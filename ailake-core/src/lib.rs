@@ -4,9 +4,9 @@
 //! Every other crate depends on this one. This crate depends on nothing internal.
 
 pub mod error;
-pub mod types;
 pub mod schema;
+pub mod types;
 
 pub use error::{AilakeError, AilakeResult};
-pub use types::{RowId, VectorMetric, VectorPrecision, Dim, ByteOffset, ByteLen, Centroid};
-pub use schema::{LlmContextSchema, VectorStoragePolicy, PQConfig, llm_columns};
+pub use schema::{llm_columns, LlmContextSchema, PQConfig, VectorStoragePolicy};
+pub use types::{ByteLen, ByteOffset, Centroid, Dim, RowId, VectorMetric, VectorPrecision};

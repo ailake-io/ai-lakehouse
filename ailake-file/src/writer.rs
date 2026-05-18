@@ -38,8 +38,7 @@ impl AilakeFileWriter {
         let (parquet_bytes, record_count) = parquet_writer.write_batch(batch, embeddings)?;
 
         // 2. Compute centroid + radius
-        let centroid: Centroid =
-            compute_centroid_and_radius(embeddings, self.policy.metric);
+        let centroid: Centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
 
         // 3. Build HNSW from embeddings
         let mut builder = HnswBuilder::new(
@@ -137,8 +136,7 @@ mod tests {
     fn write_ends_with_ailk() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let batch =
-            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3]))])
-                .unwrap();
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3]))]).unwrap();
         let embs: Vec<Vec<f32>> = (0..3).map(|_| vec![0.1, 0.2, 0.3, 0.4]).collect();
 
         let writer = AilakeFileWriter::new(make_policy(4));

@@ -150,7 +150,9 @@ impl AilakeTrailer {
 
     pub fn from_bytes(b: &[u8; TRAILER_SIZE]) -> AilakeResult<Self> {
         if &b[20..24] != &AILAKE_MAGIC {
-            return Err(AilakeError::InvalidAilakeMagic(b[20..24].try_into().unwrap()));
+            return Err(AilakeError::InvalidAilakeMagic(
+                b[20..24].try_into().unwrap(),
+            ));
         }
         Ok(AilakeTrailer {
             footer_offset: u64::from_le_bytes(b[0..8].try_into().unwrap()),

@@ -2,8 +2,6 @@
 // Phase 1: writes a simple JSON manifest (not Avro) to keep deps minimal.
 // Phase 2: replace with apache-avro for Iceberg spec compliance.
 
-use std::collections::HashMap;
-
 use ailake_core::AilakeResult;
 use serde::{Deserialize, Serialize};
 

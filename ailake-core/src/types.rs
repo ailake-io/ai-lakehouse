@@ -6,13 +6,21 @@ use serde::{Deserialize, Serialize};
 pub struct RowId(pub u64);
 
 impl RowId {
-    pub fn new(n: u64) -> Self { Self(n) }
-    pub fn as_u64(self) -> u64 { self.0 }
-    pub fn as_usize(self) -> usize { self.0 as usize }
+    pub fn new(n: u64) -> Self {
+        Self(n)
+    }
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+    pub fn as_usize(self) -> usize {
+        self.0 as usize
+    }
 }
 
 impl From<u64> for RowId {
-    fn from(n: u64) -> Self { Self(n) }
+    fn from(n: u64) -> Self {
+        Self(n)
+    }
 }
 
 /// Vector dimensionality
@@ -25,9 +33,9 @@ pub type ByteLen = u64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum VectorPrecision {
-    F32    = 0,
-    F16    = 1,
-    I8     = 2,
+    F32 = 0,
+    F16 = 1,
+    I8 = 2,
     Binary = 3,
 }
 
@@ -35,9 +43,9 @@ impl VectorPrecision {
     /// Bytes per vector element
     pub fn bytes_per_element(self) -> usize {
         match self {
-            Self::F32    => 4,
-            Self::F16    => 2,
-            Self::I8     => 1,
+            Self::F32 => 4,
+            Self::F16 => 2,
+            Self::I8 => 1,
             Self::Binary => 1, // ceil(dim/8) handled at call site
         }
     }
@@ -46,8 +54,8 @@ impl VectorPrecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum VectorMetric {
-    Cosine     = 0,
-    Euclidean  = 1,
+    Cosine = 0,
+    Euclidean = 1,
     DotProduct = 2,
 }
 

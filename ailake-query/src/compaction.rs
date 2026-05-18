@@ -22,6 +22,7 @@ pub enum CompactionMode {
 }
 
 pub struct CompactionPlanner {
+    #[allow(dead_code)]
     config: CompactionConfig,
 }
 

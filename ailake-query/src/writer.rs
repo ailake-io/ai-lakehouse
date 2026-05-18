@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use ailake_catalog::{
-    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, SnapshotOperation,
-    TableIdent, TableProperties, make_data_file_entry, new_snapshot_id,
+    make_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId,
+    SnapshotOperation, TableIdent, TableProperties,
 };
 use ailake_core::{AilakeResult, VectorStoragePolicy};
 use ailake_file::AilakeFileWriter;
@@ -66,7 +66,11 @@ impl TableWriter {
         let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
 
         // Read back the HNSW offsets from the written file
-        let reader = ailake_file::AilakeFileReader::new(file_bytes, &self.policy.column_name, self.policy.dim);
+        let reader = ailake_file::AilakeFileReader::new(
+            file_bytes,
+            &self.policy.column_name,
+            self.policy.dim,
+        );
         let header = reader.read_header()?;
         let trailer = reader.read_trailer()?;
         let hnsw_abs_offset = trailer.footer_offset + header.hnsw_offset;
@@ -94,9 +98,7 @@ impl TableWriter {
             files: std::mem::take(&mut self.pending_files),
             operation: SnapshotOperation::Append,
         };
-        self.catalog
-            .commit_snapshot(&self.table, snapshot)
-            .await
+        self.catalog.commit_snapshot(&self.table, snapshot).await
     }
 
     /// Create a table if it doesn't exist, then return a TableWriter for it.

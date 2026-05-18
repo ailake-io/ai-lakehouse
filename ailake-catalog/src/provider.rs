@@ -2,7 +2,6 @@ use ailake_core::{AilakeResult, Centroid, VectorStoragePolicy};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use uuid::Uuid;
 
 /// Fully-qualified table identifier: namespace.table_name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -76,11 +75,7 @@ pub struct TableProperties {
 /// Unified catalog interface. All backends implement this trait.
 #[async_trait]
 pub trait CatalogProvider: Send + Sync {
-    async fn create_table(
-        &self,
-        name: &TableIdent,
-        props: &TableProperties,
-    ) -> AilakeResult<()>;
+    async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()>;
 
     async fn load_table(&self, name: &TableIdent) -> AilakeResult<TableMetadata>;
 
@@ -131,7 +126,10 @@ pub fn make_data_file_entry(
 }
 
 /// Decode centroid bytes from base64 in a DataFileEntry.
-pub fn decode_centroid(entry: &DataFileEntry, metric: ailake_core::VectorMetric) -> Option<Centroid> {
+pub fn decode_centroid(
+    entry: &DataFileEntry,
+    metric: ailake_core::VectorMetric,
+) -> Option<Centroid> {
     use base64::Engine;
     let b64 = entry.centroid_b64.as_ref()?;
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;

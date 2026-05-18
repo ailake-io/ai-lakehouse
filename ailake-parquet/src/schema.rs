@@ -31,7 +31,10 @@ pub fn vector_field(
     let meta = HashMap::from([
         ("ailake.dim".to_string(), dim.to_string()),
         ("ailake.metric".to_string(), metric_str(metric).to_string()),
-        ("ailake.precision".to_string(), precision_str(precision).to_string()),
+        (
+            "ailake.precision".to_string(),
+            precision_str(precision).to_string(),
+        ),
     ]);
     Field::new(name, DataType::FixedSizeBinary(byte_width as i32), false).with_metadata(meta)
 }

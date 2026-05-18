@@ -2,18 +2,21 @@
 
 mod fixtures;
 
-use std::sync::Arc;
 use ailake_catalog::{HadoopCatalog, TableIdent};
 use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
-use ailake_query::{TableWriter, SearchConfig, search};
+use ailake_query::{search, SearchConfig, TableWriter};
 use ailake_store::LocalStore;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 #[tokio::test]
 async fn write_10k_rows_search_top10() {
     let dir = TempDir::new().unwrap();
     let store = Arc::new(LocalStore::new(dir.path()));
-    let catalog = Arc::new(HadoopCatalog::new(Arc::clone(&store) as Arc<dyn ailake_store::Store>, "warehouse"));
+    let catalog = Arc::new(HadoopCatalog::new(
+        Arc::clone(&store) as Arc<dyn ailake_store::Store>,
+        "warehouse",
+    ));
     let table = TableIdent::new("default", "test_table");
     let dim = 32u32;
 
@@ -47,7 +50,10 @@ async fn write_10k_rows_search_top10() {
     let results = search(
         &table,
         &query,
-        SearchConfig { top_k: 10, ef_search: 50 },
+        SearchConfig {
+            top_k: 10,
+            ef_search: 50,
+        },
         "embedding",
         dim,
         catalog as Arc<dyn ailake_catalog::CatalogProvider>,
@@ -58,6 +64,9 @@ async fn write_10k_rows_search_top10() {
 
     assert_eq!(results.len(), 10);
     // The query vector itself should be the closest match (distance ~0)
-    assert!(results[0].distance < 0.01,
-        "top result distance too high: {}", results[0].distance);
+    assert!(
+        results[0].distance < 0.01,
+        "top result distance too high: {}",
+        results[0].distance
+    );
 }

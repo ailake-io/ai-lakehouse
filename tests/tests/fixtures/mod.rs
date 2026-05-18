@@ -39,7 +39,9 @@ pub fn generate_batch(rows: usize, dim: usize) -> (RecordBatch, Vec<Vec<f32>>) {
             // Normalize to unit sphere for cosine distance tests
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
             if norm > 0.0 {
-                for x in &mut v { *x /= norm; }
+                for x in &mut v {
+                    *x /= norm;
+                }
             }
             v
         })

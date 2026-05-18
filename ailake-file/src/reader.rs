@@ -4,13 +4,12 @@ use ailake_parquet::ParquetVectorReader;
 use arrow_array::RecordBatch;
 use bytes::Bytes;
 
-use crate::footer::{
-    AilakeHeader, AilakeTrailer, DistanceMetric, HEADER_SIZE, TRAILER_SIZE,
-};
+use crate::footer::{AilakeHeader, AilakeTrailer, DistanceMetric, HEADER_SIZE, TRAILER_SIZE};
 
 pub struct AilakeFileReader {
     bytes: Bytes,
     vector_column: String,
+    #[allow(dead_code)]
     dim: u32,
 }
 
@@ -174,8 +173,7 @@ mod tests {
     fn write_file(rows: usize, dim: u32) -> Bytes {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let ids: Vec<i32> = (0..rows as i32).collect();
-        let batch =
-            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(ids))]).unwrap();
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(ids))]).unwrap();
         let embs: Vec<Vec<f32>> = (0..rows)
             .map(|i| {
                 let mut v = vec![0.0f32; dim as usize];
@@ -183,7 +181,9 @@ mod tests {
                 v
             })
             .collect();
-        AilakeFileWriter::new(make_policy(dim)).write(&batch, &embs).unwrap()
+        AilakeFileWriter::new(make_policy(dim))
+            .write(&batch, &embs)
+            .unwrap()
     }
 
     #[test]

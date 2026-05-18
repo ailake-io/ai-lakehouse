@@ -8,12 +8,12 @@
 //! See docs/specs/FILE_FORMAT.md for the binary specification.
 
 pub mod footer;
-pub mod writer;
 pub mod reader;
+pub mod writer;
 
 pub use footer::{
-    AilakeHeader, AilakeTrailer, Precision, DistanceMetric,
-    AILAKE_MAGIC, AILAKE_FORMAT_VERSION, TRAILER_SIZE, HEADER_SIZE,
+    AilakeHeader, AilakeTrailer, DistanceMetric, Precision, AILAKE_FORMAT_VERSION, AILAKE_MAGIC,
+    HEADER_SIZE, TRAILER_SIZE,
 };
-pub use writer::AilakeFileWriter;
 pub use reader::AilakeFileReader;
+pub use writer::AilakeFileWriter;

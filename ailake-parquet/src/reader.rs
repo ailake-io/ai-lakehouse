@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use ailake_core::{AilakeError, AilakeResult};
+use ailake_vec::Quantizer;
 use arrow_array::{Array, FixedSizeBinaryArray, RecordBatch};
-use arrow_schema::{Field, Schema};
+use arrow_schema::Schema;
 use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use ailake_vec::Quantizer;
 
 pub struct ParquetVectorReader {
     bytes: Bytes,
@@ -35,15 +35,12 @@ impl ParquetVectorReader {
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
 
         // Find and extract vector column
-        let vec_idx = batch
-            .schema()
-            .index_of(&self.vector_column)
-            .map_err(|_| {
-                AilakeError::Parquet(format!(
-                    "vector column '{}' not found in schema",
-                    self.vector_column
-                ))
-            })?;
+        let vec_idx = batch.schema().index_of(&self.vector_column).map_err(|_| {
+            AilakeError::Parquet(format!(
+                "vector column '{}' not found in schema",
+                self.vector_column
+            ))
+        })?;
 
         let vec_col = batch
             .column(vec_idx)
@@ -58,9 +55,7 @@ impl ParquetVectorReader {
             .collect();
 
         // Return tabular batch without the vector column
-        let keep: Vec<usize> = (0..batch.num_columns())
-            .filter(|&i| i != vec_idx)
-            .collect();
+        let keep: Vec<usize> = (0..batch.num_columns()).filter(|&i| i != vec_idx).collect();
         let tabular_fields: Vec<_> = keep
             .iter()
             .map(|&i| (*batch.schema().field(i)).clone())
@@ -97,8 +92,8 @@ mod tests {
     use super::*;
     use crate::writer::ParquetVectorWriter;
     use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
-    use arrow_schema::{DataType, Field, Schema};
     use arrow_array::{Int32Array, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
 
     fn make_policy(dim: u32) -> VectorStoragePolicy {
@@ -114,14 +109,10 @@ mod tests {
 
     #[test]
     fn roundtrip_embeddings() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(Int32Array::from(vec![10, 20, 30]))],
-        )
-        .unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![10, 20, 30]))])
+                .unwrap();
 
         let embs: Vec<Vec<f32>> = vec![
             vec![1.0, 0.0, 0.0, 0.0],
@@ -149,23 +140,31 @@ mod tests {
     fn kv_metadata_contains_ailake_keys() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let batch =
-            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1]))])
-                .unwrap();
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1]))]).unwrap();
         let writer = ParquetVectorWriter::new(make_policy(4));
-        let (bytes, _) = writer.write_batch(&batch, &[vec![0.1, 0.2, 0.3, 0.4]]).unwrap();
+        let (bytes, _) = writer
+            .write_batch(&batch, &[vec![0.1, 0.2, 0.3, 0.4]])
+            .unwrap();
         let reader = ParquetVectorReader::new(bytes, "embedding");
-        assert_eq!(reader.kv_metadata("ailake.format_version").unwrap(), Some("1".to_string()));
-        assert_eq!(reader.kv_metadata("ailake.precision").unwrap(), Some("f16".to_string()));
+        assert_eq!(
+            reader.kv_metadata("ailake.format_version").unwrap(),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            reader.kv_metadata("ailake.precision").unwrap(),
+            Some("f16".to_string())
+        );
     }
 
     #[test]
     fn kv_metadata_absent_for_standard_key() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let batch =
-            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1]))])
-                .unwrap();
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1]))]).unwrap();
         let writer = ParquetVectorWriter::new(make_policy(4));
-        let (bytes, _) = writer.write_batch(&batch, &[vec![0.1, 0.2, 0.3, 0.4]]).unwrap();
+        let (bytes, _) = writer
+            .write_batch(&batch, &[vec![0.1, 0.2, 0.3, 0.4]])
+            .unwrap();
         let reader = ParquetVectorReader::new(bytes, "embedding");
         // Standard reader can read this — but ailake.hnsw_offset is absent in Phase 1
         assert!(reader.kv_metadata("ailake.hnsw_offset").unwrap().is_none());

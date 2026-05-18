@@ -125,7 +125,10 @@ mod tests {
     async fn file_size_correct() {
         let dir = TempDir::new().unwrap();
         let store = LocalStore::new(dir.path());
-        store.put("x.bin", Bytes::from(vec![0u8; 42])).await.unwrap();
+        store
+            .put("x.bin", Bytes::from(vec![0u8; 42]))
+            .await
+            .unwrap();
         assert_eq!(store.file_size("x.bin").await.unwrap(), 42);
     }
 }

@@ -37,8 +37,7 @@ impl ParquetVectorWriter {
             });
         }
 
-        let bytes_per_vec =
-            self.policy.dim as usize * self.policy.precision.bytes_per_element();
+        let bytes_per_vec = self.policy.dim as usize * self.policy.precision.bytes_per_element();
 
         // Encode each vector to F16 bytes, concatenate
         let flat: Vec<u8> = embeddings
@@ -84,10 +83,7 @@ impl ParquetVectorWriter {
 
         // File-level key_value_metadata (no offset — reader uses AILK trailer)
         let kv = vec![
-            KeyValue::new(
-                "ailake.format_version".to_string(),
-                Some("1".to_string()),
-            ),
+            KeyValue::new("ailake.format_version".to_string(), Some("1".to_string())),
             KeyValue::new(
                 "ailake.precision".to_string(),
                 Some(precision_str(self.policy.precision).to_string()),
@@ -96,18 +92,12 @@ impl ParquetVectorWriter {
                 "ailake.metric".to_string(),
                 Some(metric_str(self.policy.metric).to_string()),
             ),
-            KeyValue::new(
-                "ailake.record_count".to_string(),
-                Some(n.to_string()),
-            ),
+            KeyValue::new("ailake.record_count".to_string(), Some(n.to_string())),
             KeyValue::new(
                 "ailake.vector_column".to_string(),
                 Some(self.policy.column_name.clone()),
             ),
-            KeyValue::new(
-                "ailake.dim".to_string(),
-                Some(self.policy.dim.to_string()),
-            ),
+            KeyValue::new("ailake.dim".to_string(), Some(self.policy.dim.to_string())),
         ];
 
         let props = WriterProperties::builder()
@@ -116,9 +106,8 @@ impl ParquetVectorWriter {
             .build();
 
         let mut buf: Vec<u8> = Vec::new();
-        let mut writer =
-            ArrowWriter::try_new(&mut buf, extended_schema, Some(props))
-                .map_err(|e| AilakeError::Parquet(e.to_string()))?;
+        let mut writer = ArrowWriter::try_new(&mut buf, extended_schema, Some(props))
+            .map_err(|e| AilakeError::Parquet(e.to_string()))?;
         writer
             .write(&extended)
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
@@ -134,8 +123,8 @@ impl ParquetVectorWriter {
 mod tests {
     use super::*;
     use ailake_core::{VectorMetric, VectorPrecision};
-    use arrow_schema::{DataType, Field, Schema};
     use arrow_array::{Int32Array, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
 
     fn make_policy(dim: u32) -> VectorStoragePolicy {
         VectorStoragePolicy {
@@ -162,8 +151,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let embeddings: Vec<Vec<f32>> =
-            (0..3).map(|_| vec![0.1f32, 0.2, 0.3, 0.4]).collect();
+        let embeddings: Vec<Vec<f32>> = (0..3).map(|_| vec![0.1f32, 0.2, 0.3, 0.4]).collect();
 
         let writer = ParquetVectorWriter::new(make_policy(4));
         let (bytes, count) = writer.write_batch(&batch, &embeddings).unwrap();

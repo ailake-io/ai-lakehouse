@@ -4,10 +4,9 @@
 use std::sync::Arc;
 
 use ailake_catalog::{CatalogProvider, TableIdent};
-use ailake_core::{AilakeResult, RowId, VectorMetric};
+use ailake_core::{AilakeResult, RowId};
 use ailake_file::AilakeFileReader;
 use ailake_store::Store;
-use arrow_array::RecordBatch;
 use bytes::Bytes;
 
 #[derive(Debug, Clone)]

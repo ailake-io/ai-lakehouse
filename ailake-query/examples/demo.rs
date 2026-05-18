@@ -104,11 +104,7 @@ fn inspect_file(bytes: &Bytes) {
             trailer.footer_offset + header.hnsw_offset + header.hnsw_len,
             header.hnsw_len
         );
-        println!(
-            "    AILK trailer    : {}..{}",
-            len - 24,
-            len
-        );
+        println!("    AILK trailer    : {}..{}", len - 24, len);
         println!("    Record count    : {}", header.record_count);
         println!("    Dim             : {}", header.dim);
     }
@@ -122,10 +118,7 @@ async fn main() {
     println!("Workspace: {}", dir.path().display());
 
     let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
-    let catalog = Arc::new(HadoopCatalog::new(
-        Arc::clone(&store),
-        "warehouse",
-    ));
+    let catalog = Arc::new(HadoopCatalog::new(Arc::clone(&store), "warehouse"));
     let table = TableIdent::new("default", "demo_table");
     let dim = 16u32;
 
@@ -173,7 +166,10 @@ async fn main() {
     let results = search(
         &table,
         &query,
-        SearchConfig { top_k: 5, ef_search: 50 },
+        SearchConfig {
+            top_k: 5,
+            ef_search: 50,
+        },
         "embedding",
         dim,
         Arc::clone(&catalog) as Arc<dyn ailake_catalog::CatalogProvider>,
@@ -197,7 +193,10 @@ async fn main() {
         results[0].distance < 0.01,
         "top result should be the query vector itself (distance ~0)"
     );
-    println!("\nPASS: top result distance = {:.2e} < 0.01", results[0].distance);
+    println!(
+        "\nPASS: top result distance = {:.2e} < 0.01",
+        results[0].distance
+    );
 
     // ---- integrity check ----
     println!("\n=== Integrity check on both files ===");

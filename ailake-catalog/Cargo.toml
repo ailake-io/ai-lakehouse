@@ -3,6 +3,11 @@ name = "ailake-catalog"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+catalog-glue  = []
+catalog-nessie = []
+catalog-jdbc  = []
+
 [dependencies]
 ailake-core  = { path = "../ailake-core" }
 ailake-store = { path = "../ailake-store" }

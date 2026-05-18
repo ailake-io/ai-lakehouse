@@ -28,12 +28,17 @@ fn ailake_footer_appended_after_par1() {
         .map(|(i, _)| i)
         .collect();
     // Must have at least 2 PAR1: header and footer of Parquet section
-    assert!(par1_positions.len() >= 2, "expected at least 2 PAR1 markers");
+    assert!(
+        par1_positions.len() >= 2,
+        "expected at least 2 PAR1 markers"
+    );
 
     // AILK magic must come AFTER the last PAR1
     let last_par1 = *par1_positions.last().unwrap();
-    assert!(last_par1 < file_bytes.len() - 4,
-        "PAR1 is the last 4 bytes — AI-Lake footer not appended");
+    assert!(
+        last_par1 < file_bytes.len() - 4,
+        "PAR1 is the last 4 bytes — AI-Lake footer not appended"
+    );
     assert_eq!(&file_bytes[file_bytes.len() - 4..], b"AILK");
 }
 
