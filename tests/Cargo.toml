@@ -1,0 +1,16 @@
+[package]
+name = "ailake-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+ailake-catalog = { path = "../ailake-catalog" }
+ailake-core    = { path = "../ailake-core" }
+ailake-query   = { path = "../ailake-query" }
+ailake-store   = { path = "../ailake-store" }
+ailake-file    = { path = "../ailake-file" }
+arrow-array    = { workspace = true }
+arrow-schema   = { workspace = true }
+tokio          = { workspace = true, features = ["full"] }
+tempfile       = { workspace = true }

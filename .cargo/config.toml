@@ -1,0 +1,12 @@
+[alias]
+# cargo check-all  — fast check without linking
+check-all = "check --workspace --all-targets"
+
+# cargo test-unit  — unit tests only (no integration)
+test-unit = "test --workspace --lib"
+
+# cargo test-int   — integration tests (requires Docker services)
+test-int = "test --workspace --features integration --test '*'"
+
+# cargo lint       — clippy + fmt check
+lint = "clippy --workspace --all-targets -- -D warnings"

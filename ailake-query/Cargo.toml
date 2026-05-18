@@ -1,0 +1,25 @@
+[package]
+name = "ailake-query"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ailake-core    = { path = "../ailake-core" }
+ailake-file    = { path = "../ailake-file" }
+ailake-catalog = { path = "../ailake-catalog" }
+ailake-store   = { path = "../ailake-store" }
+ailake-index   = { path = "../ailake-index" }
+ailake-vec     = { path = "../ailake-vec" }
+ailake-parquet = { path = "../ailake-parquet" }
+arrow-array    = { workspace = true }
+arrow-schema   = { workspace = true }
+tokio          = { workspace = true }
+bytes          = { workspace = true }
+thiserror      = { workspace = true }
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+rand        = { workspace = true }
+
+[[example]]
+name = "demo"

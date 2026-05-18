@@ -1,0 +1,15 @@
+[package]
+name = "ailake-vec"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ailake-core = { path = "../ailake-core" }
+half        = { workspace = true }
+lz4_flex    = { workspace = true }
+zstd        = { workspace = true }
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+rand        = { workspace = true }

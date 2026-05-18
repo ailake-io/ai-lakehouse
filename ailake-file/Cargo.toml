@@ -1,0 +1,23 @@
+[package]
+name = "ailake-file"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ailake-core    = { path = "../ailake-core" }
+ailake-parquet = { path = "../ailake-parquet" }
+ailake-vec     = { path = "../ailake-vec" }
+ailake-index   = { path = "../ailake-index" }
+arrow-array    = { workspace = true }
+arrow-schema   = { workspace = true }
+thiserror      = { workspace = true }
+bytes          = { workspace = true }
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+rand        = { workspace = true }
+criterion   = { workspace = true }
+
+[[bench]]
+name = "write"
+harness = false

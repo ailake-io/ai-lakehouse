@@ -1,0 +1,19 @@
+[package]
+name = "ailake-parquet"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ailake-core  = { path = "../ailake-core" }
+ailake-vec   = { path = "../ailake-vec" }
+parquet      = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+bytes        = { workspace = true }
+half         = { workspace = true }
+thiserror    = { workspace = true }
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+tokio       = { workspace = true }
+rand        = { workspace = true }

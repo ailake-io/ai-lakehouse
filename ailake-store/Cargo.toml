@@ -1,0 +1,22 @@
+[package]
+name = "ailake-store"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ailake-core  = { path = "../ailake-core" }
+tokio        = { workspace = true }
+bytes        = { workspace = true }
+async-trait  = { workspace = true }
+thiserror    = { workspace = true }
+
+[features]
+default = ["store-local"]
+store-local = []
+store-s3    = []
+store-gcs   = []
+store-azure = []
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+tokio       = { workspace = true }

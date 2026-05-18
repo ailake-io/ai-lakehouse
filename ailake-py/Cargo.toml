@@ -1,0 +1,14 @@
+[package]
+name = "ailake-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ailake"
+crate-type = ["cdylib"]
+
+[dependencies]
+ailake-query = { path = "../ailake-query" }
+ailake-core  = { path = "../ailake-core" }
+pyo3         = { workspace = true }
+tokio        = { workspace = true }

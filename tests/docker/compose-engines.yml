@@ -1,0 +1,43 @@
+# Phase 3 engine compatibility test services
+# Usage: docker compose -f tests/docker/compose-engines.yml up -d
+services:
+  spark:
+    image: apache/spark:3.5.0-scala2.12-java17-ubuntu
+    container_name: ailake-spark
+    command: /opt/spark/sbin/start-master.sh
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    environment:
+      SPARK_MODE: master
+
+  spark-worker:
+    image: apache/spark:3.5.0-scala2.12-java17-ubuntu
+    depends_on: [spark]
+    command: /opt/spark/sbin/start-worker.sh spark://spark:7077
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark:7077
+
+  trino:
+    image: trinodb/trino:432
+    container_name: ailake-trino
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./trino-catalog:/etc/trino/catalog
+
+  # MinIO for engines to read from
+  minio:
+    image: minio/minio:latest
+    command: server /data
+    ports:
+      - "9000:9000"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+
+  nessie:
+    image: projectnessie/nessie:latest
+    ports:
+      - "19120:19120"
