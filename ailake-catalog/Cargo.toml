@@ -18,6 +18,7 @@ async-trait  = { workspace = true }
 thiserror    = { workspace = true }
 uuid         = { workspace = true }
 bytes        = { workspace = true }
+reqwest      = { workspace = true }
 base64       = "0.22"
 
 [dev-dependencies]
