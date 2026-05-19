@@ -106,7 +106,7 @@ impl AilakeHeader {
     }
 
     pub fn from_bytes(b: &[u8; HEADER_SIZE]) -> AilakeResult<Self> {
-        if &b[0..4] != &AILAKE_MAGIC {
+        if b[0..4] != AILAKE_MAGIC {
             return Err(AilakeError::InvalidAilakeMagic(b[0..4].try_into().unwrap()));
         }
         let format_version = u16::from_le_bytes(b[4..6].try_into().unwrap());
@@ -149,7 +149,7 @@ impl AilakeTrailer {
     }
 
     pub fn from_bytes(b: &[u8; TRAILER_SIZE]) -> AilakeResult<Self> {
-        if &b[20..24] != &AILAKE_MAGIC {
+        if b[20..24] != AILAKE_MAGIC {
             return Err(AilakeError::InvalidAilakeMagic(
                 b[20..24].try_into().unwrap(),
             ));

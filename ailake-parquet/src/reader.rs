@@ -92,7 +92,7 @@ mod tests {
     use super::*;
     use crate::writer::ParquetVectorWriter;
     use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
-    use arrow_array::{Int32Array, StringArray};
+    use arrow_array::Int32Array;
     use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
 

@@ -4,7 +4,7 @@ use ailake_parquet::ParquetVectorReader;
 use arrow_array::RecordBatch;
 use bytes::Bytes;
 
-use crate::footer::{AilakeHeader, AilakeTrailer, DistanceMetric, HEADER_SIZE, TRAILER_SIZE};
+use crate::footer::{AilakeHeader, DistanceMetric, HEADER_SIZE};
 
 pub struct AilakeFileReader {
     bytes: Bytes,
@@ -22,31 +22,24 @@ impl AilakeFileReader {
         }
     }
 
-    /// Detect AILK magic in the last 4 bytes of the trailer.
+    /// Returns the absolute byte offset of the AILK section within the file.
+    /// Reads `ailake.footer_offset` from the Parquet footer key-value metadata.
+    pub fn ailk_offset(&self) -> AilakeResult<u64> {
+        let reader = ParquetVectorReader::new(self.bytes.clone(), &self.vector_column);
+        let val = reader
+            .kv_metadata("ailake.footer_offset")?
+            .ok_or(AilakeError::NotAnAilakeFile)?;
+        val.parse::<u64>().map_err(|_| AilakeError::NotAnAilakeFile)
+    }
+
+    /// Returns true if the file contains an embedded AILK section.
     pub fn is_ailake_file(&self) -> bool {
-        let len = self.bytes.len();
-        if len < TRAILER_SIZE {
-            return false;
-        }
-        &self.bytes[len - 4..] == b"AILK"
+        self.ailk_offset().is_ok()
     }
 
-    /// Parse the 24-byte trailer from the end of the file.
-    pub fn read_trailer(&self) -> AilakeResult<AilakeTrailer> {
-        let len = self.bytes.len();
-        if len < TRAILER_SIZE {
-            return Err(AilakeError::NotAnAilakeFile);
-        }
-        let trailer_bytes: &[u8; TRAILER_SIZE] = self.bytes[len - TRAILER_SIZE..]
-            .try_into()
-            .map_err(|_| AilakeError::NotAnAilakeFile)?;
-        AilakeTrailer::from_bytes(trailer_bytes)
-    }
-
-    /// Parse the 64-byte AI-Lake header.
+    /// Parse the 64-byte AI-Lake header from the embedded AILK section.
     pub fn read_header(&self) -> AilakeResult<AilakeHeader> {
-        let trailer = self.read_trailer()?;
-        let offset = trailer.footer_offset as usize;
+        let offset = self.ailk_offset()? as usize;
         if offset + HEADER_SIZE > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
         }
@@ -56,12 +49,11 @@ impl AilakeFileReader {
         AilakeHeader::from_bytes(header_bytes)
     }
 
-    /// Read centroid + radius from the centroid section. Does NOT load the HNSW graph.
+    /// Read centroid + radius from the AILK section.
     pub fn get_centroid(&self) -> AilakeResult<Centroid> {
-        let trailer = self.read_trailer()?;
+        let ailk_start = self.ailk_offset()? as usize;
         let header = self.read_header()?;
-        let footer_start = trailer.footer_offset as usize;
-        let centroid_start = footer_start + header.centroid_offset as usize;
+        let centroid_start = ailk_start + header.centroid_offset as usize;
         let centroid_end = centroid_start + header.centroid_len as usize;
 
         if centroid_end > self.bytes.len() {
@@ -92,12 +84,11 @@ impl AilakeFileReader {
         })
     }
 
-    /// Load the HNSW index from the AI-Lake footer.
+    /// Load the HNSW index from the AILK section.
     pub fn load_index(&self) -> AilakeResult<HnswIndex> {
-        let trailer = self.read_trailer()?;
+        let ailk_start = self.ailk_offset()? as usize;
         let header = self.read_header()?;
-        let footer_start = trailer.footer_offset as usize;
-        let hnsw_start = footer_start + header.hnsw_offset as usize;
+        let hnsw_start = ailk_start + header.hnsw_offset as usize;
         let hnsw_end = hnsw_start + header.hnsw_len as usize;
 
         if hnsw_end > self.bytes.len() {
@@ -109,10 +100,9 @@ impl AilakeFileReader {
     }
 
     /// Read the Parquet section (tabular data + decoded embeddings).
+    /// The full file is valid Parquet; the AILK section is invisible to standard readers.
     pub fn read_parquet(&self) -> AilakeResult<(RecordBatch, Vec<Vec<f32>>)> {
-        let trailer = self.read_trailer()?;
-        let parquet_bytes = self.bytes.slice(0..trailer.footer_offset as usize);
-        let reader = ParquetVectorReader::new(parquet_bytes, &self.vector_column);
+        let reader = ParquetVectorReader::new(self.bytes.clone(), &self.vector_column);
         reader.read_all()
     }
 
@@ -120,12 +110,9 @@ impl AilakeFileReader {
     pub fn verify_integrity(&self) -> AilakeResult<()> {
         let header = self.read_header()?;
         let index = self.load_index()?;
-        let parquet_count = {
-            let trailer = self.read_trailer()?;
-            let parquet_bytes = self.bytes.slice(0..trailer.footer_offset as usize);
-            let reader = ParquetVectorReader::new(parquet_bytes, &self.vector_column);
-            reader.record_count()?
-        };
+        let reader = ParquetVectorReader::new(self.bytes.clone(), &self.vector_column);
+        let parquet_count = reader.record_count()?;
+
         if parquet_count != index.node_count() {
             return Err(AilakeError::RowCountMismatch {
                 parquet: parquet_count,

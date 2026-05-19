@@ -24,5 +24,6 @@ pub use hadoop::HadoopCatalog;
 pub use provider::{
     decode_centroid, make_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,
     NewSnapshot, SnapshotId, SnapshotOperation, TableIdent, TableMetadata, TableProperties,
+    VectorIndexInfo,
 };
 pub use rest::RestCatalog;

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use ailake_catalog::{
     make_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId,
-    SnapshotOperation, TableIdent, TableProperties,
+    SnapshotOperation, TableIdent, TableProperties, VectorIndexInfo,
 };
 use ailake_core::{AilakeResult, VectorStoragePolicy};
 use ailake_file::AilakeFileWriter;
@@ -72,8 +72,8 @@ impl TableWriter {
             self.policy.dim,
         );
         let header = reader.read_header()?;
-        let trailer = reader.read_trailer()?;
-        let hnsw_abs_offset = trailer.footer_offset + header.hnsw_offset;
+        let ailk_start = reader.ailk_offset()?;
+        let hnsw_abs_offset = ailk_start + header.hnsw_offset;
         let hnsw_len = header.hnsw_len;
 
         let entry = make_data_file_entry(
@@ -81,10 +81,12 @@ impl TableWriter {
             embeddings.len() as u64,
             file_size,
             &centroid,
-            hnsw_abs_offset,
-            hnsw_len,
-            &self.policy.column_name,
-            self.policy.dim,
+            VectorIndexInfo {
+                column: &self.policy.column_name,
+                dim: self.policy.dim,
+                hnsw_offset: hnsw_abs_offset,
+                hnsw_len,
+            },
         );
         self.pending_files.push(entry);
         Ok(())

@@ -51,6 +51,7 @@ pub fn generate_batch(rows: usize, dim: usize) -> (RecordBatch, Vec<Vec<f32>>) {
 }
 
 /// Generate `count` vectors near `center` by adding gaussian-like noise.
+#[allow(dead_code)]
 pub fn cluster_around(center: &[f32], dim: usize, count: usize, noise: f32) -> Vec<Vec<f32>> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

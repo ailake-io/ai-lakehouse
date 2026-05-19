@@ -3,62 +3,59 @@
 mod fixtures;
 
 use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
-use ailake_file::{AilakeFileReader, AilakeFileWriter};
+use ailake_file::AilakeFileWriter;
 
-#[test]
-fn ailake_footer_appended_after_par1() {
-    let dim = 8u32;
-    let policy = VectorStoragePolicy {
+fn make_policy(dim: u32) -> VectorStoragePolicy {
+    VectorStoragePolicy {
         column_name: "embedding".to_string(),
         dim,
         metric: VectorMetric::Cosine,
         precision: VectorPrecision::F16,
         pq: None,
         keep_raw_for_reranking: false,
-    };
+    }
+}
+
+#[test]
+fn ailake_file_is_valid_parquet() {
+    let dim = 8u32;
     let (batch, embs) = fixtures::generate_batch(10, dim as usize);
-    let writer = AilakeFileWriter::new(policy);
+    let writer = AilakeFileWriter::new(make_policy(dim));
     let file_bytes = writer.write(&batch, &embs).unwrap();
 
-    // File must contain PAR1 (Parquet magic) before the AILK trailer
-    let par1_positions: Vec<usize> = file_bytes
-        .windows(4)
-        .enumerate()
-        .filter(|(_, w)| w == b"PAR1")
-        .map(|(i, _)| i)
-        .collect();
-    // Must have at least 2 PAR1: header and footer of Parquet section
-    assert!(
-        par1_positions.len() >= 2,
-        "expected at least 2 PAR1 markers"
+    // File must start and end with PAR1 — required by all Parquet readers
+    assert_eq!(&file_bytes[..4], b"PAR1", "file must start with PAR1");
+    assert_eq!(
+        &file_bytes[file_bytes.len() - 4..],
+        b"PAR1",
+        "file must end with PAR1"
     );
 
-    // AILK magic must come AFTER the last PAR1
-    let last_par1 = *par1_positions.last().unwrap();
+    // AILK magic must appear inside (in the embedded AILK section, before the footer)
+    let ailk_positions: Vec<usize> = file_bytes
+        .windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"AILK")
+        .map(|(i, _)| i)
+        .collect();
+    assert!(!ailk_positions.is_empty(), "AILK magic must appear in file");
+
+    // AILK must NOT be the last 4 bytes (PAR1 must be)
+    let last_ailk = *ailk_positions.last().unwrap();
     assert!(
-        last_par1 < file_bytes.len() - 4,
-        "PAR1 is the last 4 bytes — AI-Lake footer not appended"
+        last_ailk < file_bytes.len() - 4,
+        "AILK must not be the last 4 bytes — PAR1 must be last"
     );
-    assert_eq!(&file_bytes[file_bytes.len() - 4..], b"AILK");
 }
 
 #[test]
 #[ignore = "requires python3 with pyarrow"]
 fn pyarrow_ignores_ailake_footer() {
     let dim = 8u32;
-    let policy = VectorStoragePolicy {
-        column_name: "embedding".to_string(),
-        dim,
-        metric: VectorMetric::Cosine,
-        precision: VectorPrecision::F16,
-        pq: None,
-        keep_raw_for_reranking: false,
-    };
     let (batch, embs) = fixtures::generate_batch(5, dim as usize);
-    let writer = AilakeFileWriter::new(policy);
+    let writer = AilakeFileWriter::new(make_policy(dim));
     let file_bytes = writer.write(&batch, &embs).unwrap();
 
-    // Write to temp file and verify PyArrow can read it
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), &file_bytes).unwrap();
 

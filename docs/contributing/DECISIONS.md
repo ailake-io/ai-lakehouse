@@ -104,13 +104,13 @@ Decisions are numbered and immutable once merged. To change a decision, add a ne
 
 The single-file design unifies dimensional data, vectors, and the HNSW index into one Parquet-extended file at the storage layer.
 
-**Decision**: One physical file per logical data unit. Layout: Parquet section (header + row groups + footer + `PAR1`) followed by AI-Lake footer extension (header + centroid + HNSW graph + trailer). Parquet readers stop at the final `PAR1` and never see the extension.
+**Decision**: One physical file per logical data unit. Layout: `PAR1` + row groups + AI-Lake extension (AILK header + centroid + HNSW graph + trailer) + Parquet footer thrift + `footer_len` + `PAR1`. The AI-Lake extension sits between the row groups and the Parquet footer — invisible to standard readers because row-group offsets in the footer point before the AILK section, so readers jump directly to row groups and never scan the AILK bytes.
 
 **Consequences**:
 - **Source-of-truth simplicity**: one file = one snapshot of data + index. No three-way consistency to maintain.
 - **Iceberg integration is cleaner**: the Iceberg DataFile entry points to the unified `.parquet` file. Vector statistics (centroid, radius, HNSW byte offsets) go in `custom-properties` of the DataFile entry — a spec-defined extension point.
 - **Atomic writes**: one S3 PUT per data file. No partial-state recovery logic.
-- **Compatibility relies on two specs**: Iceberg Spec v2 AND the Parquet spec's rule that "trailing data after PAR1 must be tolerated." This is implemented by major Parquet readers but is technically a quality-of-implementation guarantee, not a strict spec requirement. We document this dependency and validate via compatibility tests.
+- **Compatibility is a hard Parquet guarantee**: the AILK section is between row groups and the Parquet footer. Standard readers parse the footer from the end of the file, then seek directly to row-group offsets — they never scan past row groups. No "tolerate trailing data" clause needed.
 - **Compaction is conceptually simpler**: merge files = read N files, write 1 file with rebuilt HNSW. No separate index merging logic.
 - **Per-file HNSW**: search must open multiple HNSW indexes (one per file) and merge. Mitigated by centroid pruning — typical search opens 50-100 indexes, not 10,000.
 

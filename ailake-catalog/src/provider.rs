@@ -94,16 +94,21 @@ pub trait CatalogProvider: Send + Sync {
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()>;
 }
 
+/// Vector index metadata for a single data file.
+pub struct VectorIndexInfo<'a> {
+    pub column: &'a str,
+    pub dim: u32,
+    pub hnsw_offset: u64,
+    pub hnsw_len: u64,
+}
+
 /// Build DataFileEntry from a centroid, encoding it as base64.
 pub fn make_data_file_entry(
     path: &str,
     record_count: u64,
     file_size_bytes: u64,
     centroid: &Centroid,
-    hnsw_offset: u64,
-    hnsw_len: u64,
-    vector_column: &str,
-    vector_dim: u32,
+    index: VectorIndexInfo<'_>,
 ) -> DataFileEntry {
     use base64::Engine;
     let centroid_bytes: Vec<u8> = centroid
@@ -118,10 +123,10 @@ pub fn make_data_file_entry(
         file_size_bytes,
         centroid_b64: Some(centroid_b64),
         radius: Some(centroid.radius),
-        hnsw_offset: Some(hnsw_offset),
-        hnsw_len: Some(hnsw_len),
-        vector_column: Some(vector_column.to_string()),
-        vector_dim: Some(vector_dim),
+        hnsw_offset: Some(index.hnsw_offset),
+        hnsw_len: Some(index.hnsw_len),
+        vector_column: Some(index.column.to_string()),
+        vector_dim: Some(index.dim),
     }
 }
 

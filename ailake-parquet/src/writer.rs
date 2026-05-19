@@ -29,6 +29,16 @@ impl ParquetVectorWriter {
         batch: &RecordBatch,
         embeddings: &[Vec<f32>],
     ) -> AilakeResult<(Bytes, u64)> {
+        self.write_batch_with_kv(batch, embeddings, &[])
+    }
+
+    /// Like `write_batch` but appends extra key-value pairs to the Parquet footer metadata.
+    pub fn write_batch_with_kv(
+        &self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+        extra_kv: &[(&str, &str)],
+    ) -> AilakeResult<(Bytes, u64)> {
         let n = batch.num_rows();
         if embeddings.len() != n {
             return Err(AilakeError::DimensionMismatch {
@@ -46,10 +56,7 @@ impl ParquetVectorWriter {
             .collect();
 
         // Build FixedSizeBinary array from contiguous bytes
-        let chunks: Vec<Option<&[u8]>> = flat
-            .chunks_exact(bytes_per_vec)
-            .map(|chunk| Some(chunk))
-            .collect();
+        let chunks: Vec<Option<&[u8]>> = flat.chunks_exact(bytes_per_vec).map(Some).collect();
         let vec_array = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
             chunks.into_iter(),
             bytes_per_vec as i32,
@@ -81,8 +88,7 @@ impl ParquetVectorWriter {
         let extended = RecordBatch::try_new(extended_schema.clone(), cols)
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
 
-        // File-level key_value_metadata (no offset — reader uses AILK trailer)
-        let kv = vec![
+        let mut kv = vec![
             KeyValue::new("ailake.format_version".to_string(), Some("1".to_string())),
             KeyValue::new(
                 "ailake.precision".to_string(),
@@ -99,6 +105,9 @@ impl ParquetVectorWriter {
             ),
             KeyValue::new("ailake.dim".to_string(), Some(self.policy.dim.to_string())),
         ];
+        for (k, v) in extra_kv {
+            kv.push(KeyValue::new(k.to_string(), Some(v.to_string())));
+        }
 
         let props = WriterProperties::builder()
             .set_compression(Compression::UNCOMPRESSED)
