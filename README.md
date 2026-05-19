@@ -51,8 +51,10 @@ ailake/
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
-│       ├── quantize.rs         # F32→F16→I8, PQ
-│       └── distance.rs         # Cosine, Euclidean, DotProduct
+│       ├── quantize.rs         # F32→F16→I8 scalar quantization
+│       ├── distance.rs         # Cosine, Euclidean, DotProduct, centroid computation
+│       ├── compress.rs         # BlockCompressor (zstd / lz4 / none)
+│       └── pq.rs               # Product Quantization — PQCodebook, ADC distance
 ├── ailake-index/
 │   ├── Cargo.toml
 │   └── src/
@@ -82,14 +84,18 @@ ailake/
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
-│       └── store.rs            # object_store wrapper
+│       ├── store.rs                  # Store trait
+│       ├── local.rs                  # LocalStore — filesystem (dev/tests)
+│       └── object_store_backend.rs   # ObjectStoreBackend — S3/GCS/Azure via object_store
 ├── ailake-query/
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
-│       ├── pruner.rs           # vector pruning via centroids
-│       ├── scanner.rs          # VectorScan execution
-│       └── context_assembler.rs
+│       ├── writer.rs           # TableWriter — write_batch + commit
+│       ├── scanner.rs          # search() with geometric pruning
+│       ├── pruner.rs           # VectorPruner — centroid-based file pruning
+│       ├── compaction.rs       # CompactionPlanner + CompactionExecutor (async)
+│       └── context_assembler.rs # ContextAssembler — dedup, XML, token budget
 ├── ailake-py/
 │   ├── Cargo.toml
 │   ├── pyproject.toml
@@ -121,8 +127,13 @@ cd ailake-py && maturin develop
 cargo check --workspace
 ```
 
-## Phase 1 scope (current)
+## Phase status
 
-Build locally-runnable MVP: write a Parquet file with embedded HNSW footer, search via vector pruning + local HNSW lookup — all on local filesystem. No object storage, no Python bindings yet.
+| Phase | Status | Scope |
+|---|---|---|
+| **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
+| **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW loading, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
+| **Phase 3** | Planned | JVM/Spark/Trino connectors (`uniffi`), multi-column vector tables |
+| **Phase 4** | Planned | GPU index (cuVS FFI), PQ reranking, public format spec v1.0 |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.

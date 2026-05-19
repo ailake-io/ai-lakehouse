@@ -53,6 +53,7 @@ async fn write_10k_rows_search_top10() {
         SearchConfig {
             top_k: 10,
             ef_search: 50,
+            pruning_threshold: f32::INFINITY,
         },
         "embedding",
         dim,

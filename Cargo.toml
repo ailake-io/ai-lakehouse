@@ -33,6 +33,7 @@ futures     = "0.3"
 parquet      = { version = "52", features = ["async"] }
 arrow-array  = "52"
 arrow-schema = "52"
+arrow-select = "52"
 object_store = { version = "0.10", features = ["aws", "gcp", "azure"] }
 
 # Iceberg

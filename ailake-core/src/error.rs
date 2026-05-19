@@ -38,6 +38,9 @@ pub enum AilakeError {
     #[error("bincode error: {0}")]
     Bincode(String),
 
+    #[error("Arrow error: {0}")]
+    Arrow(String),
+
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 }

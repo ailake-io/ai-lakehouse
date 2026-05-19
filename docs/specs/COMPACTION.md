@@ -264,38 +264,47 @@ Set in `metadata.json` `properties` (applied to all future compaction runs):
 ```
 ailake-query/src/
 └── compaction.rs
+```
 
-// Key types
+```rust
+pub struct CompactionConfig {
+    /// Minimum number of files to trigger compaction (default: 4)
+    pub min_files_to_compact: usize,
+    /// Files below this size are candidates for compaction (default: 128 MB)
+    pub target_file_size_bytes: u64,
+}
+
 pub struct CompactionPlanner {
     pub config: CompactionConfig,
-    pub catalog: Arc<dyn CatalogProvider>,
-    pub store: Arc<dyn Store>,
-}
-
-pub struct CompactionJob {
-    pub input_files: Vec<DataFileEntry>,
-    pub output_target_bytes: u64,
-    pub mode: CompactionMode,
-}
-
-pub enum CompactionMode { Full, IndexOnly, DataOnly }
-
-pub struct CompactionResult {
-    pub files_merged: usize,
-    pub rows_in: u64,
-    pub rows_out: u64,        // rows_in - deleted rows
-    pub hnsw_build_ms: u64,
-    pub output_file: DataFileEntry,
 }
 
 impl CompactionPlanner {
-    // Evaluate triggers and return jobs to run
-    pub async fn plan(&self, table: &TableIdent) -> AilakeResult<Vec<CompactionJob>>;
+    /// Returns files smaller than target_file_size_bytes if their count
+    /// meets min_files_to_compact. Returns empty vec otherwise.
+    pub fn plan(&self, files: &[DataFileEntry]) -> Vec<DataFileEntry>;
+}
 
-    // Execute a single compaction job
-    pub async fn execute(&self, job: CompactionJob) -> AilakeResult<CompactionResult>;
+pub struct CompactionExecutor {
+    store: Arc<dyn Store>,
+    policy: VectorStoragePolicy,
+}
 
-    // Run full compaction cycle: plan + execute + commit
-    pub async fn compact(&self, table: &TableIdent) -> AilakeResult<Vec<CompactionResult>>;
+impl CompactionExecutor {
+    /// Read N files, concat RecordBatches, rebuild HNSW, write one unified file.
+    pub async fn compact(
+        &self,
+        files: &[DataFileEntry],
+        output_path: &str,
+    ) -> AilakeResult<DataFileEntry>;
+
+    /// Full cycle: plan → compact → catalog.commit_snapshot → delete old files.
+    /// Returns None if planner finds nothing to compact.
+    pub async fn run(
+        &self,
+        planner: &CompactionPlanner,
+        table: &TableIdent,
+        catalog: Arc<dyn CatalogProvider>,
+        output_prefix: &str,
+    ) -> AilakeResult<Option<DataFileEntry>>;
 }
 ```

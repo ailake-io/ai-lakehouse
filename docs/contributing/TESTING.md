@@ -212,23 +212,32 @@ Places known vectors into two groups in separate files, verifies only the correc
 ```rust
 #[tokio::test]
 async fn pruning_eliminates_distant_file() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
 
-    // File A: vectors clustered around [1, 0, 0, ...]
-    let embeddings_a = fixtures::cluster_around(&[1.0, 0.0, 0.0], 128, 500, 0.05);
-    // File B: vectors clustered around [-1, 0, 0, ...]
-    let embeddings_b = fixtures::cluster_around(&[-1.0, 0.0, 0.0], 128, 500, 0.05);
+    let store = Arc::new(LocalStore::new(root));
+    let catalog = Arc::new(HadoopCatalog::new(store.clone(), root));
+    let table = TableIdent::new("default", "prune_test");
 
-    write_file(dir.path(), "part-00001", &embeddings_a).await;
-    write_file(dir.path(), "part-00002", &embeddings_b).await;
+    let policy = VectorStoragePolicy { column_name: "embedding".into(), dim: 4,
+        metric: VectorMetric::Cosine, precision: VectorPrecision::F16,
+        pq: None, keep_raw_for_reranking: false };
 
-    // Query near [1, 0, 0, ...] — file B should be pruned
-    let query = vec![0.99_f32, 0.1, 0.0, /* ... */];
-    let pruner = VectorPruner::new(load_catalog(dir.path()).await);
-    let candidates = pruner.prune(&query, 0.5).await.unwrap();
+    // File A: vectors near [1, 0, 0, 0]
+    // File B: vectors near [0, 0, 0, 1]  (far from query)
+    // ... write both files via TableWriter ...
 
-    assert_eq!(candidates.len(), 1, "should keep only file A");
-    assert!(candidates[0].data_file.contains("part-00001"));
+    // Query near [1, 0, 0, 0] — file B should be pruned
+    let results = search(
+        &table, &[1.0f32, 0.0, 0.0, 0.0],
+        SearchConfig { top_k: 5, ef_search: 50, pruning_threshold: 0.5 },
+        "embedding", 4, catalog, store,
+    ).await.unwrap();
+
+    // All results must come from file A (part-00000.parquet)
+    for r in &results {
+        assert!(r.file_path.contains("part-00000"));
+    }
 }
 ```
 
@@ -242,24 +251,27 @@ fn dedup_removes_near_identical_chunks() {
     let config = ContextAssemblerConfig { dedup_threshold: 0.05, ..Default::default() };
     let assembler = ContextAssembler::new(config);
 
-    let chunk_a = fixtures::chunk("doc-1", 0, "The gross margin improved significantly.");
-    let chunk_b = fixtures::chunk("doc-1", 1, "Gross margin saw significant improvement."); // near-duplicate of a
-    let chunk_c = fixtures::chunk("doc-2", 0, "Revenue grew 15% year over year.");
+    let emb = vec![1.0f32, 0.0, 0.0];
+    let mut chunk_a = Chunk {
+        document_id: "doc-1".into(), chunk_index: 0,
+        chunk_text: "The gross margin improved significantly.".into(),
+        embedding: Some(emb.clone()), distance: 0.1, ..Default::default()
+    };
+    let mut chunk_b = Chunk {
+        document_id: "doc-1".into(), chunk_index: 1,
+        chunk_text: "Gross margin saw significant improvement.".into(),
+        embedding: Some(emb.clone()), // exact same embedding → duplicate
+        distance: 0.2, ..Default::default()
+    };
+    let chunk_c = Chunk {
+        document_id: "doc-2".into(), chunk_index: 0,
+        chunk_text: "Revenue grew 15% year over year.".into(),
+        embedding: None, distance: 0.3, ..Default::default()
+    };
 
-    // Make chunk_b's embedding very close to chunk_a's
-    let mut chunk_b_close = chunk_b.clone();
-    chunk_b_close.embedding = chunk_a.embedding.clone(); // exact same embedding
-
-    let results = assembler.assemble(
-        vec![
-            (chunk_a.clone(), 0.9),
-            (chunk_b_close, 0.85),
-            (chunk_c.clone(), 0.7),
-        ]
-    );
+    let results = assembler.assemble_chunks(vec![chunk_a, chunk_b, chunk_c]);
 
     assert_eq!(results.chunk_count, 2, "near-duplicate should be removed");
-    assert_eq!(results.document_count, 2);
 }
 
 #[test]
@@ -269,17 +281,17 @@ fn grouping_restores_chunk_order() {
 
     // Chunks returned by search in arbitrary order
     let chunks = vec![
-        (fixtures::chunk("doc-1", 2, "third chunk"), 0.8),
-        (fixtures::chunk("doc-1", 0, "first chunk"), 0.75),
-        (fixtures::chunk("doc-1", 1, "second chunk"), 0.77),
+        Chunk { document_id: "doc-1".into(), chunk_index: 2, chunk_text: "third chunk".into(), distance: 0.3, ..Default::default() },
+        Chunk { document_id: "doc-1".into(), chunk_index: 0, chunk_text: "first chunk".into(),  distance: 0.1, ..Default::default() },
+        Chunk { document_id: "doc-1".into(), chunk_index: 1, chunk_text: "second chunk".into(), distance: 0.2, ..Default::default() },
     ];
 
-    let results = assembler.assemble(chunks);
-    let xml = &results.xml;
+    let results = assembler.assemble_chunks(chunks);
+    let text = &results.text;
 
-    let pos_first = xml.find("first chunk").unwrap();
-    let pos_second = xml.find("second chunk").unwrap();
-    let pos_third = xml.find("third chunk").unwrap();
+    let pos_first  = text.find("first chunk").unwrap();
+    let pos_second = text.find("second chunk").unwrap();
+    let pos_third  = text.find("third chunk").unwrap();
 
     assert!(pos_first < pos_second && pos_second < pos_third,
         "chunks should be in document order in the assembled context");
@@ -382,8 +394,8 @@ pub fn cluster_around(center: &[f32], dim: usize, count: usize, noise: f32) -> A
     ...
 }
 
-pub fn chunk(doc_id: &str, index: u32, text: &str) -> RetrievedChunk {
-    // Creates a RetrievedChunk with deterministic embedding derived from text hash
+pub fn chunk(doc_id: &str, index: u32, text: &str) -> Chunk {
+    // Creates a Chunk with deterministic embedding derived from text hash
     ...
 }
 

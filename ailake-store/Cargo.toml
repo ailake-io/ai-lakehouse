@@ -9,13 +9,15 @@ tokio        = { workspace = true }
 bytes        = { workspace = true }
 async-trait  = { workspace = true }
 thiserror    = { workspace = true }
+object_store = { workspace = true }
+futures      = { workspace = true }
 
 [features]
 default = ["store-local"]
 store-local = []
-store-s3    = []
-store-gcs   = []
-store-azure = []
+store-s3    = ["object_store/aws"]
+store-gcs   = ["object_store/gcp"]
+store-azure = ["object_store/azure"]
 
 [dev-dependencies]
 tempfile    = { workspace = true }

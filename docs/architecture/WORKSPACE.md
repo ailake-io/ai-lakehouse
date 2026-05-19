@@ -52,13 +52,15 @@ Reads and writes the **Parquet section** of the unified file. Knows about the `V
 ### `ailake-vec`
 Vector data transformations. No I/O.
 
-- `Quantizer::f32_to_f16(&[f32]) -> Vec<u8>` — lossless precision cast
+- `Quantizer::f32_to_f16_bytes(&[f32]) -> Vec<u8>` — half-precision cast
 - `Quantizer::f32_to_i8(&[f32]) -> (Vec<i8>, ScalingParams)` — symmetric min-max
-- `PQEncoder::train(vectors, M, k) -> Codebook` — Product Quantization training
-- `PQEncoder::encode(&[f32]) -> Vec<u8>`
-- `Distance::cosine(a: &[f32], b: &[f32]) -> f32`
-- `Distance::euclidean(a: &[f32], b: &[f32]) -> f32`
-- `compute_centroid(&[Vec<f32>]) -> (Vec<f32>, f32)` — returns (centroid, radius)
+- `PQCodebook::train(vectors, M, k, max_iter) -> PQCodebook` — k-means++ per subspace
+- `PQCodebook::encode(&[f32]) -> Vec<u8>` — M bytes, one code per subspace
+- `PQCodebook::compute_adc_table(query) -> Vec<Vec<f32>>` — precomputed ADC table for fast batch search
+- `PQCodebook::adc_distance(codes, table) -> f32` — O(M) approximate distance
+- `cosine_distance(a, b) -> f32`, `euclidean_distance`, `dot_product`
+- `compute_centroid_and_radius(&[Vec<f32>], VectorMetric) -> Centroid`
+- `BlockCompressor::zstd(level)`, `BlockCompressor::lz4()` — block-level compression
 
 ### `ailake-index`
 HNSW index lifecycle. Wraps `hnsw_rs`.
@@ -97,24 +99,26 @@ Implements the `CatalogProvider` trait for every supported backend:
 
 ```
 ailake-catalog/src/
-├── lib.rs            # CatalogProvider trait, TableIdent, DataFileEntry, NewSnapshot
-├── metadata.rs       # metadata.json read/write (Iceberg Spec v2)
-├── snapshot.rs       # snapshot creation, vector stats in custom_properties
-├── glue.rs           # AWS Glue Data Catalog (uses aws-sdk-glue)
-├── rest.rs           # Iceberg REST Catalog spec (Polaris, Unity Catalog, S3 Tables)
-├── nessie.rs         # Project Nessie (wraps REST, adds branch/tag ops)
-├── hadoop.rs         # Filesystem catalog — metadata.json on local FS / S3 / GCS
-└── jdbc.rs           # JDBC catalog — metadata in PostgreSQL or MySQL
+├── lib.rs          # re-exports, module declarations
+├── provider.rs     # CatalogProvider trait, TableIdent, DataFileEntry, NewSnapshot
+├── metadata.rs     # metadata.json read/write (Iceberg Spec v2)
+├── snapshot.rs     # manifest JSON builder
+├── hadoop.rs       # HadoopCatalog — filesystem / any Store backend
+├── rest.rs         # RestCatalog — Iceberg REST Catalog spec (Polaris, S3 Tables, Nessie, Unity Catalog)
+├── databricks.rs   # DatabricksAuth + builders for Azure/AWS/GCP Unity Catalog
+├── glue.rs         # GlueCatalog — AWS Glue (feature = "catalog-glue", stub)
+├── nessie.rs       # NessieCatalog — Nessie branching extensions (feature = "catalog-nessie", stub)
+└── jdbc.rs         # JdbcCatalog — PostgreSQL/MySQL (feature = "catalog-jdbc", stub)
 ```
 
 `CatalogProvider` trait:
 ```rust
 #[async_trait]
 pub trait CatalogProvider: Send + Sync {
+    async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()>;
     async fn load_table(&self, name: &TableIdent) -> AilakeResult<TableMetadata>;
     async fn commit_snapshot(&self, table: &TableIdent, snapshot: NewSnapshot) -> AilakeResult<SnapshotId>;
     async fn list_files(&self, table: &TableIdent, snapshot_id: Option<SnapshotId>) -> AilakeResult<Vec<DataFileEntry>>;
-    async fn create_table(&self, name: &TableIdent, schema: &Schema, props: &TableProperties) -> AilakeResult<()>;
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()>;
 }
 ```
@@ -128,29 +132,31 @@ Object storage abstraction. Thin wrapper over the `object_store` crate.
 
 - `Store` trait:
   - `get(path) → Bytes`
-  - `get_range(path, range) → Bytes` — critical for partial reads of HNSW footer
-  - `put(path, Bytes)`
-  - `list(prefix) → Vec<Path>`
-- `LocalStore` — filesystem (Phase 1, tests)
-- `S3Store`, `GcsStore`, `AzureStore` — cloud backends (Phase 2)
+  - `get_range(path, range: Range<u64>) → Bytes` — critical for partial reads of HNSW footer from S3
+  - `put(path, Bytes)`, `list(prefix)`, `file_size(path)`, `exists(path)`, `delete(path)`
+- `LocalStore` — filesystem implementation (dev/tests)
+- `ObjectStoreBackend` — wraps any `Arc<dyn object_store::ObjectStore>`:
+  - S3: `object_store::aws::AmazonS3Builder`
+  - GCS: `object_store::gcp::GoogleCloudStorageBuilder`
+  - Azure: `object_store::azure::MicrosoftAzureBuilder`
+  - Feature-gated: `store-s3`, `store-gcs`, `store-azure`
 - All async, all return `AilakeError` on failure
 
 ### `ailake-query`
 Query planning and execution. The integration layer — depends on all data-plane crates.
 
-- `VectorPruner` — loads centroids from `VectorStatsCatalog`, computes distances to query vector, returns list of candidate file paths
-- `VectorScanner` — for each candidate file:
-  1. Partial `GET` of Parquet footer to extract `ailake.hnsw_offset/len`
-  2. Partial `GET` of AI-Lake footer bytes
-  3. Load HNSW via `MmapLoader`
-  4. Search top-k locally
-  5. Return `(RowId, f32)` pairs
-  6. Read full Parquet rows for top results
-- `ContextAssembler` — given retrieved `RetrievedChunk` list:
-  - Deduplicates by cosine distance threshold
-  - Groups by `document_id`, sorts by `chunk_index`
-  - Truncates to `max_tokens` budget
-  - Returns `AssembledContext` with prompt-ready XML structure
+- `TableWriter` — `write_batch(batch, embeddings)` + `commit()` → Iceberg snapshot
+- `VectorPruner::prune(files, query, metric, threshold)` — filters `Vec<DataFileEntry>` using centroid geometry; works on catalog metadata only, zero file I/O for pruned files
+- `search(table, query, config, ...)` — full pipeline: list catalog → prune → load HNSW → global top-k merge; `SearchConfig.pruning_threshold` controls prune aggressiveness
+- `CompactionPlanner::plan(files)` — selects files smaller than `target_file_size_bytes`
+- `CompactionExecutor::compact(files, output_path)` — merges N files into one via Arrow `concat_batches`, rebuilds HNSW, returns new `DataFileEntry`
+- `CompactionExecutor::run(planner, table, catalog, prefix)` — full cycle: plan + compact + commit + delete old files
+- `ContextAssembler::assemble_chunks(chunks: Vec<Chunk>)`:
+  - Sorts by `distance` (most relevant first)
+  - Deduplicates by embedding cosine distance < `dedup_threshold`
+  - Groups by `document_id`, sorts each group by `chunk_index`
+  - Applies `max_tokens` budget (4 chars ≈ 1 token)
+  - Returns `AssembledContext { text: XML, chunk_count, token_estimate }`
 
 ### `ailake-py`
 PyO3 extension module. Thin — all logic lives in other crates.
@@ -185,8 +191,10 @@ members = [
     "ailake-catalog",
     "ailake-store",
     "ailake-query",
-    "ailake-py",
-    "ailake-jni",
+    "tests",
+    # Phase 3 bindings — excluded until Python/JVM deps are configured
+    # "ailake-py",
+    # "ailake-jni",
 ]
 
 [workspace.dependencies]
@@ -197,26 +205,18 @@ uuid        = { version = "1", features = ["v4", "serde"] }
 thiserror   = "1"
 bytes       = "1"
 half        = { version = "2", features = ["serde"] }
+async-trait = "0.1"
 
 # Async
 tokio       = { version = "1", features = ["full"] }
 futures     = "0.3"
 
 # Data
-parquet     = { version = "52", features = ["async"] }
-arrow       = "52"
-arrow-array = "52"
+parquet      = { version = "52", features = ["async"] }
+arrow-array  = "52"
+arrow-schema = "52"
+arrow-select = "52"
 object_store = { version = "0.10", features = ["aws", "gcp", "azure"] }
-
-# Iceberg
-iceberg     = "0.3"
-apache-avro = "0.16"
-
-# Catalog backends
-aws-sdk-glue       = { version = "1", optional = true }   # feature = "catalog-glue"
-aws-config         = { version = "1", optional = true }
-reqwest            = { version = "0.12", features = ["json"] }  # REST catalog
-sqlx               = { version = "0.7", features = ["postgres", "mysql", "runtime-tokio-rustls"], optional = true }  # JDBC catalog
 
 # Vector index
 hnsw_rs     = "0.3"
@@ -227,7 +227,10 @@ memmap2     = "0.9"
 lz4_flex    = "0.11"
 zstd        = "0.13"
 
-# Bindings
+# Catalog backends (catalog crate adds iceberg/apache-avro directly)
+reqwest     = { version = "0.12", features = ["json"] }  # REST catalog
+
+# Bindings (excluded from workspace build until Phase 3)
 pyo3        = { version = "0.21", features = ["extension-module"] }
 uniffi      = "0.27"
 
@@ -239,6 +242,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 criterion   = { version = "0.5", features = ["html_reports"] }
 tempfile    = "3"
 proptest    = "1"
+rand        = "0.8"
 
 [profile.release]
 lto         = "thin"
@@ -254,10 +258,16 @@ debug       = true
 
 ## Build phases and what is in scope
 
-### Phase 1 — Local MVP
+| Phase | Status | Scope |
+|---|---|---|
+| **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
+| **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
+| **Phase 3** | Planned | JVM/Spark/Trino connectors (`uniffi`), multi-column vector tables |
+| **Phase 4** | Planned | GPU index (cuVS FFI), PQ reranking, public format spec v1.0 |
+
+### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
 
-In scope:
 - `ailake-core`: all types
 - `ailake-vec`: quantization F32→F16, centroid computation, distance functions
 - `ailake-parquet`: writer (vector column encoding), reader (vector column decoding)
@@ -265,26 +275,24 @@ In scope:
 - `ailake-file`: unified writer/reader, footer layout
 - `ailake-catalog`: `CatalogProvider` trait + `HadoopCatalog` (filesystem) only
 - `ailake-store`: `LocalStore` only
-- Integration test: write 10k rows into a single file, search top-10, verify recall
+- Integration test: write + search end-to-end, verify recall
 
-Out of scope (Phase 1):
-- Cloud storage backends
-- `GlueCatalog`, `RestCatalog`, `NessieCatalog`, `JdbcCatalog`
-- `ailake-py`, `ailake-jni`
-- `MmapLoader` (deserialize fully into RAM for Phase 1)
-- Compaction
-- PQ quantization
-- `ContextAssembler`
+### Phase 2 — Distribution and Cloud Storage ✅
 
-### Phase 2 — Distribution and Cloud Storage
-- `ailake-store`: S3Store, GcsStore, AzureStore with `get_range` support
-- `ailake-catalog`: `GlueCatalog`, `RestCatalog` (covers Polaris, Nessie, Unity Catalog, BigLake, S3 Tables)
-- `ailake-index`: full `MmapLoader` with partial S3 reads
-- Compaction job: merge N small files into one, rebuild HNSW
-- `ailake-vec`: PQ quantization
-- `ailake-query`: `VectorPruner`, `VectorScanner`, `ContextAssembler`
-- `ailake-py`: full PyO3 bindings
-- Integration tests with Docker (MinIO + Nessie + Localstack)
+- `ailake-store`: `ObjectStoreBackend` wrapping `object_store` crate (S3/GCS/Azure via feature flags `store-s3`, `store-gcs`, `store-azure`)
+- `ailake-index`: real `MmapLoader` — writes HNSW bytes to tempfile, mmaps, deserializes
+- `ailake-vec`: `PQCodebook` (k-means++ per subspace, ADC distance), `BlockCompressor` (zstd/lz4)
+- `ailake-query`: `VectorPruner` (geometric centroid pruning), `CompactionExecutor`, `ContextAssembler`
+- `ailake-query::search`: pruning integrated via `SearchConfig.pruning_threshold`
+- `ailake-py`: PyO3 bindings (`TableWriter`, `search`, `assemble_context`)
+
+Also delivered in Phase 2:
+- `RestCatalog` — full Iceberg REST Catalog spec implementation (OAuth2 token caching, manifest writes to object storage)
+- Databricks Unity Catalog support — `DatabricksAuth` + `databricks_azure`/`databricks_aws`/`databricks_gcp` builders
+
+Deferred to Phase 3:
+- `GlueCatalog`, `NessieCatalog`, `JdbcCatalog`
+- Docker integration tests (MinIO + Nessie + Localstack)
 
 ### Phase 3 — Query engine integration
 - `ailake-catalog`: `NessieCatalog` (branching ops), `JdbcCatalog`
