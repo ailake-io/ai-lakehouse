@@ -416,7 +416,7 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [ ] Benchmarks públicos vs. LanceDB, Deep Lake, pgvector
 - [ ] Avaliação de FFI para GPU (cuVS/NVIDIA)
 - [ ] Documentação de spec pública do formato
-- [ ] Reranking automático após PQ
+- [x] Reranking automático após PQ
 
 ---
 

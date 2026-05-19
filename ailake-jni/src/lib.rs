@@ -97,6 +97,7 @@ fn do_search(table_uri: String, query: Vec<f32>, top_k: u32) -> Vec<SearchResult
         top_k: top_k as usize,
         ef_search: 50,
         pruning_threshold: f32::INFINITY,
+        rerank_factor: None,
     };
 
     rt.block_on(rs_search(

@@ -22,6 +22,10 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
+pub fn exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32 {
+    dispatch(metric)(a, b)
+}
+
 fn dispatch(metric: VectorMetric) -> fn(&[f32], &[f32]) -> f32 {
     match metric {
         VectorMetric::Cosine => cosine_distance,

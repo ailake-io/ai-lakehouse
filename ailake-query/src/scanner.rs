@@ -4,6 +4,7 @@ use ailake_catalog::{CatalogProvider, TableIdent};
 use ailake_core::{AilakeResult, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
 use ailake_store::Store;
+use ailake_vec::exact_distance;
 use bytes::Bytes;
 
 use crate::pruner::VectorPruner;
@@ -16,6 +17,11 @@ pub struct SearchConfig {
     /// Files where `distance(query, centroid) - radius > pruning_threshold` are skipped.
     /// Set to `f32::INFINITY` to disable pruning (scan all files).
     pub pruning_threshold: f32,
+    /// When `Some(factor)`, fetch `top_k * factor` candidates from the HNSW index and
+    /// rerank them using exact F32 distances before truncating to `top_k`.
+    /// Corrects the approximation error introduced by PQ-compressed HNSW distances.
+    /// `None` (default) disables reranking.
+    pub rerank_factor: Option<usize>,
 }
 
 impl Default for SearchConfig {
@@ -24,6 +30,7 @@ impl Default for SearchConfig {
             top_k: 10,
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
         }
     }
 }
@@ -31,6 +38,11 @@ impl Default for SearchConfig {
 impl SearchConfig {
     pub fn with_pruning(mut self, threshold: f32) -> Self {
         self.pruning_threshold = threshold;
+        self
+    }
+
+    pub fn with_reranking(mut self, factor: usize) -> Self {
+        self.rerank_factor = Some(factor);
         self
     }
 }
@@ -74,6 +86,11 @@ pub async fn search(
     // Geometric pruning: skip files whose centroid is too far from the query
     let surviving_files = VectorPruner::prune(all_files, query, metric, config.pruning_threshold);
 
+    let candidate_k = match config.rerank_factor {
+        Some(factor) => config.top_k * factor,
+        None => config.top_k,
+    };
+
     let mut all_results: Vec<SearchResult> = Vec::new();
 
     for file_entry in &surviving_files {
@@ -85,14 +102,31 @@ pub async fn search(
         }
 
         let index = reader.load_index_for_column(vector_column)?;
-        let local_results = index.search(query, config.top_k, config.ef_search);
+        let local_results = index.search(query, candidate_k, config.ef_search);
 
-        for (row_id, distance) in local_results {
-            all_results.push(SearchResult {
-                row_id,
-                distance,
-                file_path: file_entry.path.clone(),
-            });
+        if config.rerank_factor.is_some() {
+            // Read raw F32 vectors for exact distance reranking; file bytes already loaded.
+            let (_, raw_vectors) = reader.read_parquet()?;
+            for (row_id, _approx_dist) in local_results {
+                let idx = row_id.as_u64() as usize;
+                let exact_dist = raw_vectors
+                    .get(idx)
+                    .map(|v| exact_distance(metric, query, v))
+                    .unwrap_or(f32::INFINITY);
+                all_results.push(SearchResult {
+                    row_id,
+                    distance: exact_dist,
+                    file_path: file_entry.path.clone(),
+                });
+            }
+        } else {
+            for (row_id, distance) in local_results {
+                all_results.push(SearchResult {
+                    row_id,
+                    distance,
+                    file_path: file_entry.path.clone(),
+                });
+            }
         }
     }
 
@@ -111,5 +145,185 @@ fn parse_metric(s: &str) -> VectorMetric {
         "euclidean" => VectorMetric::Euclidean,
         "dotproduct" | "dot_product" | "dot" => VectorMetric::DotProduct,
         _ => VectorMetric::Cosine,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ailake_catalog::{HadoopCatalog, TableIdent};
+    use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
+    use ailake_store::LocalStore;
+    use arrow_array::{Int32Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn make_policy(dim: u32) -> VectorStoragePolicy {
+        VectorStoragePolicy {
+            column_name: "embedding".to_string(),
+            dim,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: false,
+        }
+    }
+
+    async fn write_demo_table(dir: &TempDir, dim: usize, rows: usize) {
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog = Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let ids: Vec<i32> = (0..rows as i32).collect();
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(ids))]).unwrap();
+
+        // Each row i has embedding with 1.0 at dimension i and 0 elsewhere (unit basis vectors)
+        let embeddings: Vec<Vec<f32>> = (0..rows)
+            .map(|i| {
+                let mut v = vec![0.0f32; dim];
+                v[i % dim] = 1.0;
+                v
+            })
+            .collect();
+
+        let mut writer =
+            crate::TableWriter::create_or_open(catalog, store, make_policy(dim as u32), table)
+                .await
+                .unwrap();
+        writer.write_batch(&batch, &embeddings).await.unwrap();
+        writer.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rerank_returns_correct_top_k_count() {
+        let dir = TempDir::new().unwrap();
+        let dim = 8usize;
+        write_demo_table(&dir, dim, 8).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        let query = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let config = SearchConfig {
+            top_k: 3,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: Some(2),
+        };
+
+        let results = search(
+            &table,
+            &query,
+            config,
+            "embedding",
+            dim as u32,
+            catalog,
+            store,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn rerank_nearest_is_exact_match() {
+        let dir = TempDir::new().unwrap();
+        let dim = 8usize;
+        write_demo_table(&dir, dim, 8).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        // Row 0 has [1,0,0,...] — cosine distance to same query is 0
+        let query = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let config = SearchConfig {
+            top_k: 1,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: Some(4),
+        };
+
+        let results = search(
+            &table,
+            &query,
+            config,
+            "embedding",
+            dim as u32,
+            catalog,
+            store,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        // Exact cosine distance between identical unit vectors is ~0 (F16 rounding allowed)
+        assert!(
+            results[0].distance < 1e-3,
+            "distance was {}",
+            results[0].distance
+        );
+        assert_eq!(results[0].row_id, RowId::new(0));
+    }
+
+    #[tokio::test]
+    async fn no_rerank_matches_default_behavior() {
+        let dir = TempDir::new().unwrap();
+        let dim = 4usize;
+        write_demo_table(&dir, dim, 4).await;
+
+        let store_a: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let store_b: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let cat_a: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store_a.clone(), "warehouse"));
+        let cat_b: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store_b.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let cfg_plain = SearchConfig {
+            top_k: 2,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+        };
+        let cfg_rerank = SearchConfig {
+            top_k: 2,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: Some(2),
+        };
+
+        let plain = search(
+            &table,
+            &query,
+            cfg_plain,
+            "embedding",
+            dim as u32,
+            cat_a,
+            store_a,
+        )
+        .await
+        .unwrap();
+        let reranked = search(
+            &table,
+            &query,
+            cfg_rerank,
+            "embedding",
+            dim as u32,
+            cat_b,
+            store_b,
+        )
+        .await
+        .unwrap();
+
+        // Both should return same top-1 result (row 0, distance ~0)
+        assert_eq!(plain[0].row_id, reranked[0].row_id);
     }
 }
