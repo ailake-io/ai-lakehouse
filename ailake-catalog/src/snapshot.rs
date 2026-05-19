@@ -55,6 +55,7 @@ mod tests {
                 hnsw_len: Some(8192),
                 vector_column: Some("embedding".to_string()),
                 vector_dim: Some(4),
+                extra_vector_indexes: vec![],
             }],
         };
         let json = manifest.to_json().unwrap();

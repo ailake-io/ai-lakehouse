@@ -21,6 +21,17 @@ impl TableIdent {
 
 pub type SnapshotId = i64;
 
+/// HNSW index info for one additional (non-primary) vector column.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtraVectorIndex {
+    pub column: String,
+    pub dim: u32,
+    pub hnsw_offset: u64,
+    pub hnsw_len: u64,
+    pub centroid_b64: Option<String>,
+    pub radius: Option<f32>,
+}
+
 /// Metadata about a single data file in a table snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataFileEntry {
@@ -28,13 +39,16 @@ pub struct DataFileEntry {
     pub path: String,
     pub record_count: u64,
     pub file_size_bytes: u64,
-    /// base64-encoded centroid F32 values
+    /// base64-encoded centroid F32 values (primary vector column)
     pub centroid_b64: Option<String>,
     pub radius: Option<f32>,
     pub hnsw_offset: Option<u64>,
     pub hnsw_len: Option<u64>,
     pub vector_column: Option<String>,
     pub vector_dim: Option<u32>,
+    /// Additional vector columns beyond the primary (empty for single-column tables).
+    #[serde(default)]
+    pub extra_vector_indexes: Vec<ExtraVectorIndex>,
 }
 
 /// Iceberg-compatible table metadata read from the catalog.
@@ -110,8 +124,23 @@ pub fn make_data_file_entry(
     centroid: &Centroid,
     index: VectorIndexInfo<'_>,
 ) -> DataFileEntry {
+    make_multi_column_data_file_entry(path, record_count, file_size_bytes, centroid, index, &[])
+}
+
+/// Build DataFileEntry for a file with multiple vector columns.
+///
+/// `primary_centroid` and `primary_index` describe the primary (first) vector column.
+/// `extra` contains info for additional columns.
+pub fn make_multi_column_data_file_entry(
+    path: &str,
+    record_count: u64,
+    file_size_bytes: u64,
+    primary_centroid: &Centroid,
+    primary_index: VectorIndexInfo<'_>,
+    extra: &[ExtraVectorIndex],
+) -> DataFileEntry {
     use base64::Engine;
-    let centroid_bytes: Vec<u8> = centroid
+    let centroid_bytes: Vec<u8> = primary_centroid
         .values
         .iter()
         .flat_map(|v| v.to_le_bytes())
@@ -122,12 +151,24 @@ pub fn make_data_file_entry(
         record_count,
         file_size_bytes,
         centroid_b64: Some(centroid_b64),
-        radius: Some(centroid.radius),
-        hnsw_offset: Some(index.hnsw_offset),
-        hnsw_len: Some(index.hnsw_len),
-        vector_column: Some(index.column.to_string()),
-        vector_dim: Some(index.dim),
+        radius: Some(primary_centroid.radius),
+        hnsw_offset: Some(primary_index.hnsw_offset),
+        hnsw_len: Some(primary_index.hnsw_len),
+        vector_column: Some(primary_index.column.to_string()),
+        vector_dim: Some(primary_index.dim),
+        extra_vector_indexes: extra.to_vec(),
     }
+}
+
+/// Encode a centroid to base64 for use in ExtraVectorIndex.
+pub fn encode_centroid_b64(centroid: &Centroid) -> String {
+    use base64::Engine;
+    let bytes: Vec<u8> = centroid
+        .values
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    base64::engine::general_purpose::STANDARD.encode(&bytes)
 }
 
 /// Decode centroid bytes from base64 in a DataFileEntry.

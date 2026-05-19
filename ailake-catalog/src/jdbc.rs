@@ -350,6 +350,7 @@ mod tests {
                 hnsw_len: Some(256),
                 vector_column: Some("embedding".into()),
                 vector_dim: Some(4),
+                extra_vector_indexes: vec![],
             }],
             operation: SnapshotOperation::Append,
         };

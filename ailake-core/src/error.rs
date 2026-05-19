@@ -23,6 +23,9 @@ pub enum AilakeError {
     #[error("file is not a valid AI-Lake file (no AILK trailer)")]
     NotAnAilakeFile,
 
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
     #[error("catalog error: {0}")]
     Catalog(String),
 

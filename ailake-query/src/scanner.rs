@@ -84,7 +84,7 @@ pub async fn search(
             continue;
         }
 
-        let index = reader.load_index()?;
+        let index = reader.load_index_for_column(vector_column)?;
         let local_results = index.search(query, config.top_k, config.ef_search);
 
         for (row_id, distance) in local_results {

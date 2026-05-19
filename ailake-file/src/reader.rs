@@ -22,10 +22,26 @@ impl AilakeFileReader {
         }
     }
 
-    /// Returns the absolute byte offset of the AILK section within the file.
+    /// Returns the absolute byte offset of the primary AILK section.
     /// Reads `ailake.footer_offset` from the Parquet footer key-value metadata.
     pub fn ailk_offset(&self) -> AilakeResult<u64> {
         let reader = ParquetVectorReader::new(self.bytes.clone(), &self.vector_column);
+        let val = reader
+            .kv_metadata("ailake.footer_offset")?
+            .ok_or(AilakeError::NotAnAilakeFile)?;
+        val.parse::<u64>().map_err(|_| AilakeError::NotAnAilakeFile)
+    }
+
+    /// Returns the absolute byte offset of the AILK section for a named vector column.
+    ///
+    /// For additional columns tries `ailake.{column}.footer_offset` first,
+    /// then falls back to `ailake.footer_offset` (primary / single-column files).
+    pub fn ailk_offset_for_column(&self, column: &str) -> AilakeResult<u64> {
+        let reader = ParquetVectorReader::new(self.bytes.clone(), column);
+        let col_key = format!("ailake.{column}.footer_offset");
+        if let Some(val) = reader.kv_metadata(&col_key)? {
+            return val.parse::<u64>().map_err(|_| AilakeError::NotAnAilakeFile);
+        }
         let val = reader
             .kv_metadata("ailake.footer_offset")?
             .ok_or(AilakeError::NotAnAilakeFile)?;
@@ -84,19 +100,33 @@ impl AilakeFileReader {
         })
     }
 
-    /// Load the HNSW index from the AILK section.
+    /// Load the HNSW index from the primary AILK section.
     pub fn load_index(&self) -> AilakeResult<HnswIndex> {
-        let ailk_start = self.ailk_offset()? as usize;
-        let header = self.read_header()?;
+        self.load_index_for_column(&self.vector_column.clone())
+    }
+
+    /// Load the HNSW index for a specific vector column.
+    ///
+    /// Works for both single-column files (falls back to primary AILK) and
+    /// multi-column files written with `AilakeFileWriter::write_multi`.
+    pub fn load_index_for_column(&self, column: &str) -> AilakeResult<HnswIndex> {
+        let ailk_start = self.ailk_offset_for_column(column)? as usize;
+
+        if ailk_start + HEADER_SIZE > self.bytes.len() {
+            return Err(AilakeError::NotAnAilakeFile);
+        }
+        let header_bytes: &[u8; HEADER_SIZE] = self.bytes[ailk_start..ailk_start + HEADER_SIZE]
+            .try_into()
+            .map_err(|_| AilakeError::NotAnAilakeFile)?;
+        let header = AilakeHeader::from_bytes(header_bytes)?;
+
         let hnsw_start = ailk_start + header.hnsw_offset as usize;
         let hnsw_end = hnsw_start + header.hnsw_len as usize;
 
         if hnsw_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
         }
-
-        let hnsw_data = &self.bytes[hnsw_start..hnsw_end];
-        MmapLoader::from_bytes(hnsw_data)
+        MmapLoader::from_bytes(&self.bytes[hnsw_start..hnsw_end])
     }
 
     /// Read the Parquet section (tabular data + decoded embeddings).
