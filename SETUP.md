@@ -829,6 +829,352 @@ Ambos devem terminar sem erros ou warnings.
 
 ---
 
+## 15. Plugin Trino — VectorScanConnector
+
+O `trino-plugin` expõe tabelas AI-Lake como um conector Trino nativo. Requer a biblioteca nativa `libailake_jni.so` (construída pelo Cargo) e o fat-jar do plugin (construído pelo Gradle).
+
+### 15A. Pré-requisitos adicionais
+
+| Ferramenta | Versão | Instalação |
+|---|---|---|
+| JDK | 17+ | `sudo apt install openjdk-17-jdk` |
+| Gradle | 8+ | `sdk install gradle` (ou usar wrapper) |
+| Trino server | 430+ | [trino.io/download](https://trino.io/download.html) |
+
+### 15B. Passo 1 — Compilar a biblioteca nativa
+
+```bash
+# Na raiz do projeto
+cargo build --release -p ailake-jni
+
+# Linux:
+ls -lh target/release/libailake_jni.so
+
+# macOS:
+ls -lh target/release/libailake_jni.dylib
+```
+
+### 15C. Passo 2 — Compilar o fat-jar do plugin
+
+```bash
+cd trino-plugin
+
+# Criar wrapper Gradle (só na primeira vez)
+gradle wrapper
+
+# Compilar
+./gradlew shadowJar
+
+# Saída:
+ls build/libs/trino-plugin-0.1.0-plugin.jar
+```
+
+### 15D. Passo 3 — Instalar no Trino
+
+```bash
+# Diretório de instalação do Trino (ajuste conforme seu ambiente)
+TRINO_HOME=/opt/trino
+
+# Criar diretório do plugin e copiar jar
+mkdir -p $TRINO_HOME/plugin/ailake
+cp build/libs/trino-plugin-0.1.0-plugin.jar $TRINO_HOME/plugin/ailake/
+
+# Colocar a biblioteca nativa no library path do Trino
+# Opção A: copiar para lib/ do Trino
+cp ../target/release/libailake_jni.so $TRINO_HOME/lib/
+
+# Opção B: definir no jvm.config do Trino
+echo "-Djava.library.path=/path/to/target/release" >> $TRINO_HOME/etc/jvm.config
+```
+
+### 15E. Passo 4 — Configurar o catálogo
+
+Criar o arquivo `$TRINO_HOME/etc/catalog/ailake.properties`:
+
+```properties
+# Conector AI-Lake
+connector.name=ailake
+
+# URI da tabela AI-Lake (filesystem local ou s3://)
+ailake.table-uri=/tmp/ailake-demo
+
+# Coluna vetorial e dimensão (devem bater com a tabela)
+ailake.vector-column=embedding
+ailake.vector-dim=64
+```
+
+Para usar com tabela gerada pelo demo (seção 4):
+
+```bash
+# Gerar tabela de demo primeiro
+cargo run --example demo -p ailake-query 2>&1 | grep "Workspace:"
+# Workspace: /tmp/ailakeXXXXXX
+
+# Usar o caminho impresso acima no properties:
+# ailake.table-uri=/tmp/ailakeXXXXXX/warehouse/default/demo_table
+```
+
+### 15F. Passo 5 — Iniciar o Trino e fazer a primeira busca
+
+```bash
+# Iniciar o servidor
+$TRINO_HOME/bin/launcher start
+
+# Conectar via CLI
+$TRINO_HOME/bin/trino
+```
+
+No prompt do Trino:
+
+```sql
+-- 1. Verificar que o conector está ativo
+SHOW SCHEMAS FROM ailake;
+-- default
+
+SHOW TABLES FROM ailake.default;
+-- search
+
+DESCRIBE ailake.default.search;
+-- row_id    | bigint  | ...
+-- distance  | double  | ...
+-- file_path | varchar | ...
+
+-- 2. Definir o vetor de consulta (valores separados por vírgula, 64 dims para o demo)
+SET SESSION ailake.query_vector = '0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,
+  0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,
+  0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,
+  0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,
+  0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,
+  0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,
+  0.1,0.2,0.3,0.4';
+
+SET SESSION ailake.top_k = 5;
+
+-- 3. Executar busca vetorial
+SELECT row_id, distance, file_path
+FROM ailake.default.search
+ORDER BY distance;
+
+-- Resultado esperado:
+--  row_id | distance  | file_path
+-- --------+-----------+------------------------------
+--       0 | 0.000000  | data/part-00000.parquet
+--      12 | 0.031456  | data/part-00000.parquet
+--     ...
+
+-- 4. Combinar com Iceberg (JOIN com dados tabulares via conector Iceberg padrão)
+-- A tabela AI-Lake retorna row_ids; faça JOIN com a tabela Iceberg para obter o texto
+SELECT s.row_id, s.distance, i.chunk_text
+FROM ailake.default.search s
+JOIN iceberg.default.demo_table i ON s.row_id = i.id
+ORDER BY s.distance
+LIMIT 5;
+```
+
+### 15G. Testes do plugin Trino
+
+```bash
+cd trino-plugin
+./gradlew test
+
+# Saída esperada:
+# VectorScanMetadataTest: 7 tests passed
+# VectorScanConnectorTest: 7 tests passed
+# VectorScanSplitManagerTest: 5 tests passed
+# VectorScanRecordSetTest: 9 tests passed
+# AilakeNativeTest: 5 tests passed
+```
+
+Os testes rodam sem Trino server e sem biblioteca nativa — degradação graciosa garantida.
+
+---
+
+## 16. Plugin Spark — VectorScanStrategy
+
+O `spark-plugin` registra uma `SparkStrategy` customizada no planner Catalyst do Spark 3.5. Converte planos `VectorSearchPlan` em `VectorScanExec` que chama a biblioteca nativa via JNA.
+
+### 16A. Pré-requisitos adicionais
+
+Mesmo JDK 17+ e Gradle do item 15A. Spark 3.5 local (para testes), ou cluster Spark já configurado.
+
+```bash
+# Spark local (opcional — para testar)
+curl -LO https://archive.apache.org/dist/spark/spark-3.5.0/spark-3.5.0-bin-hadoop3.tgz
+tar xf spark-3.5.0-bin-hadoop3.tgz
+export SPARK_HOME=$(pwd)/spark-3.5.0-bin-hadoop3
+```
+
+### 16B. Passo 1 — Biblioteca nativa (mesma da seção 15B)
+
+```bash
+cargo build --release -p ailake-jni
+# target/release/libailake_jni.so  (Linux)
+```
+
+### 16C. Passo 2 — Compilar o fat-jar do plugin
+
+```bash
+cd spark-plugin
+gradle wrapper   # só na primeira vez
+./gradlew shadowJar
+
+ls build/libs/spark-plugin-0.1.0-plugin.jar
+```
+
+### 16D. Passo 3 — Gerar tabela de demo
+
+Usar a tabela gerada pelo demo da seção 4:
+
+```bash
+# Gerar tabela e anotar o path
+cargo run --example demo -p ailake-query 2>&1 | grep "Workspace:"
+# Workspace: /tmp/ailakeXXXXXX
+
+export AILAKE_TABLE=/tmp/ailakeXXXXXX/warehouse/default/demo_table
+```
+
+### 16E. Passo 4 — spark-shell (Scala interativo)
+
+```bash
+$SPARK_HOME/bin/spark-shell \
+  --jars $(pwd)/spark-plugin/build/libs/spark-plugin-0.1.0-plugin.jar \
+  --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions \
+  --conf "spark.driver.extraJavaOptions=-Djava.library.path=$(pwd)/target/release" \
+  --conf spark.ui.enabled=false
+```
+
+No prompt `scala>`:
+
+```scala
+import io.ailake.spark.implicits._
+
+// Tabela gerada pelo demo (dim=64, 1000 linhas)
+val tableUri = sys.env("AILAKE_TABLE")
+
+// Vetor de consulta — igual ao primeiro embedding do demo
+val query: Array[Float] = Array.fill(64)(0.5f)
+
+// Busca vetorial — retorna DataFrame com (row_id, distance, file_path)
+val results = spark.ailakeSearch(
+  tableUri    = tableUri,
+  queryVector = query,
+  topK        = 10,
+)
+
+results.show(10, truncate = false)
+// +------+-----------+----------------------------+
+// |row_id|distance   |file_path                   |
+// +------+-----------+----------------------------+
+// |0     |0.0        |data/part-00000.parquet     |
+// |12    |0.031456   |data/part-00000.parquet     |
+// |87    |0.044123   |data/part-00001.parquet     |
+// ...
+
+// Ordenar por distância e mostrar top-5
+results.orderBy("distance").limit(5).show()
+
+// Schema retornado
+results.printSchema()
+// root
+//  |-- row_id: long (nullable = false)
+//  |-- distance: double (nullable = false)
+//  |-- file_path: string (nullable = false)
+```
+
+### 16F. Passo 4 alternativo — PySpark
+
+```bash
+$SPARK_HOME/bin/pyspark \
+  --jars $(pwd)/spark-plugin/build/libs/spark-plugin-0.1.0-plugin.jar \
+  --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions \
+  --conf "spark.driver.extraJavaOptions=-Djava.library.path=$(pwd)/target/release"
+```
+
+```python
+# PySpark — chamar lógica Scala via py4j
+jvm = spark._jvm
+
+# Instanciar o VectorSearchPlan diretamente via py4j
+float_array = jvm.Array(jvm.Float.TYPE, 64)
+for i in range(64):
+    float_array[i] = 0.5
+
+table_uri = "/tmp/ailakeXXXXXX/warehouse/default/demo_table"
+
+# Chamar AilakeNative diretamente (sem passar pelo planner Spark)
+native = jvm.io.ailake.spark.AilakeNative
+results_java = native.search(table_uri, float_array, 10)
+
+# Converter para Python
+results = [
+    {"row_id": r.rowId(), "distance": r.distance(), "file_path": r.filePath()}
+    for r in results_java
+]
+for r in results:
+    print(f"row_id={r['row_id']}  distance={r['distance']:.6f}  file={r['file_path']}")
+
+# Ou usar ailake-py (recomendado para Python):
+import ailake
+query = [0.5] * 64
+results = ailake.search(path=table_uri, query=query, top_k=10)
+```
+
+### 16G. Passo 5 — submeter job Spark (cluster)
+
+```scala
+// MyVectorSearchJob.scala
+import io.ailake.spark.implicits._
+import org.apache.spark.sql.SparkSession
+
+object MyVectorSearchJob {
+  def main(args: Array[String]): Unit = {
+    val spark = SparkSession.builder()
+      .appName("ailake-vector-search")
+      .config("spark.sql.extensions", "io.ailake.spark.AilakeSparkExtensions")
+      .getOrCreate()
+
+    val tableUri  = args(0)  // s3://my-lake/docs/
+    val topK      = args(1).toInt
+    val queryJson = args(2)  // "[0.1, -0.2, 0.3, ...]"
+
+    val query: Array[Float] =
+      ujson.read(queryJson).arr.map(_.num.toFloat).toArray
+
+    spark.ailakeSearch(tableUri, query, topK)
+      .write.parquet(args(3))  // output path
+  }
+}
+```
+
+```bash
+spark-submit \
+  --jars spark-plugin-0.1.0-plugin.jar \
+  --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions \
+  --conf "spark.driver.extraJavaOptions=-Djava.library.path=/opt/ailake/lib" \
+  --conf "spark.executor.extraJavaOptions=-Djava.library.path=/opt/ailake/lib" \
+  my-vector-search-job.jar \
+  "s3://my-lake/docs/" 100 "[0.021, -0.043, ...]" "s3://results/out/"
+```
+
+**Importante**: `libailake_jni.so` precisa estar disponível em todos os executores. Adicionar ao `--files` do spark-submit ou instalar via bootstrap script.
+
+### 16H. Testes do plugin Spark
+
+```bash
+cd spark-plugin
+./gradlew test
+
+# Saída esperada:
+# VectorSearchPlanTest: 8 tests passed
+# VectorScanStrategyTest: 6 tests passed
+# AilakeNativeTest: 4 tests passed
+# AilakeSparkExtensionsTest: 5 tests passed  (requer SparkSession local)
+```
+
+Os testes de integração (`AilakeSparkExtensionsTest`) iniciam um SparkSession local — levam ~15s na primeira execução.
+
+---
+
 ## Estrutura dos crates
 
 ```
@@ -882,4 +1228,55 @@ Certifique-se de estar na branch `main` ou `develop` (benches vazios foram corri
 Threshold muito baixo corta arquivos legítimos. Use `f32::INFINITY` para desativar pruning e debugar:
 ```rust
 SearchConfig { top_k: 10, ef_search: 50, pruning_threshold: f32::INFINITY }
+```
+
+**Plugin Trino: `UnsatisfiedLinkError: libailake_jni.so`**
+A biblioteca nativa não está no `java.library.path` do Trino.
+```bash
+# Verificar onde o Trino procura
+grep "java.library.path" $TRINO_HOME/etc/jvm.config
+
+# Adicionar o caminho
+echo "-Djava.library.path=/path/to/target/release" >> $TRINO_HOME/etc/jvm.config
+
+# Reiniciar o Trino
+$TRINO_HOME/bin/launcher restart
+```
+
+**Plugin Trino: `ailake.table-uri is required`**
+A propriedade não foi definida no arquivo de catálogo.
+```bash
+cat $TRINO_HOME/etc/catalog/ailake.properties
+# Verificar que contém: ailake.table-uri=...
+```
+
+**Plugin Trino: `SELECT` retorna 0 linhas**
+Session property `query_vector` está vazia. Verificar:
+```sql
+SHOW SESSION LIKE 'ailake%';
+SET SESSION ailake.query_vector = '0.1,0.2,0.3,...';
+```
+
+**Plugin Spark: `ClassNotFoundException: io.ailake.spark.AilakeSparkExtensions`**
+O jar do plugin não foi passado para o Spark.
+```bash
+# Verificar que --jars inclui o plugin
+spark-shell --jars /caminho/spark-plugin-0.1.0-plugin.jar \
+  --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions
+```
+
+**Plugin Spark: `ailakeSearch` não encontrado**
+O import dos implicits está faltando.
+```scala
+// Adicionar no início do script
+import io.ailake.spark.implicits._
+```
+
+**Plugin Spark: VectorScanExec retorna DataFrame vazio**
+Comportamento esperado em ambiente sem `libailake_jni.so` — degradação graciosa.
+Para habilitar busca real, garantir que a lib está no `java.library.path`:
+```bash
+spark-shell \
+  --conf "spark.driver.extraJavaOptions=-Djava.library.path=/path/to/target/release" \
+  --conf "spark.executor.extraJavaOptions=-Djava.library.path=/path/to/target/release"
 ```
