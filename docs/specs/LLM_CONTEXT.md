@@ -182,12 +182,11 @@ Given a list of retrieved chunks, produce a prompt-ready context string that:
 // ailake-query/src/context_assembler.rs
 
 pub struct ContextAssemblerConfig {
-    /// Hard token budget for the assembled context.
-    /// Estimate: 1 token ≈ 4 chars (conservative for multilingual).
+    /// Approximate token budget (4 chars ≈ 1 token). Default: 4096.
     pub max_tokens: usize,
 
     /// Cosine distance below which two chunks are considered duplicates.
-    /// Keep the higher-scored one. Typical: 0.05 (very similar).
+    /// Keep the first chunk (already sorted by relevance). Default: 0.05.
     pub dedup_threshold: f32,
 
     /// When true, chunks from the same document are grouped and sorted
@@ -195,21 +194,17 @@ pub struct ContextAssemblerConfig {
     pub group_by_document: bool,
 
     /// Max chunks from a single document_id.
-    /// Prevents one document from dominating context. Default: 5.
+    /// Prevents one document from dominating context. Default: 10.
     pub max_chunks_per_document: usize,
-
-    /// Include preceding_context and following_context in the prompt.
-    pub include_adjacent_context: bool,
 }
 
 impl Default for ContextAssemblerConfig {
     fn default() -> Self {
         Self {
-            max_tokens: 100_000,
+            max_tokens: 4096,
             dedup_threshold: 0.05,
             group_by_document: true,
-            max_chunks_per_document: 5,
-            include_adjacent_context: true,
+            max_chunks_per_document: 10,
         }
     }
 }
@@ -218,7 +213,7 @@ impl Default for ContextAssemblerConfig {
 ### Assembly algorithm
 
 ```
-Input: Vec<RetrievedChunk>, ContextAssemblerConfig
+Input: Vec<Chunk>, ContextAssemblerConfig
 
 1. DEDUPLICATION
    Build pairwise cosine distance matrix for retrieved embeddings.
@@ -250,54 +245,35 @@ Input: Vec<RetrievedChunk>, ContextAssemblerConfig
    For each chunk in included:
      render XML block (see below)
 
-Output: AssembledContext { xml, token_estimate, chunk_count, document_count }
+Output: AssembledContext { text: String, token_estimate: usize, chunk_count: usize }
 ```
 
 ### Output XML format
 
 ```xml
-<sources>
-
-  <source rank="1" score="0.923" document_id="abc-123" chunk_index="4">
-    <document>Annual Report 2023 — ACME Corp</document>
-    <section>Financial Results > Q3 Revenue</section>
-    <before>...the previous quarter saw margin compression due to supply chain constraints.</before>
-    <content>Gross margin improved to 42.3% in Q3 2023, up from 38.1% in Q3 2022, driven by operational efficiency gains in the APAC manufacturing segment.</content>
-    <after>This improvement exceeded analyst consensus estimates of 40.5%...</after>
-  </source>
-
-  <source rank="2" score="0.891" document_id="def-456" chunk_index="2">
-    <document>Q3 2023 Earnings Call Transcript</document>
-    <section>CFO Remarks</section>
-    <before></before>
-    <content>We are particularly proud of the margin expansion this quarter. The 420 basis point improvement reflects sustained investment in automation.</content>
-    <after>Analyst questions followed regarding the sustainability of these gains into Q4.</after>
-  </source>
-
-</sources>
+<context>
+  <document id="abc-123" title="Annual Report 2023 — ACME Corp" source="s3://lake/annual_report.parquet">
+    <chunk index="4" section="Financial Results &gt; Q3 Revenue">
+      <text>Gross margin improved to 42.3% in Q3 2023, up from 38.1% in Q3 2022, driven by operational efficiency gains in the APAC manufacturing segment.</text>
+    </chunk>
+  </document>
+  <document id="def-456" title="Q3 2023 Earnings Call Transcript" source="s3://lake/earnings_call.parquet">
+    <chunk index="2" section="CFO Remarks">
+      <text>We are particularly proud of the margin expansion this quarter. The 420 basis point improvement reflects sustained investment in automation.</text>
+    </chunk>
+  </document>
+</context>
 ```
 
-The `<before>` and `<after>` tags are omitted (not empty) when `include_adjacent_context = false` or when the fields are null.
+Special characters (`&`, `<`, `>`, `"`) are XML-escaped in all attribute and text values.
 
 ### Token estimation
 
 ```rust
-/// Rough token count: 1 token ≈ 4 chars (conservative, language-agnostic).
+/// Rough token count: char_budget = max_tokens × 4.
 /// For precision, replace with tiktoken binding for the target model.
-fn estimate_tokens(chunk: &RetrievedChunk, config: &ContextAssemblerConfig) -> usize {
-    let mut chars = chunk.chunk_text.len()
-        + chunk.document_title.len()
-        + chunk.section_path.as_deref().unwrap_or("").len();
-
-    if config.include_adjacent_context {
-        chars += chunk.preceding_context.as_deref().unwrap_or("").len();
-        chars += chunk.following_context.as_deref().unwrap_or("").len();
-    }
-
-    // XML overhead: ~100 chars per source block
-    chars += 100;
-
-    (chars / 4).max(1)
+fn estimate_tokens(text: &str) -> usize {
+    text.len() / 4
 }
 ```
 

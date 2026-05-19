@@ -234,7 +234,7 @@ The single-file design unifies dimensional data, vectors, and the HNSW index int
 
 **Context**: The assembled context must be formatted for insertion into an LLM prompt. Format choice affects how well the model can parse and attribute information.
 
-**Decision**: XML with semantic tags (`<source>`, `<document>`, `<section>`, `<content>`, `<before>`, `<after>`).
+**Decision**: XML with semantic tags (`<context>`, `<document>`, `<chunk>`, `<text>`).
 
 **Consequences**:
 - Claude (Anthropic) performs well with XML-structured context per published prompt engineering guidance.

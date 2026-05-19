@@ -396,14 +396,15 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [ ] Validação: PyIceberg consegue ler a parte tabular sem o SDK AI-Lake
 
 ### Fase 2 — Distribuição e Object Storage
-- [ ] `ailake-store`: integração `object_store` (S3, GCS, Azure Blob)
-- [ ] `ailake-index`: carga via `memmap2` com `GET` parcial do S3
-- [ ] Job de compaction assíncrono (Tokio): mescla arquivos pequenos
-- [ ] `ailake-vec`: Product Quantization (PQ)
-- [ ] `ailake-query`: pruning via centróides no planner
-- [ ] `ailake-query`: `ContextAssembler`
-- [ ] `ailake-py`: bindings PyO3
-- [ ] Testes de compatibilidade: Spark, Trino, DuckDB, PyIceberg
+- [x] `ailake-store`: integração `object_store` (S3, GCS, Azure Blob) — `ObjectStoreBackend`
+- [x] `ailake-index`: carga via `memmap2` — tempfile + Mmap, lazy paging do grafo HNSW
+- [x] Job de compaction assíncrono (Tokio): `CompactionPlanner` + `CompactionExecutor`
+- [x] `ailake-vec`: Product Quantization (PQ) — `PQCodebook` com k-means++ + ADC
+- [x] `ailake-vec`: `BlockCompressor` com zstd/lz4
+- [x] `ailake-query`: pruning via centróides — `VectorPruner` geométrico
+- [x] `ailake-query`: `ContextAssembler` — dedup, agrupamento por doc, budget de tokens, XML
+- [x] `ailake-py`: bindings PyO3 — `TableWriter`, `search()`, `assemble_context()`
+- [ ] Testes de compatibilidade: Spark, Trino, DuckDB, PyIceberg (requer ambiente externo)
 
 ### Fase 3 — Integração com Motores de Query
 - [ ] `ailake-jni`: bindings uniffi para Spark/Trino

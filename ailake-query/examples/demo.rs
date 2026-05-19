@@ -172,6 +172,7 @@ async fn main() {
         SearchConfig {
             top_k: 5,
             ef_search: 50,
+            pruning_threshold: f32::INFINITY,
         },
         "embedding",
         dim,

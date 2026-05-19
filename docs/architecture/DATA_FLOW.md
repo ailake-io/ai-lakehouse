@@ -1,6 +1,6 @@
 # DATA_FLOW.md — End-to-End Data Flows
 
-## Write path (Phase 1 — local)
+## Write path
 
 ```
 Caller
@@ -71,7 +71,7 @@ Invariant after commit:
 
 ---
 
-## Read path — vector search (Phase 2 with S3)
+## Read path — vector search
 
 ```
 Caller
@@ -165,7 +165,7 @@ No errors. No surprises. The AI-Lake footer is invisible — Parquet specificati
 
 ---
 
-## Compaction flow (Phase 2+)
+## Compaction flow
 
 Triggered when the snapshot accumulates many small files (default threshold: 16 files smaller than 64 MB).
 
@@ -256,31 +256,32 @@ The centroid is base64-encoded into the Avro manifest. For dim=1536, this is ~8 
 ```
 Caller
   │
-  │  assemble_context(chunks: Vec<RetrievedChunk>, max_tokens: usize)
+  │  assembler.assemble_chunks(chunks: Vec<Chunk>) -> AssembledContext
   ▼
 ailake-query / ContextAssembler
   │
   │  1. deduplication
+  │       sort by distance (ascending — most relevant first)
   │       for each pair (a, b): if cosine_distance(a.embedding, b.embedding) < dedup_threshold
-  │         keep higher-scored chunk, discard other
+  │         keep the chunk that appeared first (already sorted by relevance)
   │
   │  2. group by document_id, sort each group by chunk_index ascending
+  │       cap each group at max_chunks_per_document (default: 10)
   │
-  │  3. token budget allocation
-  │       estimate tokens: chunk_text + preceding_context + following_context + overhead
-  │       greedily include chunks until max_tokens would be exceeded
-  │       preference: diversity of document_ids over depth in any single document
+  │  3. token budget (char budget = max_tokens × 4)
+  │       greedily include chunks until char_budget would be exceeded
   │
-  │  4. build AssembledContext
-  │       for each included chunk, render:
+  │  4. render XML
   │
-  │       <source>
-  │         <document>{document_title}</document>
-  │         <section>{section_path}</section>
-  │         <before>{preceding_context}</before>
-  │         <content>{chunk_text}</content>
-  │         <after>{following_context}</after>
-  │       </source>
+  │       <context>
+  │         <document id="{doc_id}" title="{title}" source="{uri}">
+  │           <chunk index="{n}" section="{section}">
+  │             <text>{chunk_text}</text>
+  │           </chunk>
+  │           ...
+  │         </document>
+  │         ...
+  │       </context>
   │
-  └─► return AssembledContext { xml: String, token_estimate: usize, chunk_count: usize }
+  └─► return AssembledContext { text: String, token_estimate: usize, chunk_count: usize }
 ```
