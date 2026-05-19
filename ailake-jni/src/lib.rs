@@ -273,9 +273,7 @@ mod tests {
 
     #[test]
     fn cabi_null_guard() {
-        let ptr = unsafe {
-            ailake_vector_search_json(std::ptr::null(), std::ptr::null(), 0, 10)
-        };
+        let ptr = unsafe { ailake_vector_search_json(std::ptr::null(), std::ptr::null(), 0, 10) };
         assert!(!ptr.is_null());
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         assert_eq!(json, "[]");
