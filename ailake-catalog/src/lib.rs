@@ -1,7 +1,7 @@
 //! ailake-catalog — Iceberg catalog operations
 //!
 //! Implements CatalogProvider for all supported backends.
-//! This is the only crate that reads/writes metadata.json and Avro manifests.
+//! This is the only crate that reads/writes metadata.json and manifests.
 //!
 //! See docs/architecture/CATALOG_BACKENDS.md for backend details.
 
@@ -29,3 +29,12 @@ pub use provider::{
     VectorIndexInfo,
 };
 pub use rest::{RestCatalog, RestCatalogAuth, RestCatalogConfig};
+
+#[cfg(feature = "catalog-glue")]
+pub use glue::{GlueCatalog, GlueCatalogConfig};
+
+#[cfg(feature = "catalog-nessie")]
+pub use nessie::{NessieBranch, NessieCatalog, NessieCatalogConfig};
+
+#[cfg(feature = "catalog-jdbc")]
+pub use jdbc::JdbcCatalog;
