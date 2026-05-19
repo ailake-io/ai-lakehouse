@@ -588,7 +588,237 @@ Pruning geométrico funciona identicamente para todos os backends — centróide
 
 ---
 
-## 11. Clippy e formatação
+## 11. NessieCatalog — branching operations
+
+`NessieCatalog` wraps `RestCatalog` para todas as operações `CatalogProvider` e adiciona a API de branching do Nessie v2.
+
+### 11A. Testes unitários (sem servidor externo)
+
+```bash
+cargo test -p ailake-catalog --features catalog-nessie
+```
+
+Cobre URL construction (`trees_url`, `ref_url`, `merge_url`) e desserialização JSON da API Nessie.
+
+### 11B. Testes de integração (requer servidor Nessie)
+
+```bash
+docker run -p 19120:19120 ghcr.io/projectnessie/nessie:latest
+
+cargo test -p tests --test rest_nessie -- --ignored
+```
+
+### 11C. Configuração e uso
+
+```rust
+use ailake_catalog::{NessieCatalog, NessieCatalogConfig, RestCatalogAuth};
+use ailake_store::LocalStore;
+use std::sync::Arc;
+
+let store = Arc::new(LocalStore::new("/tmp/warehouse"));
+let catalog = NessieCatalog::new(
+    NessieCatalogConfig {
+        uri: "http://localhost:19120/api".into(),
+        default_branch: "main".into(),
+        warehouse: Some("/tmp/warehouse".into()),
+        auth: RestCatalogAuth::None,
+    },
+    store,
+);
+
+// CatalogProvider → delega para inner RestCatalog (branch "main")
+catalog.create_table(&table, &props).await?;
+
+// Branching operations — específicas do Nessie
+let branches = catalog.list_branches().await?;
+catalog.create_branch("feature-rag-v2", "main").await?;
+
+// trabalhar na branch feature...
+
+catalog.merge_branch("feature-rag-v2", "main").await?;
+catalog.delete_branch("feature-rag-v2").await?;
+```
+
+Auth via PAT:
+```rust
+auth: RestCatalogAuth::Bearer("my-nessie-token".into())
+```
+
+Auth via OAuth2 (Nessie com OIDC):
+```rust
+auth: RestCatalogAuth::OAuth2 {
+    token_endpoint: "https://my-oidc/token".into(),
+    client_id: "client-id".into(),
+    client_secret: "secret".into(),
+    scope: None,
+}
+```
+
+---
+
+## 12. JdbcCatalog — PostgreSQL / MySQL
+
+Armazena o ponteiro `metadata_location` em banco de dados relacional. Ideal para deploys self-hosted sem AWS Glue.
+
+### 12A. Testes unitários + SQLite e2e (sem DB externo)
+
+```bash
+cargo test -p ailake-catalog --features catalog-jdbc
+```
+
+Inclui teste end-to-end completo com SQLite in-process (`catalog-jdbc` feature ativa o driver SQLite via sqlx).
+
+### 12B. PostgreSQL via Docker
+
+```bash
+docker run --name pg-ailake -e POSTGRES_PASSWORD=test -p 5432:5432 -d postgres:16
+```
+
+```rust
+use ailake_catalog::JdbcCatalog;
+use ailake_store::LocalStore;
+use std::sync::Arc;
+
+let store = Arc::new(LocalStore::new("/tmp/warehouse"));
+let catalog = JdbcCatalog::connect(
+    "postgres://postgres:test@localhost:5432/postgres",
+    "prod-catalog",      // catalog name (partitions iceberg_tables)
+    "/tmp/warehouse",    // warehouse root
+    store,
+).await?;
+
+// Schema criado automaticamente (CREATE TABLE IF NOT EXISTS iceberg_tables)
+catalog.create_table(&table, &props).await?;
+let snap_id = catalog.commit_snapshot(&table, snapshot).await?;
+let files = catalog.list_files(&table, Some(snap_id)).await?;
+```
+
+### 12C. MySQL via Docker
+
+```bash
+docker run --name mysql-ailake \
+  -e MYSQL_ROOT_PASSWORD=test -e MYSQL_DATABASE=ailake \
+  -p 3306:3306 -d mysql:8
+```
+
+```rust
+let catalog = JdbcCatalog::connect(
+    "mysql://root:test@localhost:3306/ailake",
+    "prod-catalog",
+    "s3://my-bucket/warehouse",
+    store,
+).await?;
+```
+
+### 12D. SQLite local (dev / testes)
+
+```rust
+let catalog = JdbcCatalog::connect(
+    "sqlite:///tmp/catalog.db?mode=rwc",
+    "dev-catalog",
+    "/tmp/warehouse",
+    store,
+).await?;
+```
+
+Nota: `sqlite::memory:` não funciona com pool (cada conexão tem DB separado). Use arquivo.
+
+### 12E. Schema criado automaticamente
+
+```sql
+CREATE TABLE IF NOT EXISTS iceberg_tables (
+    catalog_name      VARCHAR(255) NOT NULL,
+    table_namespace   VARCHAR(255) NOT NULL,
+    table_name        VARCHAR(255) NOT NULL,
+    metadata_location VARCHAR(1000) NOT NULL,
+    PRIMARY KEY (catalog_name, table_namespace, table_name)
+);
+```
+
+Cada `commit_snapshot` escreve novo `{uuid}.metadata.json` no Store e faz `UPDATE` do ponteiro no banco. Assumption: single-writer.
+
+---
+
+## 13. GlueCatalog — AWS Glue Data Catalog
+
+Armazena `metadata_location` no Glue. Tabelas ficam visíveis no Athena, EMR, Glue ETL e Redshift Spectrum.
+
+### 13A. Testes unitários (sem AWS)
+
+```bash
+cargo test -p ailake-catalog --features catalog-glue
+```
+
+Cobre encoding dos parâmetros Glue e formato dos paths.
+
+### 13B. Configuração
+
+```rust
+use ailake_catalog::{GlueCatalog, GlueCatalogConfig};
+use ailake_store::ObjectStoreBackend;
+use object_store::aws::AmazonS3Builder;
+use std::sync::Arc;
+
+let s3 = AmazonS3Builder::new()
+    .with_bucket_name("my-bucket")
+    .with_region("us-east-1")
+    .build()?;
+let store = Arc::new(ObjectStoreBackend::new(Arc::new(s3), "warehouse/"));
+
+// Carrega credenciais do ambiente (AWS_ACCESS_KEY_ID / IAM role / ~/.aws)
+let catalog = GlueCatalog::from_env(
+    GlueCatalogConfig {
+        database: "my_glue_database".into(),
+        warehouse: "s3://my-bucket/warehouse".into(),
+        region: Some("us-east-1".into()),
+    },
+    store,
+).await;
+
+catalog.create_table(&table, &props).await?;
+```
+
+Client explícito (quando você já tem um `aws_sdk_glue::Client`):
+
+```rust
+use aws_config::BehaviorVersion;
+use aws_sdk_glue::config::Region;
+
+let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+    .region(Region::new("us-east-1"))
+    .load()
+    .await;
+let client = aws_sdk_glue::Client::new(&sdk_config);
+let catalog = GlueCatalog::from_client(client, config, store);
+```
+
+### 13C. Parâmetros criados no Glue
+
+```
+table_type        = "ICEBERG"
+metadata_location = "s3://bucket/warehouse/ns/table/metadata/{uuid}.metadata.json"
+```
+
+Compatível com `SHOW TBLPROPERTIES` no Athena e com o conector Iceberg do AWS Glue ETL.
+
+### 13D. Testar com Localstack (opcional)
+
+```bash
+pip install localstack awscli-local
+localstack start -d
+
+# criar database no Glue local
+awslocal glue create-database --database-input '{"Name": "test_db"}'
+
+# testar
+AWS_ENDPOINT_URL=http://localhost:4566 \
+AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
+  cargo test -p tests --test glue_localstack -- --ignored
+```
+
+---
+
+## 14. Clippy e formatação
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings

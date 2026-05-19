@@ -262,7 +262,7 @@ debug       = true
 |---|---|---|
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
-| **Phase 3** | Planned | JVM/Spark/Trino connectors (`uniffi`), multi-column vector tables |
+| **Phase 3** | 🔄 In Progress | Catalog backends complete; JVM/Spark/Trino connectors and multi-column vectors pending |
 | **Phase 4** | Planned | GPU index (cuVS FFI), PQ reranking, public format spec v1.0 |
 
 ### Phase 1 — Local MVP ✅
@@ -291,11 +291,16 @@ Also delivered in Phase 2:
 - Databricks Unity Catalog support — `DatabricksAuth` + `databricks_azure`/`databricks_aws`/`databricks_gcp` builders
 
 Deferred to Phase 3:
-- `GlueCatalog`, `NessieCatalog`, `JdbcCatalog`
 - Docker integration tests (MinIO + Nessie + Localstack)
 
-### Phase 3 — Query engine integration
-- `ailake-catalog`: `NessieCatalog` (branching ops), `JdbcCatalog`
+### Phase 3 — Catalog backends + Query engine integration 🔄
+
+Delivered in Phase 3:
+- `ailake-catalog`: `NessieCatalog` — wraps `RestCatalog` + Nessie v2 branching API (`list_branches`, `create_branch`, `merge_branch`, `delete_branch`)
+- `ailake-catalog`: `JdbcCatalog` — PostgreSQL/MySQL/SQLite via `sqlx 0.7` `AnyPool`; schema auto-created; versioned metadata.json via UUID paths
+- `ailake-catalog`: `GlueCatalog` — AWS Glue Data Catalog via `aws-sdk-glue 1.x`; Iceberg-standard `metadata_location` parameter; tables visible in Athena/EMR
+
+Remaining Phase 3:
 - `ailake-jni`: uniffi exports
 - `ailake-spark-runtime` (separate Scala repo): Spark `VectorScanStrategy`, `ailake_search` UDF
 - `ailake-trino-plugin` (separate Java repo): Trino `ConnectorTableFunction`
