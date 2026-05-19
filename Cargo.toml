@@ -10,9 +10,9 @@ members = [
     "ailake-store",
     "ailake-query",
     "tests",
-    # Phase 3 bindings — excluded until Python/JVM deps are configured
+    "ailake-jni",
+    # Phase 4 bindings — excluded until PyO3/maturin env is configured
     # "ailake-py",
-    # "ailake-jni",
 ]
 
 [workspace.dependencies]

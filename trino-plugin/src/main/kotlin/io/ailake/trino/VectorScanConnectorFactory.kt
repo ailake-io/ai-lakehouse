@@ -1,0 +1,22 @@
+package io.ailake.trino
+
+import io.trino.spi.connector.Connector
+import io.trino.spi.connector.ConnectorContext
+import io.trino.spi.connector.ConnectorFactory
+
+class VectorScanConnectorFactory : ConnectorFactory {
+    override fun getName(): String = "ailake"
+
+    override fun create(
+        catalogName: String,
+        config: Map<String, String>,
+        context: ConnectorContext,
+    ): Connector {
+        val tableUri = requireNotNull(config["ailake.table-uri"]) {
+            "ailake.table-uri is required in catalog properties"
+        }
+        val vectorColumn = config.getOrDefault("ailake.vector-column", "embedding")
+        val dim = config.getOrDefault("ailake.vector-dim", "1536").toInt()
+        return VectorScanConnector(tableUri, vectorColumn, dim)
+    }
+}

@@ -1,0 +1,50 @@
+plugins {
+    kotlin("jvm") version "1.9.23"
+    id("com.github.johnrengelman.shadow") version "8.1.1"
+}
+
+group = "io.ailake"
+version = "0.1.0"
+
+repositories {
+    mavenCentral()
+}
+
+val trinoVersion = "430"
+
+dependencies {
+    // Trino SPI — provided at runtime by the Trino server
+    compileOnly("io.trino:trino-spi:$trinoVersion")
+    compileOnly("io.airlift:slice:2.2")
+    compileOnly("com.fasterxml.jackson.core:jackson-annotations:2.15.2")
+
+    // JNA — bundled in the plugin fat-jar
+    implementation("net.java.dev.jna:jna:5.14.0")
+
+    // Jackson for JSON parsing of native results
+    implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.15.2")
+
+    testImplementation(kotlin("test"))
+    testImplementation("io.trino:trino-spi:$trinoVersion")
+    testImplementation("io.airlift:slice:2.2")
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.2.1")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
+}
+
+tasks.shadowJar {
+    archiveClassifier.set("plugin")
+    // Exclude Trino SPI and its transitive deps (provided by Trino server)
+    dependencies {
+        exclude(dependency("io.trino:.*"))
+        exclude(dependency("io.airlift:slice:.*"))
+    }
+    mergeServiceFiles()
+}
+
+tasks.test {
+    useJUnitPlatform()
+}
+
+kotlin {
+    jvmToolchain(17)
+}

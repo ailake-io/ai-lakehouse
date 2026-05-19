@@ -10,6 +10,12 @@ use crate::footer::{
     TRAILER_SIZE,
 };
 
+/// One vector column to embed in a multi-column write.
+pub struct VectorColumnBatch<'a> {
+    pub policy: &'a VectorStoragePolicy,
+    pub embeddings: &'a [Vec<f32>],
+}
+
 pub struct AilakeFileWriter {
     policy: VectorStoragePolicy,
     hnsw_config: HnswConfig,
@@ -37,80 +43,136 @@ impl AilakeFileWriter {
     /// group offsets. The AILK section sits between row groups and footer and is never touched.
     /// AI-Lake readers find the AILK section via `ailake.footer_offset` in the Parquet footer KV.
     pub fn write(&self, batch: &RecordBatch, embeddings: &[Vec<f32>]) -> AilakeResult<Bytes> {
-        let parquet_writer = ParquetVectorWriter::new(self.policy.clone());
-
-        // Pass 1 – write Parquet without AILK location KV to measure the data section size.
-        let (parquet_v1, record_count) = parquet_writer.write_batch(batch, embeddings)?;
-        let footer_start = parquet_footer_start(&parquet_v1)?;
-        let ailk_offset = footer_start as u64; // AILK will live right before the footer
-
-        // Build centroid section
-        let centroid: Centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
-        let centroid_bytes = encode_centroid(&centroid);
-
-        // Build HNSW
-        let mut builder = HnswBuilder::new(
-            self.policy.dim,
-            self.policy.metric,
-            self.hnsw_config.clone(),
-        );
-        for (i, v) in embeddings.iter().enumerate() {
-            builder.insert(ailake_core::RowId::new(i as u64), v.clone());
-        }
-        let index = builder.build();
-        let hnsw_bytes = HnswSerializer::to_bytes(&index)?;
-
-        // Compute AILK section layout
-        let centroid_offset = HEADER_SIZE as u64;
-        let centroid_len = centroid_bytes.len() as u64;
-        let hnsw_offset_in_ailk = centroid_offset + centroid_len;
-        let hnsw_len = hnsw_bytes.len() as u64;
-        let ailk_total_len = HEADER_SIZE as u64 + centroid_len + hnsw_len + TRAILER_SIZE as u64;
-
-        let header = AilakeHeader {
-            format_version: AILAKE_FORMAT_VERSION,
-            flags: 0,
-            dim: self.policy.dim,
-            precision: Precision::from(self.policy.precision),
-            distance_metric: DistanceMetric::from(self.policy.metric),
-            record_count,
-            centroid_offset,
-            centroid_len,
-            hnsw_offset: hnsw_offset_in_ailk,
-            hnsw_len,
-        };
-        let trailer = AilakeTrailer {
-            footer_offset: ailk_offset,
-            footer_len: ailk_total_len,
-            format_version: AILAKE_FORMAT_VERSION,
-            flags: 0,
-        };
-
-        let mut ailk_section = BytesMut::with_capacity(ailk_total_len as usize);
-        ailk_section.put_slice(&header.to_bytes());
-        ailk_section.put_slice(&centroid_bytes);
-        ailk_section.put_slice(&hnsw_bytes);
-        ailk_section.put_slice(&trailer.to_bytes());
-
-        // Pass 2 – write Parquet with `ailake.footer_offset` in KV so the AI-Lake reader can
-        // locate the AILK section without external metadata.
-        let ailk_offset_str = ailk_offset.to_string();
-        let (parquet_v2, _) = parquet_writer.write_batch_with_kv(
-            batch,
+        let col = VectorColumnBatch {
+            policy: &self.policy,
             embeddings,
-            &[("ailake.footer_offset", ailk_offset_str.as_str())],
-        )?;
+        };
+        self.write_multi(batch, &[col])
+    }
+
+    /// Write RecordBatch + multiple vector columns into a single AI-Lake file.
+    ///
+    /// Each column gets its own AILK section appended sequentially before the Parquet footer.
+    /// Offsets are recorded in Parquet KV metadata:
+    ///   - Primary (first) column: `ailake.footer_offset`
+    ///   - Additional columns: `ailake.{column_name}.footer_offset`
+    ///
+    /// Readers use the column-specific KV key to locate the right AILK section.
+    pub fn write_multi(
+        &self,
+        batch: &RecordBatch,
+        columns: &[VectorColumnBatch<'_>],
+    ) -> AilakeResult<Bytes> {
+        use ailake_core::AilakeError;
+
+        if columns.is_empty() {
+            return Err(AilakeError::InvalidArgument(
+                "write_multi requires at least one vector column".into(),
+            ));
+        }
+
+        let primary = &columns[0];
+        let parquet_writer = ParquetVectorWriter::new(primary.policy.clone());
+
+        // Pass 1 — write Parquet without KV to measure the data section size.
+        let (parquet_v1, record_count) = parquet_writer.write_batch(batch, primary.embeddings)?;
+        let footer_start = parquet_footer_start(&parquet_v1)?;
+
+        // Build all AILK sections sequentially; track running absolute offset.
+        let mut ailk_sections: Vec<Bytes> = Vec::with_capacity(columns.len());
+        let mut kv_owned: Vec<(String, String)> = Vec::with_capacity(columns.len());
+        let mut current_offset = footer_start as u64;
+
+        for (i, col) in columns.iter().enumerate() {
+            let section = build_ailk_section(
+                col.policy,
+                col.embeddings,
+                record_count,
+                current_offset,
+                &self.hnsw_config,
+            )?;
+            let kv_key = if i == 0 {
+                "ailake.footer_offset".to_string()
+            } else {
+                format!("ailake.{}.footer_offset", col.policy.column_name)
+            };
+            kv_owned.push((kv_key, current_offset.to_string()));
+            current_offset += section.len() as u64;
+            ailk_sections.push(section);
+        }
+
+        // Pass 2 — write Parquet with all AILK offset KVs embedded.
+        let kv_refs: Vec<(&str, &str)> = kv_owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let (parquet_v2, _) =
+            parquet_writer.write_batch_with_kv(batch, primary.embeddings, &kv_refs)?;
         let footer_start_v2 = parquet_footer_start(&parquet_v2)?;
 
-        // Splice: data section + AILK section + Parquet footer (unchanged offsets) + PAR1
-        let total = footer_start_v2 + ailk_section.len() + (parquet_v2.len() - footer_start_v2);
+        // Splice: [PAR1 + row groups] + [all AILK sections] + [Parquet footer + PAR1]
+        let total_ailk: usize = ailk_sections.iter().map(|s| s.len()).sum();
+        let total = footer_start_v2 + total_ailk + (parquet_v2.len() - footer_start_v2);
         let mut out = BytesMut::with_capacity(total);
-        out.put_slice(&parquet_v2[..footer_start_v2]); // PAR1 + row groups
-        out.put(ailk_section.freeze());
-        out.put_slice(&parquet_v2[footer_start_v2..]); // footer thrift + footer_len + PAR1
+        out.put_slice(&parquet_v2[..footer_start_v2]);
+        for section in ailk_sections {
+            out.put(section);
+        }
+        out.put_slice(&parquet_v2[footer_start_v2..]);
 
         Ok(out.freeze())
     }
+}
+
+/// Build a complete AILK section (header + centroid + HNSW + trailer) for one vector column.
+fn build_ailk_section(
+    policy: &VectorStoragePolicy,
+    embeddings: &[Vec<f32>],
+    record_count: u64,
+    ailk_abs_offset: u64,
+    hnsw_config: &HnswConfig,
+) -> AilakeResult<Bytes> {
+    let centroid: Centroid = compute_centroid_and_radius(embeddings, policy.metric);
+    let centroid_bytes = encode_centroid(&centroid);
+
+    let mut builder = HnswBuilder::new(policy.dim, policy.metric, hnsw_config.clone());
+    for (i, v) in embeddings.iter().enumerate() {
+        builder.insert(ailake_core::RowId::new(i as u64), v.clone());
+    }
+    let index = builder.build();
+    let hnsw_bytes = HnswSerializer::to_bytes(&index)?;
+
+    let centroid_offset = HEADER_SIZE as u64;
+    let centroid_len = centroid_bytes.len() as u64;
+    let hnsw_offset_in_ailk = centroid_offset + centroid_len;
+    let hnsw_len = hnsw_bytes.len() as u64;
+    let ailk_total_len = HEADER_SIZE as u64 + centroid_len + hnsw_len + TRAILER_SIZE as u64;
+
+    let header = AilakeHeader {
+        format_version: AILAKE_FORMAT_VERSION,
+        flags: 0,
+        dim: policy.dim,
+        precision: Precision::from(policy.precision),
+        distance_metric: DistanceMetric::from(policy.metric),
+        record_count,
+        centroid_offset,
+        centroid_len,
+        hnsw_offset: hnsw_offset_in_ailk,
+        hnsw_len,
+    };
+    let trailer = AilakeTrailer {
+        footer_offset: ailk_abs_offset,
+        footer_len: ailk_total_len,
+        format_version: AILAKE_FORMAT_VERSION,
+        flags: 0,
+    };
+
+    let mut buf = BytesMut::with_capacity(ailk_total_len as usize);
+    buf.put_slice(&header.to_bytes());
+    buf.put_slice(&centroid_bytes);
+    buf.put_slice(&hnsw_bytes);
+    buf.put_slice(&trailer.to_bytes());
+    Ok(buf.freeze())
 }
 
 /// Returns the byte offset in `buf` where the Parquet footer thrift starts.
@@ -169,11 +231,57 @@ mod tests {
         let writer = AilakeFileWriter::new(make_policy(4));
         let file = writer.write(&batch, &embs).unwrap();
 
-        // Standard Parquet readers require PAR1 as the last 4 bytes
         assert_eq!(&file[file.len() - 4..], b"PAR1");
-        // File must also start with PAR1
         assert_eq!(&file[..4], b"PAR1");
-        // AILK magic must appear somewhere inside (in the embedded AILK section)
         assert!(file.windows(4).any(|w| w == b"AILK"));
+    }
+
+    #[test]
+    fn write_multi_two_columns() {
+        use ailake_core::{VectorMetric, VectorPrecision};
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3]))]).unwrap();
+
+        let embs: Vec<Vec<f32>> = (0..3).map(|i| vec![i as f32, 0.0, 0.0, 0.0]).collect();
+        let ctx_embs: Vec<Vec<f32>> = (0..3).map(|i| vec![0.0, i as f32, 0.0, 0.0]).collect();
+
+        let policy1 = make_policy(4);
+        let policy2 = VectorStoragePolicy {
+            column_name: "context_embedding".to_string(),
+            dim: 4,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: false,
+        };
+
+        let writer = AilakeFileWriter::new(policy1.clone());
+        let file = writer
+            .write_multi(
+                &batch,
+                &[
+                    VectorColumnBatch {
+                        policy: &policy1,
+                        embeddings: &embs,
+                    },
+                    VectorColumnBatch {
+                        policy: &policy2,
+                        embeddings: &ctx_embs,
+                    },
+                ],
+            )
+            .unwrap();
+
+        // Valid Parquet envelope
+        assert_eq!(&file[..4], b"PAR1");
+        assert_eq!(&file[file.len() - 4..], b"PAR1");
+        // Two AILK sections — magic appears at least twice
+        let ailk_count = file.windows(4).filter(|w| *w == b"AILK").count();
+        assert!(
+            ailk_count >= 2,
+            "expected >= 2 AILK markers, got {ailk_count}"
+        );
     }
 }

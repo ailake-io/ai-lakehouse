@@ -205,6 +205,7 @@ mod tests {
                 hnsw_len: None,
                 vector_column: None,
                 vector_dim: None,
+                extra_vector_indexes: vec![],
             })
             .collect();
         assert!(planner.plan(&files).is_empty());
@@ -227,6 +228,7 @@ mod tests {
                 hnsw_len: None,
                 vector_column: None,
                 vector_dim: None,
+                extra_vector_indexes: vec![],
             },
             DataFileEntry {
                 path: "large.parquet".into(),
@@ -238,6 +240,7 @@ mod tests {
                 hnsw_len: None,
                 vector_column: None,
                 vector_dim: None,
+                extra_vector_indexes: vec![],
             },
             DataFileEntry {
                 path: "also-small.parquet".into(),
@@ -249,6 +252,7 @@ mod tests {
                 hnsw_len: None,
                 vector_column: None,
                 vector_dim: None,
+                extra_vector_indexes: vec![],
             },
         ];
         let selected = planner.plan(&files);
@@ -312,6 +316,7 @@ mod tests {
                 hnsw_len: None,
                 vector_column: None,
                 vector_dim: None,
+                extra_vector_indexes: vec![],
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -323,6 +328,7 @@ mod tests {
                 hnsw_len: None,
                 vector_column: None,
                 vector_dim: None,
+                extra_vector_indexes: vec![],
             },
         ];
 

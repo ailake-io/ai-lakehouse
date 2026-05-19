@@ -15,9 +15,9 @@ AI-Lake tables are read-compatible with any engine that supports Apache Iceberg 
 
 | Engine / Platform | Tabular read | Tabular write | Vector scan | Streaming ingest |
 |---|---|---|---|---|
-| **Apache Spark 3.3+** | ✅ Native Iceberg | ✅ Native Iceberg | Phase 3 (plugin) | ✅ Structured Streaming |
-| **Apache Spark 4.0** | ✅ Native Iceberg | ✅ Native Iceberg | Phase 3 (plugin) | ✅ Structured Streaming |
-| **Trino 400+** | ✅ Native Iceberg | ✅ Native Iceberg | Phase 3 (plugin) | — |
+| **Apache Spark 3.5** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `spark-plugin/` | ✅ Structured Streaming |
+| **Apache Spark 4.0** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `spark-plugin/` (untested) | ✅ Structured Streaming |
+| **Trino 430** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `trino-plugin/` | — |
 | **Apache Beam 2.56+** | ✅ Managed IcebergIO | ✅ Managed IcebergIO | via SDK direct | ✅ Streaming read/write |
 | **DuckDB 0.10+** | ✅ Iceberg extension | Read-only | — | — |
 | **PyIceberg 0.6+** | ✅ | ✅ | via SDK direct | — |
@@ -82,33 +82,38 @@ df.filter("category = 'finance'").show()
 df.select("chunk_text", "embedding").printSchema()
 ```
 
-### Phase 3: Vector-scan plugin (Spark)
+### Phase 3: Vector-scan plugin (Spark) ✅ Implemented
 
-The AI-Lake Spark plugin is a separate Scala/Java artifact (`ailake-spark-runtime`) that registers a custom `SparkStrategy` in the Catalyst planner. When loaded:
+Source: `spark-plugin/` · Build: `cd spark-plugin && ./gradlew shadowJar`
 
-```python
-# With AI-Lake plugin loaded
-spark = SparkSession.builder \
-    .config("spark.jars", "/path/to/ailake-spark-runtime.jar") \
-    .config("spark.sql.extensions",
-        "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,"
-        "io.ailake.spark.AilakeSparkExtensions") \
-    ... \
-    .getOrCreate()
+Key classes:
+- `io.ailake.spark.AilakeSparkExtensions` — Spark extensions entry point
+- `io.ailake.spark.VectorScanStrategy` — Catalyst `SparkStrategy` (converts `VectorSearchPlan` → `VectorScanExec`)
+- `io.ailake.spark.VectorScanExec` — physical `LeafExecNode`; calls `libailake_jni.so` via JNA
+- `io.ailake.spark.implicits.AilakeSession` — implicit `spark.ailakeSearch(uri, query, topK)`
 
-# Vector search via SQL UDF
-results = spark.sql("""
-    SELECT chunk_text, _distance
-    FROM ailake_search(
-        'glue_catalog.db.my_ailake_table',
-        vector_encode('[0.021, -0.043, ...]'),
-        top_k => 100,
-        filter => "category = ''finance''"
-    )
-""")
+```scala
+import io.ailake.spark.implicits._
+
+val spark = SparkSession.builder()
+  .config("spark.jars", "/path/to/spark-plugin-0.1.0-plugin.jar")
+  .config("spark.sql.extensions",
+    "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions," +
+    "io.ailake.spark.AilakeSparkExtensions")
+  .config("spark.driver.extraJavaOptions",
+    "-Djava.library.path=/path/to/target/release")
+  .getOrCreate()
+
+// Returns DataFrame: row_id (Long), distance (Double), file_path (String)
+val results = spark.ailakeSearch(
+  tableUri    = "s3://my-lake/docs/",
+  queryVector = Array(0.021f, -0.043f, 0.118f /* ... 1536 dims */),
+  topK        = 100,
+)
+results.orderBy("distance").show(10)
 ```
 
-The `ailake_search` table function delegates to `ailake-jni` via JNI for the hot path (HNSW search), then joins results with Spark's Parquet reader for the column projection.
+See `SETUP.md §16` for a complete walkthrough including demo table generation and cluster submission.
 
 ### Structured Streaming (ingest)
 
@@ -183,23 +188,37 @@ WHERE category = 'finance'
 DESCRIBE ailake.db.my_ailake_table;
 ```
 
-### Phase 3: Vector-scan plugin (Trino)
+### Phase 3: Vector-scan plugin (Trino) ✅ Implemented
 
-The AI-Lake Trino plugin (`ailake-trino-plugin`) is a Trino connector plugin JAR dropped into `$TRINO_HOME/plugin/ailake/`. It registers a custom `ConnectorTableFunction` `vector_search`:
+Source: `trino-plugin/` · Build: `cd trino-plugin && ./gradlew shadowJar`
+Install: copy fat-jar to `$TRINO_HOME/plugin/ailake/`, native lib to `java.library.path`.
 
-```sql
--- With AI-Lake Trino plugin
-SELECT t.*
-FROM TABLE(ailake.system.vector_search(
-    table_name => 'ailake.db.my_ailake_table',
-    query_vector => from_hex('...'),   -- hex-encoded F32 vector
-    top_k => 100,
-    filter => 'category = ''finance'''
-)) AS t
-ORDER BY t._distance;
+Key classes:
+- `io.ailake.trino.AilakePlugin` — `Plugin` entry point (ServiceLoader)
+- `io.ailake.trino.VectorScanConnectorFactory` — factory; reads `ailake.table-uri`, `ailake.vector-column`, `ailake.vector-dim` from catalog properties
+- `io.ailake.trino.VectorScanConnector` — `Connector`; exposes session properties `query_vector` (CSV floats) and `top_k`
+- `io.ailake.trino.VectorScanMetadata` — schema `default`, table `search` with columns `row_id / distance / file_path`
+- `io.ailake.trino.AilakeNative` — JNA bridge to `libailake_jni.so`; graceful degradation when lib absent
+
+**Catalog config** (`etc/catalog/ailake.properties`):
+```properties
+connector.name=ailake
+ailake.table-uri=s3://my-lake/docs/
+ailake.vector-column=embedding
+ailake.vector-dim=1536
 ```
 
-The plugin calls `ailake-jni` via its native library loaded at plugin startup.
+**Query**:
+```sql
+SET SESSION ailake.query_vector = '0.021,-0.043,0.118,...';  -- 1536 CSV floats
+SET SESSION ailake.top_k = 100;
+
+SELECT row_id, distance, file_path
+FROM ailake.default.search
+ORDER BY distance;
+```
+
+See `SETUP.md §15` for a complete walkthrough including demo table generation.
 
 ### Trino + REST catalog (cloud-agnostic)
 

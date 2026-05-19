@@ -346,34 +346,144 @@ let table = TableIdent::new("prod_schema", "embeddings");
 
 ---
 
-## Backend: `GlueCatalog` (feature = `catalog-glue`)
-
-AWS-native. Stores Iceberg metadata pointers in Glue Data Catalog. Tables are visible in Athena, EMR, Redshift Spectrum, and Glue ETL.
-
-Stub implementation — Phase 3. Enable with:
-```toml
-ailake-catalog = { path = "...", features = ["catalog-glue"] }
-```
-
----
-
 ## Backend: `NessieCatalog` (feature = `catalog-nessie`)
 
-Extends `RestCatalog` with Nessie-specific branching operations. Stub — Phase 3.
+Wraps `RestCatalog` for all `CatalogProvider` operations (Nessie implements the Iceberg REST spec). Adds Nessie-specific branching operations via the Nessie v2 API (`/api/v2/trees/*`).
+
+Requires Nessie 0.60+ (REST API v2). No extra dependencies — uses `reqwest` already present in the crate.
 
 ```toml
 ailake-catalog = { path = "...", features = ["catalog-nessie"] }
 ```
 
+```rust
+use ailake_catalog::{NessieCatalog, NessieCatalogConfig, RestCatalogAuth};
+
+let catalog = NessieCatalog::new(
+    NessieCatalogConfig {
+        uri: "http://localhost:19120/api".into(),
+        default_branch: "main".into(),
+        warehouse: Some("s3://my-bucket/warehouse".into()),
+        auth: RestCatalogAuth::None,   // or Bearer / OAuth2
+    },
+    store,
+);
+
+// CatalogProvider: all methods delegate to inner RestCatalog
+catalog.create_table(&table, &props).await?;
+
+// Nessie-specific branching
+let branches = catalog.list_branches().await?;
+catalog.create_branch("feature-x", "main").await?;
+catalog.merge_branch("feature-x", "main").await?;
+catalog.delete_branch("feature-x").await?;
+```
+
+**Branching API** (Nessie v2):
+
+| Method | HTTP | Path |
+|---|---|---|
+| `list_branches()` | GET | `/api/v2/trees` |
+| `get_branch(name)` | GET | `/api/v2/trees/BRANCH,{name}` |
+| `create_branch(name, from)` | POST | `/api/v2/trees` |
+| `merge_branch(src, into)` | POST | `/api/v2/trees/BRANCH,{into}/merge` |
+| `delete_branch(name)` | DELETE | `/api/v2/trees/BRANCH,{name}?expectedHash=...` |
+
+Hash-based optimistic concurrency: `get_branch` fetches the current hash before any mutating operation.
+
 ---
 
 ## Backend: `JdbcCatalog` (feature = `catalog-jdbc`)
 
-Self-hosted PostgreSQL/MySQL. Stub — Phase 3.
+Stores the `metadata_location` pointer in a PostgreSQL or MySQL table. The actual `metadata.json` and manifests are written to object storage via `Store`. Suitable for self-hosted deployments without AWS Glue.
+
+Dependencies: `sqlx 0.7` (runtime-selected driver via `AnyPool`).
 
 ```toml
 ailake-catalog = { path = "...", features = ["catalog-jdbc"] }
 ```
+
+**Schema** (auto-created on `connect()`):
+```sql
+CREATE TABLE IF NOT EXISTS iceberg_tables (
+    catalog_name      VARCHAR(255) NOT NULL,
+    table_namespace   VARCHAR(255) NOT NULL,
+    table_name        VARCHAR(255) NOT NULL,
+    metadata_location VARCHAR(1000) NOT NULL,
+    PRIMARY KEY (catalog_name, table_namespace, table_name)
+);
+```
+
+```rust
+use ailake_catalog::JdbcCatalog;
+
+// PostgreSQL
+let catalog = JdbcCatalog::connect(
+    "postgres://user:pass@localhost:5432/mydb",
+    "prod-catalog",
+    "s3://my-bucket/warehouse",
+    store,
+).await?;
+
+// MySQL
+let catalog = JdbcCatalog::connect(
+    "mysql://user:pass@localhost:3306/mydb",
+    "prod-catalog",
+    "s3://my-bucket/warehouse",
+    store,
+).await?;
+
+// In-memory SQLite (tests / local dev)
+let catalog = JdbcCatalog::connect(
+    "sqlite:///tmp/catalog.db?mode=rwc",
+    "dev-catalog",
+    "/tmp/warehouse",
+    local_store,
+).await?;
+```
+
+**Commit protocol**: each `commit_snapshot` writes a new UUID-named `metadata.json` to object storage and updates the `metadata_location` pointer in the DB with a single `UPDATE`. No two-phase commit — single-writer assumption (same as `HadoopCatalog`).
+
+---
+
+## Backend: `GlueCatalog` (feature = `catalog-glue`)
+
+AWS-native. Stores the `metadata_location` pointer in the Glue Data Catalog. Tables are visible in Athena, EMR, Glue ETL, and Redshift Spectrum via the standard Iceberg-on-Glue integration.
+
+Dependencies: `aws-sdk-glue 1.x`, `aws-config 1.x`.
+
+```toml
+ailake-catalog = { path = "...", features = ["catalog-glue"] }
+```
+
+**Glue table parameters**:
+```
+table_type        = "ICEBERG"
+metadata_location = "s3://bucket/warehouse/ns/table/metadata/{uuid}.metadata.json"
+```
+
+```rust
+use ailake_catalog::{GlueCatalog, GlueCatalogConfig};
+
+// From environment (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, IAM role, etc.)
+let catalog = GlueCatalog::from_env(
+    GlueCatalogConfig {
+        database: "my_glue_database".into(),
+        warehouse: "s3://my-bucket/warehouse".into(),
+        region: Some("us-east-1".into()),
+    },
+    s3_store,
+).await;
+
+// From a pre-built Glue client (caller manages credentials)
+let sdk_config = aws_config::load_from_env().await;
+let client = aws_sdk_glue::Client::new(&sdk_config);
+let catalog = GlueCatalog::from_client(client, config, s3_store);
+```
+
+**Namespace model**: `TableIdent.namespace` is ignored by Glue (all tables go into `config.database`). Use separate `GlueCatalogConfig.database` per namespace if isolation is needed.
+
+**Commit protocol**: writes a new UUID-named `metadata.json` to S3, then calls `UpdateTable` in Glue with the new path. Glue's optimistic locking is not enforced — single-writer assumption.
 
 ---
 
@@ -387,7 +497,7 @@ let catalog: Arc<dyn CatalogProvider> = Arc::new(
     HadoopCatalog::new(local_store, "/tmp/warehouse")
 );
 
-// REST (Polaris / Nessie / S3 Tables)
+// REST (Polaris / Nessie / S3 Tables / BigLake)
 let catalog: Arc<dyn CatalogProvider> = Arc::new(
     RestCatalog::new(rest_config, store)
 );
@@ -395,6 +505,21 @@ let catalog: Arc<dyn CatalogProvider> = Arc::new(
 // Databricks Unity Catalog
 let catalog: Arc<dyn CatalogProvider> = Arc::new(
     RestCatalog::new(databricks_azure(...), azure_store)
+);
+
+// Nessie with branching
+let catalog: Arc<dyn CatalogProvider> = Arc::new(
+    NessieCatalog::new(nessie_config, store)
+);
+
+// PostgreSQL / MySQL
+let catalog: Arc<dyn CatalogProvider> = Arc::new(
+    JdbcCatalog::connect(db_url, "prod", warehouse, store).await?
+);
+
+// AWS Glue
+let catalog: Arc<dyn CatalogProvider> = Arc::new(
+    GlueCatalog::from_env(glue_config, s3_store).await
 );
 
 // Same search() call regardless of catalog backend
@@ -410,29 +535,39 @@ let results = search(&table, &query, config, "embedding", dim, catalog, store).a
 | `HadoopCatalog` | ✅ Implemented | 1 |
 | `RestCatalog` | ✅ Implemented | 2 |
 | Databricks helpers | ✅ Implemented | 2 |
-| `GlueCatalog` | Stub (compile-only) | 3 |
-| `NessieCatalog` | Stub (compile-only) | 3 |
-| `JdbcCatalog` | Stub (compile-only) | 3 |
+| `NessieCatalog` | ✅ Implemented | 3 |
+| `JdbcCatalog` | ✅ Implemented | 3 |
+| `GlueCatalog` | ✅ Implemented | 3 |
 
 ---
 
 ## Testing catalog backends
 
 ```bash
-# HadoopCatalog — no external service needed
+# All backends — unit tests (no external service)
 cargo test -p ailake-catalog
+cargo test -p ailake-catalog --features catalog-nessie
+cargo test -p ailake-catalog --features catalog-jdbc   # includes SQLite e2e
+cargo test -p ailake-catalog --features catalog-glue   # unit tests only
 
-# RestCatalog — requires a running REST catalog server
-# Local Nessie:
+# NessieCatalog — requires running Nessie server
 docker run -p 19120:19120 ghcr.io/projectnessie/nessie:latest
 cargo test -p tests --test rest_nessie -- --ignored
 
-# Local Polaris:
+# RestCatalog — local Polaris
 docker run -p 8181:8181 apache/polaris:latest
 cargo test -p tests --test rest_polaris -- --ignored
+
+# JdbcCatalog — PostgreSQL via Docker
+docker run -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16
+DATABASE_URL=postgres://postgres:test@localhost/postgres \
+  cargo test -p tests --test jdbc_postgres -- --ignored
+
+# GlueCatalog — requires AWS credentials + Glue database
+AWS_DEFAULT_REGION=us-east-1 cargo test -p tests --test glue -- --ignored
 ```
 
-Integration test pattern (same for all REST-based backends):
+Integration test pattern (same for all backends):
 1. Create table
 2. Write 2 batches → assert 2 `DataFileEntry` with centroid/radius
 3. Search with pruning → assert correct file pruned

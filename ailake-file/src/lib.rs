@@ -16,4 +16,4 @@ pub use footer::{
     HEADER_SIZE, TRAILER_SIZE,
 };
 pub use reader::AilakeFileReader;
-pub use writer::AilakeFileWriter;
+pub use writer::{AilakeFileWriter, VectorColumnBatch};

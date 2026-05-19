@@ -7,10 +7,11 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-ailake-query = { path = "../ailake-query" }
-ailake-core  = { path = "../ailake-core" }
-uniffi       = { workspace = true }
-tokio        = { workspace = true }
-
-[build-dependencies]
-uniffi = { workspace = true, features = ["build"] }
+ailake-query   = { path = "../ailake-query" }
+ailake-catalog = { path = "../ailake-catalog" }
+ailake-store   = { path = "../ailake-store" }
+ailake-core    = { path = "../ailake-core" }
+uniffi         = { version = "0.27", features = ["scaffolding-ffi-buffer-fns"] }
+tokio          = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }

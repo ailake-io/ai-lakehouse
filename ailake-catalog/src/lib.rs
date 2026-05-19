@@ -1,7 +1,7 @@
 //! ailake-catalog — Iceberg catalog operations
 //!
 //! Implements CatalogProvider for all supported backends.
-//! This is the only crate that reads/writes metadata.json and Avro manifests.
+//! This is the only crate that reads/writes metadata.json and manifests.
 //!
 //! See docs/architecture/CATALOG_BACKENDS.md for backend details.
 
@@ -24,8 +24,17 @@ pub mod jdbc;
 pub use databricks::{databricks_aws, databricks_azure, databricks_gcp, DatabricksAuth};
 pub use hadoop::HadoopCatalog;
 pub use provider::{
-    decode_centroid, make_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,
-    NewSnapshot, SnapshotId, SnapshotOperation, TableIdent, TableMetadata, TableProperties,
-    VectorIndexInfo,
+    decode_centroid, encode_centroid_b64, make_data_file_entry, make_multi_column_data_file_entry,
+    new_snapshot_id, CatalogProvider, DataFileEntry, ExtraVectorIndex, NewSnapshot, SnapshotId,
+    SnapshotOperation, TableIdent, TableMetadata, TableProperties, VectorIndexInfo,
 };
 pub use rest::{RestCatalog, RestCatalogAuth, RestCatalogConfig};
+
+#[cfg(feature = "catalog-glue")]
+pub use glue::{GlueCatalog, GlueCatalogConfig};
+
+#[cfg(feature = "catalog-nessie")]
+pub use nessie::{NessieBranch, NessieCatalog, NessieCatalogConfig};
+
+#[cfg(feature = "catalog-jdbc")]
+pub use jdbc::JdbcCatalog;
