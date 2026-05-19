@@ -1,7 +1,12 @@
 //! ailake-index — HNSW index lifecycle
 //!
-//! Wraps hnsw_rs. Handles: build, search, bincode serialization, mmap loading.
+//! Search backend priority:
+//!   1. GPU (candle-core + CUDA) — compiled when `--features gpu`, used when CUDA available at runtime
+//!   2. Parallel CPU brute-force (rayon) — always available, no special hardware needed
+//!
+//! Build with `cargo build --features ailake-index/gpu` to enable GPU support.
 
+pub mod gpu;
 pub mod hnsw;
 pub mod mmap_loader;
 pub mod serialize;

@@ -1,8 +1,6 @@
-// Phase 1: brute-force linear scan — 100% recall, no lifetime issues.
-// Phase 2: replace with hnsw_rs HNSW graph for O(log n) search.
-
 use ailake_core::{RowId, VectorMetric};
 use ailake_vec::{cosine_distance, dot_product, euclidean_distance};
+use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct HnswConfig {
@@ -62,14 +60,28 @@ pub struct HnswIndex {
 }
 
 impl HnswIndex {
-    /// Brute-force top-k search. Returns (row_id, distance) sorted ascending.
-    pub fn search(&self, query: &[f32], top_k: usize, _ef: usize) -> Vec<(RowId, f32)> {
+    /// Top-k search. Uses GPU when available (requires `gpu` feature + CUDA at runtime);
+    /// falls back to parallel CPU brute-force otherwise.
+    /// Returns (row_id, distance) sorted ascending by distance.
+    pub fn search(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
+        // Try GPU path first (compiled away when `gpu` feature is not enabled).
+        #[cfg(feature = "gpu")]
+        if let Some(results) = crate::gpu::try_gpu_search(query, &self.vectors, self.metric, top_k)
+        {
+            return results;
+        }
+
+        self.cpu_search(query, top_k, ef)
+    }
+
+    /// Parallel CPU brute-force. Used when GPU is unavailable or not compiled in.
+    fn cpu_search(&self, query: &[f32], top_k: usize, _ef: usize) -> Vec<(RowId, f32)> {
         let mut results: Vec<(RowId, f32)> = self
             .vectors
-            .iter()
+            .par_iter()
             .map(|(id, v)| (*id, self.distance(query, v)))
             .collect();
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(top_k);
         results
     }
