@@ -582,9 +582,7 @@ mod tests {
 
     #[test]
     fn create_table_request_includes_ailake_properties() {
-        use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
-
-        let mut properties: HashMap<String, String> = HashMap::from([
+        let properties: HashMap<String, String> = HashMap::from([
             ("ailake.vector-column".into(), "embedding".into()),
             ("ailake.vector-dim".into(), "1536".into()),
             ("ailake.vector-metric".into(), "cosine".into()),

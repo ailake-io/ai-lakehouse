@@ -5,6 +5,7 @@
 //!
 //! See docs/architecture/CATALOG_BACKENDS.md for backend details.
 
+pub mod databricks;
 pub mod hadoop;
 pub mod metadata;
 pub mod provider;
@@ -20,10 +21,11 @@ pub mod nessie;
 #[cfg(feature = "catalog-jdbc")]
 pub mod jdbc;
 
+pub use databricks::{databricks_aws, databricks_azure, databricks_gcp, DatabricksAuth};
 pub use hadoop::HadoopCatalog;
 pub use provider::{
     decode_centroid, make_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,
     NewSnapshot, SnapshotId, SnapshotOperation, TableIdent, TableMetadata, TableProperties,
     VectorIndexInfo,
 };
-pub use rest::RestCatalog;
+pub use rest::{RestCatalog, RestCatalogAuth, RestCatalogConfig};
