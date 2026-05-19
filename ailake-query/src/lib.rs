@@ -10,9 +10,7 @@ pub mod scanner;
 pub mod writer;
 
 pub use compaction::{CompactionConfig, CompactionExecutor, CompactionMode, CompactionPlanner};
-pub use context_assembler::{
-    AssembledContext, Chunk, ContextAssembler, ContextAssemblerConfig,
-};
+pub use context_assembler::{AssembledContext, Chunk, ContextAssembler, ContextAssemblerConfig};
 pub use pruner::VectorPruner;
 pub use scanner::{search, SearchConfig, SearchResult};
 pub use writer::TableWriter;

@@ -12,15 +12,24 @@ pub struct BlockCompressor {
 
 impl BlockCompressor {
     pub fn none() -> Self {
-        Self { codec: CompressionCodec::None, zstd_level: 3 }
+        Self {
+            codec: CompressionCodec::None,
+            zstd_level: 3,
+        }
     }
 
     pub fn lz4() -> Self {
-        Self { codec: CompressionCodec::Lz4, zstd_level: 3 }
+        Self {
+            codec: CompressionCodec::Lz4,
+            zstd_level: 3,
+        }
     }
 
     pub fn zstd(level: i32) -> Self {
-        Self { codec: CompressionCodec::Zstd, zstd_level: level }
+        Self {
+            codec: CompressionCodec::Zstd,
+            zstd_level: level,
+        }
     }
 
     pub fn codec(&self) -> CompressionCodec {
@@ -32,8 +41,7 @@ impl BlockCompressor {
             CompressionCodec::None => data.to_vec(),
             CompressionCodec::Lz4 => lz4_flex::compress_prepend_size(data),
             CompressionCodec::Zstd => {
-                zstd::bulk::compress(data, self.zstd_level)
-                    .unwrap_or_else(|_| data.to_vec())
+                zstd::bulk::compress(data, self.zstd_level).unwrap_or_else(|_| data.to_vec())
             }
         }
     }
@@ -42,12 +50,10 @@ impl BlockCompressor {
         match self.codec {
             CompressionCodec::None => data.to_vec(),
             CompressionCodec::Lz4 => {
-                lz4_flex::decompress_size_prepended(data)
-                    .unwrap_or_else(|_| data.to_vec())
+                lz4_flex::decompress_size_prepended(data).unwrap_or_else(|_| data.to_vec())
             }
             CompressionCodec::Zstd => {
-                zstd::bulk::decompress(data, 64 * 1024 * 1024)
-                    .unwrap_or_else(|_| data.to_vec())
+                zstd::bulk::decompress(data, 64 * 1024 * 1024).unwrap_or_else(|_| data.to_vec())
             }
         }
     }
@@ -93,6 +99,9 @@ mod tests {
         let data = vec![0u8; 8192];
         let c = BlockCompressor::zstd(3);
         let compressed = c.compress(&data);
-        assert!(compressed.len() < data.len() / 4, "expected >4x compression ratio");
+        assert!(
+            compressed.len() < data.len() / 4,
+            "expected >4x compression ratio"
+        );
     }
 }

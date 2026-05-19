@@ -72,8 +72,7 @@ pub async fn search(
     );
 
     // Geometric pruning: skip files whose centroid is too far from the query
-    let surviving_files =
-        VectorPruner::prune(all_files, query, metric, config.pruning_threshold);
+    let surviving_files = VectorPruner::prune(all_files, query, metric, config.pruning_threshold);
 
     let mut all_results: Vec<SearchResult> = Vec::new();
 

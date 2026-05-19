@@ -90,8 +90,7 @@ impl CompactionExecutor {
 
         for entry in files {
             let bytes: Bytes = self.store.get(&entry.path).await?;
-            let reader =
-                AilakeFileReader::new(bytes, &self.policy.column_name, self.policy.dim);
+            let reader = AilakeFileReader::new(bytes, &self.policy.column_name, self.policy.dim);
             if !reader.is_ailake_file() {
                 continue;
             }
@@ -280,14 +279,8 @@ mod tests {
 
         // Write two small files
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
-        let embs_a: Vec<Vec<f32>> = vec![
-            vec![1.0, 0.0, 0.0, 0.0],
-            vec![0.0, 1.0, 0.0, 0.0],
-        ];
-        let embs_b: Vec<Vec<f32>> = vec![
-            vec![0.0, 0.0, 1.0, 0.0],
-            vec![0.0, 0.0, 0.0, 1.0],
-        ];
+        let embs_a: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
+        let embs_b: Vec<Vec<f32>> = vec![vec![0.0, 0.0, 1.0, 0.0], vec![0.0, 0.0, 0.0, 1.0]];
 
         let batch_a = RecordBatch::try_new(
             schema.clone(),
@@ -334,7 +327,10 @@ mod tests {
         ];
 
         let executor = CompactionExecutor::new(store.clone(), policy.clone());
-        let merged = executor.compact(&entries, "data/merged.parquet").await.unwrap();
+        let merged = executor
+            .compact(&entries, "data/merged.parquet")
+            .await
+            .unwrap();
 
         assert_eq!(merged.record_count, 4);
         assert_eq!(merged.path, "data/merged.parquet");

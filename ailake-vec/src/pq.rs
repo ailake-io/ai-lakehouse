@@ -24,7 +24,9 @@ impl PQCodebook {
         max_iter: usize,
     ) -> Result<Self, AilakeError> {
         if vectors.is_empty() {
-            return Err(AilakeError::Catalog("PQ training requires at least 1 vector".into()));
+            return Err(AilakeError::Catalog(
+                "PQ training requires at least 1 vector".into(),
+            ));
         }
         let dim = vectors[0].len();
         if !dim.is_multiple_of(num_subvectors) {
@@ -39,8 +41,7 @@ impl PQCodebook {
         for m in 0..num_subvectors {
             let start = m * sub_dim;
             let end = start + sub_dim;
-            let sub_vecs: Vec<Vec<f32>> =
-                vectors.iter().map(|v| v[start..end].to_vec()).collect();
+            let sub_vecs: Vec<Vec<f32>> = vectors.iter().map(|v| v[start..end].to_vec()).collect();
             let sub_centroids = kmeans(&sub_vecs, n_train, max_iter);
             centroids.push(sub_centroids);
         }
@@ -89,17 +90,18 @@ impl PQCodebook {
             .map(|m| {
                 let start = m * self.sub_dim;
                 let q_sub = &query[start..start + self.sub_dim];
-                self.centroids[m]
-                    .iter()
-                    .map(|c| l2_sq(q_sub, c))
-                    .collect()
+                self.centroids[m].iter().map(|c| l2_sq(q_sub, c)).collect()
             })
             .collect()
     }
 
     /// Compute approximate L2 distance using the precomputed ADC table.
     pub fn adc_distance(&self, codes: &[u8], table: &[Vec<f32>]) -> f32 {
-        codes.iter().enumerate().map(|(m, &c)| table[m][c as usize]).sum()
+        codes
+            .iter()
+            .enumerate()
+            .map(|(m, &c)| table[m][c as usize])
+            .sum()
     }
 }
 
@@ -164,7 +166,9 @@ fn kmeans_pp_init(points: &[Vec<f32>], k: usize) -> Vec<Vec<f32>> {
             .collect();
         let total: f32 = dists.iter().sum();
         // Simple LCG random for deterministic behavior (no rand dep in vec crate)
-        rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        rng_state = rng_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let r = (rng_state >> 33) as f32 / (u32::MAX as f32);
         let target = r * total;
         let mut cumsum = 0.0f32;

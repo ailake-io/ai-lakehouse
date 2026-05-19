@@ -23,7 +23,10 @@ impl ObjectStoreBackend {
         if !prefix.is_empty() && !prefix.ends_with('/') {
             prefix.push('/');
         }
-        Self { inner: store, prefix }
+        Self {
+            inner: store,
+            prefix,
+        }
     }
 
     fn resolve(&self, path: &str) -> Path {

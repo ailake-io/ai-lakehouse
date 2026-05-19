@@ -49,5 +49,8 @@ fn grouping_restores_chunk_order() {
     let pos_a = ctx.text.find("Chunk A.").expect("Chunk A missing");
     let pos_b = ctx.text.find("Chunk B.").expect("Chunk B missing");
     let pos_c = ctx.text.find("Chunk C.").expect("Chunk C missing");
-    assert!(pos_a < pos_b && pos_b < pos_c, "chunks must appear in index order");
+    assert!(
+        pos_a < pos_b && pos_b < pos_c,
+        "chunks must appear in index order"
+    );
 }

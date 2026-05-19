@@ -118,7 +118,9 @@ impl ContextAssembler {
             if !map.contains_key(&chunk.document_id) {
                 doc_order.push(chunk.document_id.clone());
             }
-            map.entry(chunk.document_id.clone()).or_default().push(chunk);
+            map.entry(chunk.document_id.clone())
+                .or_default()
+                .push(chunk);
         }
         if self.config.group_by_document {
             for group in map.values_mut() {
