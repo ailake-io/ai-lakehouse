@@ -77,37 +77,36 @@ fn inspect_file(bytes: &Bytes) {
     }
 
     // AILK magic
-    let ailk_end = &bytes[len - 4..];
-    if ailk_end == b"AILK" {
-        println!("    AILK trailer magic at byte {} (last 4)", len - 4);
+    let ailk_positions: Vec<usize> = bytes
+        .windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"AILK")
+        .map(|(i, _)| i)
+        .collect();
+    for pos in &ailk_positions {
+        println!("    AILK magic at byte {}", pos);
     }
 
     // Parse header via reader
     let reader = AilakeFileReader::new(bytes.clone(), "embedding", 0);
     if reader.is_ailake_file() {
-        let trailer = reader.read_trailer().unwrap();
+        let ailk_start = reader.ailk_offset().unwrap();
         let header = reader.read_header().unwrap();
-        println!("    Parquet section : 0..{}", trailer.footer_offset);
         println!(
-            "    AILK header     : {}..{}",
-            trailer.footer_offset,
-            trailer.footer_offset + 64
+            "    AILK section    : {}..{}",
+            ailk_start,
+            ailk_start + header.hnsw_offset + header.hnsw_len + 24
         );
         println!(
             "    Centroid section: {}..{}",
-            trailer.footer_offset + header.centroid_offset,
-            trailer.footer_offset + header.centroid_offset + header.centroid_len
+            ailk_start + header.centroid_offset,
+            ailk_start + header.centroid_offset + header.centroid_len
         );
         println!(
             "    HNSW section    : {}..{} ({} bytes)",
-            trailer.footer_offset + header.hnsw_offset,
-            trailer.footer_offset + header.hnsw_offset + header.hnsw_len,
+            ailk_start + header.hnsw_offset,
+            ailk_start + header.hnsw_offset + header.hnsw_len,
             header.hnsw_len
-        );
-        println!(
-            "    AILK trailer    : {}..{}",
-            len - 24,
-            len
         );
         println!("    Record count    : {}", header.record_count);
         println!("    Dim             : {}", header.dim);
@@ -122,10 +121,7 @@ async fn main() {
     println!("Workspace: {}", dir.path().display());
 
     let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
-    let catalog = Arc::new(HadoopCatalog::new(
-        Arc::clone(&store),
-        "warehouse",
-    ));
+    let catalog = Arc::new(HadoopCatalog::new(Arc::clone(&store), "warehouse"));
     let table = TableIdent::new("default", "demo_table");
     let dim = 16u32;
 
@@ -173,7 +169,10 @@ async fn main() {
     let results = search(
         &table,
         &query,
-        SearchConfig { top_k: 5, ef_search: 50 },
+        SearchConfig {
+            top_k: 5,
+            ef_search: 50,
+        },
         "embedding",
         dim,
         Arc::clone(&catalog) as Arc<dyn ailake_catalog::CatalogProvider>,
@@ -197,7 +196,10 @@ async fn main() {
         results[0].distance < 0.01,
         "top result should be the query vector itself (distance ~0)"
     );
-    println!("\nPASS: top result distance = {:.2e} < 0.01", results[0].distance);
+    println!(
+        "\nPASS: top result distance = {:.2e} < 0.01",
+        results[0].distance
+    );
 
     // ---- integrity check ----
     println!("\n=== Integrity check on both files ===");

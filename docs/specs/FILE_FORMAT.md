@@ -1,19 +1,18 @@
 # FILE_FORMAT.md — Unified File Binary Specification
 
 Version: 1  
-File extension: `.parquet` (no new extension — the file is a valid Parquet file with an AI-Lake footer appended)  
+File extension: `.parquet` (no new extension — the file IS a valid Parquet file)  
 AI-Lake magic: `0x41 0x49 0x4C 0x4B` ("AILK")
 
 ---
 
 ## Overview
 
-An AI-Lake file is a single self-contained physical file composed of two sections:
+An AI-Lake file is a **single self-contained, fully-valid Parquet file**. The AILK section (HNSW index, centroid, and radius) is embedded between the Parquet row groups and the Parquet footer, making it invisible to all standard Parquet readers.
 
-1. **Parquet section** — standard Apache Parquet file, including header (`PAR1`), row groups with columnar data (including the vector column as `FIXED_LEN_BYTE_ARRAY`), and footer (schema + metadata + final `PAR1`).
-2. **AI-Lake footer extension** — appended after the Parquet section. Contains the HNSW graph, centroid, radius, and supported distance metrics.
+Standard Parquet readers (PyIceberg, Spark, Trino, DuckDB, PyArrow) read the footer from the **end of the file**, follow row-group byte offsets directly, and never scan the AILK section. This is a hard spec guarantee: row-group offsets point before the AILK section, so readers skip over it naturally.
 
-Standard Parquet readers (PyIceberg, Spark, Trino, DuckDB) stop reading at the final `PAR1` marker per the Parquet specification. They never see the AI-Lake footer. This is the compatibility guarantee.
+AI-Lake readers locate the AILK section via the `ailake.footer_offset` key in the Parquet footer's `key_value_metadata`.
 
 ---
 
@@ -26,46 +25,47 @@ Standard Parquet readers (PyIceberg, Spark, Trino, DuckDB) stop reading at the f
 │ ROW GROUPS                                                      │
 │   - column chunks: id, text, metadata, embedding, ...           │
 │   - embedding column: FIXED_LEN_BYTE_ARRAY(dim * bytes_per_el)  │
+│   ← row-group offsets in the footer point into this region      │
 ├─────────────────────────────────────────────────────────────────┤
-│ PARQUET FOOTER                                                  │
-│   - schema (with ailake.* field metadata)                       │
-│   - row group statistics                                        │
-│   - key_value_metadata:                                         │
-│       ailake.format_version = "1"                               │
-│       ailake.hnsw_offset = "12582912"                           │
-│       ailake.hnsw_len = "4194304"                               │
-│       ailake.precision = "f16"                                  │
-│       ailake.metric = "cosine"                                  │
-│   - footer length (4 bytes)                                     │
-│   - PARQUET MAGIC END (4 bytes: "PAR1")  ← standard readers stop here
-├─────────────────────────────────────────────────────────────────┤
-│ ▼▼▼ AI-LAKE FOOTER EXTENSION (invisible to standard readers)  ▼▼▼
+│ ▼▼▼ AI-LAKE SECTION (invisible to standard Parquet readers) ▼▼▼ │
 │                                                                 │
 │ AI-LAKE HEADER (64 bytes)                                       │
 │   - magic ("AILK") | version | flags                            │
 │   - dim, metric, precision, record_count                        │
-│   - offsets to subsections                                      │
+│   - centroid_offset, centroid_len                               │
+│   - hnsw_offset, hnsw_len  (relative to AILK header start)     │
 ├─────────────────────────────────────────────────────────────────┤
 │ CENTROID SECTION                                                │
-│   - centroid: [f32; dim] (raw bytes, native endian)             │
+│   - centroid: [f32; dim] (raw little-endian)                    │
 │   - radius: f32                                                  │
 ├─────────────────────────────────────────────────────────────────┤
 │ HNSW GRAPH SECTION                                              │
 │   - bincode-serialized HNSW graph                               │
-│   - includes: hierarchical layers, connections, vectors         │
-│   - vectors stored at HNSW level use the same precision         │
-│     as the Parquet column (F16 default)                         │
+│   - hierarchical layers, neighbor lists, entry point            │
 ├─────────────────────────────────────────────────────────────────┤
-│ AI-LAKE FOOTER TRAILER (24 bytes)                               │
-│   - footer_offset: u64 (where AI-Lake header starts)            │
-│   - footer_len: u64 (total length of AI-Lake extension)         │
-│   - format_version: u16                                         │
-│   - flags: u16                                                  │
+│ AI-LAKE TRAILER (24 bytes)                                      │
+│   - footer_offset: u64 (absolute offset of AILK header in file) │
+│   - footer_len: u64 (total AILK section length)                 │
+│   - format_version: u16 | flags: u16                            │
 │   - magic ("AILK"): [u8; 4]                                     │
+├─────────────────────────────────────────────────────────────────┤
+│ PARQUET FOOTER (Thrift compact-encoded FileMetaData)            │
+│   - schema (with ailake.* field metadata on vector column)      │
+│   - row group metadata (absolute offsets into row-groups above) │
+│   - key_value_metadata:                                         │
+│       ailake.format_version = "1"                               │
+│       ailake.footer_offset  = "<absolute byte offset of AILK>"  │
+│       ailake.precision      = "f16"                             │
+│       ailake.metric         = "cosine"                          │
+│       ailake.dim            = "1536"                            │
+│       ailake.record_count   = "50000"                           │
+│       ailake.vector_column  = "embedding"                       │
+│   - footer length (4 bytes, little-endian)                      │
+│   - PARQUET MAGIC (4 bytes: "PAR1")  ← last 4 bytes of file     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The trailer is always exactly the last 24 bytes of the file. A reader checks for `"AILK"` at the last 4 bytes to detect whether the file has an AI-Lake extension.
+The file starts with `PAR1` and ends with `PAR1`. Standard readers read backwards from the end: last 8 bytes give `footer_len + PAR1`, then they seek to the footer and follow row-group offsets. The AILK section is between those row groups and the footer and is never touched by standard readers.
 
 ---
 
@@ -123,29 +123,32 @@ The graph contains:
 
 ---
 
-## AI-Lake footer trailer (24 bytes, last 24 bytes of file)
+## AI-Lake footer trailer (24 bytes, last section before Parquet footer)
 
-| Offset (from end) | Size | Type | Field | Description |
+| Offset (from AILK header start) | Size | Type | Field | Description |
 |---|---|---|---|---|
-| -24 | 8 | `u64` | `footer_offset` | Absolute byte offset of AI-Lake header in file |
-| -16 | 8 | `u64` | `footer_len` | Total length of AI-Lake extension (header + sections + trailer) |
-| -8 | 2 | `u16` | `format_version` | Same as header version |
-| -6 | 2 | `u16` | `flags` | Same as header flags |
-| -4 | 4 | `[u8; 4]` | `magic` | `0x41 0x49 0x4C 0x4B` ("AILK") |
+| header_size + centroid_len + hnsw_len | 8 | `u64` | `footer_offset` | Absolute byte offset of AI-Lake header in file |
+| +8 | 8 | `u64` | `footer_len` | Total length of AI-Lake extension (header + sections + trailer) |
+| +16 | 2 | `u16` | `format_version` | Same as header version |
+| +18 | 2 | `u16` | `flags` | Same as header flags |
+| +20 | 4 | `[u8; 4]` | `magic` | `0x41 0x49 0x4C 0x4B` ("AILK") |
 
 Total: 24 bytes.
 
-The trailer is the bootstrap for AI-Lake reads. A reader does:
+The trailer immediately precedes the Parquet footer (not at end of file). The primary bootstrap for AI-Lake reads is `ailake.footer_offset` in the Parquet `key_value_metadata`. A reader does:
 
 ```
-1. seek(SeekFrom::End(-24))
-2. read 24 bytes → trailer
-3. if trailer.magic == "AILK":
-     seek(SeekFrom::Start(trailer.footer_offset))
-     read trailer.footer_len bytes → full AI-Lake extension
+1. Parse Parquet footer normally (last 8 bytes: footer_len + PAR1)
+2. Read key_value_metadata → find "ailake.footer_offset"
+3. If key found:
+     seek(SeekFrom::Start(ailake_footer_offset))
+     read HEADER_SIZE bytes → AilakeHeader
+     use header.centroid_offset, header.hnsw_offset to locate sections
    else:
      file is a standard Parquet file with no AI-Lake extension
 ```
+
+The in-file trailer at `ailk_offset + header_size + centroid_len + hnsw_len` is available as a secondary integrity check (verify `footer_offset` matches the KV metadata value).
 
 ---
 
@@ -173,13 +176,14 @@ The Parquet footer's file-level `key_value_metadata`:
 | Key | Value example | Purpose |
 |---|---|---|
 | `ailake.format_version` | `"1"` | AI-Lake format version |
-| `ailake.hnsw_offset` | `"12582912"` | Absolute byte offset of AI-Lake header (= trailer.footer_offset) |
-| `ailake.hnsw_len` | `"4194304"` | Length of AI-Lake extension |
+| `ailake.footer_offset` | `"12582912"` | Absolute byte offset of AI-Lake header in file (primary bootstrap) |
 | `ailake.precision` | `"f16"` | Vector precision in the file |
 | `ailake.metric` | `"cosine"` | Distance metric |
+| `ailake.dim` | `"1536"` | Vector dimensionality |
 | `ailake.record_count` | `"50000"` | Vectors indexed (for sanity checks) |
+| `ailake.vector_column` | `"embedding"` | Name of the vector column |
 
-A reader can extract `ailake.hnsw_offset` from the Parquet footer to skip the trailer lookup. Both paths (trailer-based and Parquet-metadata-based) point to the same location.
+`ailake.footer_offset` is the only key required to locate the AI-Lake extension. A reader parses the Parquet footer normally, reads this key, then seeks to that offset.
 
 ---
 
@@ -189,23 +193,25 @@ The unified file layout enables efficient partial reads:
 
 ```
 1. HEAD object → file_size
-2. GET range [file_size - 8192, file_size)  → fetches Parquet footer + AI-Lake trailer
+2. GET range [file_size - 8192, file_size)  → fetches Parquet footer (+ trailer inside it)
 3. Parse Parquet footer:
-     - read ailake.hnsw_offset, ailake.hnsw_len from key_value_metadata
-4. Read centroid (cheap — small):
-     GET range [ailake.hnsw_offset, ailake.hnsw_offset + 64 + centroid_section_len)
+     - read ailake.footer_offset from key_value_metadata
+4. Read AI-Lake header + centroid (cheap — 64 + dim*4 + 4 bytes):
+     ailk_offset = ailake.footer_offset
+     GET range [ailk_offset, ailk_offset + HEADER_SIZE + centroid_section_len)
+     parse AilakeHeader → centroid_offset, centroid_len, hnsw_offset, hnsw_len
 5. Compute distance(query, centroid). If pruned, stop here.
 6. If not pruned:
-     GET range [ailake.hnsw_offset, ailake.hnsw_offset + ailake.hnsw_len)
-     → full AI-Lake extension
+     GET range [ailk_offset + hnsw_offset, ailk_offset + hnsw_offset + hnsw_len)
+     → HNSW graph bytes only
 7. Load HNSW via memmap2 from temp file, search top-k.
 8. For top-k RowIds, fetch the relevant Parquet row group:
      standard Parquet projection + predicate pushdown
 ```
 
-Total cost for a pruned file: ~16 KB downloaded (one footer fetch + one centroid fetch). For 10,000 files pruned, that's 160 MB total — well within network budget for a single query.
+Total cost for a pruned file: ~16 KB downloaded (one footer fetch + one header+centroid fetch). For 10,000 files pruned, that's 160 MB total — well within network budget for a single query.
 
-For a non-pruned file with HNSW size ~10 MB: one extra range GET, then mmap-backed graph traversal.
+For a non-pruned file with HNSW size ~10 MB: one extra range GET for the HNSW bytes only, then mmap-backed graph traversal.
 
 ---
 
@@ -223,8 +229,8 @@ Standard Iceberg Parquet naming. The `.parquet` extension is preserved because t
 
 On open, a reader MUST verify:
 1. File ends with `"PAR1"` (Parquet magic). If not, it's not a valid Parquet file.
-2. If the last 4 bytes are `"AILK"`, the file has an AI-Lake extension. Parse the trailer.
-3. AI-Lake header magic at `trailer.footer_offset` must be `"AILK"`.
+2. Parse Parquet footer `key_value_metadata`. If `ailake.footer_offset` key is absent, file has no AI-Lake extension.
+3. Seek to `ailake.footer_offset`. Read `HEADER_SIZE` bytes. First 4 bytes must be `"AILK"`.
 4. `header.format_version == 1`
 5. `header.record_count == parquet_record_count` (positional invariant check)
 6. `header.dim` matches the Parquet field metadata `ailake.dim`

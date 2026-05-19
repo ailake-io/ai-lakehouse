@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use crate::metadata::{IcebergMetadata, IcebergSnapshot};
 use crate::provider::{
     CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, TableIdent, TableMetadata,
-    TableProperties, new_snapshot_id,
+    TableProperties,
 };
 use crate::snapshot::{build_manifest, manifest_path};
 use ailake_store::Store;
@@ -39,16 +39,11 @@ impl HadoopCatalog {
     async fn load_raw_metadata(&self, table: &TableIdent) -> AilakeResult<IcebergMetadata> {
         let path = self.current_metadata_path(table);
         let bytes = self.store.get(&path).await?;
-        let json = std::str::from_utf8(&bytes)
-            .map_err(|e| AilakeError::Catalog(e.to_string()))?;
+        let json = std::str::from_utf8(&bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
         IcebergMetadata::from_json(json)
     }
 
-    async fn save_metadata(
-        &self,
-        table: &TableIdent,
-        meta: &IcebergMetadata,
-    ) -> AilakeResult<()> {
+    async fn save_metadata(&self, table: &TableIdent, meta: &IcebergMetadata) -> AilakeResult<()> {
         let json = meta.to_json()?;
         let path = self.current_metadata_path(table);
         self.store.put(&path, Bytes::from(json.into_bytes())).await
@@ -57,11 +52,7 @@ impl HadoopCatalog {
 
 #[async_trait]
 impl CatalogProvider for HadoopCatalog {
-    async fn create_table(
-        &self,
-        name: &TableIdent,
-        props: &TableProperties,
-    ) -> AilakeResult<()> {
+    async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
         let location = format!("{}/{}.db/{}", self.warehouse, name.namespace, name.name);
         let mut meta = IcebergMetadata::new(&location, &props.policy);
         for (k, v) in &props.extra {
@@ -84,11 +75,7 @@ impl CatalogProvider for HadoopCatalog {
 
         // Write manifest
         let manifest = build_manifest(&snapshot);
-        let manifest_path = format!(
-            "{}/{}",
-            self.table_root(table),
-            manifest_path(snap_id)
-        );
+        let manifest_path = format!("{}/{}", self.table_root(table), manifest_path(snap_id));
         let manifest_json = manifest.to_json()?;
         self.store
             .put(&manifest_path, Bytes::from(manifest_json.into_bytes()))
@@ -108,8 +95,14 @@ impl CatalogProvider for HadoopCatalog {
             timestamp_ms: now_ms,
             manifest_list: manifest_path,
             summary: std::collections::HashMap::from([
-                ("operation".to_string(), format!("{:?}", snapshot.operation).to_lowercase()),
-                ("added-data-files".to_string(), snapshot.files.len().to_string()),
+                (
+                    "operation".to_string(),
+                    format!("{:?}", snapshot.operation).to_lowercase(),
+                ),
+                (
+                    "added-data-files".to_string(),
+                    snapshot.files.len().to_string(),
+                ),
             ]),
             schema_id: Some(0),
         };
@@ -158,6 +151,7 @@ impl CatalogProvider for HadoopCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::new_snapshot_id;
     use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
     use ailake_store::LocalStore;
     use tempfile::TempDir;
@@ -214,10 +208,7 @@ mod tests {
             }],
             operation: crate::provider::SnapshotOperation::Append,
         };
-        let snap_id = catalog
-            .commit_snapshot(&table, snap)
-            .await
-            .unwrap();
+        let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 
         let files = catalog.list_files(&table, Some(snap_id)).await.unwrap();
         assert_eq!(files.len(), 1);

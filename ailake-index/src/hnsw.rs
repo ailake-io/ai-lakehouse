@@ -100,7 +100,11 @@ mod tests {
     use super::*;
 
     fn make_index(vecs: Vec<Vec<f32>>) -> HnswIndex {
-        let mut b = HnswBuilder::new(vecs[0].len() as u32, VectorMetric::Cosine, Default::default());
+        let mut b = HnswBuilder::new(
+            vecs[0].len() as u32,
+            VectorMetric::Cosine,
+            Default::default(),
+        );
         for (i, v) in vecs.into_iter().enumerate() {
             b.insert(RowId::new(i as u64), v);
         }

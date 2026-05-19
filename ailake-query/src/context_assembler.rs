@@ -21,6 +21,7 @@ pub struct AssembledContext {
 }
 
 pub struct ContextAssembler {
+    #[allow(dead_code)]
     config: ContextAssemblerConfig,
 }
 

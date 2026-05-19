@@ -18,7 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --workspace --check
+      - run: cargo fmt --all -- --check
 
   clippy:
     runs-on: ubuntu-latest
@@ -51,6 +51,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: pip install pyarrow
+      - run: pip install pyarrow --break-system-packages
       - run: cargo test -p ailake-tests --test parquet_trailing_bytes -- --ignored
       - run: cargo test -p ailake-tests --test positional_invariant
