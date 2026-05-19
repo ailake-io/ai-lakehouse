@@ -325,7 +325,270 @@ cargo bench -p ailake-file
 
 ---
 
-## 9. Clippy e formatação
+## 9. Testar RestCatalog — multi-cloud
+
+O `RestCatalog` implementa o [Iceberg REST Catalog spec](https://iceberg.apache.org/spec/#rest-catalog) e funciona com Polaris, Nessie, S3 Tables, AWS BigLake e Unity Catalog.
+
+### 9A. Testes unitários (sem servidor externo)
+
+```bash
+cargo test -p ailake-catalog
+```
+
+Cobre URL building, serialização do `CommitTableRequest`, storage root derivation e configs Databricks.
+
+### 9B. RestCatalog local com Nessie
+
+```bash
+# Subir Nessie (Project Nessie — catálogo com branching)
+docker run -p 19120:19120 ghcr.io/projectnessie/nessie:latest
+
+# Rodar teste de integração (necessita servidor)
+cargo test -p tests --test rest_nessie -- --ignored
+```
+
+Configuração manual em Rust:
+
+```rust
+use ailake_catalog::{RestCatalog, RestCatalogAuth, RestCatalogConfig};
+use ailake_store::LocalStore;
+use std::sync::Arc;
+
+let store = Arc::new(LocalStore::new("/tmp/warehouse"));
+let catalog = RestCatalog::new(
+    RestCatalogConfig {
+        uri: "http://localhost:19120/api".into(),
+        prefix: Some("main".into()),
+        warehouse: Some("/tmp/warehouse".into()),
+        auth: RestCatalogAuth::None,
+    },
+    store,
+);
+```
+
+### 9C. RestCatalog local com Apache Polaris
+
+```bash
+docker run -p 8181:8181 apache/polaris:latest
+
+cargo test -p tests --test rest_polaris -- --ignored
+```
+
+Configuração:
+
+```rust
+let catalog = RestCatalog::new(
+    RestCatalogConfig {
+        uri: "http://localhost:8181".into(),
+        prefix: Some("my_polaris_catalog".into()),
+        warehouse: Some("s3://my-bucket/warehouse".into()),
+        auth: RestCatalogAuth::Bearer("my-bootstrap-token".into()),
+    },
+    store,
+);
+```
+
+### 9D. AWS S3 Tables (REST nativo na AWS)
+
+```rust
+let catalog = RestCatalog::new(
+    RestCatalogConfig {
+        uri: "https://s3tables.us-east-1.amazonaws.com/iceberg".into(),
+        prefix: Some("arn:aws:s3tables:us-east-1:123456789012:bucket/my-bucket".into()),
+        warehouse: None,
+        auth: RestCatalogAuth::Bearer(aws_access_token),
+    },
+    s3_store,
+);
+```
+
+### 9E. GCP BigLake Metastore
+
+```rust
+let catalog = RestCatalog::new(
+    RestCatalogConfig {
+        uri: "https://biglake.googleapis.com/iceberg/v1beta".into(),
+        prefix: Some("projects/my-project/locations/us-central1/catalogs/my-catalog".into()),
+        warehouse: Some("gs://my-bucket/warehouse".into()),
+        auth: RestCatalogAuth::Bearer(gcp_access_token),
+    },
+    gcs_store,
+);
+```
+
+### 9F. Azure Blob + Apache Polaris (produção Azure)
+
+```rust
+use object_store::azure::MicrosoftAzureBuilder;
+use ailake_store::ObjectStoreBackend;
+
+let azure = MicrosoftAzureBuilder::new()
+    .with_account("myaccount")
+    .with_access_key("my-access-key")
+    .with_container("mycontainer")
+    .build()?;
+let store = Arc::new(ObjectStoreBackend::new(Arc::new(azure), "warehouse/"));
+
+let catalog = RestCatalog::new(
+    RestCatalogConfig {
+        uri: "https://my-polaris.azuredatabricks.net/polaris/api/catalog".into(),
+        prefix: Some("my_catalog".into()),
+        warehouse: Some("abfss://mycontainer@myaccount.dfs.core.windows.net/warehouse".into()),
+        auth: RestCatalogAuth::OAuth2 {
+            token_endpoint: "https://login.microsoftonline.com/TENANT/oauth2/v2.0/token".into(),
+            client_id: "CLIENT_ID".into(),
+            client_secret: "CLIENT_SECRET".into(),
+            scope: Some("api://POLARIS_APP_ID/.default".into()),
+        },
+    },
+    store,
+);
+```
+
+---
+
+## 10. Testar Databricks Unity Catalog
+
+Os helpers `databricks_azure` / `databricks_aws` / `databricks_gcp` constroem o `RestCatalogConfig` correto para cada cloud. Requerem workspace Databricks real — não tem emulador local.
+
+### 10A. Azure (service principal)
+
+```rust
+use ailake_catalog::{databricks_azure, DatabricksAuth, RestCatalog};
+use object_store::azure::MicrosoftAzureBuilder;
+use ailake_store::ObjectStoreBackend;
+use std::sync::Arc;
+
+let azure = MicrosoftAzureBuilder::new()
+    .with_account("myaccount")
+    .with_access_key("my-access-key")
+    .with_container("mycontainer")
+    .build()?;
+let store = Arc::new(ObjectStoreBackend::new(Arc::new(azure), "warehouse/"));
+
+let catalog = RestCatalog::new(
+    databricks_azure(
+        "myworkspace.azuredatabricks.net",
+        "my_unity_catalog",
+        "abfss://mycontainer@myaccount.dfs.core.windows.net/warehouse",
+        DatabricksAuth::AzureServicePrincipal {
+            tenant_id: std::env::var("AZURE_TENANT_ID")?,
+            client_id: std::env::var("AZURE_CLIENT_ID")?,
+            client_secret: std::env::var("AZURE_CLIENT_SECRET")?,
+        },
+    ),
+    store,
+);
+```
+
+Para dev/CI com PAT:
+
+```rust
+DatabricksAuth::Pat(std::env::var("DATABRICKS_TOKEN")?)
+```
+
+Token endpoint usado: `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
+Scope: `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default` (recurso Databricks no Azure AD)
+
+### 10B. AWS (M2M OAuth2)
+
+```rust
+use ailake_catalog::{databricks_aws, DatabricksAuth};
+use object_store::aws::AmazonS3Builder;
+
+let s3 = AmazonS3Builder::new()
+    .with_bucket_name("my-bucket")
+    .with_region("us-east-1")
+    .build()?;
+let store = Arc::new(ObjectStoreBackend::new(Arc::new(s3), "warehouse/"));
+
+let catalog = RestCatalog::new(
+    databricks_aws(
+        "myworkspace.cloud.databricks.com",
+        "my_unity_catalog",
+        "s3://my-bucket/warehouse",
+        DatabricksAuth::AwsOAuth2 {
+            client_id: std::env::var("DATABRICKS_CLIENT_ID")?,
+            client_secret: std::env::var("DATABRICKS_CLIENT_SECRET")?,
+        },
+    ),
+    store,
+);
+```
+
+Token endpoint usado: `https://myworkspace.cloud.databricks.com/oidc/v1/token`
+Scope: `all-apis`
+
+### 10C. GCP (Bearer token)
+
+```bash
+# Obter token via gcloud
+export GCP_TOKEN=$(gcloud auth print-access-token)
+```
+
+```rust
+use ailake_catalog::{databricks_gcp, DatabricksAuth};
+use object_store::gcp::GoogleCloudStorageBuilder;
+
+let gcs = GoogleCloudStorageBuilder::new()
+    .with_bucket_name("my-bucket")
+    .build()?;
+let store = Arc::new(ObjectStoreBackend::new(Arc::new(gcs), "warehouse/"));
+
+let catalog = RestCatalog::new(
+    databricks_gcp(
+        "myworkspace.gcp.databricks.com",
+        "my_unity_catalog",
+        "gs://my-bucket/warehouse",
+        DatabricksAuth::GcpBearer(std::env::var("GCP_TOKEN")?),
+    ),
+    store,
+);
+```
+
+### 10D. Hierarquia Unity Catalog
+
+Unity Catalog usa 3 níveis: `catalog.schema.table`.
+
+```rust
+// Tabela: my_unity_catalog.prod_schema.embeddings
+let table = TableIdent::new("prod_schema", "embeddings");
+// catalog = prefixo do RestCatalogConfig (definido no databricks_*)
+// schema  = TableIdent.namespace
+// table   = TableIdent.name
+```
+
+URL resultante:
+```
+GET https://myworkspace.azuredatabricks.net/api/2.1/unity-catalog/iceberg
+    /v1/my_unity_catalog/namespaces/prod_schema/tables/embeddings
+```
+
+### 10E. Fluxo de busca multi-cloud (mesmo código para todos os backends)
+
+```rust
+use ailake_query::{search, SearchConfig};
+use ailake_catalog::{TableIdent, CatalogProvider};
+use std::sync::Arc;
+
+// catalog pode ser HadoopCatalog, RestCatalog, ou qualquer backend
+let catalog: Arc<dyn CatalogProvider> = Arc::new(/* qualquer backend */);
+
+let table = TableIdent::new("prod_schema", "embeddings");
+let query = vec![0.1_f32; 1536];
+
+let results = search(
+    &table, &query,
+    SearchConfig { top_k: 10, ef_search: 50, pruning_threshold: 0.8 },
+    "embedding", 1536, catalog, store,
+).await?;
+```
+
+Pruning geométrico funciona identicamente para todos os backends — centróide e raio ficam no manifesto, não no servidor de catálogo.
+
+---
+
+## 11. Clippy e formatação
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -344,7 +607,7 @@ ailake-parquet/   leitura/escrita Parquet com coluna VECTOR (FIXED_LEN_BYTE_ARRA
 ailake-vec/       quantização F32→F16, Product Quantization (PQCodebook), BlockCompressor (zstd/lz4), distâncias, centróides
 ailake-index/     HNSW via hnsw_rs, serialização bincode, MmapLoader (memmap2)
 ailake-file/      arquivo unificado: AILK entre row groups e footer Parquet
-ailake-catalog/   catálogo Iceberg: metadata.json + manifestos Avro, HadoopCatalog
+ailake-catalog/   catálogo Iceberg: HadoopCatalog (filesystem), RestCatalog (Polaris/Nessie/S3 Tables/Unity Catalog), DatabricksAuth helpers
 ailake-store/     abstração de storage: LocalStore + ObjectStoreBackend (S3/GCS/Azure via object_store)
 ailake-query/     TableWriter, search() com pruning geométrico, ContextAssembler, CompactionExecutor
 ailake-py/        bindings PyO3 (fora do workspace — compilar com maturin)
