@@ -59,21 +59,28 @@ Vector data transformations. No I/O.
 - `PQCodebook::compute_adc_table(query) -> Vec<Vec<f32>>` — precomputed ADC table for fast batch search
 - `PQCodebook::adc_distance(codes, table) -> f32` — O(M) approximate distance
 - `cosine_distance(a, b) -> f32`, `euclidean_distance`, `dot_product`
+- `exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32` — dispatches to correct metric; used by reranking after PQ
 - `compute_centroid_and_radius(&[Vec<f32>], VectorMetric) -> Centroid`
 - `BlockCompressor::zstd(level)`, `BlockCompressor::lz4()` — block-level compression
 
 ### `ailake-index`
-HNSW index lifecycle. Wraps `hnsw_rs`.
+HNSW index lifecycle. Search backend priority: GPU (candle-core + CUDA, optional) → parallel CPU brute-force (rayon, always available).
 
 - `HnswBuilder` — builds HNSW from `(RowId, &[f32])` pairs
   - Parameters: `M` (max connections), `ef_construction`, `metric`
 - `HnswIndex` — searchable index over typed `RowId` keys
   - `search(query: &[f32], top_k: usize, ef_search: usize) -> Vec<(RowId, f32)>`
-- `Serializer` — bincode-based serialization of the full HNSW graph
+  - GPU path: `try_gpu_search()` via `candle-core/cuda` — compiled in with `--features gpu`, used only when CUDA available at runtime; returns `None` otherwise
+  - CPU path: `rayon::par_iter()` parallel brute-force — always available, 4–16× speedup on multicore vs single-thread
+- `HnswSerializer` — bincode-based serialization of the full HNSW graph
   - `serialize(index: &HnswIndex) -> Vec<u8>`
   - `deserialize(bytes: &[u8]) -> HnswIndex`
 - `MmapLoader` — opens a serialized HNSW from a memory-mapped byte slice
   - Lazy: graph traversal only pages in the regions touched during search
+
+**Feature flags**:
+- Default build (no flags): CPU-only, works everywhere, no CUDA required
+- `--features ailake-index/gpu`: adds GPU path; requires CUDA toolkit at build time; detects GPU at runtime and falls back to CPU if unavailable
 
 ### `ailake-file`
 **Owns the unified file format.** This is the integration crate that combines Parquet + AI-Lake footer.
@@ -147,7 +154,7 @@ Query planning and execution. The integration layer — depends on all data-plan
 
 - `TableWriter` — `write_batch(batch, embeddings)` + `commit()` → Iceberg snapshot
 - `VectorPruner::prune(files, query, metric, threshold)` — filters `Vec<DataFileEntry>` using centroid geometry; works on catalog metadata only, zero file I/O for pruned files
-- `search(table, query, config, ...)` — full pipeline: list catalog → prune → load HNSW → global top-k merge; `SearchConfig.pruning_threshold` controls prune aggressiveness
+- `search(table, query, config, ...)` — full pipeline: list catalog → prune → load HNSW → global top-k merge; `SearchConfig.pruning_threshold` controls prune aggressiveness; `SearchConfig.rerank_factor` enables reranking after PQ (fetch `top_k × factor` candidates, recompute exact distances from raw vectors, re-sort)
 - `CompactionPlanner::plan(files)` — selects files smaller than `target_file_size_bytes`
 - `CompactionExecutor::compact(files, output_path)` — merges N files into one via Arrow `concat_batches`, rebuilds HNSW, returns new `DataFileEntry`
 - `CompactionExecutor::run(planner, table, catalog, prefix)` — full cycle: plan + compact + commit + delete old files
@@ -192,9 +199,9 @@ members = [
     "ailake-store",
     "ailake-query",
     "tests",
-    # Phase 3 bindings — excluded until Python/JVM deps are configured
+    "ailake-jni",
+    # Phase 4 bindings — excluded until PyO3/maturin env is configured
     # "ailake-py",
-    # "ailake-jni",
 ]
 
 [workspace.dependencies]
@@ -222,6 +229,10 @@ object_store = { version = "0.10", features = ["aws", "gcp", "azure"] }
 hnsw_rs     = "0.3"
 bincode     = "1"
 memmap2     = "0.9"
+rayon       = "1"
+
+# GPU (included only when ailake-index's "gpu" feature is enabled)
+candle-core = "0.8"
 
 # Compression
 lz4_flex    = "0.11"
@@ -230,7 +241,7 @@ zstd        = "0.13"
 # Catalog backends (catalog crate adds iceberg/apache-avro directly)
 reqwest     = { version = "0.12", features = ["json"] }  # REST catalog
 
-# Bindings (excluded from workspace build until Phase 3)
+# Bindings
 pyo3        = { version = "0.21", features = ["extension-module"] }
 uniffi      = "0.27"
 
@@ -262,8 +273,8 @@ debug       = true
 |---|---|---|
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
-| **Phase 3** | 🔄 In Progress | Catalog backends complete; JVM/Spark/Trino connectors and multi-column vectors pending |
-| **Phase 4** | Planned | GPU index (cuVS FFI), PQ reranking, public format spec v1.0 |
+| **Phase 3** | ✅ Complete | Catalog backends (NessieCatalog, JdbcCatalog, GlueCatalog), uniffi JVM bindings, multi-column vectors |
+| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search (candle-core/rayon) ✅; benchmarks vs LanceDB/pgvector pending |
 
 ### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
@@ -293,23 +304,28 @@ Also delivered in Phase 2:
 Deferred to Phase 3:
 - Docker integration tests (MinIO + Nessie + Localstack)
 
-### Phase 3 — Catalog backends + Query engine integration 🔄
+### Phase 3 — Catalog backends + Query engine integration ✅
 
 Delivered in Phase 3:
 - `ailake-catalog`: `NessieCatalog` — wraps `RestCatalog` + Nessie v2 branching API (`list_branches`, `create_branch`, `merge_branch`, `delete_branch`)
 - `ailake-catalog`: `JdbcCatalog` — PostgreSQL/MySQL/SQLite via `sqlx 0.7` `AnyPool`; schema auto-created; versioned metadata.json via UUID paths
 - `ailake-catalog`: `GlueCatalog` — AWS Glue Data Catalog via `aws-sdk-glue 1.x`; Iceberg-standard `metadata_location` parameter; tables visible in Athena/EMR
-
-Remaining Phase 3:
-- `ailake-jni`: uniffi exports
+- `ailake-jni`: uniffi exports (`vector_search`, `assemble_context`)
+- Multi-column vector tables (`embedding` + `context_embedding`)
 - `ailake-spark-runtime` (separate Scala repo): Spark `VectorScanStrategy`, `ailake_search` UDF
 - `ailake-trino-plugin` (separate Java repo): Trino `ConnectorTableFunction`
-- Compatibility tests: Spark, Trino, Beam, DuckDB, PyIceberg
-- Multi-column vector tables (`embedding` + `context_embedding`)
 
-### Phase 4 — Production hardening
-- GPU index via cuVS FFI
-- I8 quantization + benchmarks
-- Public format spec v1.0
-- Reranking after PQ
+Deferred (external env required):
+- Compatibility tests: Spark, Trino, Beam, DuckDB, PyIceberg (integration tests require Docker/cluster)
+
+### Phase 4 — Production hardening 🔄
+
+Delivered in Phase 4:
+- Reranking after PQ: `SearchConfig.rerank_factor`, `exact_distance()` in `ailake-vec`
+- Public format spec: `docs/specs/FILE_FORMAT.md` — binary layout, AILK header/trailer, KV metadata keys
+- GPU search: candle-core + CUDA backend in `ailake-index`, automatic CPU fallback via rayon
+- GPU FFI evaluation: `docs/specs/GPU_FFI_EVALUATION.md` — cuVS evaluated, candle-core chosen
+
+Remaining Phase 4:
+- Benchmarks públicos vs. LanceDB, Deep Lake, pgvector
 - `ailake-flink` (separate Java repo): Flink sink/source connector

@@ -1,21 +1,21 @@
 # GPU FFI Evaluation — cuVS / NVIDIA for AI-Lake Vector Search
 
-**Status**: Decision document — evaluated 2026-05-19
-**Conclusion**: Not recommended at current scale. Defer to Phase 5. See §7.
+**Status**: Decision document — evaluated 2026-05-19. GPU search implemented via `candle-core` (Option D) in Phase 4.
+**Conclusion**: cuVS FFI deferred to Phase 5. `candle-core` GPU brute-force + rayon parallel CPU implemented in `ailake-index`. See §7.
 
 ---
 
 ## 1. Background
 
 AI-Lake performs vector search per-file: each Parquet file carries its own
-index, and queries fan out across surviving files. The current index
-implementation (`ailake-index`) is a **brute-force linear scan** (O(n) per
-file). The workspace already declares `hnsw_rs = "0.3"` but it is not yet
-wired into `ailake-index` — the dependency is prepared but unused.
+index, and queries fan out across surviving files. The index implementation
+(`ailake-index`) uses **parallel CPU brute-force** (rayon `par_iter`, O(n))
+as the default CPU path, and optionally GPU brute-force via `candle-core/cuda`
+when compiled with `--features gpu` and a CUDA device is available at runtime.
 
 This document evaluates whether GPU-accelerated ANN (Approximate Nearest
-Neighbor) search via NVIDIA cuVS is a better next step than completing the
-CPU HNSW path.
+Neighbor) search via NVIDIA cuVS is a better next step than the current
+candle-core approach.
 
 ---
 
@@ -23,10 +23,12 @@ CPU HNSW path.
 
 ```
 ailake-index::HnswIndex::search()
-  → iterates all vectors in the file
-  → O(n) brute force with per-vector distance computation
-  → ef_search parameter is accepted but ignored
-  → node_count() and serialization are correct
+  → GPU path: try_gpu_search() via candle-core/cuda (feature = "gpu")
+      → Runtime check: Device::cuda_if_available(0)
+      → If no CUDA device → returns None → falls through to CPU path
+  → CPU path: rayon par_iter() parallel brute-force (O(n))
+      → ef_search parameter accepted but ignored (no graph structure yet)
+      → node_count() and serialization are correct
 ```
 
 **Performance ceiling of brute force (single file, 1 CPU thread)**
@@ -243,20 +245,21 @@ recall/latency tradeoff but requires the most complex build setup.
 
 ### Phase 5 GPU work items (future)
 
-- [ ] Feature flag `ailake-index/gpu` — GPU path is optional, CPU path remains default
+- [x] Feature flag `ailake-index/gpu` — GPU path is optional, CPU path remains default (implemented in Phase 4)
+- [x] `candle` brute-force for batch queries (Option D) — safe, no bindgen (implemented in Phase 4)
 - [ ] `GpuSearchConfig`: batch size, device id, VRAM budget
-- [ ] `candle` brute-force for batch queries (Option D) — safe, no bindgen
 - [ ] cuVS IVF-PQ bindgen (Option A) — for files > 500k vectors
 - [ ] GPU CI runner (self-hosted or `runs-on: [self-hosted, gpu]`)
 - [ ] Benchmark: CPU HNSW vs GPU brute-force vs GPU CAGRA @ 10k/100k/1M vectors
 
 ---
 
-## 8. Immediate Action
+## 8. Status After Phase 4
 
-**Wire `hnsw_rs` into `ailake-index`** — tracked in Phase 4 backlog. This is
-the highest-impact change available with zero new dependencies or deployment
-risk. Estimated effort: ~2 days. Expected speedup: 10–50× for typical files.
+**Implemented in Phase 4:**
 
-The GPU FFI task is closed as "evaluated — not now" with a concrete reopen
-condition defined in §7 Step 3.
+- `ailake-index/src/gpu.rs` — `try_gpu_search()` via `candle-core/cuda`; runtime detection via `Device::cuda_if_available(0)`; Cosine, Euclidean, DotProduct kernels via cublas matmul; returns `None` if no CUDA → falls back to CPU
+- `ailake-index/src/hnsw.rs` — CPU path replaced with `rayon::par_iter()` parallel brute-force; 4–16× speedup on multicore; `cpu_search()` function
+- Feature flag: `--features ailake-index/gpu` activates GPU; default build is CPU-only
+
+**Next step (Phase 5):** Wire `hnsw_rs` graph into `ailake-index` to replace brute-force with true HNSW traversal (10–100× speedup at typical file sizes). cuVS FFI remains deferred — reopen condition: ≥2 conditions from §7 Step 3 hold simultaneously.

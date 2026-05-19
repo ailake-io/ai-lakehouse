@@ -29,31 +29,38 @@ python3 -c "import pyarrow; print(pyarrow.__version__)"
 git clone https://github.com/ThiagoLange/iceberg-ai-deltalakehouse.git
 cd iceberg-ai-deltalakehouse
 
-# Compilar todos os crates do workspace
+# Build padrão — CPU paralelo (rayon), sem dependência de CUDA
 cargo build --workspace
 ```
 
 Primeira compilação leva ~2-3 min (baixa dependências Arrow/Parquet).
 
-Para habilitar backends de cloud storage:
+### Variantes de build
 
 ```bash
-# S3
-cargo build --workspace --features store-s3
+# Cloud storage
+cargo build --workspace --features store-s3      # Amazon S3
+cargo build --workspace --features store-gcs     # Google Cloud Storage
+cargo build --workspace --features store-azure   # Azure Blob
 
-# GCS
-cargo build --workspace --features store-gcs
+# GPU (requer CUDA Toolkit ≥ 12 instalado — headers + nvcc)
+# Em runtime usa GPU se disponível; cai para CPU paralelo caso contrário.
+cargo build --release --features ailake-index/gpu
 
-# Azure Blob
-cargo build --workspace --features store-azure
+# Tudo junto: S3 + GPU
+cargo build --release --features "store-s3 ailake-index/gpu"
 ```
+
+**Regra de ouro**: builds sem `ailake-index/gpu` compilam e rodam em qualquer
+máquina (incluindo CPU-only). O binário com `gpu` detecta CUDA em runtime
+automaticamente — sem GPU instalada, continua funcionando via CPU.
 
 ---
 
 ## 2. Suite de testes completa
 
 ```bash
-# Testes unitários de todos os crates (60 testes, ~0.5s)
+# Testes unitários de todos os crates
 cargo test --workspace --lib
 
 # Testes de integração (write + read + search end-to-end)
@@ -63,16 +70,16 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Deve terminar com `60 passed, 1 ignored`.
+Deve terminar com `79 passed, 1 ignored`.
 
 ### Testes por crate
 
 | Crate | O que cobre |
 |---|---|
-| `ailake-vec` | Quantização F32→F16, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centróides |
-| `ailake-index` | HNSW build/search, serialização bincode, MmapLoader round-trip |
+| `ailake-vec` | Quantização F32→F16, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centróides, `exact_distance` |
+| `ailake-index` | HNSW build/search (CPU paralelo via rayon), serialização bincode, MmapLoader round-trip |
 | `ailake-file` | Escrita/leitura do arquivo unificado, layout AILK, integridade |
-| `ailake-query` | ContextAssembler (dedup, grouping, XML, budget), pruning geométrico |
+| `ailake-query` | ContextAssembler (dedup, grouping, XML, budget), pruning geométrico, reranking pós-PQ |
 | `tests` (integração) | write→read→search end-to-end, invariante posicional, compatibilidade PyArrow, pruning, context assembler |
 
 ---
@@ -322,6 +329,70 @@ cargo bench -p ailake-index
 # Write benchmark (ailake-file)
 cargo bench -p ailake-file
 ```
+
+---
+
+## 8A. GPU search — build e verificação
+
+### Pré-requisitos
+
+| Requisito | Versão mínima |
+|-----------|---------------|
+| NVIDIA GPU | Arquitetura Ampere+ (sm_80) recomendada |
+| CUDA Toolkit | 12.x (`nvcc`, headers em `/usr/local/cuda`) |
+| Driver NVIDIA | ≥ 525 |
+
+### Build com suporte GPU
+
+```bash
+# Requer CUDA Toolkit instalado no sistema de build
+cargo build --release --features ailake-index/gpu
+```
+
+O binário resultante detecta automaticamente em runtime:
+- **GPU disponível**: usa `candle-core` + cuBLAS para cálculo de distâncias em lote
+- **Sem GPU / CUDA não instalado**: cai silenciosamente para CPU paralelo (rayon)
+
+### Verificar detecção de GPU
+
+```rust
+// Exemplo mínimo — em código Rust
+use candle_core::Device;
+let dev = Device::cuda_if_available(0).unwrap();
+println!("Backend: {:?}", dev);
+// GPU presente:   Cuda(CudaDevice { ordinal: 0 })
+// Sem GPU:        Cpu
+```
+
+### Teste de busca com GPU
+
+```bash
+# Gerar tabela demo (dim=64, 1000 linhas)
+cargo run --example demo -p ailake-query 2>&1 | grep Workspace
+# Workspace: /tmp/ailakeXXXXXX
+
+# Busca — o backend GPU é selecionado automaticamente
+AILAKE_TABLE=/tmp/ailakeXXXXXX/warehouse/default.db/table \
+cargo run --features ailake-index/gpu --example demo -p ailake-query
+```
+
+### Quando GPU bate CPU
+
+| Arquivo (vetores) | dim | CPU rayon | GPU brute-force |
+|-------------------|-----|-----------|-----------------|
+| 10k               | 1536 | ~2 ms    | ~3 ms (overhead domina) |
+| 100k              | 1536 | ~20 ms   | ~2 ms |
+| 500k              | 1536 | ~100 ms  | ~4 ms |
+
+GPU vence a partir de ~50k vetores/arquivo para dim=1536.
+
+### Métricas suportadas no GPU
+
+| Métrica | Implementação GPU |
+|---------|-------------------|
+| Cosine | normalizar linhas → dot product → `1 - sim` |
+| Euclidean | `broadcast_sub` → `sqr` → `sum` → `sqrt` |
+| DotProduct | matmul negado (`-q @ V.T`) |
 
 ---
 
@@ -1279,4 +1350,55 @@ Para habilitar busca real, garantir que a lib está no `java.library.path`:
 spark-shell \
   --conf "spark.driver.extraJavaOptions=-Djava.library.path=/path/to/target/release" \
   --conf "spark.executor.extraJavaOptions=-Djava.library.path=/path/to/target/release"
+```
+
+**`SearchConfig` falha compilação com `missing field rerank_factor`**
+Adicione o campo faltante (introduzido na Phase 4):
+```rust
+SearchConfig {
+    top_k: 10,
+    ef_search: 50,
+    pruning_threshold: 0.8,
+    rerank_factor: None,  // Some(3) para habilitar reranking
+}
+```
+
+**Build GPU falha com `error: could not find native library 'cudart'`**
+CUDA toolkit não está no PATH ou não foi instalado:
+```bash
+# Verificar instalação
+nvcc --version
+ls /usr/local/cuda/lib64/libcudart.so
+
+# Ubuntu — instalar toolkit
+sudo apt install nvidia-cuda-toolkit
+
+# Após instalar, exportar variáveis
+export CUDA_HOME=/usr/local/cuda
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+```
+
+**Build GPU falha com `candle-core: feature cuda not available`**
+O crate `candle-core` requer a feature `cuda` explicitamente:
+```bash
+# Correto
+cargo build --features ailake-index/gpu
+
+# Incorreto — não ativa CUDA no candle
+cargo build --features gpu
+```
+
+**GPU build compila mas busca usa CPU (log não mostra "gpu")**
+`Device::cuda_if_available(0)` retornou `None` em runtime. Verificar:
+```bash
+nvidia-smi                        # GPU visível?
+ls /dev/nvidia*                   # Dispositivos de driver presentes?
+echo $CUDA_VISIBLE_DEVICES        # Não deve estar vazio ou "NoDevFiles"
+```
+Se GPU existe mas não é detectada, adicionar log temporário:
+```rust
+match Device::cuda_if_available(0) {
+    Ok(d) => eprintln!("device: {:?}", d),
+    Err(e) => eprintln!("cuda error: {e}"),
+}
 ```
