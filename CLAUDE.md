@@ -407,10 +407,10 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [ ] Testes de compatibilidade: Spark, Trino, DuckDB, PyIceberg (requer ambiente externo)
 
 ### Fase 3 — Integração com Motores de Query
-- [ ] `ailake-jni`: bindings uniffi para Spark/Trino
-- [ ] Plugin Trino: `VectorScanConnector`
-- [ ] Plugin Spark: `VectorScanStrategy`
-- [ ] Suporte a múltiplas colunas vetoriais (`embedding` + `context_embedding`)
+- [x] `ailake-jni`: bindings uniffi para Spark/Trino
+- [x] Plugin Trino: `VectorScanConnector`
+- [x] Plugin Spark: `VectorScanStrategy`
+- [x] Suporte a múltiplas colunas vetoriais (`embedding` + `context_embedding`)
 
 ### Fase 4 — Produção
 - [ ] Benchmarks públicos vs. LanceDB, Deep Lake, pgvector

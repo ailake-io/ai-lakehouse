@@ -1,28 +1,54 @@
-//! ailake-jni — uniffi JVM bindings
+//! ailake-jni — uniffi JVM bindings + C-ABI for Trino/Spark plugins
 //!
-//! Thin sync wrapper over ailake-query for Spark/Trino connector hot path.
-//! Build with: cargo build --release -p ailake-jni
-//! The cdylib is loaded by the Spark/Trino connector via System.loadLibrary.
+//! Exports two surfaces:
+//!   1. uniffi exports: `vector_search`, `assemble_context` — used by generated Kotlin bindings.
+//!   2. C-ABI exports: `ailake_vector_search_json`, `ailake_free_string` — used directly via JNA.
+//!
+//! Build: cargo build --release -p ailake-jni
+//! The cdylib is loaded by the Spark/Trino connector via System.loadLibrary / JNA.
 
-use std::sync::Arc;
+use std::{
+    ffi::{c_char, CStr, CString},
+    sync::Arc,
+};
 
 use ailake_catalog::{CatalogProvider, HadoopCatalog};
 use ailake_core::VectorMetric;
 use ailake_query::{
     search as rs_search, Chunk, ContextAssembler, ContextAssemblerConfig, SearchConfig,
+    SearchResult,
 };
 use ailake_store::LocalStore;
+use serde::Serialize;
 
 uniffi::setup_scaffolding!();
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Shared types ──────────────────────────────────────────────────────────────
 
-/// A single vector search result.
+/// Single vector search result (uniffi-exported record).
 #[derive(uniffi::Record)]
 pub struct RowResult {
     pub row_id: u64,
     pub distance: f32,
     pub file_path: String,
+}
+
+/// Same data, JSON-serializable for C-ABI surface.
+#[derive(Serialize)]
+struct RowResultJson {
+    row_id: u64,
+    distance: f32,
+    file_path: String,
+}
+
+impl From<SearchResult> for RowResultJson {
+    fn from(r: SearchResult) -> Self {
+        Self {
+            row_id: r.row_id.as_u64(),
+            distance: r.distance,
+            file_path: r.file_path,
+        }
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -39,22 +65,8 @@ fn parse_metric(s: &str) -> VectorMetric {
     }
 }
 
-// ── Exports ───────────────────────────────────────────────────────────────────
-
-/// Search a local AI-Lake table for the top-k nearest vectors.
-///
-/// `table_uri`   — local filesystem path to the table root
-/// `query_bytes` — raw f32 values as little-endian bytes (4 bytes per dimension)
-/// `top_k`       — number of nearest neighbors to return
-///
-/// Returns results sorted by ascending distance. Returns empty list on error.
-#[uniffi::export]
-pub fn vector_search(table_uri: String, query_bytes: Vec<u8>, top_k: u32) -> Vec<RowResult> {
-    let query: Vec<f32> = query_bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-        .collect();
-
+/// Core search logic shared by both uniffi and C-ABI surfaces.
+fn do_search(table_uri: String, query: Vec<f32>, top_k: u32) -> Vec<SearchResult> {
     let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&table_uri));
     let catalog = Arc::new(HadoopCatalog::new(store.clone(), &table_uri));
     let table = ailake_catalog::TableIdent::new("default", "table");
@@ -87,7 +99,7 @@ pub fn vector_search(table_uri: String, query_bytes: Vec<u8>, top_k: u32) -> Vec
         pruning_threshold: f32::INFINITY,
     };
 
-    match rt.block_on(rs_search(
+    rt.block_on(rs_search(
         &table,
         &query,
         config,
@@ -95,22 +107,39 @@ pub fn vector_search(table_uri: String, query_bytes: Vec<u8>, top_k: u32) -> Vec
         dim,
         catalog,
         store,
-    )) {
-        Ok(results) => results
-            .into_iter()
-            .map(|r| RowResult {
-                row_id: r.row_id.as_u64(),
-                distance: r.distance,
-                file_path: r.file_path,
-            })
-            .collect(),
-        Err(_) => vec![],
-    }
+    ))
+    .unwrap_or_default()
+}
+
+// ── uniffi exports ────────────────────────────────────────────────────────────
+
+/// Search a local AI-Lake table for the top-k nearest vectors.
+///
+/// `table_uri`   — local filesystem path to the table root
+/// `query_bytes` — raw f32 values as little-endian bytes (4 bytes per dimension)
+/// `top_k`       — number of nearest neighbors to return
+///
+/// Returns results sorted by ascending distance.
+#[uniffi::export]
+pub fn vector_search(table_uri: String, query_bytes: Vec<u8>, top_k: u32) -> Vec<RowResult> {
+    let query: Vec<f32> = query_bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+
+    do_search(table_uri, query, top_k)
+        .into_iter()
+        .map(|r| RowResult {
+            row_id: r.row_id.as_u64(),
+            distance: r.distance,
+            file_path: r.file_path,
+        })
+        .collect()
 }
 
 /// Assemble JSON-serialized chunks into structured XML context for LLM input.
 ///
-/// Each element of `chunk_jsons` must be a JSON object containing at minimum:
+/// Each element of `chunk_jsons` must be a JSON object with at minimum:
 ///   `document_id` (str), `chunk_index` (int), `chunk_text` (str)
 /// Optional: `document_title`, `section_path`, `source_uri`, `distance` (float)
 ///
@@ -152,6 +181,60 @@ pub fn assemble_context(chunk_jsons: Vec<String>, max_tokens: u64) -> String {
     ca.assemble_chunks(chunks).text
 }
 
+// ── C-ABI exports (JNA bridge for Trino / Spark plugins) ─────────────────────
+
+fn cstr_empty_json() -> *mut c_char {
+    CString::new("[]").unwrap().into_raw()
+}
+
+/// Search a local AI-Lake table. Returns a null-terminated JSON array:
+/// `[{"row_id":N,"distance":F,"file_path":"..."}]`
+///
+/// # Parameters
+/// - `table_uri`  — null-terminated UTF-8 path to table root
+/// - `query_ptr`  — pointer to f32 array (native byte order)
+/// - `query_len`  — number of f32 elements
+/// - `top_k`      — nearest neighbors to return
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_vector_search_json(
+    table_uri: *const c_char,
+    query_ptr: *const f32,
+    query_len: u32,
+    top_k: u32,
+) -> *mut c_char {
+    if table_uri.is_null() || query_ptr.is_null() {
+        return cstr_empty_json();
+    }
+    let uri = match CStr::from_ptr(table_uri).to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return cstr_empty_json(),
+    };
+    let query = std::slice::from_raw_parts(query_ptr, query_len as usize).to_vec();
+    let results: Vec<RowResultJson> = do_search(uri, query, top_k)
+        .into_iter()
+        .map(RowResultJson::from)
+        .collect();
+    let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
+    CString::new(json)
+        .unwrap_or_else(|_| CString::new("[]").unwrap())
+        .into_raw()
+}
+
+/// Free a string returned by `ailake_vector_search_json`.
+///
+/// # Safety
+/// `ptr` must be a pointer previously returned by `ailake_vector_search_json`
+/// and must not have been freed already.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_free_string(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        drop(CString::from_raw(ptr));
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -186,5 +269,16 @@ mod tests {
         .to_string();
         let result = assemble_context(vec![chunk], 4096);
         assert!(result.contains("Hello world"));
+    }
+
+    #[test]
+    fn cabi_null_guard() {
+        let ptr = unsafe {
+            ailake_vector_search_json(std::ptr::null(), std::ptr::null(), 0, 10)
+        };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        assert_eq!(json, "[]");
+        unsafe { ailake_free_string(ptr) };
     }
 }
