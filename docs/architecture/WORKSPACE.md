@@ -99,24 +99,26 @@ Implements the `CatalogProvider` trait for every supported backend:
 
 ```
 ailake-catalog/src/
-├── lib.rs            # CatalogProvider trait, TableIdent, DataFileEntry, NewSnapshot
-├── metadata.rs       # metadata.json read/write (Iceberg Spec v2)
-├── snapshot.rs       # snapshot creation, vector stats in custom_properties
-├── glue.rs           # AWS Glue Data Catalog (uses aws-sdk-glue)
-├── rest.rs           # Iceberg REST Catalog spec (Polaris, Unity Catalog, S3 Tables)
-├── nessie.rs         # Project Nessie (wraps REST, adds branch/tag ops)
-├── hadoop.rs         # Filesystem catalog — metadata.json on local FS / S3 / GCS
-└── jdbc.rs           # JDBC catalog — metadata in PostgreSQL or MySQL
+├── lib.rs          # re-exports, module declarations
+├── provider.rs     # CatalogProvider trait, TableIdent, DataFileEntry, NewSnapshot
+├── metadata.rs     # metadata.json read/write (Iceberg Spec v2)
+├── snapshot.rs     # manifest JSON builder
+├── hadoop.rs       # HadoopCatalog — filesystem / any Store backend
+├── rest.rs         # RestCatalog — Iceberg REST Catalog spec (Polaris, S3 Tables, Nessie, Unity Catalog)
+├── databricks.rs   # DatabricksAuth + builders for Azure/AWS/GCP Unity Catalog
+├── glue.rs         # GlueCatalog — AWS Glue (feature = "catalog-glue", stub)
+├── nessie.rs       # NessieCatalog — Nessie branching extensions (feature = "catalog-nessie", stub)
+└── jdbc.rs         # JdbcCatalog — PostgreSQL/MySQL (feature = "catalog-jdbc", stub)
 ```
 
 `CatalogProvider` trait:
 ```rust
 #[async_trait]
 pub trait CatalogProvider: Send + Sync {
+    async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()>;
     async fn load_table(&self, name: &TableIdent) -> AilakeResult<TableMetadata>;
     async fn commit_snapshot(&self, table: &TableIdent, snapshot: NewSnapshot) -> AilakeResult<SnapshotId>;
     async fn list_files(&self, table: &TableIdent, snapshot_id: Option<SnapshotId>) -> AilakeResult<Vec<DataFileEntry>>;
-    async fn create_table(&self, name: &TableIdent, schema: &Schema, props: &TableProperties) -> AilakeResult<()>;
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()>;
 }
 ```
@@ -284,8 +286,12 @@ debug       = true
 - `ailake-query::search`: pruning integrated via `SearchConfig.pruning_threshold`
 - `ailake-py`: PyO3 bindings (`TableWriter`, `search`, `assemble_context`)
 
+Also delivered in Phase 2:
+- `RestCatalog` — full Iceberg REST Catalog spec implementation (OAuth2 token caching, manifest writes to object storage)
+- Databricks Unity Catalog support — `DatabricksAuth` + `databricks_azure`/`databricks_aws`/`databricks_gcp` builders
+
 Deferred to Phase 3:
-- `GlueCatalog`, `RestCatalog`, `NessieCatalog`, `JdbcCatalog`
+- `GlueCatalog`, `NessieCatalog`, `JdbcCatalog`
 - Docker integration tests (MinIO + Nessie + Localstack)
 
 ### Phase 3 — Query engine integration
