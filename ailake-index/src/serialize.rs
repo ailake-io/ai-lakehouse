@@ -84,6 +84,7 @@ impl HnswSerializer {
 mod tests {
     use super::*;
     use crate::hnsw::HnswBuilder;
+    use ailake_core::RowId;
 
     #[test]
     fn serialize_roundtrip() {
