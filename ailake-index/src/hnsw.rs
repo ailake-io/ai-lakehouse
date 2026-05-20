@@ -1,13 +1,47 @@
-use std::collections::{BinaryHeap, HashSet};
+use std::cell::RefCell;
+use std::collections::BinaryHeap;
 
 use ailake_core::{RowId, VectorMetric};
 use ailake_vec::{cosine_distance, dot_product, euclidean_distance};
 use rand::Rng;
 use rayon::prelude::*;
 
+// ── Visited tracker (generation-based bitmap) ─────────────────────────────────
+
+thread_local! {
+    static VISITED: RefCell<VisitedTracker> = RefCell::new(VisitedTracker::default());
+}
+
+#[derive(Default)]
+struct VisitedTracker {
+    gen: Vec<u32>,
+    current: u32,
+}
+
+impl VisitedTracker {
+    #[inline]
+    fn prepare(&mut self, n: usize) {
+        if self.gen.len() < n {
+            self.gen.resize(n, 0);
+        }
+        self.current = self.current.wrapping_add(1);
+        if self.current == 0 {
+            self.gen.fill(0);
+            self.current = 1;
+        }
+    }
+
+    #[inline(always)]
+    fn visit(&mut self, idx: usize) -> bool {
+        let slot = unsafe { self.gen.get_unchecked_mut(idx) };
+        if *slot == self.current { false } else { *slot = self.current; true }
+    }
+}
+
+// ── Config / Builder ──────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone)]
 pub struct HnswConfig {
-    /// Max connections per node (M in HNSW paper).
     pub m: usize,
     pub ef_construction: usize,
     pub max_elements: usize,
@@ -38,17 +72,28 @@ impl HnswBuilder {
     /// Build HNSW graph over all inserted vectors (Algorithm 1, Malkov & Yashunin 2018).
     pub fn build(self) -> HnswIndex {
         let n = self.vectors.len();
+        let dim = self.dim as usize;
+
         if n == 0 {
             return HnswIndex {
                 config: self.config,
                 metric: self.metric,
                 dim: self.dim,
-                vectors: vec![],
+                flat_vecs: vec![],
+                row_ids: vec![],
                 neighbors: vec![],
                 node_levels: vec![],
                 entry_point: None,
                 max_layer: 0,
             };
+        }
+
+        // Flatten vectors into contiguous storage for cache-friendly distance ops
+        let mut flat_vecs: Vec<f32> = Vec::with_capacity(n * dim);
+        let mut row_ids: Vec<u64> = Vec::with_capacity(n);
+        for (id, v) in &self.vectors {
+            row_ids.push(id.as_u64());
+            flat_vecs.extend_from_slice(v);
         }
 
         let m = self.config.m;
@@ -59,7 +104,6 @@ impl HnswBuilder {
         let mut rng = rand::thread_rng();
         let node_levels: Vec<usize> = (0..n).map(|_| random_level(&mut rng, ml)).collect();
 
-        // neighbors[node][layer] = neighbor node indices at that layer
         let mut neighbors: Vec<Vec<Vec<usize>>> = node_levels
             .iter()
             .map(|&l| vec![Vec::new(); l + 1])
@@ -67,32 +111,30 @@ impl HnswBuilder {
 
         let mut entry_point: Option<usize> = None;
         let mut max_layer: usize = 0;
-        let vecs = &self.vectors;
+
+        let mut tracker = VisitedTracker::default();
+        tracker.prepare(n);
 
         for i in 0..n {
             let l = node_levels[i];
-            let q = &vecs[i].1;
+            let q = &flat_vecs[i * dim..(i + 1) * dim];
 
             let ep = match entry_point {
-                None => {
-                    entry_point = Some(i);
-                    max_layer = l;
-                    continue;
-                }
+                None => { entry_point = Some(i); max_layer = l; continue; }
                 Some(ep) => ep,
             };
 
-            // Greedy descent from max_layer down to l+1 (ef=1 per layer)
             let mut eps: Vec<usize> = vec![ep];
             for lc in (l + 1..=max_layer).rev() {
-                let w = search_layer(q, &eps, 1, lc, vecs, &neighbors, &node_levels, metric);
+                tracker.prepare(i + 1);
+                let w = search_layer(q, &eps, 1, lc, &flat_vecs, dim, &neighbors, &node_levels, metric, &mut tracker);
                 eps = vec![w[0].1];
             }
 
-            // Beam search + connect from min(l, max_layer) down to 0
             for lc in (0..=l.min(max_layer)).rev() {
                 let m_lc = if lc == 0 { 2 * m } else { m };
-                let w = search_layer(q, &eps, ef_c, lc, vecs, &neighbors, &node_levels, metric);
+                tracker.prepare(i + 1);
+                let w = search_layer(q, &eps, ef_c, lc, &flat_vecs, dim, &neighbors, &node_levels, metric, &mut tracker);
 
                 let selected: Vec<usize> = w.iter().take(m_lc).map(|&(_, nb)| nb).collect();
                 neighbors[i][lc] = selected.clone();
@@ -101,7 +143,8 @@ impl HnswBuilder {
                     neighbors[nb][lc].push(i);
                     let m_max = if lc == 0 { 2 * m } else { m };
                     if neighbors[nb][lc].len() > m_max {
-                        prune_connections(&mut neighbors[nb][lc], &vecs[nb].1, vecs, m_max, metric);
+                        let nb_vec = &flat_vecs[nb * dim..(nb + 1) * dim];
+                        prune_connections(&mut neighbors[nb][lc], nb_vec, &flat_vecs, dim, m_max, metric);
                     }
                 }
 
@@ -114,26 +157,20 @@ impl HnswBuilder {
             }
         }
 
-        HnswIndex {
-            config: self.config,
-            metric,
-            dim: self.dim,
-            vectors: self.vectors,
-            neighbors,
-            node_levels,
-            entry_point,
-            max_layer,
-        }
+        HnswIndex { config: self.config, metric, dim: self.dim, flat_vecs, row_ids, neighbors, node_levels, entry_point, max_layer }
     }
 }
+
+// ── Index ─────────────────────────────────────────────────────────────────────
 
 pub struct HnswIndex {
     pub(crate) config: HnswConfig,
     pub(crate) metric: VectorMetric,
     pub(crate) dim: u32,
-    /// Raw vectors retained for reranking and serialization.
-    pub(crate) vectors: Vec<(RowId, Vec<f32>)>,
-    /// neighbors[node][layer] = neighbor node indices.
+    /// Contiguous vector storage: flat_vecs[i*dim..(i+1)*dim] = vector i.
+    pub(crate) flat_vecs: Vec<f32>,
+    /// Row IDs parallel to flat_vecs.
+    pub(crate) row_ids: Vec<u64>,
     pub(crate) neighbors: Vec<Vec<Vec<usize>>>,
     pub(crate) node_levels: Vec<usize>,
     pub(crate) entry_point: Option<usize>,
@@ -141,144 +178,116 @@ pub struct HnswIndex {
 }
 
 impl HnswIndex {
-    /// Top-k search. Uses GPU when available; falls back to HNSW graph search.
-    /// Returns (row_id, distance) sorted ascending by distance.
+    #[inline(always)]
+    fn vec_at(&self, idx: usize) -> &[f32] {
+        let d = self.dim as usize;
+        &self.flat_vecs[idx * d..(idx + 1) * d]
+    }
+
     pub fn search(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
         #[cfg(feature = "gpu")]
-        if let Some(results) =
-            crate::gpu::try_gpu_search(query, &self.vectors, self.metric, top_k)
-        {
-            return results;
+        if let Some(r) = crate::gpu::try_gpu_search(
+            query, &self.row_ids, &self.flat_vecs, self.dim as usize, self.metric, top_k,
+        ) {
+            return r;
         }
 
         if self.neighbors.is_empty() {
-            // Old-format index or very small index — brute force fallback
             return self.brute_force(query, top_k);
         }
 
-        self.hnsw_search(query, top_k, ef)
+        let n = self.row_ids.len();
+        VISITED.with(|cell| {
+            let mut tracker = cell.borrow_mut();
+            self.hnsw_search(query, top_k, ef, &mut tracker, n)
+        })
     }
 
-    /// Algorithm 5: K-NN search via HNSW graph.
-    fn hnsw_search(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
-        let ep = match self.entry_point {
-            Some(ep) => ep,
-            None => return vec![],
-        };
-
+    fn hnsw_search(&self, query: &[f32], top_k: usize, ef: usize, tracker: &mut VisitedTracker, n: usize) -> Vec<(RowId, f32)> {
+        let ep = match self.entry_point { Some(ep) => ep, None => return vec![] };
+        let dim = self.dim as usize;
         let mut eps = vec![ep];
 
         for lc in (1..=self.max_layer).rev() {
-            let w = search_layer(
-                query, &eps, 1, lc,
-                &self.vectors, &self.neighbors, &self.node_levels, self.metric,
-            );
+            tracker.prepare(n);
+            let w = search_layer(query, &eps, 1, lc, &self.flat_vecs, dim, &self.neighbors, &self.node_levels, self.metric, tracker);
             eps = vec![w[0].1];
         }
 
-        let w = search_layer(
-            query, &eps, ef.max(top_k), 0,
-            &self.vectors, &self.neighbors, &self.node_levels, self.metric,
-        );
+        tracker.prepare(n);
+        let w = search_layer(query, &eps, ef.max(top_k), 0, &self.flat_vecs, dim, &self.neighbors, &self.node_levels, self.metric, tracker);
 
-        w.into_iter()
-            .take(top_k)
-            .map(|(d, idx)| (self.vectors[idx].0, d))
-            .collect()
+        w.into_iter().take(top_k).map(|(d, idx)| (RowId::new(self.row_ids[idx]), d)).collect()
     }
 
     fn brute_force(&self, query: &[f32], top_k: usize) -> Vec<(RowId, f32)> {
         let metric = self.metric;
-        let mut results: Vec<(RowId, f32)> = self
-            .vectors
-            .par_iter()
-            .map(|(id, v)| (*id, dist(metric, query, v)))
+        let dim = self.dim as usize;
+        let n = self.row_ids.len();
+        let mut results: Vec<(RowId, f32)> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let v = &self.flat_vecs[i * dim..(i + 1) * dim];
+                (RowId::new(self.row_ids[i]), dist(metric, query, v))
+            })
             .collect();
-        results
-            .sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(top_k);
         results
     }
 
-    pub fn node_count(&self) -> u64 {
-        self.vectors.len() as u64
-    }
-
-    pub fn metric(&self) -> VectorMetric {
-        self.metric
-    }
-
-    pub fn dim(&self) -> u32 {
-        self.dim
-    }
+    pub fn node_count(&self) -> u64 { self.row_ids.len() as u64 }
+    pub fn metric(&self) -> VectorMetric { self.metric }
+    pub fn dim(&self) -> u32 { self.dim }
 }
 
 // ── Heap types ────────────────────────────────────────────────────────────────
 
-/// Max-heap entry by distance (farthest on top — for the result set W).
 #[derive(PartialEq)]
-struct MaxEntry {
-    dist: f32,
-    idx: usize,
-}
+struct MaxEntry { dist: f32, idx: usize }
 impl Eq for MaxEntry {}
 impl PartialOrd for MaxEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) }
 }
 impl Ord for MaxEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.dist
-            .partial_cmp(&other.dist)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| other.idx.cmp(&self.idx))
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        self.dist.partial_cmp(&o.dist).unwrap_or(std::cmp::Ordering::Equal).then_with(|| o.idx.cmp(&self.idx))
     }
 }
 
-/// Min-heap entry by distance (closest on top — for candidate queue C).
-/// Implemented by negating dist in a max-heap.
 #[derive(PartialEq)]
-struct MinEntry {
-    neg_dist: f32,
-    idx: usize,
-}
+struct MinEntry { neg_dist: f32, idx: usize }
 impl Eq for MinEntry {}
 impl PartialOrd for MinEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) }
 }
 impl Ord for MinEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.neg_dist
-            .partial_cmp(&other.neg_dist)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| other.idx.cmp(&self.idx))
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        self.neg_dist.partial_cmp(&o.neg_dist).unwrap_or(std::cmp::Ordering::Equal).then_with(|| o.idx.cmp(&self.idx))
     }
 }
 
 // ── Algorithm 2: SEARCH-LAYER ─────────────────────────────────────────────────
 
-/// Beam search within one HNSW layer.
-/// Returns `(dist, node_idx)` sorted ascending by distance, at most `ef` results.
+#[allow(clippy::too_many_arguments)]
 fn search_layer(
     q: &[f32],
     entry_points: &[usize],
     ef: usize,
     layer: usize,
-    vecs: &[(RowId, Vec<f32>)],
+    flat_vecs: &[f32],
+    dim: usize,
     neighbors: &[Vec<Vec<usize>>],
     node_levels: &[usize],
     metric: VectorMetric,
+    tracker: &mut VisitedTracker,
 ) -> Vec<(f32, usize)> {
-    let mut visited: HashSet<usize> = HashSet::with_capacity(ef * 4);
     let mut cands: BinaryHeap<MinEntry> = BinaryHeap::with_capacity(ef * 2);
     let mut w: BinaryHeap<MaxEntry> = BinaryHeap::with_capacity(ef + 1);
 
     for &ep in entry_points {
-        if visited.insert(ep) {
-            let d = dist(metric, q, &vecs[ep].1);
+        if tracker.visit(ep) {
+            let d = dist(metric, q, &flat_vecs[ep * dim..(ep + 1) * dim]);
             cands.push(MinEntry { neg_dist: -d, idx: ep });
             w.push(MaxEntry { dist: d, idx: ep });
         }
@@ -287,26 +296,18 @@ fn search_layer(
     while let Some(c) = cands.pop() {
         let c_dist = -c.neg_dist;
         let f_dist = w.peek().map(|f| f.dist).unwrap_or(f32::INFINITY);
-        if c_dist > f_dist {
-            break; // all remaining candidates are worse than current farthest result
-        }
+        if c_dist > f_dist { break; }
 
-        // Skip if this node doesn't exist at this layer
-        if c.idx >= node_levels.len() || layer > node_levels[c.idx] {
-            continue;
-        }
-        let nb_list = &neighbors[c.idx][layer];
+        if c.idx >= node_levels.len() || layer > node_levels[c.idx] { continue; }
 
-        for &nb in nb_list {
-            if visited.insert(nb) {
-                let d = dist(metric, q, &vecs[nb].1);
+        for &nb in &neighbors[c.idx][layer] {
+            if tracker.visit(nb) {
+                let d = dist(metric, q, &flat_vecs[nb * dim..(nb + 1) * dim]);
                 let f_dist = w.peek().map(|f| f.dist).unwrap_or(f32::INFINITY);
                 if d < f_dist || w.len() < ef {
                     cands.push(MinEntry { neg_dist: -d, idx: nb });
                     w.push(MaxEntry { dist: d, idx: nb });
-                    if w.len() > ef {
-                        w.pop();
-                    }
+                    if w.len() > ef { w.pop(); }
                 }
             }
         }
@@ -317,18 +318,12 @@ fn search_layer(
     result
 }
 
-// ── Neighbor pruning (SELECT-NEIGHBORS-SIMPLE) ────────────────────────────────
+// ── Neighbor pruning ──────────────────────────────────────────────────────────
 
-fn prune_connections(
-    conn: &mut Vec<usize>,
-    node_vec: &[f32],
-    vecs: &[(RowId, Vec<f32>)],
-    m_max: usize,
-    metric: VectorMetric,
-) {
+fn prune_connections(conn: &mut Vec<usize>, node_vec: &[f32], flat_vecs: &[f32], dim: usize, m_max: usize, metric: VectorMetric) {
     let mut sorted: Vec<(f32, usize)> = conn
         .iter()
-        .map(|&nb| (dist(metric, node_vec, &vecs[nb].1), nb))
+        .map(|&nb| (dist(metric, node_vec, &flat_vecs[nb * dim..(nb + 1) * dim]), nb))
         .collect();
     sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     *conn = sorted.into_iter().take(m_max).map(|(_, nb)| nb).collect();
@@ -345,8 +340,6 @@ fn dist(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-// ── Level assignment ──────────────────────────────────────────────────────────
-
 fn random_level(rng: &mut impl Rng, ml: f64) -> usize {
     let r: f64 = rng.gen::<f64>().max(f64::EPSILON);
     (-r.ln() * ml).floor() as usize
@@ -359,11 +352,7 @@ mod tests {
     use super::*;
 
     fn make_index(vecs: Vec<Vec<f32>>) -> HnswIndex {
-        let mut b = HnswBuilder::new(
-            vecs[0].len() as u32,
-            VectorMetric::Cosine,
-            Default::default(),
-        );
+        let mut b = HnswBuilder::new(vecs[0].len() as u32, VectorMetric::Cosine, Default::default());
         for (i, v) in vecs.into_iter().enumerate() {
             b.insert(RowId::new(i as u64), v);
         }
@@ -372,27 +361,17 @@ mod tests {
 
     #[test]
     fn top1_is_exact_match() {
-        let idx = make_index(vec![
-            vec![1.0, 0.0, 0.0],
-            vec![0.0, 1.0, 0.0],
-            vec![0.0, 0.0, 1.0],
-        ]);
-        let results = idx.search(&[1.0, 0.0, 0.0], 1, 50);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, RowId::new(0));
-        assert!(results[0].1 < 1e-5);
+        let idx = make_index(vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]]);
+        let r = idx.search(&[1.0, 0.0, 0.0], 1, 50);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].0, RowId::new(0));
+        assert!(r[0].1 < 1e-5);
     }
 
     #[test]
     fn top_k_returns_k() {
-        let idx = make_index(vec![
-            vec![1.0, 0.0],
-            vec![0.8, 0.2],
-            vec![0.0, 1.0],
-            vec![-1.0, 0.0],
-        ]);
-        let results = idx.search(&[1.0, 0.0], 2, 50);
-        assert_eq!(results.len(), 2);
+        let idx = make_index(vec![vec![1.0, 0.0], vec![0.8, 0.2], vec![0.0, 1.0], vec![-1.0, 0.0]]);
+        assert_eq!(idx.search(&[1.0, 0.0], 2, 50).len(), 2);
     }
 
     #[test]
@@ -403,37 +382,25 @@ mod tests {
 
     #[test]
     fn large_index_recall() {
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{rngs::StdRng, Rng, SeedableRng};
         let mut rng = StdRng::seed_from_u64(42);
         let n = 500;
         let dim = 16;
-        let vecs: Vec<Vec<f32>> = (0..n)
-            .map(|_| (0..dim).map(|_| rng.gen::<f32>()).collect())
-            .collect();
+        let vecs: Vec<Vec<f32>> = (0..n).map(|_| (0..dim).map(|_| rng.gen::<f32>()).collect()).collect();
         let query: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
 
-        // Brute-force ground truth
-        let mut gt: Vec<(f32, usize)> = vecs
-            .iter()
-            .enumerate()
+        let mut gt: Vec<(f32, usize)> = vecs.iter().enumerate()
             .map(|(i, v)| (cosine_distance(&query, v), i))
             .collect();
         gt.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        let gt_ids: HashSet<usize> = gt.iter().take(10).map(|&(_, i)| i).collect();
+        let gt_ids: std::collections::HashSet<usize> = gt.iter().take(10).map(|&(_, i)| i).collect();
 
-        let mut b = HnswBuilder::new(
-            dim as u32,
-            VectorMetric::Cosine,
-            HnswConfig { m: 16, ef_construction: 200, max_elements: 1000 },
-        );
-        for (i, v) in vecs.into_iter().enumerate() {
-            b.insert(RowId::new(i as u64), v);
-        }
+        let mut b = HnswBuilder::new(dim as u32, VectorMetric::Cosine, HnswConfig { m: 16, ef_construction: 200, max_elements: 1000 });
+        for (i, v) in vecs.into_iter().enumerate() { b.insert(RowId::new(i as u64), v); }
         let idx = b.build();
 
         let results = idx.search(&query, 10, 50);
-        let found: HashSet<usize> =
-            results.iter().map(|(id, _)| id.as_u64() as usize).collect();
+        let found: std::collections::HashSet<usize> = results.iter().map(|(id, _)| id.as_u64() as usize).collect();
         let recall = found.intersection(&gt_ids).count() as f64 / gt_ids.len() as f64;
         assert!(recall >= 0.8, "recall@10={recall:.2} < 0.8");
     }

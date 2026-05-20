@@ -10,8 +10,11 @@ struct HnswSnapshot {
     max_elements: usize,
     metric: u8,
     dim: u32,
-    vectors: Vec<(u64, Vec<f32>)>,
-    // Graph structure (empty Vec = old format, triggers brute-force fallback)
+    /// Row IDs parallel to flat_vecs (one entry per vector).
+    row_ids: Vec<u64>,
+    /// Contiguous vector storage: flat_vecs[i*dim..(i+1)*dim] = vector i.
+    flat_vecs: Vec<f32>,
+    // Graph structure (empty = old format, triggers brute-force fallback)
     neighbors: Vec<Vec<Vec<usize>>>,
     node_levels: Vec<usize>,
     entry_point: Option<usize>,
@@ -19,11 +22,7 @@ struct HnswSnapshot {
 }
 
 fn metric_to_u8(m: VectorMetric) -> u8 {
-    match m {
-        VectorMetric::Cosine => 0,
-        VectorMetric::Euclidean => 1,
-        VectorMetric::DotProduct => 2,
-    }
+    match m { VectorMetric::Cosine => 0, VectorMetric::Euclidean => 1, VectorMetric::DotProduct => 2 }
 }
 
 fn u8_to_metric(v: u8) -> AilakeResult<VectorMetric> {
@@ -45,7 +44,8 @@ impl HnswSerializer {
             max_elements: index.config.max_elements,
             metric: metric_to_u8(index.metric),
             dim: index.dim,
-            vectors: index.vectors.iter().map(|(id, v)| (id.as_u64(), v.clone())).collect(),
+            row_ids: index.row_ids.clone(),
+            flat_vecs: index.flat_vecs.clone(),
             neighbors: index.neighbors.clone(),
             node_levels: index.node_levels.clone(),
             entry_point: index.entry_point,
@@ -58,18 +58,12 @@ impl HnswSerializer {
         let snap: HnswSnapshot =
             bincode::deserialize(bytes).map_err(|e| AilakeError::Bincode(e.to_string()))?;
         let metric = u8_to_metric(snap.metric)?;
-        let config = HnswConfig {
-            m: snap.m,
-            ef_construction: snap.ef_construction,
-            max_elements: snap.max_elements,
-        };
-        let vectors: Vec<(RowId, Vec<f32>)> =
-            snap.vectors.into_iter().map(|(id, v)| (RowId::new(id), v)).collect();
         Ok(HnswIndex {
-            config,
+            config: HnswConfig { m: snap.m, ef_construction: snap.ef_construction, max_elements: snap.max_elements },
             metric,
             dim: snap.dim,
-            vectors,
+            row_ids: snap.row_ids,
+            flat_vecs: snap.flat_vecs,
             neighbors: snap.neighbors,
             node_levels: snap.node_levels,
             entry_point: snap.entry_point,
