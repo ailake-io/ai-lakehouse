@@ -130,6 +130,7 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
         top_k,
         ef_search: 50,
         pruning_threshold: f32::INFINITY,
+        rerank_factor: None,
     };
 
     let results = rt

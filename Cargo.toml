@@ -11,6 +11,7 @@ members = [
     "ailake-query",
     "tests",
     "ailake-jni",
+    "ailake-bench",
     # Phase 4 bindings — excluded until PyO3/maturin env is configured
     # "ailake-py",
 ]
@@ -44,6 +45,10 @@ apache-avro = "0.16"
 hnsw_rs     = "0.3"
 bincode     = "1"
 memmap2     = "0.9"
+rayon       = "1"
+
+# GPU (included only when ailake-index's "gpu" feature is enabled)
+candle-core = "0.8"
 
 # Compression
 lz4_flex    = "0.11"

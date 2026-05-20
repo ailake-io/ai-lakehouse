@@ -75,6 +75,7 @@ async fn pruning_eliminates_distant_file() {
             top_k: 5,
             ef_search: 50,
             pruning_threshold: 0.5, // file B centroid is ~1.0 distance away → pruned
+            rerank_factor: None,
         },
         "embedding",
         4,

@@ -173,6 +173,7 @@ async fn main() {
             top_k: 5,
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
         },
         "embedding",
         dim,
