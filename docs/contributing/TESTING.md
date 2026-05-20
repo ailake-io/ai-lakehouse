@@ -517,6 +517,34 @@ Scripts:
 
 ## Benchmarks
 
+### `ailake-bench` — SIFT-1M end-to-end
+
+`ailake-bench` is the canonical public benchmark. Measures write throughput, search QPS, latency percentiles, and Recall@10 against SIFT-1M ground truth.
+
+```bash
+# Download dataset (~164 MB)
+bash ailake-bench/scripts/download_sift1m.sh
+
+# Run (uses --release automatically via cargo run --release)
+cargo run --release -p ailake-bench -- --dataset-dir data/sift1m
+```
+
+What it measures:
+- **Write phase**: 10 shards × 100k vectors, wall time + vec/s throughput
+- **Index load**: time to `SearchSession::load()` all shards into memory
+- **Search phase** (top_k=10, ef=50): Recall@10, QPS, mean/p50/p95/p99 latency
+
+Reference results (x86_64 with AVX2, 10-core CPU):
+
+| Metric | Value |
+|--------|-------|
+| Write throughput | ~2400 vec/s |
+| Index load (10 shards) | ~3 s |
+| Recall@10 | ~0.96 |
+| QPS | ~450 |
+| Latency mean | ~2.2 ms |
+| Latency p99 | ~4.5 ms |
+
 ### `ailake-file/benches/write.rs`
 
 ```rust

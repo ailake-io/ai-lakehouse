@@ -70,14 +70,14 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Deve terminar com `79 passed, 1 ignored`.
+Deve terminar com `83 passed, 1 ignored`.
 
 ### Testes por crate
 
 | Crate | O que cobre |
 |---|---|
-| `ailake-vec` | Quantização F32→F16, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centróides, `exact_distance` |
-| `ailake-index` | HNSW build/search (CPU paralelo via rayon), serialização bincode, MmapLoader round-trip |
+| `ailake-vec` | Quantização F32→F16, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centróides, `exact_distance`, SIMD (AVX2/NEON) |
+| `ailake-index` | HNSW build/search (grafo real + geração bitmap + flat_vecs), serialização bincode, MmapLoader round-trip |
 | `ailake-file` | Escrita/leitura do arquivo unificado, layout AILK, integridade |
 | `ailake-query` | ContextAssembler (dedup, grouping, XML, budget), pruning geométrico, reranking pós-PQ |
 | `tests` (integração) | write→read→search end-to-end, invariante posicional, compatibilidade PyArrow, pruning, context assembler |
@@ -322,6 +322,44 @@ PyArrow deve ler normalmente — colunas `id`, `text`, e `embedding` (como bytes
 
 ## 8. Rodar benchmarks
 
+### 8A. SIFT-1M benchmark (ailake-bench)
+
+Benchmark público com o dataset SIFT-1M (1M vetores 128-dim Euclidean).
+
+**Download do dataset** (~164 MB):
+```bash
+bash ailake-bench/scripts/download_sift1m.sh
+# Baixa em data/sift1m/
+```
+
+**Rodar:**
+```bash
+cargo run --release -p ailake-bench -- --dataset-dir data/sift1m
+```
+
+Resultado esperado (CPU com AVX2):
+```
+Write phase
+  Throughput    : ~2400 vec/s
+
+Search phase  (top_k=10, ef=50)  [indexes pre-loaded]
+  Recall@10     : ~0.96
+  QPS           : ~450
+  Latency mean  : ~2.2 ms
+  Latency p99   : ~4.5 ms
+```
+
+Opções:
+```bash
+# Limitar base a 10k vetores para smoke-test rápido
+cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --limit 10000
+
+# Ajustar ef e top_k
+cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --top-k 10 --ef 100
+```
+
+### 8B. Microbenchmarks criterion
+
 ```bash
 # HNSW search benchmark (ailake-index)
 cargo bench -p ailake-index
@@ -332,7 +370,7 @@ cargo bench -p ailake-file
 
 ---
 
-## 8A. GPU search — build e verificação
+## 8C. GPU search — build e verificação
 
 ### Pré-requisitos
 
@@ -1251,12 +1289,13 @@ Os testes de integração (`AilakeSparkExtensionsTest`) iniciam um SparkSession 
 ```
 ailake-core/      tipos base: VectorMetric, VectorPrecision, RowId, AilakeError
 ailake-parquet/   leitura/escrita Parquet com coluna VECTOR (FIXED_LEN_BYTE_ARRAY)
-ailake-vec/       quantização F32→F16, Product Quantization (PQCodebook), BlockCompressor (zstd/lz4), distâncias, centróides
-ailake-index/     HNSW via hnsw_rs, serialização bincode, MmapLoader (memmap2)
+ailake-vec/       quantização F32→F16, PQ (PQCodebook), BlockCompressor, SIMD distances (AVX2/NEON), centróides
+ailake-index/     HNSW custom (grafo real, bitmap visited, flat_vecs), bincode, MmapLoader (memmap2)
 ailake-file/      arquivo unificado: AILK entre row groups e footer Parquet
-ailake-catalog/   catálogo Iceberg: HadoopCatalog (filesystem), RestCatalog (Polaris/Nessie/S3 Tables/Unity Catalog), DatabricksAuth helpers
+ailake-catalog/   catálogo Iceberg: HadoopCatalog, RestCatalog, DatabricksAuth helpers
 ailake-store/     abstração de storage: LocalStore + ObjectStoreBackend (S3/GCS/Azure via object_store)
-ailake-query/     TableWriter, search() com pruning geométrico, ContextAssembler, CompactionExecutor
+ailake-query/     TableWriter, SearchSession, search() com pruning geométrico, ContextAssembler, CompactionExecutor
+ailake-bench/     benchmark público SIFT-1M (write throughput, QPS, Recall@10)
 ailake-py/        bindings PyO3 (fora do workspace — compilar com maturin)
 tests/            testes de integração e compatibilidade
 ```

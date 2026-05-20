@@ -110,22 +110,21 @@ pub async fn read_footer(&mut self) -> AilakeResult<AilakeHeader> {
 
 ### `spawn_blocking` for HNSW construction
 
-`hnsw_rs` is CPU-bound and not async-aware. Always wrap in `spawn_blocking`:
+`HnswBuilder::build()` is CPU-bound and not async-aware. Always wrap in `spawn_blocking`:
 
 ```rust
-pub async fn build_hnsw(vectors: Vec<Vec<f32>>) -> AilakeResult<HnswIndex> {
+pub async fn build_hnsw(
+    row_ids: Vec<RowId>,
+    vectors: Vec<Vec<f32>>,
+    dim: u32,
+    metric: VectorMetric,
+) -> AilakeResult<HnswIndex> {
     tokio::task::spawn_blocking(move || {
-        let mut hnsw = hnsw_rs::Hnsw::<f32, hnsw_rs::dist::DistCosine>::new(
-            16,           // M
-            vectors.len(), // capacity
-            16,           // ef_construction
-            200,
-            hnsw_rs::dist::DistCosine{},
-        );
-        for (i, v) in vectors.iter().enumerate() {
-            hnsw.insert((v, i));
+        let mut builder = HnswBuilder::new(dim, metric, HnswConfig::default());
+        for (id, v) in row_ids.into_iter().zip(vectors) {
+            builder.insert(id, v);
         }
-        Ok(HnswIndex::from(hnsw))
+        Ok(builder.build())
     })
     .await
     .map_err(|e| AilakeError::Catalog(format!("HNSW build task panicked: {e}")))?
@@ -140,7 +139,10 @@ pub async fn build_hnsw(vectors: Vec<Vec<f32>>) -> AilakeResult<HnswIndex> {
 
 In those three crates:
 - Every `unsafe` block requires a `// SAFETY:` comment explaining the invariant being upheld.
-- `unsafe` is only for memory layout operations (casting `&[f32]` to `&[u8]` for serialization, mmap operations) and FFI calls.
+- `unsafe` is permitted for:
+  - Memory layout operations (casting `&[f32]` to `&[u8]`, mmap operations)
+  - SIMD intrinsics in `ailake-vec/src/distance.rs` — guarded by `#[target_feature(enable = "avx2")]` or `#[target_feature(enable = "neon")]`; callers check CPU features via `is_x86_feature_detected!` / `is_aarch64_feature_detected!` before calling
+  - FFI calls
 - No raw pointer arithmetic without bounds proof in the safety comment.
 
 ```rust

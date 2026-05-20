@@ -58,29 +58,36 @@ Vector data transformations. No I/O.
 - `PQCodebook::encode(&[f32]) -> Vec<u8>` — M bytes, one code per subspace
 - `PQCodebook::compute_adc_table(query) -> Vec<Vec<f32>>` — precomputed ADC table for fast batch search
 - `PQCodebook::adc_distance(codes, table) -> f32` — O(M) approximate distance
-- `cosine_distance(a, b) -> f32`, `euclidean_distance`, `dot_product`
+- `dot_product(a, b) -> f32`, `euclidean_distance`, `cosine_distance` — SIMD-dispatched at runtime:
+  - x86_64: AVX2 path (2× unrolled, 16 f32/iter for dot/euclidean; single-pass 3-accumulator cosine)
+  - aarch64: NEON path (4 f32/iter via `vmlaq_f32`)
+  - Scalar fallback on other architectures
 - `exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32` — dispatches to correct metric; used by reranking after PQ
 - `compute_centroid_and_radius(&[Vec<f32>], VectorMetric) -> Centroid`
 - `BlockCompressor::zstd(level)`, `BlockCompressor::lz4()` — block-level compression
 
 ### `ailake-index`
-HNSW index lifecycle. Search backend priority: GPU (candle-core + CUDA, optional) → parallel CPU brute-force (rayon, always available).
+HNSW index lifecycle. Search backend priority: GPU (candle-core + CUDA, optional) → real HNSW graph (CPU, always available).
 
 - `HnswBuilder` — builds HNSW from `(RowId, &[f32])` pairs
   - Parameters: `M` (max connections), `ef_construction`, `metric`
+  - Implements Malkov & Yashunin 2018, Algorithms 1 + 2: random level assignment, greedy descent, beam search, bidirectional links, neighbour pruning
 - `HnswIndex` — searchable index over typed `RowId` keys
+  - Internal layout: contiguous `flat_vecs: Vec<f32>` (row-major), `row_ids: Vec<u64>`, `neighbors: Vec<Vec<Vec<usize>>>`, `node_levels`, `entry_point`, `max_layer`
+  - Visited tracking: thread-local generation bitmap — O(1) reset by incrementing generation counter; no per-query allocation
   - `search(query: &[f32], top_k: usize, ef_search: usize) -> Vec<(RowId, f32)>`
-  - GPU path: `try_gpu_search()` via `candle-core/cuda` — compiled in with `--features gpu`, used only when CUDA available at runtime; returns `None` otherwise
-  - CPU path: `rayon::par_iter()` parallel brute-force — always available, 4–16× speedup on multicore vs single-thread
+  - GPU path: `try_gpu_search()` via `candle-core/cuda` — compiled in with `--features gpu`, used only when CUDA available at runtime; returns `None` otherwise (falls through to HNSW graph path)
+  - CPU fallback: `brute_force()` via `rayon::par_iter()` — activated only when `neighbors` is empty (old serialized format compatibility)
 - `HnswSerializer` — bincode-based serialization of the full HNSW graph
-  - `serialize(index: &HnswIndex) -> Vec<u8>`
-  - `deserialize(bytes: &[u8]) -> HnswIndex`
+  - `to_bytes(index: &HnswIndex) -> Vec<u8>`
+  - `from_bytes(bytes: &[u8]) -> HnswIndex`
+  - Old format (empty `neighbors`) triggers brute-force fallback automatically
 - `MmapLoader` — opens a serialized HNSW from a memory-mapped byte slice
   - Lazy: graph traversal only pages in the regions touched during search
 
 **Feature flags**:
-- Default build (no flags): CPU-only, works everywhere, no CUDA required
-- `--features ailake-index/gpu`: adds GPU path; requires CUDA toolkit at build time; detects GPU at runtime and falls back to CPU if unavailable
+- Default build (no flags): HNSW graph on CPU, works everywhere, no CUDA required
+- `--features ailake-index/gpu`: adds GPU brute-force path; requires CUDA toolkit at build time; detects GPU at runtime and falls back to HNSW graph if unavailable
 
 ### `ailake-file`
 **Owns the unified file format.** This is the integration crate that combines Parquet + AI-Lake footer.
@@ -155,6 +162,10 @@ Query planning and execution. The integration layer — depends on all data-plan
 - `TableWriter` — `write_batch(batch, embeddings)` + `commit()` → Iceberg snapshot
 - `VectorPruner::prune(files, query, metric, threshold)` — filters `Vec<DataFileEntry>` using centroid geometry; works on catalog metadata only, zero file I/O for pruned files
 - `search(table, query, config, ...)` — full pipeline: list catalog → prune → load HNSW → global top-k merge; `SearchConfig.pruning_threshold` controls prune aggressiveness; `SearchConfig.rerank_factor` enables reranking after PQ (fetch `top_k × factor` candidates, recompute exact distances from raw vectors, re-sort)
+- `SearchSession` — pre-loads all shard HNSW indexes once, serves many queries without I/O per query:
+  - `SearchSession::load(table, vector_column, dim, catalog, store, load_raw) -> AilakeResult<Self>`
+  - `SearchSession::search_query(query, config) -> Vec<SearchResult>` — sync, no I/O
+  - Used by `ailake-bench` to achieve ~450 QPS on SIFT-1M
 - `CompactionPlanner::plan(files)` — selects files smaller than `target_file_size_bytes`
 - `CompactionExecutor::compact(files, output_path)` — merges N files into one via Arrow `concat_batches`, rebuilds HNSW, returns new `DataFileEntry`
 - `CompactionExecutor::run(planner, table, catalog, prefix)` — full cycle: plan + compact + commit + delete old files
@@ -200,6 +211,7 @@ members = [
     "ailake-query",
     "tests",
     "ailake-jni",
+    "ailake-bench",
     # Phase 4 bindings — excluded until PyO3/maturin env is configured
     # "ailake-py",
 ]
@@ -274,7 +286,7 @@ debug       = true
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
 | **Phase 3** | ✅ Complete | Catalog backends (NessieCatalog, JdbcCatalog, GlueCatalog), uniffi JVM bindings, multi-column vectors |
-| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search (candle-core/rayon) ✅; benchmarks vs LanceDB/pgvector pending |
+| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search (candle-core/rayon) ✅, real HNSW graph ✅, SIMD distances (AVX2/NEON) ✅, SIFT-1M benchmark ✅; comparisons vs LanceDB/pgvector pending |
 
 ### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
@@ -325,7 +337,12 @@ Delivered in Phase 4:
 - Public format spec: `docs/specs/FILE_FORMAT.md` — binary layout, AILK header/trailer, KV metadata keys
 - GPU search: candle-core + CUDA backend in `ailake-index`, automatic CPU fallback via rayon
 - GPU FFI evaluation: `docs/specs/GPU_FFI_EVALUATION.md` — cuVS evaluated, candle-core chosen
+- Real HNSW graph: custom implementation in `ailake-index` (Malkov & Yashunin 2018); generation bitmap visited tracker; contiguous `flat_vecs` layout
+- SIMD distance functions: AVX2 + NEON in `ailake-vec/src/distance.rs`; runtime detection; 2× unrolled AVX2 for dot/euclidean
+- `SearchSession` in `ailake-query`: pre-loaded multi-query search, eliminates per-query I/O
+- `ailake-bench` crate: SIFT-1M benchmark (128D Euclidean, 1M vectors)
+  - Results: 2394 vec/s write, 453 QPS, Recall@10 = 96.1%, mean latency 2.2 ms
 
 Remaining Phase 4:
-- Benchmarks públicos vs. LanceDB, Deep Lake, pgvector
+- Comparisons vs. LanceDB, Deep Lake, pgvector (on same SIFT-1M + ANN benchmarks)
 - `ailake-flink` (separate Java repo): Flink sink/source connector
