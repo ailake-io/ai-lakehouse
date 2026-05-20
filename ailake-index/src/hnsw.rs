@@ -1,5 +1,9 @@
 use std::cell::RefCell;
 use std::collections::BinaryHeap;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    RwLock,
+};
 
 use ailake_core::{RowId, VectorMetric};
 use ailake_vec::{cosine_distance, dot_product, euclidean_distance};
@@ -56,7 +60,7 @@ impl Default for HnswConfig {
     fn default() -> Self {
         Self {
             m: 16,
-            ef_construction: 200,
+            ef_construction: 100,
             max_elements: 1_000_000,
         }
     }
@@ -83,8 +87,15 @@ impl HnswBuilder {
         self.vectors.push((row_id, vector));
     }
 
-    /// Build HNSW graph over all inserted vectors (Algorithm 1, Malkov & Yashunin 2018).
+    /// Build HNSW graph (Algorithm 1). Parallel on multi-core when n ≥ 500.
     pub fn build(self) -> HnswIndex {
+        if rayon::current_num_threads() > 1 && self.vectors.len() >= 500 {
+            return self.build_parallel();
+        }
+        self.build_serial()
+    }
+
+    fn build_serial(self) -> HnswIndex {
         let n = self.vectors.len();
         let dim = self.dim as usize;
 
@@ -214,6 +225,112 @@ impl HnswBuilder {
             node_levels,
             entry_point,
             max_layer,
+        }
+    }
+
+    /// Parallel build using per-(node,layer) RwLock — same algorithm as build_serial
+    /// but with relaxed insertion ordering (like hnswlib multithreaded mode).
+    fn build_parallel(self) -> HnswIndex {
+        let n = self.vectors.len();
+        let dim = self.dim as usize;
+        let m = self.config.m;
+        let ef_c = self.config.ef_construction;
+        let ml = 1.0_f64 / (m as f64).ln();
+        let metric = self.metric;
+
+        let mut flat_vecs: Vec<f32> = Vec::with_capacity(n * dim);
+        let mut row_ids: Vec<u64> = Vec::with_capacity(n);
+        for (id, v) in &self.vectors {
+            row_ids.push(id.as_u64());
+            flat_vecs.extend_from_slice(v);
+        }
+
+        let mut rng = rand::thread_rng();
+        let node_levels: Vec<usize> = (0..n).map(|_| random_level(&mut rng, ml)).collect();
+
+        // One RwLock per (node, layer) — readers search concurrently; writers prune.
+        let par_nb: Vec<Vec<RwLock<Vec<usize>>>> = node_levels
+            .iter()
+            .map(|&l| (0..=l).map(|_| RwLock::new(Vec::new())).collect())
+            .collect();
+
+        // Bootstrap: node 0 is the entry point.
+        let entry_pt: RwLock<Option<usize>> = RwLock::new(Some(0));
+        let max_layer_atom: AtomicUsize = AtomicUsize::new(node_levels[0]);
+
+        // Insert nodes 1..n in parallel (rayon scoped — no 'static needed).
+        (1..n).into_par_iter().for_each(|i| {
+            let l = node_levels[i];
+            let q = &flat_vecs[i * dim..(i + 1) * dim];
+
+            let ep = entry_pt.read().unwrap().unwrap_or(0);
+            let cur_max = max_layer_atom.load(Ordering::Relaxed);
+            let mut eps = vec![ep];
+
+            // Greedy descent above insertion layer (ef=1).
+            for lc in (l + 1..=cur_max).rev() {
+                let w = search_layer_par(
+                    q, &eps, 1, lc, &flat_vecs, dim, &par_nb, &node_levels, metric,
+                );
+                if let Some(&(_, best)) = w.first() {
+                    eps = vec![best];
+                }
+            }
+
+            // Insert at layers 0..=min(l, cur_max).
+            for lc in (0..=l.min(cur_max)).rev() {
+                let m_lc = if lc == 0 { 2 * m } else { m };
+                let w = search_layer_par(
+                    q, &eps, ef_c, lc, &flat_vecs, dim, &par_nb, &node_levels, metric,
+                );
+                let selected: Vec<usize> = w.iter().take(m_lc).map(|&(_, nb)| nb).collect();
+
+                if lc < par_nb[i].len() {
+                    *par_nb[i][lc].write().unwrap() = selected.clone();
+                }
+                for &nb in &selected {
+                    if lc < par_nb[nb].len() {
+                        let mut nblist = par_nb[nb][lc].write().unwrap();
+                        nblist.push(i);
+                        let m_max = if lc == 0 { 2 * m } else { m };
+                        if nblist.len() > m_max {
+                            let nb_vec = &flat_vecs[nb * dim..(nb + 1) * dim];
+                            prune_connections(&mut nblist, nb_vec, &flat_vecs, dim, m_max, metric);
+                        }
+                    }
+                }
+                eps = w.iter().map(|&(_, idx)| idx).collect();
+            }
+
+            // Promote entry point if this node has a higher layer.
+            if l > max_layer_atom.load(Ordering::Relaxed) {
+                let mut ep_w = entry_pt.write().unwrap();
+                let cur = max_layer_atom.load(Ordering::Relaxed);
+                if l > cur {
+                    max_layer_atom.store(l, Ordering::SeqCst);
+                    *ep_w = Some(i);
+                }
+            }
+        });
+
+        let neighbors: Vec<Vec<Vec<usize>>> = par_nb
+            .into_iter()
+            .map(|node| node.into_iter().map(|lk| lk.into_inner().unwrap()).collect())
+            .collect();
+
+        let final_ep = *entry_pt.read().unwrap();
+        let final_max = max_layer_atom.load(Ordering::SeqCst);
+
+        HnswIndex {
+            config: self.config,
+            metric,
+            dim: self.dim,
+            flat_vecs,
+            row_ids,
+            neighbors,
+            node_levels,
+            entry_point: final_ep,
+            max_layer: final_max,
         }
     }
 }
@@ -441,6 +558,71 @@ fn search_layer(
     let mut result: Vec<(f32, usize)> = w.into_iter().map(|e| (e.dist, e.idx)).collect();
     result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     result
+}
+
+// ── Parallel search layer (used during build_parallel) ───────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn search_layer_par(
+    q: &[f32],
+    entry_points: &[usize],
+    ef: usize,
+    layer: usize,
+    flat_vecs: &[f32],
+    dim: usize,
+    neighbors: &[Vec<RwLock<Vec<usize>>>],
+    node_levels: &[usize],
+    metric: VectorMetric,
+) -> Vec<(f32, usize)> {
+    let n = node_levels.len();
+    VISITED.with(|cell| {
+        let mut tracker = cell.borrow_mut();
+        tracker.prepare(n);
+
+        let mut cands: BinaryHeap<MinEntry> = BinaryHeap::with_capacity(ef * 2);
+        let mut w: BinaryHeap<MaxEntry> = BinaryHeap::with_capacity(ef + 1);
+
+        for &ep in entry_points {
+            if tracker.visit(ep) {
+                let d = dist(metric, q, &flat_vecs[ep * dim..(ep + 1) * dim]);
+                cands.push(MinEntry { neg_dist: -d, idx: ep });
+                w.push(MaxEntry { dist: d, idx: ep });
+            }
+        }
+
+        while let Some(c) = cands.pop() {
+            let c_dist = -c.neg_dist;
+            let f_dist = w.peek().map(|f| f.dist).unwrap_or(f32::INFINITY);
+            if c_dist > f_dist {
+                break;
+            }
+            if c.idx >= node_levels.len() || layer > node_levels[c.idx] {
+                continue;
+            }
+            if c.idx >= neighbors.len() || layer >= neighbors[c.idx].len() {
+                continue;
+            }
+            // Clone to release read lock before distance computations.
+            let nbs: Vec<usize> = neighbors[c.idx][layer].read().unwrap().clone();
+            for nb in nbs {
+                if tracker.visit(nb) {
+                    let d = dist(metric, q, &flat_vecs[nb * dim..(nb + 1) * dim]);
+                    let f_dist = w.peek().map(|f| f.dist).unwrap_or(f32::INFINITY);
+                    if d < f_dist || w.len() < ef {
+                        cands.push(MinEntry { neg_dist: -d, idx: nb });
+                        w.push(MaxEntry { dist: d, idx: nb });
+                        if w.len() > ef {
+                            w.pop();
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut result: Vec<(f32, usize)> = w.into_iter().map(|e| (e.dist, e.idx)).collect();
+        result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        result
+    })
 }
 
 // ── Neighbor pruning ──────────────────────────────────────────────────────────

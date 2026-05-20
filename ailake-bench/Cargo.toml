@@ -3,11 +3,14 @@ name = "ailake-bench"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Public benchmark: AI-Lake vs. LanceDB / Deep Lake / pgvector on SIFT-1M"
+description = "Public benchmark: AI-Lake vs. LanceDB on SIFT-1M"
 
 [[bin]]
 name = "ailake-bench"
 path = "src/main.rs"
+
+[features]
+lancedb-bench = ["dep:lancedb", "dep:futures", "dep:aa58", "dep:as58"]
 
 [dependencies]
 ailake-catalog = { path = "../ailake-catalog" }
@@ -21,3 +24,9 @@ arrow-schema = { workspace = true }
 tempfile     = { workspace = true }
 anyhow       = "1"
 clap         = { version = "4", features = ["derive"] }
+
+lancedb = { version = "0.29", optional = true }
+futures = { version = "0.3", optional = true }
+# Arrow v58 aliases — same version lancedb 0.29 uses; Cargo deduplicates the compile unit
+aa58 = { package = "arrow-array",  version = "58", optional = true }
+as58 = { package = "arrow-schema", version = "58", optional = true }
