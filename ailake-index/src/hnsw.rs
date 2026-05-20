@@ -60,7 +60,7 @@ impl Default for HnswConfig {
     fn default() -> Self {
         Self {
             m: 16,
-            ef_construction: 100,
+            ef_construction: 150,
             max_elements: 1_000_000,
         }
     }
