@@ -27,7 +27,7 @@ pub struct LatencyStats {
 impl LatencyStats {
     /// `latencies_us` — per-query latencies in microseconds (modified in place for sorting).
     /// `total_wall_ns` — total elapsed wall time in nanoseconds for all queries.
-    pub fn compute(latencies_us: &mut Vec<u64>, total_wall_ns: u64) -> Self {
+    pub fn compute(latencies_us: &mut [u64], total_wall_ns: u64) -> Self {
         latencies_us.sort_unstable();
         let n = latencies_us.len();
         let mean_us = if n == 0 {
