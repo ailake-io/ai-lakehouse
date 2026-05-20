@@ -1,4 +1,4 @@
-use ailake_core::{AilakeError, AilakeResult, RowId, VectorMetric};
+use ailake_core::{AilakeError, AilakeResult, VectorMetric};
 use serde::{Deserialize, Serialize};
 
 use crate::hnsw::{HnswConfig, HnswIndex};

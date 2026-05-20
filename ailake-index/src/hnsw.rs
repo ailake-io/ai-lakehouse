@@ -235,12 +235,6 @@ pub struct HnswIndex {
 }
 
 impl HnswIndex {
-    #[inline(always)]
-    fn vec_at(&self, idx: usize) -> &[f32] {
-        let d = self.dim as usize;
-        &self.flat_vecs[idx * d..(idx + 1) * d]
-    }
-
     pub fn search(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
         #[cfg(feature = "gpu")]
         if let Some(r) = crate::gpu::try_gpu_search(
