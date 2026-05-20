@@ -114,10 +114,7 @@ async fn main() -> anyhow::Result<()> {
         let n = shard_vecs.len();
 
         let ids: Vec<i64> = (base_offset as i64..(base_offset + n) as i64).collect();
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(ids))],
-        )?;
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(ids))])?;
 
         writer
             .write_batch(&batch, shard_vecs)
@@ -229,7 +226,10 @@ async fn main() -> anyhow::Result<()> {
     println!("  Shards loaded : {}", session.shard_count());
     println!("  Load time     : {:.2} s", load_elapsed.as_secs_f64());
     println!();
-    println!("Search phase  (top_k={}, ef={})  [indexes pre-loaded]", args.top_k, args.ef);
+    println!(
+        "Search phase  (top_k={}, ef={})  [indexes pre-loaded]",
+        args.top_k, args.ef
+    );
     println!("  Recall@{}     : {:.4}", args.top_k, mean_recall);
     println!("  QPS           : {:.0}", lat.qps);
     println!("  Latency mean  : {:.3} ms", lat.mean_ms);

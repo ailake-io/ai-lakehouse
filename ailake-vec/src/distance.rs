@@ -48,7 +48,11 @@ pub fn exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32 {
 
 pub fn compute_centroid_and_radius(vectors: &[Vec<f32>], metric: VectorMetric) -> Centroid {
     if vectors.is_empty() {
-        return Centroid { values: vec![], radius: 0.0, metric };
+        return Centroid {
+            values: vec![],
+            radius: 0.0,
+            metric,
+        };
     }
     let dim = vectors[0].len();
     let n = vectors.len() as f32;
@@ -59,7 +63,11 @@ pub fn compute_centroid_and_radius(vectors: &[Vec<f32>], metric: VectorMetric) -
         .iter()
         .map(|v| exact_distance(metric, &centroid, v))
         .fold(0.0_f32, f32::max);
-    Centroid { values: centroid, radius, metric }
+    Centroid {
+        values: centroid,
+        radius,
+        metric,
+    }
 }
 
 // ── Scalar fallbacks ──────────────────────────────────────────────────────────
@@ -71,7 +79,11 @@ fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
 
 #[inline(always)]
 fn euclidean_scalar(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f32>()
+        .sqrt()
 }
 
 #[inline(always)]
@@ -79,7 +91,9 @@ fn cosine_scalar(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { return 1.0; }
+    if na == 0.0 || nb == 0.0 {
+        return 1.0;
+    }
     1.0 - dot / (na * nb)
 }
 
@@ -93,9 +107,9 @@ mod avx2 {
     #[inline(always)]
     pub unsafe fn hsum256(v: __m256) -> f32 {
         // Fold upper 4 lanes into lower 4
-        let hi  = _mm256_extractf128_ps(v, 1);
-        let lo  = _mm256_castps256_ps128(v);
-        let s   = _mm_add_ps(lo, hi);
+        let hi = _mm256_extractf128_ps(v, 1);
+        let lo = _mm256_castps256_ps128(v);
+        let s = _mm_add_ps(lo, hi);
         // Horizontal sum of 4 lanes in __m128
         let shuf = _mm_movehdup_ps(s);
         let sums = _mm_add_ps(s, shuf);
@@ -153,8 +167,11 @@ mod avx2 {
         let chunks16 = n / 16;
         for i in 0..chunks16 {
             let base = i * 16;
-            let d0 = _mm256_sub_ps(_mm256_loadu_ps(ap.add(base)),     _mm256_loadu_ps(bp.add(base)));
-            let d1 = _mm256_sub_ps(_mm256_loadu_ps(ap.add(base + 8)), _mm256_loadu_ps(bp.add(base + 8)));
+            let d0 = _mm256_sub_ps(_mm256_loadu_ps(ap.add(base)), _mm256_loadu_ps(bp.add(base)));
+            let d1 = _mm256_sub_ps(
+                _mm256_loadu_ps(ap.add(base + 8)),
+                _mm256_loadu_ps(bp.add(base + 8)),
+            );
             acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(d0, d0));
             acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(d1, d1));
         }
@@ -181,9 +198,9 @@ mod avx2 {
         let ap = a.as_ptr();
         let bp = b.as_ptr();
 
-        let mut dot_acc  = _mm256_setzero_ps();
-        let mut na_acc   = _mm256_setzero_ps();
-        let mut nb_acc   = _mm256_setzero_ps();
+        let mut dot_acc = _mm256_setzero_ps();
+        let mut na_acc = _mm256_setzero_ps();
+        let mut nb_acc = _mm256_setzero_ps();
 
         let chunks8 = n / 8;
         for i in 0..chunks8 {
@@ -191,8 +208,8 @@ mod avx2 {
             let av = _mm256_loadu_ps(ap.add(base));
             let bv = _mm256_loadu_ps(bp.add(base));
             dot_acc = _mm256_add_ps(dot_acc, _mm256_mul_ps(av, bv));
-            na_acc  = _mm256_add_ps(na_acc,  _mm256_mul_ps(av, av));
-            nb_acc  = _mm256_add_ps(nb_acc,  _mm256_mul_ps(bv, bv));
+            na_acc = _mm256_add_ps(na_acc, _mm256_mul_ps(av, av));
+            nb_acc = _mm256_add_ps(nb_acc, _mm256_mul_ps(bv, bv));
         }
 
         let mut dot = hsum256(dot_acc);
@@ -209,22 +226,30 @@ mod avx2 {
 
         let na = na2.sqrt();
         let nb = nb2.sqrt();
-        if na == 0.0 || nb == 0.0 { return 1.0; }
+        if na == 0.0 || nb == 0.0 {
+            return 1.0;
+        }
         1.0 - dot / (na * nb)
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 { avx2::dot(a, b) }
+unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
+    avx2::dot(a, b)
+}
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn euclidean_avx2(a: &[f32], b: &[f32]) -> f32 { avx2::euclidean(a, b) }
+unsafe fn euclidean_avx2(a: &[f32], b: &[f32]) -> f32 {
+    avx2::euclidean(a, b)
+}
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn cosine_avx2(a: &[f32], b: &[f32]) -> f32 { avx2::cosine(a, b) }
+unsafe fn cosine_avx2(a: &[f32], b: &[f32]) -> f32 {
+    avx2::cosine(a, b)
+}
 
 // ── aarch64 NEON ──────────────────────────────────────────────────────────────
 
@@ -244,7 +269,9 @@ mod neon_impl {
             acc = vmlaq_f32(acc, av, bv);
         }
         let mut sum = vaddvq_f32(acc);
-        for i in (chunks * 4)..n { sum += a[i] * b[i]; }
+        for i in (chunks * 4)..n {
+            sum += a[i] * b[i];
+        }
         sum
     }
 
@@ -255,11 +282,17 @@ mod neon_impl {
         let chunks = n / 4;
         for i in 0..chunks {
             let base = i * 4;
-            let d = vsubq_f32(vld1q_f32(a.as_ptr().add(base)), vld1q_f32(b.as_ptr().add(base)));
+            let d = vsubq_f32(
+                vld1q_f32(a.as_ptr().add(base)),
+                vld1q_f32(b.as_ptr().add(base)),
+            );
             acc = vmlaq_f32(acc, d, d);
         }
         let mut sum = vaddvq_f32(acc);
-        for i in (chunks * 4)..n { let d = a[i] - b[i]; sum += d * d; }
+        for i in (chunks * 4)..n {
+            let d = a[i] - b[i];
+            sum += d * d;
+        }
         sum.sqrt()
     }
 
@@ -267,40 +300,50 @@ mod neon_impl {
     pub unsafe fn cosine(a: &[f32], b: &[f32]) -> f32 {
         let n = a.len().min(b.len());
         let mut dot_acc = vdupq_n_f32(0.0);
-        let mut na_acc  = vdupq_n_f32(0.0);
-        let mut nb_acc  = vdupq_n_f32(0.0);
+        let mut na_acc = vdupq_n_f32(0.0);
+        let mut nb_acc = vdupq_n_f32(0.0);
         let chunks = n / 4;
         for i in 0..chunks {
             let base = i * 4;
             let av = vld1q_f32(a.as_ptr().add(base));
             let bv = vld1q_f32(b.as_ptr().add(base));
             dot_acc = vmlaq_f32(dot_acc, av, bv);
-            na_acc  = vmlaq_f32(na_acc,  av, av);
-            nb_acc  = vmlaq_f32(nb_acc,  bv, bv);
+            na_acc = vmlaq_f32(na_acc, av, av);
+            nb_acc = vmlaq_f32(nb_acc, bv, bv);
         }
         let mut dot = vaddvq_f32(dot_acc);
         let mut na2 = vaddvq_f32(na_acc);
         let mut nb2 = vaddvq_f32(nb_acc);
         for i in (chunks * 4)..n {
-            dot += a[i] * b[i]; na2 += a[i] * a[i]; nb2 += b[i] * b[i];
+            dot += a[i] * b[i];
+            na2 += a[i] * a[i];
+            nb2 += b[i] * b[i];
         }
         let (na, nb) = (na2.sqrt(), nb2.sqrt());
-        if na == 0.0 || nb == 0.0 { return 1.0; }
+        if na == 0.0 || nb == 0.0 {
+            return 1.0;
+        }
         1.0 - dot / (na * nb)
     }
 }
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn dot_neon(a: &[f32], b: &[f32]) -> f32 { neon_impl::dot(a, b) }
+unsafe fn dot_neon(a: &[f32], b: &[f32]) -> f32 {
+    neon_impl::dot(a, b)
+}
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn euclidean_neon(a: &[f32], b: &[f32]) -> f32 { neon_impl::euclidean(a, b) }
+unsafe fn euclidean_neon(a: &[f32], b: &[f32]) -> f32 {
+    neon_impl::euclidean(a, b)
+}
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn cosine_neon(a: &[f32], b: &[f32]) -> f32 { neon_impl::cosine(a, b) }
+unsafe fn cosine_neon(a: &[f32], b: &[f32]) -> f32 {
+    neon_impl::cosine(a, b)
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -337,17 +380,26 @@ mod tests {
         let a: Vec<f32> = (0..128).map(|_| rng.gen::<f32>() * 2.0 - 1.0).collect();
         let b: Vec<f32> = (0..128).map(|_| rng.gen::<f32>() * 2.0 - 1.0).collect();
 
-        let dot_s   = dot_scalar(&a, &b);
+        let dot_s = dot_scalar(&a, &b);
         let euclid_s = euclidean_scalar(&a, &b);
-        let cos_s   = cosine_scalar(&a, &b);
+        let cos_s = cosine_scalar(&a, &b);
 
-        let dot_f   = dot_product(&a, &b);
+        let dot_f = dot_product(&a, &b);
         let euclid_f = euclidean_distance(&a, &b);
-        let cos_f   = cosine_distance(&a, &b);
+        let cos_f = cosine_distance(&a, &b);
 
-        assert!((dot_f - dot_s).abs() < 1e-4, "dot mismatch: {dot_f} vs {dot_s}");
-        assert!((euclid_f - euclid_s).abs() < 1e-4, "euclidean mismatch: {euclid_f} vs {euclid_s}");
-        assert!((cos_f - cos_s).abs() < 1e-4, "cosine mismatch: {cos_f} vs {cos_s}");
+        assert!(
+            (dot_f - dot_s).abs() < 1e-4,
+            "dot mismatch: {dot_f} vs {dot_s}"
+        );
+        assert!(
+            (euclid_f - euclid_s).abs() < 1e-4,
+            "euclidean mismatch: {euclid_f} vs {euclid_s}"
+        );
+        assert!(
+            (cos_f - cos_s).abs() < 1e-4,
+            "cosine mismatch: {cos_f} vs {cos_s}"
+        );
     }
 
     #[test]

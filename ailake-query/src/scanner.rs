@@ -203,7 +203,11 @@ impl SearchSession {
             } else {
                 None
             };
-            shards.push(LoadedShard { entry, index, raw_vectors });
+            shards.push(LoadedShard {
+                entry,
+                index,
+                raw_vectors,
+            });
         }
 
         Ok(Self { shards, metric })
@@ -228,7 +232,9 @@ impl SearchSession {
             if let Some(centroid) = ailake_catalog::decode_centroid(&shard.entry, self.metric) {
                 let dist = match self.metric {
                     VectorMetric::Cosine => ailake_vec::cosine_distance(query, &centroid.values),
-                    VectorMetric::Euclidean => ailake_vec::euclidean_distance(query, &centroid.values),
+                    VectorMetric::Euclidean => {
+                        ailake_vec::euclidean_distance(query, &centroid.values)
+                    }
                     VectorMetric::DotProduct => -ailake_vec::dot_product(query, &centroid.values),
                 };
                 if dist - centroid.radius > config.pruning_threshold {

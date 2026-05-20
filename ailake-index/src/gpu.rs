@@ -28,7 +28,9 @@ mod gpu_impl {
         top_k: usize,
     ) -> Option<Vec<(RowId, f32)>> {
         let n = row_ids.len();
-        if n == 0 { return Some(vec![]); }
+        if n == 0 {
+            return Some(vec![]);
+        }
 
         let dev = match Device::cuda_if_available(0) {
             Ok(d) if d.is_cuda() => d,
@@ -52,7 +54,16 @@ mod gpu_impl {
             }
             VectorMetric::Euclidean => {
                 let diff = q.broadcast_sub(&db).ok()?;
-                diff.sqr().ok()?.sum_keepdim(1).ok()?.squeeze(1).ok()?.sqrt().ok()?.to_vec1().ok()?
+                diff.sqr()
+                    .ok()?
+                    .sum_keepdim(1)
+                    .ok()?
+                    .squeeze(1)
+                    .ok()?
+                    .sqrt()
+                    .ok()?
+                    .to_vec1()
+                    .ok()?
             }
         };
 
@@ -60,7 +71,12 @@ mod gpu_impl {
         indexed.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         indexed.truncate(top_k);
 
-        Some(indexed.into_iter().map(|(i, d)| (RowId::new(row_ids[i]), d)).collect())
+        Some(
+            indexed
+                .into_iter()
+                .map(|(i, d)| (RowId::new(row_ids[i]), d))
+                .collect(),
+        )
     }
 
     fn normalize_rows_2d(t: &Tensor) -> Option<Tensor> {

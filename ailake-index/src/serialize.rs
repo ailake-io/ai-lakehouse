@@ -22,7 +22,11 @@ struct HnswSnapshot {
 }
 
 fn metric_to_u8(m: VectorMetric) -> u8 {
-    match m { VectorMetric::Cosine => 0, VectorMetric::Euclidean => 1, VectorMetric::DotProduct => 2 }
+    match m {
+        VectorMetric::Cosine => 0,
+        VectorMetric::Euclidean => 1,
+        VectorMetric::DotProduct => 2,
+    }
 }
 
 fn u8_to_metric(v: u8) -> AilakeResult<VectorMetric> {
@@ -59,7 +63,11 @@ impl HnswSerializer {
             bincode::deserialize(bytes).map_err(|e| AilakeError::Bincode(e.to_string()))?;
         let metric = u8_to_metric(snap.metric)?;
         Ok(HnswIndex {
-            config: HnswConfig { m: snap.m, ef_construction: snap.ef_construction, max_elements: snap.max_elements },
+            config: HnswConfig {
+                m: snap.m,
+                ef_construction: snap.ef_construction,
+                max_elements: snap.max_elements,
+            },
             metric,
             dim: snap.dim,
             row_ids: snap.row_ids,

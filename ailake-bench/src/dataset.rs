@@ -39,8 +39,7 @@ impl Dataset {
 /// `limit_base` truncates the base set (useful for quick smoke-tests).
 pub fn load(dir: &Path, limit_base: Option<usize>) -> anyhow::Result<Dataset> {
     eprintln!("Loading base vectors from {} …", dir.display());
-    let mut base = read_fvecs(&dir.join("sift_base.fvecs"))
-        .context("sift_base.fvecs")?;
+    let mut base = read_fvecs(&dir.join("sift_base.fvecs")).context("sift_base.fvecs")?;
     let dim = base.first().map(|v| v.len()).unwrap_or(128);
 
     if let Some(limit) = limit_base {
@@ -49,12 +48,11 @@ pub fn load(dir: &Path, limit_base: Option<usize>) -> anyhow::Result<Dataset> {
     }
 
     eprintln!("Loading query vectors …");
-    let queries = read_fvecs(&dir.join("sift_query.fvecs"))
-        .context("sift_query.fvecs")?;
+    let queries = read_fvecs(&dir.join("sift_query.fvecs")).context("sift_query.fvecs")?;
 
     eprintln!("Loading ground truth …");
-    let ground_truth = read_ivecs(&dir.join("sift_groundtruth.ivecs"))
-        .context("sift_groundtruth.ivecs")?;
+    let ground_truth =
+        read_ivecs(&dir.join("sift_groundtruth.ivecs")).context("sift_groundtruth.ivecs")?;
 
     eprintln!(
         "Dataset ready: {} base  |  {} queries  |  {} GT neighbors each",
@@ -63,12 +61,16 @@ pub fn load(dir: &Path, limit_base: Option<usize>) -> anyhow::Result<Dataset> {
         ground_truth.first().map(|v| v.len()).unwrap_or(0),
     );
 
-    Ok(Dataset { base, queries, ground_truth, dim })
+    Ok(Dataset {
+        base,
+        queries,
+        ground_truth,
+        dim,
+    })
 }
 
 fn read_fvecs(path: &Path) -> anyhow::Result<Vec<Vec<f32>>> {
-    let file = File::open(path)
-        .with_context(|| format!("open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut r = BufReader::with_capacity(4 * 1024 * 1024, file);
     let mut vecs = Vec::new();
 
@@ -91,8 +93,7 @@ fn read_fvecs(path: &Path) -> anyhow::Result<Vec<Vec<f32>>> {
 }
 
 fn read_ivecs(path: &Path) -> anyhow::Result<Vec<Vec<u32>>> {
-    let file = File::open(path)
-        .with_context(|| format!("open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut r = BufReader::with_capacity(4 * 1024 * 1024, file);
     let mut vecs = Vec::new();
 
