@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use ailake_catalog::{CatalogProvider, TableIdent};
+use ailake_catalog::{CatalogProvider, DataFileEntry, TableIdent};
 use ailake_core::{AilakeResult, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
+use ailake_index::HnswIndex;
 use ailake_store::Store;
 use ailake_vec::exact_distance;
 use bytes::Bytes;
@@ -145,6 +146,139 @@ fn parse_metric(s: &str) -> VectorMetric {
         "euclidean" => VectorMetric::Euclidean,
         "dotproduct" | "dot_product" | "dot" => VectorMetric::DotProduct,
         _ => VectorMetric::Cosine,
+    }
+}
+
+/// Pre-loaded search session: all HNSW indexes loaded into memory once.
+///
+/// Useful for benchmarks and servers that issue many queries against the same
+/// snapshot. Avoids re-loading and re-deserializing indexes on every call.
+pub struct SearchSession {
+    shards: Vec<LoadedShard>,
+    metric: VectorMetric,
+}
+
+struct LoadedShard {
+    entry: DataFileEntry,
+    index: HnswIndex,
+    /// F32 raw vectors, present only when the session was built with `load_raw`.
+    raw_vectors: Option<Vec<Vec<f32>>>,
+}
+
+impl SearchSession {
+    /// Load all indexes for the latest snapshot into memory.
+    ///
+    /// Pass `load_raw = true` when reranking will be used (`rerank_factor` is
+    /// `Some`); it reads the full parquet columns so exact distances are
+    /// available without extra I/O during `search_query`.
+    pub async fn load(
+        table: &TableIdent,
+        vector_column: &str,
+        dim: u32,
+        catalog: Arc<dyn CatalogProvider>,
+        store: Arc<dyn Store>,
+        load_raw: bool,
+    ) -> AilakeResult<Self> {
+        let all_files = catalog.list_files(table, None).await?;
+        let table_meta = catalog.load_table(table).await?;
+        let metric = parse_metric(
+            table_meta
+                .properties
+                .get("ailake.vector-metric")
+                .map(String::as_str)
+                .unwrap_or("cosine"),
+        );
+
+        let mut shards = Vec::with_capacity(all_files.len());
+        for entry in all_files {
+            let file_bytes: Bytes = store.get(&entry.path).await?;
+            let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
+            if !reader.is_ailake_file() {
+                continue;
+            }
+            let index = reader.load_index_for_column(vector_column)?;
+            let raw_vectors = if load_raw {
+                let (_, vecs) = reader.read_parquet()?;
+                Some(vecs)
+            } else {
+                None
+            };
+            shards.push(LoadedShard { entry, index, raw_vectors });
+        }
+
+        Ok(Self { shards, metric })
+    }
+
+    /// Number of loaded shards.
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
+
+    /// Search using pre-loaded indexes. No I/O — pure in-memory search.
+    pub fn search_query(&self, query: &[f32], config: &SearchConfig) -> Vec<SearchResult> {
+        let candidate_k = match config.rerank_factor {
+            Some(factor) => config.top_k * factor,
+            None => config.top_k,
+        };
+
+        let mut all_results: Vec<SearchResult> = Vec::new();
+
+        for shard in &self.shards {
+            // Geometric pruning per shard
+            if let Some(centroid) = ailake_catalog::decode_centroid(&shard.entry, self.metric) {
+                let dist = match self.metric {
+                    VectorMetric::Cosine => ailake_vec::cosine_distance(query, &centroid.values),
+                    VectorMetric::Euclidean => ailake_vec::euclidean_distance(query, &centroid.values),
+                    VectorMetric::DotProduct => -ailake_vec::dot_product(query, &centroid.values),
+                };
+                if dist - centroid.radius > config.pruning_threshold {
+                    continue;
+                }
+            }
+
+            let local_results = shard.index.search(query, candidate_k, config.ef_search);
+
+            if config.rerank_factor.is_some() {
+                if let Some(raw) = &shard.raw_vectors {
+                    for (row_id, _approx_dist) in local_results {
+                        let idx = row_id.as_u64() as usize;
+                        let exact_dist = raw
+                            .get(idx)
+                            .map(|v| exact_distance(self.metric, query, v))
+                            .unwrap_or(f32::INFINITY);
+                        all_results.push(SearchResult {
+                            row_id,
+                            distance: exact_dist,
+                            file_path: shard.entry.path.clone(),
+                        });
+                    }
+                } else {
+                    for (row_id, distance) in local_results {
+                        all_results.push(SearchResult {
+                            row_id,
+                            distance,
+                            file_path: shard.entry.path.clone(),
+                        });
+                    }
+                }
+            } else {
+                for (row_id, distance) in local_results {
+                    all_results.push(SearchResult {
+                        row_id,
+                        distance,
+                        file_path: shard.entry.path.clone(),
+                    });
+                }
+            }
+        }
+
+        all_results.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all_results.truncate(config.top_k);
+        all_results
     }
 }
 

@@ -1,0 +1,23 @@
+[package]
+name = "ailake-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Public benchmark: AI-Lake vs. LanceDB / Deep Lake / pgvector on SIFT-1M"
+
+[[bin]]
+name = "ailake-bench"
+path = "src/main.rs"
+
+[dependencies]
+ailake-catalog = { path = "../ailake-catalog" }
+ailake-core    = { path = "../ailake-core" }
+ailake-query   = { path = "../ailake-query" }
+ailake-store   = { path = "../ailake-store" }
+
+tokio        = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+tempfile     = { workspace = true }
+anyhow       = "1"
+clap         = { version = "4", features = ["derive"] }

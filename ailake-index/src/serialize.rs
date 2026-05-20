@@ -1,6 +1,3 @@
-// Serialize HnswIndex as (config, metric, dim, vectors) via bincode.
-// Phase 2: replace with hnsw_rs graph dump for faster load times.
-
 use ailake_core::{AilakeError, AilakeResult, RowId, VectorMetric};
 use serde::{Deserialize, Serialize};
 
@@ -13,8 +10,12 @@ struct HnswSnapshot {
     max_elements: usize,
     metric: u8,
     dim: u32,
-    // (row_id_u64, flat_f32_bytes)
     vectors: Vec<(u64, Vec<f32>)>,
+    // Graph structure (empty Vec = old format, triggers brute-force fallback)
+    neighbors: Vec<Vec<Vec<usize>>>,
+    node_levels: Vec<usize>,
+    entry_point: Option<usize>,
+    max_layer: usize,
 }
 
 fn metric_to_u8(m: VectorMetric) -> u8 {
@@ -44,11 +45,11 @@ impl HnswSerializer {
             max_elements: index.config.max_elements,
             metric: metric_to_u8(index.metric),
             dim: index.dim,
-            vectors: index
-                .vectors
-                .iter()
-                .map(|(id, v)| (id.as_u64(), v.clone()))
-                .collect(),
+            vectors: index.vectors.iter().map(|(id, v)| (id.as_u64(), v.clone())).collect(),
+            neighbors: index.neighbors.clone(),
+            node_levels: index.node_levels.clone(),
+            entry_point: index.entry_point,
+            max_layer: index.max_layer,
         };
         bincode::serialize(&snap).map_err(|e| AilakeError::Bincode(e.to_string()))
     }
@@ -62,16 +63,17 @@ impl HnswSerializer {
             ef_construction: snap.ef_construction,
             max_elements: snap.max_elements,
         };
-        let vectors: Vec<(RowId, Vec<f32>)> = snap
-            .vectors
-            .into_iter()
-            .map(|(id, v)| (RowId::new(id), v))
-            .collect();
+        let vectors: Vec<(RowId, Vec<f32>)> =
+            snap.vectors.into_iter().map(|(id, v)| (RowId::new(id), v)).collect();
         Ok(HnswIndex {
             config,
             metric,
             dim: snap.dim,
             vectors,
+            neighbors: snap.neighbors,
+            node_levels: snap.node_levels,
+            entry_point: snap.entry_point,
+            max_layer: snap.max_layer,
         })
     }
 }
@@ -93,5 +95,28 @@ mod tests {
         assert_eq!(idx2.dim(), 3);
         let r = idx2.search(&[1.0, 0.0, 0.0], 1, 50);
         assert_eq!(r[0].0, RowId::new(0));
+    }
+
+    #[test]
+    fn serialize_preserves_graph() {
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut b = HnswBuilder::new(8, VectorMetric::Euclidean, Default::default());
+        for i in 0..50u64 {
+            let v: Vec<f32> = (0..8).map(|_| rng.gen::<f32>()).collect();
+            b.insert(RowId::new(i), v);
+        }
+        let idx = b.build();
+        let query: Vec<f32> = (0..8).map(|_| rng.gen::<f32>()).collect();
+        let r1 = idx.search(&query, 5, 50);
+
+        let bytes = HnswSerializer::to_bytes(&idx).unwrap();
+        let idx2 = HnswSerializer::from_bytes(&bytes).unwrap();
+        let r2 = idx2.search(&query, 5, 50);
+
+        assert_eq!(r1.len(), r2.len());
+        for (a, b) in r1.iter().zip(r2.iter()) {
+            assert_eq!(a.0, b.0);
+        }
     }
 }

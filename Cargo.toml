@@ -11,6 +11,7 @@ members = [
     "ailake-query",
     "tests",
     "ailake-jni",
+    "ailake-bench",
     # Phase 4 bindings — excluded until PyO3/maturin env is configured
     # "ailake-py",
 ]
