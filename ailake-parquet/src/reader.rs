@@ -32,7 +32,7 @@ impl ParquetVectorReader {
         // concatenate_all() handles the multi-batch case transparently.
         let record_count = builder.metadata().file_metadata().num_rows() as usize;
         let batch_size = record_count.max(1);
-        let mut reader = builder
+        let reader = builder
             .with_batch_size(batch_size)
             .build()
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
