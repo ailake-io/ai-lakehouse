@@ -1,10 +1,10 @@
 use ailake_core::{AilakeError, AilakeResult, Centroid, VectorMetric};
-use ailake_index::{HnswIndex, MmapLoader};
+use ailake_index::{AnyIndex, HnswIndex, IvfPqSerializer, MmapLoader};
 use ailake_parquet::ParquetVectorReader;
 use arrow_array::RecordBatch;
 use bytes::Bytes;
 
-use crate::footer::{AilakeHeader, DistanceMetric, HEADER_SIZE};
+use crate::footer::{AilakeHeader, DistanceMetric, FLAG_INDEX_IVF_PQ, HEADER_SIZE};
 
 pub struct AilakeFileReader {
     bytes: Bytes,
@@ -127,6 +127,40 @@ impl AilakeFileReader {
             return Err(AilakeError::NotAnAilakeFile);
         }
         MmapLoader::from_bytes(&self.bytes[hnsw_start..hnsw_end])
+    }
+
+    /// Load primary index as `AnyIndex`, dispatching on header flags.
+    pub fn load_any_index(&self) -> AilakeResult<AnyIndex> {
+        self.load_any_index_for_column(&self.vector_column.clone())
+    }
+
+    /// Load index for a specific vector column as `AnyIndex`.
+    pub fn load_any_index_for_column(&self, column: &str) -> AilakeResult<AnyIndex> {
+        let ailk_start = self.ailk_offset_for_column(column)? as usize;
+
+        if ailk_start + HEADER_SIZE > self.bytes.len() {
+            return Err(AilakeError::NotAnAilakeFile);
+        }
+        let header_bytes: &[u8; HEADER_SIZE] = self.bytes[ailk_start..ailk_start + HEADER_SIZE]
+            .try_into()
+            .map_err(|_| AilakeError::NotAnAilakeFile)?;
+        let header = AilakeHeader::from_bytes(header_bytes)?;
+
+        let index_start = ailk_start + header.hnsw_offset as usize;
+        let index_end = index_start + header.hnsw_len as usize;
+
+        if index_end > self.bytes.len() {
+            return Err(AilakeError::NotAnAilakeFile);
+        }
+        let index_bytes = &self.bytes[index_start..index_end];
+
+        if header.flags & FLAG_INDEX_IVF_PQ != 0 {
+            let idx = IvfPqSerializer::from_bytes(index_bytes)?;
+            Ok(AnyIndex::IvfPq(idx))
+        } else {
+            let idx = MmapLoader::from_bytes(index_bytes)?;
+            Ok(AnyIndex::Hnsw(idx))
+        }
     }
 
     /// Read the Parquet section (tabular data + decoded embeddings).

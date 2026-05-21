@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
 use ailake_core::{AilakeResult, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
-use ailake_index::HnswIndex;
+use ailake_index::AnyIndex;
 use ailake_store::Store;
 use ailake_vec::exact_distance;
 use bytes::Bytes;
@@ -104,7 +104,7 @@ pub async fn search(
             continue;
         }
 
-        let index = reader.load_index_for_column(vector_column)?;
+        let index = reader.load_any_index_for_column(vector_column)?;
         let local_results = index.search(query, candidate_k, config.ef_search);
 
         if config.rerank_factor.is_some() {
@@ -180,7 +180,7 @@ pub struct SearchSession {
 struct LoadedShard {
     entry: DataFileEntry,
     /// None when the shard is still being indexed (IndexStatus::Indexing).
-    index: Option<HnswIndex>,
+    index: Option<AnyIndex>,
     /// Raw F32 vectors: always present for Indexing shards (flat scan), optionally
     /// present for Ready shards when `load_raw = true` (reranking).
     raw_vectors: Option<Vec<Vec<f32>>>,
@@ -224,11 +224,8 @@ impl SearchSession {
                     raw_vectors: Some(raw_vecs),
                 });
             } else if reader.is_ailake_file() {
-                let mut index = reader.load_index_for_column(vector_column)?;
+                let mut index = reader.load_any_index_for_column(vector_column)?;
                 let raw_vectors = if load_raw {
-                    // F16 search + F32 rerank: use half-precision for HNSW distances
-                    // (halves memory bandwidth per distance call), then rerank top
-                    // candidates with exact F32 from raw_vectors.
                     index.quantize_to_f16();
                     let (_, vecs) = reader.read_parquet()?;
                     Some(vecs)
@@ -281,7 +278,7 @@ impl SearchSession {
                 }
 
                 if let Some(index) = &shard.index {
-                    // Ready shard: HNSW search.
+                    // Ready shard: HNSW or IVF-PQ search (dispatched by AnyIndex).
                     let local_results = index.search(query, candidate_k, config.ef_search);
                     if config.rerank_factor.is_some() {
                         if let Some(raw) = &shard.raw_vectors {

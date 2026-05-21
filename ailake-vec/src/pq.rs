@@ -2,8 +2,9 @@
 // At dim=1536, M=48: 6144 bytes → 48 bytes per vector (128x reduction, ~93-95% recall@10).
 
 use ailake_core::AilakeError;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PQCodebook {
     /// Number of sub-vectors (M)
     pub num_subvectors: usize,
@@ -197,6 +198,13 @@ fn nearest_centroid(point: &[f32], centroids: &[Vec<f32>]) -> usize {
 
 fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
+}
+
+/// Train k-means centroids on `vectors`. Returns `k` centroids of same dimensionality.
+/// Exposed for IVF coarse quantizer training.
+pub fn kmeans_centroids(vectors: &[Vec<f32>], k: usize, max_iter: usize) -> Vec<Vec<f32>> {
+    let k_eff = k.min(vectors.len());
+    kmeans(vectors, k_eff, max_iter)
 }
 
 #[cfg(test)]

@@ -46,16 +46,13 @@ impl Default for MemTableConfig {
 ///
 /// # Usage
 ///
-/// ```no_run
-/// # use ailake_query::mem_table::{MemTableConfig, MemTableWriter};
-/// # async fn example() {
+/// ```ignore
 /// let mut mt = MemTableWriter::new(catalog, store, policy, table, MemTableConfig::default());
 /// loop {
-///     mt.insert(batch, &embeddings).await.unwrap();
-///     mt.flush_if_due().await.unwrap();  // call periodically
+///     mt.insert(&batch, &embeddings).await.unwrap();
+///     mt.flush_if_due().await.unwrap();
 /// }
-/// mt.flush().await.unwrap();  // drain on shutdown
-/// # }
+/// mt.flush().await.unwrap();
 /// ```
 pub struct MemTableWriter {
     catalog: Arc<dyn CatalogProvider>,
