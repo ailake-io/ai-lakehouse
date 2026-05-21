@@ -10,6 +10,7 @@ parquet      = { workspace = true }
 arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
+arrow-buffer = { workspace = true }
 bytes        = { workspace = true }
 half         = { workspace = true }
 thiserror    = { workspace = true }
