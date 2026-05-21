@@ -5,7 +5,7 @@
 //! must then fall back to the CPU path.
 
 #[cfg(feature = "gpu")]
-pub use gpu_impl::try_gpu_search;
+pub use gpu_impl::{try_gpu_kmeans, try_gpu_search};
 
 #[cfg(feature = "gpu")]
 mod gpu_impl {
@@ -82,5 +82,90 @@ mod gpu_impl {
     fn normalize_rows_2d(t: &Tensor) -> Option<Tensor> {
         let norms = t.sqr().ok()?.sum_keepdim(1).ok()?.sqrt().ok()?;
         t.broadcast_div(&norms).ok()
+    }
+
+    /// GPU k-means via candle matmul. Returns `None` when no CUDA device is found.
+    ///
+    /// Distance computation stays on GPU (the bottleneck); centroid update runs on
+    /// CPU to avoid complex scatter ops. Transfers per iteration: n×4 bytes (assignments)
+    /// + k×dim×4 bytes (new centroids) — negligible vs the n×k×dim matmul cost.
+    pub fn try_gpu_kmeans(
+        vectors: &[Vec<f32>],
+        k: usize,
+        max_iter: usize,
+    ) -> Option<Vec<Vec<f32>>> {
+        let n = vectors.len();
+        if n == 0 {
+            return Some(vec![]);
+        }
+        let dim = vectors[0].len();
+        let k = k.min(n);
+
+        let dev = match Device::cuda_if_available(0) {
+            Ok(d) if d.is_cuda() => d,
+            _ => return None,
+        };
+
+        // Flatten + upload all vectors to GPU once
+        let flat: Vec<f32> = vectors.iter().flat_map(|v| v.iter().copied()).collect();
+        let x = Tensor::from_slice(&flat, (n, dim), &dev).ok()?;
+
+        // Init centroids via evenly-spaced sampling (deterministic)
+        let step = n / k;
+        let mut centroids_flat: Vec<f32> = (0..k)
+            .flat_map(|i| vectors[(i * step) % n].iter().copied())
+            .collect();
+        let mut centroids = Tensor::from_slice(&centroids_flat, (k, dim), &dev).ok()?;
+
+        // ||x||^2 — constant across iterations
+        let x_sq = x.sqr().ok()?.sum_keepdim(1).ok()?; // [n, 1]
+
+        let mut prev_asgn: Vec<u32> = vec![];
+
+        for _ in 0..max_iter {
+            // ||x - c||^2 = ||x||^2 + ||c||^2 - 2·x·cᵀ  (all on GPU)
+            let c_sq = centroids.sqr().ok()?.sum_keepdim(1).ok()?; // [k, 1]
+            let cross = x.matmul(&centroids.t().ok()?).ok()?; // [n, k]
+            let cross2 = cross.affine(2.0, 0.0).ok()?;
+            let base = x_sq.broadcast_add(&c_sq.t().ok()?).ok()?; // [n, k]
+            let dists = base.sub(&cross2).ok()?; // [n, k]
+
+            // Argmin per row → [n] u32 (small D→H transfer)
+            let asgn: Vec<u32> = dists.argmin(candle_core::D::Minus1).ok()?.to_vec1().ok()?;
+
+            if asgn == prev_asgn {
+                break;
+            }
+
+            // Centroid update on CPU
+            let mut new_flat = vec![0.0f32; k * dim];
+            let mut counts = vec![0usize; k];
+            for (i, &ci) in asgn.iter().enumerate() {
+                let ci = ci as usize;
+                for (d, &v) in vectors[i].iter().enumerate() {
+                    new_flat[ci * dim + d] += v;
+                }
+                counts[ci] += 1;
+            }
+            for j in 0..k {
+                if counts[j] > 0 {
+                    let inv = 1.0 / counts[j] as f32;
+                    for d in 0..dim {
+                        new_flat[j * dim + d] *= inv;
+                    }
+                } else {
+                    // Empty cluster: keep previous centroid
+                    new_flat[j * dim..(j + 1) * dim]
+                        .copy_from_slice(&centroids_flat[j * dim..(j + 1) * dim]);
+                }
+            }
+
+            // Upload new centroids to GPU (small H→D transfer)
+            centroids = Tensor::from_slice(&new_flat, (k, dim), &dev).ok()?;
+            centroids_flat = new_flat;
+            prev_asgn = asgn;
+        }
+
+        Some(centroids_flat.chunks(dim).map(|c| c.to_vec()).collect())
     }
 }

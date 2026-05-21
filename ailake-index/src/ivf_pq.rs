@@ -14,6 +14,16 @@ use serde::{Deserialize, Serialize};
 use ailake_core::{AilakeError, AilakeResult, RowId, VectorMetric};
 use ailake_vec::{kmeans_centroids, PQCodebook};
 
+/// K-means dispatch: GPU when `gpu` feature is enabled and a CUDA device is found,
+/// CPU fallback otherwise.
+fn kmeans_dispatch(vecs: &[Vec<f32>], k: usize, max_iter: usize) -> Vec<Vec<f32>> {
+    #[cfg(feature = "gpu")]
+    if let Some(result) = crate::gpu::try_gpu_kmeans(vecs, k, max_iter) {
+        return result;
+    }
+    kmeans_centroids(vecs, k, max_iter)
+}
+
 /// Configuration for IVF-PQ index construction and search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IvfPqConfig {
@@ -96,8 +106,8 @@ impl IvfPqIndex {
         let nprobe = config.nprobe.min(nlist);
         let pq_m = find_valid_pq_m(config.pq_m, dim);
 
-        // Train coarse centroids via k-means on all vectors
-        let coarse_centroids = kmeans_centroids(vecs, nlist, config.max_iter);
+        // Train coarse centroids + PQ codebook, using GPU k-means when available.
+        let coarse_centroids = kmeans_dispatch(vecs, nlist, config.max_iter);
 
         // Assign each vector to its nearest coarse centroid
         let assignments: Vec<usize> = vecs
@@ -106,7 +116,7 @@ impl IvfPqIndex {
             .collect();
 
         // Train global PQ on all vectors
-        let pq = PQCodebook::train(vecs, pq_m, config.pq_k.min(256), config.max_iter)
+        let pq = PQCodebook::train_with_kmeans(vecs, pq_m, config.pq_k.min(256), config.max_iter, kmeans_dispatch)
             .map_err(|e| AilakeError::Catalog(format!("PQ training failed: {e}")))?;
 
         // Build inverted lists

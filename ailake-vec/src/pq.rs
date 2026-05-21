@@ -24,6 +24,25 @@ impl PQCodebook {
         num_centroids: usize,
         max_iter: usize,
     ) -> Result<Self, AilakeError> {
+        Self::train_with_kmeans(vectors, num_subvectors, num_centroids, max_iter, |vs, k, it| {
+            kmeans(vs, k, it)
+        })
+    }
+
+    /// Train PQ codebook with a custom k-means backend (e.g. GPU-accelerated).
+    ///
+    /// `kmeans_fn(vecs, k, max_iter)` must return exactly `k` centroids of the
+    /// same dimensionality as `vecs`.  The built-in CPU path passes `kmeans`.
+    pub fn train_with_kmeans<F>(
+        vectors: &[Vec<f32>],
+        num_subvectors: usize,
+        num_centroids: usize,
+        max_iter: usize,
+        kmeans_fn: F,
+    ) -> Result<Self, AilakeError>
+    where
+        F: Fn(&[Vec<f32>], usize, usize) -> Vec<Vec<f32>>,
+    {
         if vectors.is_empty() {
             return Err(AilakeError::Catalog(
                 "PQ training requires at least 1 vector".into(),
@@ -43,7 +62,7 @@ impl PQCodebook {
             let start = m * sub_dim;
             let end = start + sub_dim;
             let sub_vecs: Vec<Vec<f32>> = vectors.iter().map(|v| v[start..end].to_vec()).collect();
-            let sub_centroids = kmeans(&sub_vecs, n_train, max_iter);
+            let sub_centroids = kmeans_fn(&sub_vecs, n_train, max_iter);
             centroids.push(sub_centroids);
         }
 
