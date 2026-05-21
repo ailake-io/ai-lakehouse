@@ -114,7 +114,7 @@ pub fn print_comparison(a: &BenchResult, b: &BenchResult, top_k: usize) {
     println!();
     println!("Notes:");
     println!("  - Same hardware, same 10k queries, same ground truth");
-    println!("  - AI-Lake: 10 shards, HNSW built during write, indexes pre-loaded");
+    println!("  - AI-Lake: 10 shards, HNSW built async after write (deferred), indexes pre-loaded");
     println!("  - LanceDB: single table, IvfHnswSq, index built separately");
     println!("  - AI-Lake QPS = sequential; LanceDB QPS = concurrent (see --lancedb-concurrency)");
     println!();

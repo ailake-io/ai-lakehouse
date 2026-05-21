@@ -206,6 +206,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
+                index_status: ailake_catalog::IndexStatus::Ready,
             })
             .collect();
         assert!(planner.plan(&files).is_empty());
@@ -229,6 +230,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
+                index_status: ailake_catalog::IndexStatus::Ready,
             },
             DataFileEntry {
                 path: "large.parquet".into(),
@@ -241,6 +243,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
+                index_status: ailake_catalog::IndexStatus::Ready,
             },
             DataFileEntry {
                 path: "also-small.parquet".into(),
@@ -253,6 +256,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
+                index_status: ailake_catalog::IndexStatus::Ready,
             },
         ];
         let selected = planner.plan(&files);
@@ -317,6 +321,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
+                index_status: ailake_catalog::IndexStatus::Ready,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -329,6 +334,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
+                index_status: ailake_catalog::IndexStatus::Ready,
             },
         ];
 

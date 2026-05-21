@@ -9,6 +9,7 @@ ailake-vec   = { path = "../ailake-vec" }
 parquet      = { workspace = true }
 arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
+arrow-select = { workspace = true }
 bytes        = { workspace = true }
 half         = { workspace = true }
 thiserror    = { workspace = true }

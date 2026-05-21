@@ -21,18 +21,37 @@ impl ParquetVectorReader {
     }
 
     /// Read tabular data and decode the vector column back to F32.
+    ///
+    /// Reads ALL row groups — uses a large batch size so typical single-row-group
+    /// files are returned in one pass, and concatenates multiple batches otherwise.
     pub fn read_all(&self) -> AilakeResult<(RecordBatch, Vec<Vec<f32>>)> {
         let builder = ParquetRecordBatchReaderBuilder::try_new(self.bytes.clone())
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
+
+        // Use a large batch size to avoid splitting single-row-group files across batches.
+        // concatenate_all() handles the multi-batch case transparently.
+        let record_count = builder.metadata().file_metadata().num_rows() as usize;
+        let batch_size = record_count.max(1);
         let mut reader = builder
+            .with_batch_size(batch_size)
             .build()
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
 
-        // Phase 1: expect single row group / single batch
-        let batch = reader
-            .next()
-            .ok_or_else(|| AilakeError::Parquet("no batches in Parquet file".to_string()))?
+        // Collect all batches (usually just one, but handle multi-row-group files too).
+        let batches: Vec<RecordBatch> = reader
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
+
+        if batches.is_empty() {
+            return Err(AilakeError::Parquet("no batches in Parquet file".to_string()));
+        }
+
+        let batch = if batches.len() == 1 {
+            batches.remove(0)
+        } else {
+            arrow_select::concat::concat_batches(&batches[0].schema(), &batches)
+                .map_err(|e| AilakeError::Parquet(e.to_string()))?
+        };
 
         // Find and extract vector column
         let vec_idx = batch.schema().index_of(&self.vector_column).map_err(|_| {

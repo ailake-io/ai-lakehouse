@@ -2,12 +2,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use ailake_catalog::{
-    encode_centroid_b64, make_data_file_entry, make_multi_column_data_file_entry, new_snapshot_id,
-    CatalogProvider, DataFileEntry, ExtraVectorIndex, NewSnapshot, SnapshotId, SnapshotOperation,
-    TableIdent, TableProperties, VectorIndexInfo,
+    encode_centroid_b64, make_data_file_entry, make_data_file_entry_indexing,
+    make_multi_column_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,
+    ExtraVectorIndex, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation, TableIdent,
+    TableProperties, VectorIndexInfo,
 };
 use ailake_core::{AilakeResult, VectorStoragePolicy};
-use ailake_file::{AilakeFileWriter, VectorColumnBatch};
+use ailake_file::{AilakeFileReader, AilakeFileWriter, VectorColumnBatch};
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
 use arrow_array::RecordBatch;
@@ -50,6 +51,56 @@ impl TableWriter {
     pub fn with_parent_snapshot(mut self, id: SnapshotId) -> Self {
         self.parent_snapshot_id = Some(id);
         self
+    }
+
+    /// Write batch as Parquet-only immediately, build HNSW in background.
+    ///
+    /// Returns after the Parquet file is persisted (~LanceDB write speed).
+    /// A tokio task runs concurrently to build the HNSW index, rewrite the
+    /// file with the AILK section, and update the catalog entry.
+    ///
+    /// During the build window, `SearchSession` serves this shard via flat scan
+    /// (brute-force, exact) instead of HNSW. The transition is automatic once
+    /// the background task commits the updated manifest entry.
+    pub async fn write_batch_deferred(
+        &mut self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+    ) -> AilakeResult<()> {
+        let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
+        let file_path = format!("data/part-{:05}.parquet", part_num);
+
+        // Fast path: persist Parquet without HNSW.
+        let file_writer = AilakeFileWriter::new(self.policy.clone());
+        let parquet_bytes = file_writer.write_parquet_only(batch, embeddings)?;
+        let file_size = parquet_bytes.len() as u64;
+        self.store.put(&file_path, parquet_bytes).await?;
+
+        // Centroid needed immediately for geometric pruning during the build window.
+        let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
+        let entry = make_data_file_entry_indexing(
+            &file_path,
+            embeddings.len() as u64,
+            file_size,
+            &centroid,
+            &self.policy.column_name,
+            self.policy.dim,
+        );
+        self.pending_files.push(entry);
+
+        // Spawn background HNSW build (fire-and-forget; errors are logged).
+        let store = self.store.clone();
+        let catalog = self.catalog.clone();
+        let policy = self.policy.clone();
+        let table = self.table.clone();
+        let fp = file_path.clone();
+        tokio::spawn(async move {
+            if let Err(e) = build_and_patch_index(store, catalog, policy, table, fp).await {
+                eprintln!("[ailake] deferred HNSW build failed: {e}");
+            }
+        });
+
+        Ok(())
     }
 
     /// Write a batch to a new AI-Lake file and stage it for commit.
@@ -206,7 +257,7 @@ impl TableWriter {
         self.catalog.commit_snapshot(&self.table, snapshot).await
     }
 
-    /// Create a table if it doesn't exist, then return a TableWriter for it.
+    /// Create a table if it doesn't exist, then return a writer for it.
     pub async fn create_or_open(
         catalog: Arc<dyn CatalogProvider>,
         store: Arc<dyn Store>,
@@ -227,4 +278,94 @@ impl TableWriter {
         }
         Ok(Self::new(catalog, store, policy, table))
     }
+}
+
+/// Background task: reads a Parquet-only shard, builds full AILK file, patches catalog.
+async fn build_and_patch_index(
+    store: Arc<dyn Store>,
+    catalog: Arc<dyn CatalogProvider>,
+    policy: VectorStoragePolicy,
+    table: TableIdent,
+    file_path: String,
+) -> AilakeResult<()> {
+    // Read the Parquet-only bytes already stored.
+    let parquet_bytes = store.get(&file_path).await?;
+    let reader = AilakeFileReader::new(parquet_bytes, &policy.column_name, policy.dim);
+    let (batch, embeddings) = reader.read_parquet()?;
+
+    // Build the full AILK file (Parquet + HNSW).
+    let file_writer = AilakeFileWriter::new(policy.clone());
+    let full_bytes = file_writer.write(&batch, &embeddings)?;
+
+    // Extract HNSW offsets from the newly written file.
+    let full_reader = AilakeFileReader::new(full_bytes.clone(), &policy.column_name, policy.dim);
+    let header = full_reader.read_header()?;
+    let ailk_start = full_reader.ailk_offset()?;
+    let hnsw_abs_offset = ailk_start + header.hnsw_offset;
+    let hnsw_len = header.hnsw_len;
+
+    // Overwrite the Parquet-only file with the full AILK version.
+    store.put(&file_path, full_bytes).await?;
+
+    // Wait for the initial writer commit to appear (HNSW builds can finish before
+    // the main write loop calls commit_snapshot, so the catalog has no snapshot yet).
+    for _ in 0..120u32 {
+        match catalog.load_table(&table).await {
+            Ok(meta) if meta.current_snapshot_id.is_some() => break,
+            _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        }
+    }
+
+    // Update the catalog with CAS-like retry to handle concurrent background tasks.
+    // Multiple tasks can race on commit_snapshot(Replace): the last writer wins and
+    // may overwrite a sibling task's Ready status. Retry until we confirm our file
+    // is marked Ready in the current snapshot.
+    for attempt in 0..50u32 {
+        let table_meta = catalog.load_table(&table).await?;
+        let parent_snapshot_id = table_meta.current_snapshot_id;
+        let mut files = catalog.list_files(&table, None).await?;
+
+        // Already marked Ready by a previous successful attempt.
+        if files
+            .iter()
+            .any(|f| f.path == file_path && f.index_status == IndexStatus::Ready)
+        {
+            break;
+        }
+
+        for f in &mut files {
+            if f.path == file_path {
+                f.hnsw_offset = Some(hnsw_abs_offset);
+                f.hnsw_len = Some(hnsw_len);
+                f.index_status = IndexStatus::Ready;
+                break;
+            }
+        }
+        catalog
+            .commit_snapshot(
+                &table,
+                NewSnapshot {
+                    snapshot_id: new_snapshot_id(),
+                    parent_snapshot_id,
+                    files,
+                    operation: SnapshotOperation::Replace,
+                },
+            )
+            .await?;
+
+        // Brief yield so sibling tasks can commit, then verify our change survived.
+        tokio::time::sleep(std::time::Duration::from_millis(10 + attempt as u64 * 5)).await;
+
+        let verify = catalog.list_files(&table, None).await?;
+        if verify
+            .iter()
+            .any(|f| f.path == file_path && f.index_status == IndexStatus::Ready)
+        {
+            break;
+        }
+        // Another task overwrote us — retry.
+    }
+
+    eprintln!("[ailake] deferred HNSW built for {file_path} (offset={hnsw_abs_offset}, len={hnsw_len})");
+    Ok(())
 }

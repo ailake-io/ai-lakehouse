@@ -3,6 +3,17 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Whether a shard's HNSW index has been built.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexStatus {
+    /// HNSW index embedded in the file — normal HNSW search applies.
+    #[default]
+    Ready,
+    /// Parquet written; HNSW build running in background — flat scan applies.
+    Indexing,
+}
+
 /// Fully-qualified table identifier: namespace.table_name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TableIdent {
@@ -49,6 +60,9 @@ pub struct DataFileEntry {
     /// Additional vector columns beyond the primary (empty for single-column tables).
     #[serde(default)]
     pub extra_vector_indexes: Vec<ExtraVectorIndex>,
+    /// Index build status. Defaults to Ready for backward compatibility with old manifests.
+    #[serde(default)]
+    pub index_status: IndexStatus,
 }
 
 /// Iceberg-compatible table metadata read from the catalog.
@@ -157,6 +171,41 @@ pub fn make_multi_column_data_file_entry(
         vector_column: Some(primary_index.column.to_string()),
         vector_dim: Some(primary_index.dim),
         extra_vector_indexes: extra.to_vec(),
+        index_status: IndexStatus::Ready,
+    }
+}
+
+/// Build a DataFileEntry for a file whose HNSW is still being built asynchronously.
+///
+/// `hnsw_offset` and `hnsw_len` are `None`; `index_status` is `Indexing`.
+/// The centroid is included so geometric pruning still works during the build window.
+pub fn make_data_file_entry_indexing(
+    path: &str,
+    record_count: u64,
+    file_size_bytes: u64,
+    centroid: &Centroid,
+    column: &str,
+    dim: u32,
+) -> DataFileEntry {
+    use base64::Engine;
+    let centroid_bytes: Vec<u8> = centroid
+        .values
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let centroid_b64 = base64::engine::general_purpose::STANDARD.encode(&centroid_bytes);
+    DataFileEntry {
+        path: path.to_string(),
+        record_count,
+        file_size_bytes,
+        centroid_b64: Some(centroid_b64),
+        radius: Some(centroid.radius),
+        hnsw_offset: None,
+        hnsw_len: None,
+        vector_column: Some(column.to_string()),
+        vector_dim: Some(dim),
+        extra_vector_indexes: vec![],
+        index_status: IndexStatus::Indexing,
     }
 }
 

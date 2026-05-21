@@ -206,6 +206,7 @@ mod tests {
                 vector_column: Some("embedding".to_string()),
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
             }],
             operation: crate::provider::SnapshotOperation::Append,
         };

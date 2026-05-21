@@ -26,7 +26,7 @@ use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use clap::Parser;
 
-use ailake_catalog::{HadoopCatalog, TableIdent};
+use ailake_catalog::{CatalogProvider, HadoopCatalog, IndexStatus, TableIdent};
 use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
 use ailake_query::{SearchConfig, SearchSession, TableWriter};
 use ailake_store::{LocalStore, Store};
@@ -197,7 +197,7 @@ async fn run_ailake(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<BenchR
         let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(ids))])?;
 
         writer
-            .write_batch(&batch, shard_vecs)
+            .write_batch_deferred(&batch, shard_vecs)
             .await
             .with_context(|| format!("write shard {shard_idx}"))?;
 
@@ -210,10 +210,31 @@ async fn run_ailake(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<BenchR
     let write_vec_per_sec = total_base as f64 / write_elapsed.as_secs_f64();
 
     eprintln!(
-        "  committed snapshot {}  ({:.1}s  {:.0} vec/s)",
+        "  committed snapshot {}  ({:.1}s  {:.0} vec/s) — Parquet-only, HNSW building …",
         snapshot_id,
         write_elapsed.as_secs_f64(),
         write_vec_per_sec,
+    );
+
+    // ── Wait for background HNSW builds ──────────────────────────────────────
+    eprintln!("  Waiting for {num_shards} background HNSW build(s) …");
+    let index_start = Instant::now();
+    loop {
+        let files = catalog.list_files(&table, None).await.context("list files")?;
+        let ready = files
+            .iter()
+            .filter(|f| f.index_status == IndexStatus::Ready)
+            .count();
+        if ready >= num_shards {
+            break;
+        }
+        eprint!("\r  Indexing: {ready}/{num_shards} shards ready …");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let index_build_elapsed = index_start.elapsed();
+    eprintln!(
+        "\r  All {num_shards} shards indexed in {:.1}s                    ",
+        index_build_elapsed.as_secs_f64()
     );
 
     // ── Load indexes ──────────────────────────────────────────────────────────
@@ -276,10 +297,10 @@ async fn run_ailake(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<BenchR
     let lat = metrics::LatencyStats::compute(&mut latencies_us, search_wall_ns);
 
     Ok(BenchResult {
-        engine: format!("AI-Lake 0.2 ({num_shards} shards, HNSW+F16)"),
+        engine: format!("AI-Lake 0.2 ({num_shards} shards, deferred HNSW+F16)"),
         write_secs: write_elapsed.as_secs_f64(),
         write_vec_per_sec,
-        index_build_secs: 0.0,
+        index_build_secs: index_build_elapsed.as_secs_f64(),
         load_secs: load_elapsed.as_secs_f64(),
         recall: recall_sum / num_queries as f64,
         qps: lat.qps,

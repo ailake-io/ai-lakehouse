@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ailake_catalog::{CatalogProvider, DataFileEntry, TableIdent};
+use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
 use ailake_core::{AilakeResult, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
 use ailake_index::HnswIndex;
@@ -141,6 +141,23 @@ pub async fn search(
     Ok(all_results)
 }
 
+/// Brute-force top-k search over raw vectors. Used for Indexing shards.
+fn flat_search(
+    raw: &[Vec<f32>],
+    query: &[f32],
+    top_k: usize,
+    metric: VectorMetric,
+) -> Vec<(RowId, f32)> {
+    let mut results: Vec<(RowId, f32)> = raw
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (RowId::new(i as u64), exact_distance(metric, query, v)))
+        .collect();
+    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(top_k);
+    results
+}
+
 fn parse_metric(s: &str) -> VectorMetric {
     match s {
         "euclidean" => VectorMetric::Euclidean,
@@ -160,8 +177,10 @@ pub struct SearchSession {
 
 struct LoadedShard {
     entry: DataFileEntry,
-    index: HnswIndex,
-    /// F32 raw vectors, present only when the session was built with `load_raw`.
+    /// None when the shard is still being indexed (IndexStatus::Indexing).
+    index: Option<HnswIndex>,
+    /// Raw F32 vectors: always present for Indexing shards (flat scan), optionally
+    /// present for Ready shards when `load_raw = true` (reranking).
     raw_vectors: Option<Vec<Vec<f32>>>,
 }
 
@@ -193,21 +212,29 @@ impl SearchSession {
         for entry in all_files {
             let file_bytes: Bytes = store.get(&entry.path).await?;
             let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
-            if !reader.is_ailake_file() {
-                continue;
+
+            if entry.index_status == IndexStatus::Indexing {
+                // HNSW not yet built — load raw vectors for flat scan.
+                let (_, raw_vecs) = reader.read_parquet()?;
+                shards.push(LoadedShard {
+                    entry,
+                    index: None,
+                    raw_vectors: Some(raw_vecs),
+                });
+            } else if reader.is_ailake_file() {
+                let index = reader.load_index_for_column(vector_column)?;
+                let raw_vectors = if load_raw {
+                    let (_, vecs) = reader.read_parquet()?;
+                    Some(vecs)
+                } else {
+                    None
+                };
+                shards.push(LoadedShard {
+                    entry,
+                    index: Some(index),
+                    raw_vectors,
+                });
             }
-            let index = reader.load_index_for_column(vector_column)?;
-            let raw_vectors = if load_raw {
-                let (_, vecs) = reader.read_parquet()?;
-                Some(vecs)
-            } else {
-                None
-            };
-            shards.push(LoadedShard {
-                entry,
-                index,
-                raw_vectors,
-            });
         }
 
         Ok(Self { shards, metric })
@@ -228,7 +255,7 @@ impl SearchSession {
         let mut all_results: Vec<SearchResult> = Vec::new();
 
         for shard in &self.shards {
-            // Geometric pruning per shard
+            // Geometric pruning per shard (works for both Ready and Indexing).
             if let Some(centroid) = ailake_catalog::decode_centroid(&shard.entry, self.metric) {
                 let dist = match self.metric {
                     VectorMetric::Cosine => ailake_vec::cosine_distance(query, &centroid.values),
@@ -242,21 +269,31 @@ impl SearchSession {
                 }
             }
 
-            let local_results = shard.index.search(query, candidate_k, config.ef_search);
-
-            if config.rerank_factor.is_some() {
-                if let Some(raw) = &shard.raw_vectors {
-                    for (row_id, _approx_dist) in local_results {
-                        let idx = row_id.as_u64() as usize;
-                        let exact_dist = raw
-                            .get(idx)
-                            .map(|v| exact_distance(self.metric, query, v))
-                            .unwrap_or(f32::INFINITY);
-                        all_results.push(SearchResult {
-                            row_id,
-                            distance: exact_dist,
-                            file_path: shard.entry.path.clone(),
-                        });
+            if let Some(index) = &shard.index {
+                // Ready shard: HNSW search.
+                let local_results = index.search(query, candidate_k, config.ef_search);
+                if config.rerank_factor.is_some() {
+                    if let Some(raw) = &shard.raw_vectors {
+                        for (row_id, _approx_dist) in local_results {
+                            let idx = row_id.as_u64() as usize;
+                            let exact_dist = raw
+                                .get(idx)
+                                .map(|v| exact_distance(self.metric, query, v))
+                                .unwrap_or(f32::INFINITY);
+                            all_results.push(SearchResult {
+                                row_id,
+                                distance: exact_dist,
+                                file_path: shard.entry.path.clone(),
+                            });
+                        }
+                    } else {
+                        for (row_id, distance) in local_results {
+                            all_results.push(SearchResult {
+                                row_id,
+                                distance,
+                                file_path: shard.entry.path.clone(),
+                            });
+                        }
                     }
                 } else {
                     for (row_id, distance) in local_results {
@@ -267,8 +304,9 @@ impl SearchSession {
                         });
                     }
                 }
-            } else {
-                for (row_id, distance) in local_results {
+            } else if let Some(raw) = &shard.raw_vectors {
+                // Indexing shard: exact flat scan (HNSW not yet ready).
+                for (row_id, distance) in flat_search(raw, query, candidate_k, self.metric) {
                     all_results.push(SearchResult {
                         row_id,
                         distance,

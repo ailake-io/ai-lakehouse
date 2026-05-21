@@ -34,6 +34,23 @@ impl AilakeFileWriter {
         self
     }
 
+    /// Write RecordBatch + embeddings as plain Parquet, with no AILK section.
+    ///
+    /// Used by `TableWriter::write_batch_deferred()` to persist data immediately
+    /// while the HNSW index is built asynchronously in the background.
+    /// The resulting file is a valid Parquet readable by any standard reader,
+    /// but `AilakeFileReader::is_ailake_file()` returns false until the HNSW
+    /// section is appended by the background indexing task.
+    pub fn write_parquet_only(
+        &self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+    ) -> AilakeResult<Bytes> {
+        let parquet_writer = ParquetVectorWriter::new(self.policy.clone());
+        let (bytes, _) = parquet_writer.write_batch(batch, embeddings)?;
+        Ok(bytes)
+    }
+
     /// Write RecordBatch + embeddings into a single AI-Lake file.
     ///
     /// Layout:
