@@ -361,7 +361,69 @@ cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --limit 10000
 cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --top-k 10 --ef 100
 ```
 
-### 8B. Microbenchmarks criterion
+### 8B. Benchmark LanceDB (comparação)
+
+```bash
+cargo run --release -p ailake-bench --features lancedb-bench -- \
+    --dataset-dir data/sift1m --engine lancedb
+```
+
+Para comparar AI-Lake vs LanceDB side-by-side:
+
+```bash
+cargo run --release -p ailake-bench --features lancedb-bench -- \
+    --dataset-dir data/sift1m --engine all
+```
+
+### 8C. Benchmark pgvector (comparação)
+
+Requer PostgreSQL com a extensão `pgvector ≥ 0.5.0` (HNSW support).
+
+**Subir PostgreSQL + pgvector via Docker:**
+```bash
+docker run -d --name pg-ailake \
+  -e POSTGRES_PASSWORD=postgres \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
+```
+
+**Rodar benchmark pgvector sozinho:**
+```bash
+cargo run --release -p ailake-bench --features pgvector-bench -- \
+    --dataset-dir data/sift1m \
+    --engine pgvector \
+    --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
+```
+
+**Comparação completa AI-Lake + LanceDB + pgvector:**
+```bash
+cargo run --release -p ailake-bench --features lancedb-bench,pgvector-bench -- \
+    --dataset-dir data/sift1m \
+    --engine all \
+    --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
+```
+
+Parâmetros pgvector opcionais:
+```bash
+--pgvector-m 16              # HNSW m (default: 16)
+--pgvector-ef-construction 64 # ef_construction (default: 64)
+--pgvector-ef-search 50      # ef_search at query time (default: 50)
+```
+
+### 8D. Benchmark Deep Lake (Python, opcional)
+
+Deep Lake free tier suporta apenas busca exata (brute-force). O script abaixo mede throughput de escrita e busca exata em um subconjunto:
+
+```bash
+pip install deeplake numpy
+python3 ailake-bench/scripts/deeplake_bench.py \
+    --dataset-dir data/sift1m \
+    --limit 10000
+```
+
+> **Nota**: ANN aproximado (Deep Memory) requer plano pago da Activeloop. A comparação de recall com AI-Lake/pgvector/LanceDB não é direta.
+
+### 8E. Microbenchmarks criterion
 
 ```bash
 # HNSW search benchmark (ailake-index)
@@ -373,7 +435,7 @@ cargo bench -p ailake-file
 
 ---
 
-## 8C. GPU search — build e verificação
+## 8F. GPU search — build e verificação
 
 ### Pré-requisitos
 

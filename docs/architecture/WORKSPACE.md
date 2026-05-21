@@ -286,7 +286,7 @@ debug       = true
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
 | **Phase 3** | ✅ Complete | Catalog backends (NessieCatalog, JdbcCatalog, GlueCatalog), uniffi JVM bindings, multi-column vectors |
-| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search (candle-core/rayon) ✅, real HNSW graph ✅, SIMD distances (AVX2/NEON) ✅, SIFT-1M benchmark ✅, HNSW perf optimizations (prefetch, SNH, F16 search, metric monomorphization) ✅; comparisons vs LanceDB/pgvector pending |
+| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search ✅, HNSW perf optimizations ✅, LanceDB/pgvector/Deep Lake comparisons ✅; `ailake-flink` pending |
 
 ### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
@@ -348,7 +348,10 @@ Delivered in Phase 4:
   - **F16 search + F32 rerank**: `HnswIndex` stores `flat_vecs_f16`; HNSW traversal uses half-precision distances (less cache pressure), final candidates reranked with exact F32 — 30% latency reduction, no recall loss
   - **Metric monomorphization**: `DistFn` trait with `CosineDist`/`EuclideanDist`/`DotProductDist` ZSTs; dispatch on metric once at entry, all inner fns generic `<M: DistFn>` — eliminates per-call `match` from hot loop, allows LLVM to inline distance functions
   - SIFT-1M HNSW build: 218.9 s → 155.8 s (−29%)
+- Multi-engine comparison benchmark (`--engine all`): AI-Lake vs LanceDB vs pgvector
+  - `ailake-bench`: new `pgvector-bench` feature — `pgvector_bench.rs` uses text COPY + HNSW index; `Engine::Pgvector` + `Engine::All` updated
+  - `bench_result::print_multi_comparison` — N-engine side-by-side table, highlights fastest QPS
+  - Deep Lake: `scripts/deeplake_bench.py` (Python) — exact kNN on subset; ANN requires paid Deep Memory plan (no Rust SDK available)
 
 Remaining Phase 4:
-- Comparisons vs. LanceDB, Deep Lake, pgvector (on same SIFT-1M + ANN benchmarks)
 - `ailake-flink` (separate Java repo): Flink sink/source connector

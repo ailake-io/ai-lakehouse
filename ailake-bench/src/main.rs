@@ -3,9 +3,10 @@
 //! Measures write throughput, search QPS, and recall@10 on real ANN data.
 //!
 //! Usage:
-//!   ailake-bench --dataset-dir /data/sift1m [--engine ailake|lancedb|all]
+//!   ailake-bench --dataset-dir /data/sift1m [--engine ailake|lancedb|pgvector|all]
 //!
 //! LanceDB comparison requires: --features lancedb-bench
+//! pgvector comparison requires: --features pgvector-bench  +  --pgvector-url <conn>
 //!
 //! Download the dataset first:
 //!   ./scripts/download_sift1m.sh /data/sift1m
@@ -16,6 +17,9 @@ mod metrics;
 
 #[cfg(feature = "lancedb-bench")]
 mod lancedb_bench;
+
+#[cfg(feature = "pgvector-bench")]
+mod pgvector_bench;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,6 +42,7 @@ enum Engine {
     #[default]
     Ailake,
     Lancedb,
+    Pgvector,
     All,
 }
 
@@ -90,6 +95,23 @@ struct Args {
     /// Number of concurrent LanceDB search queries (requires --features lancedb-bench)
     #[arg(long, default_value_t = 32)]
     lancedb_concurrency: usize,
+
+    /// PostgreSQL connection string for pgvector benchmark (requires --features pgvector-bench)
+    /// Example: "host=localhost user=postgres password=postgres dbname=postgres"
+    #[arg(long)]
+    pgvector_url: Option<String>,
+
+    /// pgvector HNSW m parameter (requires --features pgvector-bench)
+    #[arg(long, default_value_t = 16)]
+    pgvector_m: u32,
+
+    /// pgvector HNSW ef_construction parameter (requires --features pgvector-bench)
+    #[arg(long, default_value_t = 64)]
+    pgvector_ef_construction: u32,
+
+    /// pgvector HNSW ef_search parameter (requires --features pgvector-bench)
+    #[arg(long, default_value_t = 50)]
+    pgvector_ef_search: u32,
 }
 
 #[tokio::main]
@@ -119,6 +141,27 @@ async fn main() -> anyhow::Result<()> {
                 bench_result::print_single(&r, ds.base.len(), args.top_k);
             }
         }
+        Engine::Pgvector => {
+            #[cfg(not(feature = "pgvector-bench"))]
+            anyhow::bail!("--engine pgvector requires recompiling with --features pgvector-bench");
+            #[cfg(feature = "pgvector-bench")]
+            {
+                let pg_url = args
+                    .pgvector_url
+                    .as_deref()
+                    .context("--pgvector-url required for --engine pgvector")?;
+                let r = pgvector_bench::run(
+                    &ds,
+                    pg_url,
+                    args.top_k,
+                    args.pgvector_m,
+                    args.pgvector_ef_construction,
+                    args.pgvector_ef_search,
+                )
+                .await?;
+                bench_result::print_single(&r, ds.base.len(), args.top_k);
+            }
+        }
         Engine::All => {
             #[cfg(not(feature = "lancedb-bench"))]
             anyhow::bail!("--engine all requires recompiling with --features lancedb-bench");
@@ -134,7 +177,25 @@ async fn main() -> anyhow::Result<()> {
                     args.lancedb_concurrency,
                 )
                 .await?;
-                bench_result::print_comparison(&ailake, &lancedb, args.top_k);
+
+                let results: Vec<BenchResult> = vec![ailake, lancedb];
+
+                #[cfg(feature = "pgvector-bench")]
+                if let Some(ref pg_url) = args.pgvector_url {
+                    let pgvec = pgvector_bench::run(
+                        &ds,
+                        pg_url,
+                        args.top_k,
+                        args.pgvector_m,
+                        args.pgvector_ef_construction,
+                        args.pgvector_ef_search,
+                    )
+                    .await?;
+                    results.push(pgvec);
+                }
+
+                let refs: Vec<&BenchResult> = results.iter().collect();
+                bench_result::print_multi_comparison(&refs, args.top_k);
             }
         }
     }
