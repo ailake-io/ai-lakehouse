@@ -133,7 +133,7 @@ cargo check --workspace
 |---|---|---|
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW loading, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
-| **Phase 3** | Planned | JVM/Spark/Trino connectors (`uniffi`), multi-column vector tables |
-| **Phase 4** | Planned | GPU index (cuVS FFI), PQ reranking, public format spec v1.0 |
+| **Phase 3** | ✅ Complete | Catalog backends (Nessie/JDBC/Glue), uniffi JVM bindings, multi-column vectors, Spark/Trino plugins |
+| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search ✅, HNSW optimizations (prefetch, SNH, F16 search, metric monomorphization) ✅; LanceDB/pgvector comparisons pending |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.
