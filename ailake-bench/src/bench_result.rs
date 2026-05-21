@@ -53,6 +53,7 @@ pub fn print_comparison(a: &BenchResult, b: &BenchResult, top_k: usize) {
 }
 
 /// Print a multi-engine comparison table for N ≥ 2 results.
+#[cfg(feature = "lancedb-bench")]
 pub fn print_multi_comparison(results: &[&BenchResult], top_k: usize) {
     let n = results.len();
     let lw = 22usize; // label column width
@@ -156,6 +157,7 @@ pub fn print_multi_comparison(results: &[&BenchResult], top_k: usize) {
     println!();
 }
 
+#[cfg(feature = "lancedb-bench")]
 fn print_row(label: &str, vals: &[String], lw: usize, cw: usize) {
     let mut line = format!("{:<lw$}", label);
     for v in vals {
@@ -164,6 +166,7 @@ fn print_row(label: &str, vals: &[String], lw: usize, cw: usize) {
     println!("{line}");
 }
 
+#[cfg(feature = "lancedb-bench")]
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
