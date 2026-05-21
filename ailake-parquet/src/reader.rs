@@ -43,7 +43,9 @@ impl ParquetVectorReader {
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
 
         if batches.is_empty() {
-            return Err(AilakeError::Parquet("no batches in Parquet file".to_string()));
+            return Err(AilakeError::Parquet(
+                "no batches in Parquet file".to_string(),
+            ));
         }
 
         let batch = if batches.len() == 1 {

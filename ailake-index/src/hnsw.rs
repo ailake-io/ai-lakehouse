@@ -26,10 +26,7 @@ fn prefetch_l1(ptr: *const f32) {
     #[cfg(target_arch = "x86_64")]
     // SAFETY: _mm_prefetch never faults; processor discards hint on bad addr.
     unsafe {
-        std::arch::x86_64::_mm_prefetch(
-            ptr as *const i8,
-            std::arch::x86_64::_MM_HINT_T0,
-        );
+        std::arch::x86_64::_mm_prefetch(ptr as *const i8, std::arch::x86_64::_MM_HINT_T0);
     }
     #[cfg(not(target_arch = "x86_64"))]
     let _ = ptr;
@@ -47,28 +44,48 @@ trait DistFn: Copy + 'static {
     fn dist_f16(a: &[f32], b: &[f16]) -> f32;
 }
 
-#[derive(Clone, Copy)] struct CosineDist;
-#[derive(Clone, Copy)] struct EuclideanDist;
-#[derive(Clone, Copy)] struct DotProductDist;
+#[derive(Clone, Copy)]
+struct CosineDist;
+#[derive(Clone, Copy)]
+struct EuclideanDist;
+#[derive(Clone, Copy)]
+struct DotProductDist;
 
 impl DistFn for CosineDist {
     const METRIC: VectorMetric = VectorMetric::Cosine;
-    #[inline(always)] fn dist(a: &[f32], b: &[f32]) -> f32 { cosine_distance(a, b) }
-    #[inline(always)] fn dist_f16(a: &[f32], b: &[f16]) -> f32 { cosine_distance_f16(a, b) }
+    #[inline(always)]
+    fn dist(a: &[f32], b: &[f32]) -> f32 {
+        cosine_distance(a, b)
+    }
+    #[inline(always)]
+    fn dist_f16(a: &[f32], b: &[f16]) -> f32 {
+        cosine_distance_f16(a, b)
+    }
 }
 
 impl DistFn for EuclideanDist {
     const METRIC: VectorMetric = VectorMetric::Euclidean;
-    #[inline(always)] fn dist(a: &[f32], b: &[f32]) -> f32 { euclidean_distance(a, b) }
-    #[inline(always)] fn dist_f16(a: &[f32], b: &[f16]) -> f32 { euclidean_distance_f16(a, b) }
+    #[inline(always)]
+    fn dist(a: &[f32], b: &[f32]) -> f32 {
+        euclidean_distance(a, b)
+    }
+    #[inline(always)]
+    fn dist_f16(a: &[f32], b: &[f16]) -> f32 {
+        euclidean_distance_f16(a, b)
+    }
 }
 
 impl DistFn for DotProductDist {
     const METRIC: VectorMetric = VectorMetric::DotProduct;
-    #[inline(always)] fn dist(a: &[f32], b: &[f32]) -> f32 { -dot_product(a, b) }
-    #[inline(always)] fn dist_f16(a: &[f32], b: &[f16]) -> f32 { -dot_product_f16(a, b) }
+    #[inline(always)]
+    fn dist(a: &[f32], b: &[f32]) -> f32 {
+        -dot_product(a, b)
+    }
+    #[inline(always)]
+    fn dist_f16(a: &[f32], b: &[f16]) -> f32 {
+        -dot_product_f16(a, b)
+    }
 }
-
 
 // ── Visited tracker (generation-based bitmap) ─────────────────────────────────
 
@@ -153,16 +170,25 @@ impl HnswBuilder {
         let parallel = rayon::current_num_threads() > 1 && self.vectors.len() >= 500;
         match self.metric {
             VectorMetric::Cosine => {
-                if parallel { self.build_parallel_typed::<CosineDist>() }
-                else { self.build_serial_typed::<CosineDist>() }
+                if parallel {
+                    self.build_parallel_typed::<CosineDist>()
+                } else {
+                    self.build_serial_typed::<CosineDist>()
+                }
             }
             VectorMetric::Euclidean => {
-                if parallel { self.build_parallel_typed::<EuclideanDist>() }
-                else { self.build_serial_typed::<EuclideanDist>() }
+                if parallel {
+                    self.build_parallel_typed::<EuclideanDist>()
+                } else {
+                    self.build_serial_typed::<EuclideanDist>()
+                }
             }
             VectorMetric::DotProduct => {
-                if parallel { self.build_parallel_typed::<DotProductDist>() }
-                else { self.build_serial_typed::<DotProductDist>() }
+                if parallel {
+                    self.build_parallel_typed::<DotProductDist>()
+                } else {
+                    self.build_serial_typed::<DotProductDist>()
+                }
             }
         }
     }
@@ -229,7 +255,16 @@ impl HnswBuilder {
             for lc in (l + 1..=max_layer).rev() {
                 tracker.prepare(i + 1);
                 let w = search_layer::<M>(
-                    q, &eps, 1, lc, &flat_vecs, None, dim, &neighbors, &node_levels, &mut tracker,
+                    q,
+                    &eps,
+                    1,
+                    lc,
+                    &flat_vecs,
+                    None,
+                    dim,
+                    &neighbors,
+                    &node_levels,
+                    &mut tracker,
                 );
                 eps = vec![w[0].1];
             }
@@ -238,7 +273,15 @@ impl HnswBuilder {
                 let m_lc = if lc == 0 { 2 * m } else { m };
                 tracker.prepare(i + 1);
                 let w = search_layer::<M>(
-                    q, &eps, ef_c, lc, &flat_vecs, None, dim, &neighbors, &node_levels,
+                    q,
+                    &eps,
+                    ef_c,
+                    lc,
+                    &flat_vecs,
+                    None,
+                    dim,
+                    &neighbors,
+                    &node_levels,
                     &mut tracker,
                 );
 
@@ -250,7 +293,13 @@ impl HnswBuilder {
                     let m_max = if lc == 0 { 2 * m } else { m };
                     if neighbors[nb][lc].len() > m_max {
                         let nb_vec = &flat_vecs[nb * dim..(nb + 1) * dim];
-                        prune_connections::<M>(&mut neighbors[nb][lc], nb_vec, &flat_vecs, dim, m_max);
+                        prune_connections::<M>(
+                            &mut neighbors[nb][lc],
+                            nb_vec,
+                            &flat_vecs,
+                            dim,
+                            m_max,
+                        );
                     }
                 }
 
@@ -317,7 +366,8 @@ impl HnswBuilder {
 
             // Greedy descent above insertion layer (ef=1).
             for lc in (l + 1..=cur_max).rev() {
-                let w = search_layer_par::<M>(q, &eps, 1, lc, &flat_vecs, dim, &par_nb, &node_levels);
+                let w =
+                    search_layer_par::<M>(q, &eps, 1, lc, &flat_vecs, dim, &par_nb, &node_levels);
                 if let Some(&(_, best)) = w.first() {
                     eps = vec![best];
                 }
@@ -326,7 +376,16 @@ impl HnswBuilder {
             // Insert at layers 0..=min(l, cur_max).
             for lc in (0..=l.min(cur_max)).rev() {
                 let m_lc = if lc == 0 { 2 * m } else { m };
-                let w = search_layer_par::<M>(q, &eps, ef_c, lc, &flat_vecs, dim, &par_nb, &node_levels);
+                let w = search_layer_par::<M>(
+                    q,
+                    &eps,
+                    ef_c,
+                    lc,
+                    &flat_vecs,
+                    dim,
+                    &par_nb,
+                    &node_levels,
+                );
                 let selected = select_neighbors_heuristic::<M>(&w, &flat_vecs, dim, m_lc, true);
 
                 if lc < par_nb[i].len() {
@@ -359,7 +418,11 @@ impl HnswBuilder {
 
         let neighbors: Vec<Vec<Vec<usize>>> = par_nb
             .into_iter()
-            .map(|node| node.into_iter().map(|lk| lk.into_inner().unwrap()).collect())
+            .map(|node| {
+                node.into_iter()
+                    .map(|lk| lk.into_inner().unwrap())
+                    .collect()
+            })
             .collect();
 
         let final_ep = *entry_pt.read().unwrap();
@@ -453,7 +516,15 @@ impl HnswIndex {
         for lc in (1..=self.max_layer).rev() {
             tracker.prepare(n);
             let w = search_layer::<M>(
-                query, &eps, 1, lc, &self.flat_vecs, f16s, dim, &self.neighbors, &self.node_levels,
+                query,
+                &eps,
+                1,
+                lc,
+                &self.flat_vecs,
+                f16s,
+                dim,
+                &self.neighbors,
+                &self.node_levels,
                 tracker,
             );
             eps = vec![w[0].1];
@@ -461,8 +532,16 @@ impl HnswIndex {
 
         tracker.prepare(n);
         let w = search_layer::<M>(
-            query, &eps, ef.max(top_k), 0, &self.flat_vecs, f16s, dim, &self.neighbors,
-            &self.node_levels, tracker,
+            query,
+            &eps,
+            ef.max(top_k),
+            0,
+            &self.flat_vecs,
+            f16s,
+            dim,
+            &self.neighbors,
+            &self.node_levels,
+            tracker,
         );
 
         w.into_iter()
@@ -581,7 +660,10 @@ fn search_layer<M: DistFn>(
     for &ep in entry_points {
         if tracker.visit(ep) {
             let d = distance!(ep);
-            cands.push(MinEntry { neg_dist: -d, idx: ep });
+            cands.push(MinEntry {
+                neg_dist: -d,
+                idx: ep,
+            });
             w.push(MaxEntry { dist: d, idx: ep });
         }
     }
@@ -617,7 +699,10 @@ fn search_layer<M: DistFn>(
                 let d = distance!(nb);
                 let f_dist = w.peek().map(|f| f.dist).unwrap_or(f32::INFINITY);
                 if d < f_dist || w.len() < ef {
-                    cands.push(MinEntry { neg_dist: -d, idx: nb });
+                    cands.push(MinEntry {
+                        neg_dist: -d,
+                        idx: nb,
+                    });
                     w.push(MaxEntry { dist: d, idx: nb });
                     if w.len() > ef {
                         w.pop();
@@ -656,7 +741,10 @@ fn search_layer_par<M: DistFn>(
         for &ep in entry_points {
             if tracker.visit(ep) {
                 let d = M::dist(q, &flat_vecs[ep * dim..(ep + 1) * dim]);
-                cands.push(MinEntry { neg_dist: -d, idx: ep });
+                cands.push(MinEntry {
+                    neg_dist: -d,
+                    idx: ep,
+                });
                 w.push(MaxEntry { dist: d, idx: ep });
             }
         }
@@ -680,7 +768,10 @@ fn search_layer_par<M: DistFn>(
                     let d = M::dist(q, &flat_vecs[nb * dim..(nb + 1) * dim]);
                     let f_dist = w.peek().map(|f| f.dist).unwrap_or(f32::INFINITY);
                     if d < f_dist || w.len() < ef {
-                        cands.push(MinEntry { neg_dist: -d, idx: nb });
+                        cands.push(MinEntry {
+                            neg_dist: -d,
+                            idx: nb,
+                        });
                         w.push(MaxEntry { dist: d, idx: nb });
                         if w.len() > ef {
                             w.pop();

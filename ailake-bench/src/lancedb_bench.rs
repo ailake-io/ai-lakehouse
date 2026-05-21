@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Context;
 use aa58::{FixedSizeListArray, Float32Array, Int64Array, RecordBatch, RecordBatchIterator};
+use anyhow::Context;
 use as58::{DataType, Field, Schema};
 use futures::{StreamExt, TryStreamExt};
 use lancedb::index::vector::IvfHnswSqIndexBuilder;
@@ -45,8 +45,10 @@ pub async fn run(
     let db = lancedb::connect(&uri).execute().await?;
     let total = ds.base.len();
     let batches = make_batches(&ds.base, schema.clone(), WRITE_BATCH);
-    let reader: Box<dyn aa58::RecordBatchReader + Send> =
-        Box::new(RecordBatchIterator::new(batches.into_iter().map(Ok), schema.clone()));
+    let reader: Box<dyn aa58::RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+        batches.into_iter().map(Ok),
+        schema.clone(),
+    ));
     let table = db
         .create_table("sift1m", reader)
         .execute()
@@ -98,7 +100,9 @@ pub async fn run(
     let load_elapsed = load_start.elapsed();
 
     // ── Search phase ──────────────────────────────────────────────────────────
-    eprintln!("\nLanceDB search phase (top_k={top_k}, nprobes={nprobes}, concurrency={concurrency}) …");
+    eprintln!(
+        "\nLanceDB search phase (top_k={top_k}, nprobes={nprobes}, concurrency={concurrency}) …"
+    );
 
     let num_queries = ds.queries.len();
     let done_count = Arc::new(AtomicUsize::new(0));
@@ -174,8 +178,12 @@ fn make_batches(vecs: &[Vec<f32>], schema: Arc<Schema>, batch_size: usize) -> Ve
 
         let flat: Vec<f32> = chunk.iter().flat_map(|v| v.iter().cloned()).collect();
         let values = Arc::new(Float32Array::from(flat));
-        let vector_col =
-            Arc::new(FixedSizeListArray::new(item_field.clone(), dim, values, None)) as _;
+        let vector_col = Arc::new(FixedSizeListArray::new(
+            item_field.clone(),
+            dim,
+            values,
+            None,
+        )) as _;
 
         batches.push(
             RecordBatch::try_new(

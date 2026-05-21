@@ -104,9 +104,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Engine::Lancedb => {
             #[cfg(not(feature = "lancedb-bench"))]
-            anyhow::bail!(
-                "--engine lancedb requires recompiling with --features lancedb-bench"
-            );
+            anyhow::bail!("--engine lancedb requires recompiling with --features lancedb-bench");
             #[cfg(feature = "lancedb-bench")]
             {
                 let r = lancedb_bench::run(
@@ -123,9 +121,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Engine::All => {
             #[cfg(not(feature = "lancedb-bench"))]
-            anyhow::bail!(
-                "--engine all requires recompiling with --features lancedb-bench"
-            );
+            anyhow::bail!("--engine all requires recompiling with --features lancedb-bench");
             #[cfg(feature = "lancedb-bench")]
             {
                 let ailake = run_ailake(&args, &ds).await?;
@@ -201,7 +197,12 @@ async fn run_ailake(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<BenchR
             .await
             .with_context(|| format!("write shard {shard_idx}"))?;
 
-        eprint!("\r  shard {}/{} ({} vectors)", shard_idx + 1, num_shards, end);
+        eprint!(
+            "\r  shard {}/{} ({} vectors)",
+            shard_idx + 1,
+            num_shards,
+            end
+        );
     }
     eprintln!();
 
@@ -220,7 +221,10 @@ async fn run_ailake(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<BenchR
     eprintln!("  Waiting for {num_shards} background HNSW build(s) …");
     let index_start = Instant::now();
     loop {
-        let files = catalog.list_files(&table, None).await.context("list files")?;
+        let files = catalog
+            .list_files(&table, None)
+            .await
+            .context("list files")?;
         let ready = files
             .iter()
             .filter(|f| f.index_status == IndexStatus::Ready)
@@ -258,7 +262,10 @@ async fn run_ailake(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<BenchR
     );
 
     // ── Search phase ──────────────────────────────────────────────────────────
-    eprintln!("\nAI-Lake search phase (top_k={}, ef={}) …", args.top_k, args.ef);
+    eprintln!(
+        "\nAI-Lake search phase (top_k={}, ef={}) …",
+        args.top_k, args.ef
+    );
 
     let search_cfg = SearchConfig {
         top_k: args.top_k,

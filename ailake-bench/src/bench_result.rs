@@ -26,7 +26,10 @@ pub fn print_single(r: &BenchResult, total: usize, top_k: usize) {
     println!("  Wall time     : {:.1} s", r.write_secs);
     println!("  Throughput    : {:.0} vec/s", r.write_vec_per_sec);
     if r.index_build_secs > 0.0 {
-        println!("  Index build   : {:.1} s (separate step)", r.index_build_secs);
+        println!(
+            "  Index build   : {:.1} s (separate step)",
+            r.index_build_secs
+        );
     }
     println!();
     println!("Index load");
@@ -49,19 +52,22 @@ pub fn print_comparison(a: &BenchResult, b: &BenchResult, top_k: usize) {
     let cw = 20usize;
 
     println!();
-    println!(
-        "Comparison — SIFT-1M (128D Euclidean, top_k={top_k})"
-    );
+    println!("Comparison — SIFT-1M (128D Euclidean, top_k={top_k})");
     println!("{}", "═".repeat(66));
     println!(
         "{:<w$}  {:>cw$}  {:>cw$}",
-        "Metric", &truncate(&a.engine, cw), &truncate(&b.engine, cw)
+        "Metric",
+        &truncate(&a.engine, cw),
+        &truncate(&b.engine, cw)
     );
     println!("{}", "─".repeat(66));
 
     let write_a = format!("{:.0} vec/s", a.write_vec_per_sec);
     let write_b = format!("{:.0} vec/s", b.write_vec_per_sec);
-    println!("{:<w$}  {:>cw$}  {:>cw$}", "Write throughput", write_a, write_b);
+    println!(
+        "{:<w$}  {:>cw$}  {:>cw$}",
+        "Write throughput", write_a, write_b
+    );
 
     // Index build: only show if any engine has a separate build step
     if a.index_build_secs > 0.0 || b.index_build_secs > 0.0 {
@@ -84,7 +90,12 @@ pub fn print_comparison(a: &BenchResult, b: &BenchResult, top_k: usize) {
 
     let recall_a = format!("{:.4}", a.recall);
     let recall_b = format!("{:.4}", b.recall);
-    println!("{:<w$}  {:>cw$}  {:>cw$}", &format!("Recall@{top_k}"), recall_a, recall_b);
+    println!(
+        "{:<w$}  {:>cw$}  {:>cw$}",
+        &format!("Recall@{top_k}"),
+        recall_a,
+        recall_b
+    );
 
     let qps_a = format!("{:.0}", a.qps);
     let qps_b = format!("{:.0}", b.qps);

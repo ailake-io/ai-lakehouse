@@ -366,6 +366,8 @@ async fn build_and_patch_index(
         // Another task overwrote us — retry.
     }
 
-    eprintln!("[ailake] deferred HNSW built for {file_path} (offset={hnsw_abs_offset}, len={hnsw_len})");
+    eprintln!(
+        "[ailake] deferred HNSW built for {file_path} (offset={hnsw_abs_offset}, len={hnsw_len})"
+    );
     Ok(())
 }

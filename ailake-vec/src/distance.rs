@@ -66,7 +66,11 @@ pub fn cosine_distance_f16(a: &[f32], b: &[f16]) -> f32 {
         norm_b += bi * bi;
     }
     let denom = (norm_a * norm_b).sqrt();
-    if denom < 1e-8 { 1.0 } else { 1.0 - dot / denom }
+    if denom < 1e-8 {
+        1.0
+    } else {
+        1.0 - dot / denom
+    }
 }
 
 pub fn euclidean_distance_f16(a: &[f32], b: &[f16]) -> f32 {
