@@ -17,6 +17,7 @@ arrow-select   = { workspace = true }
 tokio          = { workspace = true }
 bytes          = { workspace = true }
 thiserror      = { workspace = true }
+rayon          = { workspace = true }
 
 [dev-dependencies]
 tempfile    = { workspace = true }

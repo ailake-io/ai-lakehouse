@@ -293,9 +293,17 @@ async fn build_and_patch_index(
     let reader = AilakeFileReader::new(parquet_bytes, &policy.column_name, policy.dim);
     let (batch, embeddings) = reader.read_parquet()?;
 
-    // Build the full AILK file (Parquet + HNSW).
-    let file_writer = AilakeFileWriter::new(policy.clone());
-    let full_bytes = file_writer.write(&batch, &embeddings)?;
+    // Build the full AILK file (Parquet + HNSW) — CPU-intensive; run on blocking pool
+    // so the tokio async threads aren't starved when many shards build concurrently.
+    let full_bytes = tokio::task::spawn_blocking({
+        let policy = policy.clone();
+        move || {
+            let file_writer = AilakeFileWriter::new(policy);
+            file_writer.write(&batch, &embeddings)
+        }
+    })
+    .await
+    .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))??;
 
     // Extract HNSW offsets from the newly written file.
     let full_reader = AilakeFileReader::new(full_bytes.clone(), &policy.column_name, policy.dim);
