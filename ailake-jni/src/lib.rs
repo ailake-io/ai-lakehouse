@@ -66,6 +66,7 @@ fn parse_metric(s: &str) -> VectorMetric {
 }
 
 /// Core search logic shared by both uniffi and C-ABI surfaces.
+#[allow(clippy::too_many_arguments)]
 fn do_search(
     warehouse: String,
     namespace: &str,
@@ -411,7 +412,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         Ok(snap) => {
             let json = serde_json::to_string(&Resp {
                 ok: true,
-                snapshot_id: snap as i64,
+                snapshot_id: snap,
             })
             .unwrap_or_default();
             CString::new(json).unwrap_or_default().into_raw()
