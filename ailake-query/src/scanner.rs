@@ -222,8 +222,12 @@ impl SearchSession {
                     raw_vectors: Some(raw_vecs),
                 });
             } else if reader.is_ailake_file() {
-                let index = reader.load_index_for_column(vector_column)?;
+                let mut index = reader.load_index_for_column(vector_column)?;
                 let raw_vectors = if load_raw {
+                    // F16 search + F32 rerank: use half-precision for HNSW distances
+                    // (halves memory bandwidth per distance call), then rerank top
+                    // candidates with exact F32 from raw_vectors.
+                    index.quantize_to_f16();
                     let (_, vecs) = reader.read_parquet()?;
                     Some(vecs)
                 } else {

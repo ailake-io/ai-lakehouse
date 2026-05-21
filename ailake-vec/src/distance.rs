@@ -1,4 +1,5 @@
 use ailake_core::{Centroid, VectorMetric};
+use half::f16;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,47 @@ pub fn exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32 {
         VectorMetric::Euclidean => euclidean_distance(a, b),
         VectorMetric::DotProduct => -dot_product(a, b),
     }
+}
+
+// ── F16 distance functions ────────────────────────────────────────────────────
+//
+// Query `a` stays F32 (one vector, lives in registers).
+// Database vector `b` is F16 (dequantized inline, no allocation).
+// LLVM auto-vectorizes the inner loop on both x86_64 (F16C) and aarch64 (NEON).
+
+pub fn cosine_distance_f16(a: &[f32], b: &[f16]) -> f32 {
+    let n = a.len().min(b.len());
+    let mut dot = 0.0f32;
+    let mut norm_a = 0.0f32;
+    let mut norm_b = 0.0f32;
+    for i in 0..n {
+        let ai = a[i];
+        let bi = b[i].to_f32();
+        dot += ai * bi;
+        norm_a += ai * ai;
+        norm_b += bi * bi;
+    }
+    let denom = (norm_a * norm_b).sqrt();
+    if denom < 1e-8 { 1.0 } else { 1.0 - dot / denom }
+}
+
+pub fn euclidean_distance_f16(a: &[f32], b: &[f16]) -> f32 {
+    let n = a.len().min(b.len());
+    let mut sum = 0.0f32;
+    for i in 0..n {
+        let diff = a[i] - b[i].to_f32();
+        sum += diff * diff;
+    }
+    sum.sqrt()
+}
+
+pub fn dot_product_f16(a: &[f32], b: &[f16]) -> f32 {
+    let n = a.len().min(b.len());
+    let mut acc = 0.0f32;
+    for i in 0..n {
+        acc += a[i] * b[i].to_f32();
+    }
+    acc
 }
 
 pub fn compute_centroid_and_radius(vectors: &[Vec<f32>], metric: VectorMetric) -> Centroid {

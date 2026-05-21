@@ -6,9 +6,69 @@ use std::sync::{
 };
 
 use ailake_core::{RowId, VectorMetric};
-use ailake_vec::{cosine_distance, dot_product, euclidean_distance};
+use ailake_vec::{
+    cosine_distance, cosine_distance_f16, dot_product, dot_product_f16, euclidean_distance,
+    euclidean_distance_f16,
+};
+use half::f16;
 use rand::Rng;
 use rayon::prelude::*;
+
+// ── Prefetch helper ───────────────────────────────────────────────────────────
+
+/// Prefetch the cache line at `ptr` into L1.
+///
+/// On x86_64: `_mm_prefetch` with T0 hint — drops silently on inaccessible
+/// addresses (Intel SDM §12.4.6), so safe to call speculatively.
+/// On all other targets: no-op.
+#[inline(always)]
+fn prefetch_l1(ptr: *const f32) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: _mm_prefetch never faults; processor discards hint on bad addr.
+    unsafe {
+        std::arch::x86_64::_mm_prefetch(
+            ptr as *const i8,
+            std::arch::x86_64::_MM_HINT_T0,
+        );
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = ptr;
+}
+
+// ── Distance trait — compile-time metric dispatch ────────────────────────────
+//
+// Zero-sized structs for each metric. Making `search_layer`, `build_serial`, etc.
+// generic over `M: DistFn` lets the compiler inline the distance function and
+// eliminates the per-call `match metric { … }` branch from the hot loop.
+
+trait DistFn: Copy + 'static {
+    const METRIC: VectorMetric;
+    fn dist(a: &[f32], b: &[f32]) -> f32;
+    fn dist_f16(a: &[f32], b: &[f16]) -> f32;
+}
+
+#[derive(Clone, Copy)] struct CosineDist;
+#[derive(Clone, Copy)] struct EuclideanDist;
+#[derive(Clone, Copy)] struct DotProductDist;
+
+impl DistFn for CosineDist {
+    const METRIC: VectorMetric = VectorMetric::Cosine;
+    #[inline(always)] fn dist(a: &[f32], b: &[f32]) -> f32 { cosine_distance(a, b) }
+    #[inline(always)] fn dist_f16(a: &[f32], b: &[f16]) -> f32 { cosine_distance_f16(a, b) }
+}
+
+impl DistFn for EuclideanDist {
+    const METRIC: VectorMetric = VectorMetric::Euclidean;
+    #[inline(always)] fn dist(a: &[f32], b: &[f32]) -> f32 { euclidean_distance(a, b) }
+    #[inline(always)] fn dist_f16(a: &[f32], b: &[f16]) -> f32 { euclidean_distance_f16(a, b) }
+}
+
+impl DistFn for DotProductDist {
+    const METRIC: VectorMetric = VectorMetric::DotProduct;
+    #[inline(always)] fn dist(a: &[f32], b: &[f32]) -> f32 { -dot_product(a, b) }
+    #[inline(always)] fn dist_f16(a: &[f32], b: &[f16]) -> f32 { -dot_product_f16(a, b) }
+}
+
 
 // ── Visited tracker (generation-based bitmap) ─────────────────────────────────
 
@@ -88,23 +148,36 @@ impl HnswBuilder {
     }
 
     /// Build HNSW graph (Algorithm 1). Parallel on multi-core when n ≥ 500.
+    /// Dispatches on metric once here; all inner functions are monomorphic.
     pub fn build(self) -> HnswIndex {
-        if rayon::current_num_threads() > 1 && self.vectors.len() >= 500 {
-            return self.build_parallel();
+        let parallel = rayon::current_num_threads() > 1 && self.vectors.len() >= 500;
+        match self.metric {
+            VectorMetric::Cosine => {
+                if parallel { self.build_parallel_typed::<CosineDist>() }
+                else { self.build_serial_typed::<CosineDist>() }
+            }
+            VectorMetric::Euclidean => {
+                if parallel { self.build_parallel_typed::<EuclideanDist>() }
+                else { self.build_serial_typed::<EuclideanDist>() }
+            }
+            VectorMetric::DotProduct => {
+                if parallel { self.build_parallel_typed::<DotProductDist>() }
+                else { self.build_serial_typed::<DotProductDist>() }
+            }
         }
-        self.build_serial()
     }
 
-    fn build_serial(self) -> HnswIndex {
+    fn build_serial_typed<M: DistFn>(self) -> HnswIndex {
         let n = self.vectors.len();
         let dim = self.dim as usize;
 
         if n == 0 {
             return HnswIndex {
                 config: self.config,
-                metric: self.metric,
+                metric: M::METRIC,
                 dim: self.dim,
                 flat_vecs: vec![],
+                flat_vecs_f16: None,
                 row_ids: vec![],
                 neighbors: vec![],
                 node_levels: vec![],
@@ -124,7 +197,6 @@ impl HnswBuilder {
         let m = self.config.m;
         let ef_c = self.config.ef_construction;
         let ml = 1.0_f64 / (m as f64).ln();
-        let metric = self.metric;
 
         let mut rng = rand::thread_rng();
         let node_levels: Vec<usize> = (0..n).map(|_| random_level(&mut rng, ml)).collect();
@@ -156,17 +228,8 @@ impl HnswBuilder {
             let mut eps: Vec<usize> = vec![ep];
             for lc in (l + 1..=max_layer).rev() {
                 tracker.prepare(i + 1);
-                let w = search_layer(
-                    q,
-                    &eps,
-                    1,
-                    lc,
-                    &flat_vecs,
-                    dim,
-                    &neighbors,
-                    &node_levels,
-                    metric,
-                    &mut tracker,
+                let w = search_layer::<M>(
+                    q, &eps, 1, lc, &flat_vecs, None, dim, &neighbors, &node_levels, &mut tracker,
                 );
                 eps = vec![w[0].1];
             }
@@ -174,20 +237,12 @@ impl HnswBuilder {
             for lc in (0..=l.min(max_layer)).rev() {
                 let m_lc = if lc == 0 { 2 * m } else { m };
                 tracker.prepare(i + 1);
-                let w = search_layer(
-                    q,
-                    &eps,
-                    ef_c,
-                    lc,
-                    &flat_vecs,
-                    dim,
-                    &neighbors,
-                    &node_levels,
-                    metric,
+                let w = search_layer::<M>(
+                    q, &eps, ef_c, lc, &flat_vecs, None, dim, &neighbors, &node_levels,
                     &mut tracker,
                 );
 
-                let selected: Vec<usize> = w.iter().take(m_lc).map(|&(_, nb)| nb).collect();
+                let selected = select_neighbors_heuristic::<M>(&w, &flat_vecs, dim, m_lc, true);
                 neighbors[i][lc] = selected.clone();
 
                 for nb in selected {
@@ -195,14 +250,7 @@ impl HnswBuilder {
                     let m_max = if lc == 0 { 2 * m } else { m };
                     if neighbors[nb][lc].len() > m_max {
                         let nb_vec = &flat_vecs[nb * dim..(nb + 1) * dim];
-                        prune_connections(
-                            &mut neighbors[nb][lc],
-                            nb_vec,
-                            &flat_vecs,
-                            dim,
-                            m_max,
-                            metric,
-                        );
+                        prune_connections::<M>(&mut neighbors[nb][lc], nb_vec, &flat_vecs, dim, m_max);
                     }
                 }
 
@@ -217,9 +265,10 @@ impl HnswBuilder {
 
         HnswIndex {
             config: self.config,
-            metric,
+            metric: M::METRIC,
             dim: self.dim,
             flat_vecs,
+            flat_vecs_f16: None,
             row_ids,
             neighbors,
             node_levels,
@@ -230,13 +279,12 @@ impl HnswBuilder {
 
     /// Parallel build using per-(node,layer) RwLock — same algorithm as build_serial
     /// but with relaxed insertion ordering (like hnswlib multithreaded mode).
-    fn build_parallel(self) -> HnswIndex {
+    fn build_parallel_typed<M: DistFn>(self) -> HnswIndex {
         let n = self.vectors.len();
         let dim = self.dim as usize;
         let m = self.config.m;
         let ef_c = self.config.ef_construction;
         let ml = 1.0_f64 / (m as f64).ln();
-        let metric = self.metric;
 
         let mut flat_vecs: Vec<f32> = Vec::with_capacity(n * dim);
         let mut row_ids: Vec<u64> = Vec::with_capacity(n);
@@ -269,9 +317,7 @@ impl HnswBuilder {
 
             // Greedy descent above insertion layer (ef=1).
             for lc in (l + 1..=cur_max).rev() {
-                let w = search_layer_par(
-                    q, &eps, 1, lc, &flat_vecs, dim, &par_nb, &node_levels, metric,
-                );
+                let w = search_layer_par::<M>(q, &eps, 1, lc, &flat_vecs, dim, &par_nb, &node_levels);
                 if let Some(&(_, best)) = w.first() {
                     eps = vec![best];
                 }
@@ -280,10 +326,8 @@ impl HnswBuilder {
             // Insert at layers 0..=min(l, cur_max).
             for lc in (0..=l.min(cur_max)).rev() {
                 let m_lc = if lc == 0 { 2 * m } else { m };
-                let w = search_layer_par(
-                    q, &eps, ef_c, lc, &flat_vecs, dim, &par_nb, &node_levels, metric,
-                );
-                let selected: Vec<usize> = w.iter().take(m_lc).map(|&(_, nb)| nb).collect();
+                let w = search_layer_par::<M>(q, &eps, ef_c, lc, &flat_vecs, dim, &par_nb, &node_levels);
+                let selected = select_neighbors_heuristic::<M>(&w, &flat_vecs, dim, m_lc, true);
 
                 if lc < par_nb[i].len() {
                     *par_nb[i][lc].write().unwrap() = selected.clone();
@@ -295,7 +339,7 @@ impl HnswBuilder {
                         let m_max = if lc == 0 { 2 * m } else { m };
                         if nblist.len() > m_max {
                             let nb_vec = &flat_vecs[nb * dim..(nb + 1) * dim];
-                            prune_connections(&mut nblist, nb_vec, &flat_vecs, dim, m_max, metric);
+                            prune_connections::<M>(&mut nblist, nb_vec, &flat_vecs, dim, m_max);
                         }
                     }
                 }
@@ -323,9 +367,10 @@ impl HnswBuilder {
 
         HnswIndex {
             config: self.config,
-            metric,
+            metric: M::METRIC,
             dim: self.dim,
             flat_vecs,
+            flat_vecs_f16: None,
             row_ids,
             neighbors,
             node_levels,
@@ -341,8 +386,12 @@ pub struct HnswIndex {
     pub(crate) config: HnswConfig,
     pub(crate) metric: VectorMetric,
     pub(crate) dim: u32,
-    /// Contiguous vector storage: flat_vecs[i*dim..(i+1)*dim] = vector i.
+    /// Contiguous F32 vector storage: flat_vecs[i*dim..(i+1)*dim] = vector i.
     pub(crate) flat_vecs: Vec<f32>,
+    /// F16-quantized mirror of flat_vecs. Populated by `quantize_to_f16()`.
+    /// When present, search uses F16 distances (less cache pressure, ~half bandwidth).
+    /// F32 vectors are retained for brute-force fallback and callers that need them.
+    pub(crate) flat_vecs_f16: Option<Vec<f16>>,
     /// Row IDs parallel to flat_vecs.
     pub(crate) row_ids: Vec<u64>,
     pub(crate) neighbors: Vec<Vec<Vec<usize>>>,
@@ -352,6 +401,7 @@ pub struct HnswIndex {
 }
 
 impl HnswIndex {
+    /// Dispatch on `self.metric` once; all inner search logic is monomorphic.
     pub fn search(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
         #[cfg(feature = "gpu")]
         if let Some(r) = crate::gpu::try_gpu_search(
@@ -365,18 +415,25 @@ impl HnswIndex {
             return r;
         }
 
-        if self.neighbors.is_empty() {
-            return self.brute_force(query, top_k);
+        match self.metric {
+            VectorMetric::Cosine => self.search_typed::<CosineDist>(query, top_k, ef),
+            VectorMetric::Euclidean => self.search_typed::<EuclideanDist>(query, top_k, ef),
+            VectorMetric::DotProduct => self.search_typed::<DotProductDist>(query, top_k, ef),
         }
+    }
 
+    fn search_typed<M: DistFn>(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
+        if self.neighbors.is_empty() {
+            return self.brute_force_typed::<M>(query, top_k);
+        }
         let n = self.row_ids.len();
         VISITED.with(|cell| {
             let mut tracker = cell.borrow_mut();
-            self.hnsw_search(query, top_k, ef, &mut tracker, n)
+            self.hnsw_search_typed::<M>(query, top_k, ef, &mut tracker, n)
         })
     }
 
-    fn hnsw_search(
+    fn hnsw_search_typed<M: DistFn>(
         &self,
         query: &[f32],
         top_k: usize,
@@ -391,35 +448,21 @@ impl HnswIndex {
         let dim = self.dim as usize;
         let mut eps = vec![ep];
 
+        let f16s = self.flat_vecs_f16.as_deref();
+
         for lc in (1..=self.max_layer).rev() {
             tracker.prepare(n);
-            let w = search_layer(
-                query,
-                &eps,
-                1,
-                lc,
-                &self.flat_vecs,
-                dim,
-                &self.neighbors,
-                &self.node_levels,
-                self.metric,
+            let w = search_layer::<M>(
+                query, &eps, 1, lc, &self.flat_vecs, f16s, dim, &self.neighbors, &self.node_levels,
                 tracker,
             );
             eps = vec![w[0].1];
         }
 
         tracker.prepare(n);
-        let w = search_layer(
-            query,
-            &eps,
-            ef.max(top_k),
-            0,
-            &self.flat_vecs,
-            dim,
-            &self.neighbors,
-            &self.node_levels,
-            self.metric,
-            tracker,
+        let w = search_layer::<M>(
+            query, &eps, ef.max(top_k), 0, &self.flat_vecs, f16s, dim, &self.neighbors,
+            &self.node_levels, tracker,
         );
 
         w.into_iter()
@@ -428,20 +471,30 @@ impl HnswIndex {
             .collect()
     }
 
-    fn brute_force(&self, query: &[f32], top_k: usize) -> Vec<(RowId, f32)> {
-        let metric = self.metric;
+    fn brute_force_typed<M: DistFn>(&self, query: &[f32], top_k: usize) -> Vec<(RowId, f32)> {
         let dim = self.dim as usize;
         let n = self.row_ids.len();
         let mut results: Vec<(RowId, f32)> = (0..n)
             .into_par_iter()
             .map(|i| {
                 let v = &self.flat_vecs[i * dim..(i + 1) * dim];
-                (RowId::new(self.row_ids[i]), dist(metric, query, v))
+                (RowId::new(self.row_ids[i]), M::dist(query, v))
             })
             .collect();
         results.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(top_k);
         results
+    }
+
+    /// Quantize flat_vecs → flat_vecs_f16.
+    ///
+    /// After calling this, HNSW search uses F16 distances (half the memory bandwidth
+    /// per distance call vs F32). Pair with `rerank_factor` in `SearchConfig` to
+    /// recover the precision lost by F16 approximation.
+    /// F32 vectors are retained for brute-force fallback.
+    pub fn quantize_to_f16(&mut self) {
+        let f16_vecs: Vec<f16> = self.flat_vecs.iter().map(|&x| f16::from_f32(x)).collect();
+        self.flat_vecs_f16 = Some(f16_vecs);
     }
 
     pub fn node_count(&self) -> u64 {
@@ -500,28 +553,35 @@ impl Ord for MinEntry {
 // ── Algorithm 2: SEARCH-LAYER ─────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-fn search_layer(
+fn search_layer<M: DistFn>(
     q: &[f32],
     entry_points: &[usize],
     ef: usize,
     layer: usize,
     flat_vecs: &[f32],
+    flat_vecs_f16: Option<&[f16]>,
     dim: usize,
     neighbors: &[Vec<Vec<usize>>],
     node_levels: &[usize],
-    metric: VectorMetric,
     tracker: &mut VisitedTracker,
 ) -> Vec<(f32, usize)> {
     let mut cands: BinaryHeap<MinEntry> = BinaryHeap::with_capacity(ef * 2);
     let mut w: BinaryHeap<MaxEntry> = BinaryHeap::with_capacity(ef + 1);
 
+    macro_rules! distance {
+        ($idx:expr) => {
+            if let Some(f16s) = flat_vecs_f16 {
+                M::dist_f16(q, &f16s[$idx * dim..($idx + 1) * dim])
+            } else {
+                M::dist(q, &flat_vecs[$idx * dim..($idx + 1) * dim])
+            }
+        };
+    }
+
     for &ep in entry_points {
         if tracker.visit(ep) {
-            let d = dist(metric, q, &flat_vecs[ep * dim..(ep + 1) * dim]);
-            cands.push(MinEntry {
-                neg_dist: -d,
-                idx: ep,
-            });
+            let d = distance!(ep);
+            cands.push(MinEntry { neg_dist: -d, idx: ep });
             w.push(MaxEntry { dist: d, idx: ep });
         }
     }
@@ -537,15 +597,27 @@ fn search_layer(
             continue;
         }
 
-        for &nb in &neighbors[c.idx][layer] {
+        let nbs = &neighbors[c.idx][layer];
+        for (i, &nb) in nbs.iter().enumerate() {
+            // Prefetch next neighbor's vector while computing distance for this one.
+            if let Some(&next_nb) = nbs.get(i + 1) {
+                if let Some(f16s) = flat_vecs_f16 {
+                    let offset = next_nb * dim;
+                    if offset < f16s.len() {
+                        prefetch_l1(f16s[offset..].as_ptr() as *const f32);
+                    }
+                } else {
+                    let offset = next_nb * dim;
+                    if offset < flat_vecs.len() {
+                        prefetch_l1(flat_vecs[offset..].as_ptr());
+                    }
+                }
+            }
             if tracker.visit(nb) {
-                let d = dist(metric, q, &flat_vecs[nb * dim..(nb + 1) * dim]);
+                let d = distance!(nb);
                 let f_dist = w.peek().map(|f| f.dist).unwrap_or(f32::INFINITY);
                 if d < f_dist || w.len() < ef {
-                    cands.push(MinEntry {
-                        neg_dist: -d,
-                        idx: nb,
-                    });
+                    cands.push(MinEntry { neg_dist: -d, idx: nb });
                     w.push(MaxEntry { dist: d, idx: nb });
                     if w.len() > ef {
                         w.pop();
@@ -563,7 +635,7 @@ fn search_layer(
 // ── Parallel search layer (used during build_parallel) ───────────────────────
 
 #[allow(clippy::too_many_arguments)]
-fn search_layer_par(
+fn search_layer_par<M: DistFn>(
     q: &[f32],
     entry_points: &[usize],
     ef: usize,
@@ -572,7 +644,6 @@ fn search_layer_par(
     dim: usize,
     neighbors: &[Vec<RwLock<Vec<usize>>>],
     node_levels: &[usize],
-    metric: VectorMetric,
 ) -> Vec<(f32, usize)> {
     let n = node_levels.len();
     VISITED.with(|cell| {
@@ -584,7 +655,7 @@ fn search_layer_par(
 
         for &ep in entry_points {
             if tracker.visit(ep) {
-                let d = dist(metric, q, &flat_vecs[ep * dim..(ep + 1) * dim]);
+                let d = M::dist(q, &flat_vecs[ep * dim..(ep + 1) * dim]);
                 cands.push(MinEntry { neg_dist: -d, idx: ep });
                 w.push(MaxEntry { dist: d, idx: ep });
             }
@@ -606,7 +677,7 @@ fn search_layer_par(
             let nbs: Vec<usize> = neighbors[c.idx][layer].read().unwrap().clone();
             for nb in nbs {
                 if tracker.visit(nb) {
-                    let d = dist(metric, q, &flat_vecs[nb * dim..(nb + 1) * dim]);
+                    let d = M::dist(q, &flat_vecs[nb * dim..(nb + 1) * dim]);
                     let f_dist = w.peek().map(|f| f.dist).unwrap_or(f32::INFINITY);
                     if d < f_dist || w.len() < ef {
                         cands.push(MinEntry { neg_dist: -d, idx: nb });
@@ -625,38 +696,75 @@ fn search_layer_par(
     })
 }
 
-// ── Neighbor pruning ──────────────────────────────────────────────────────────
+// ── Neighbor selection ────────────────────────────────────────────────────────
 
-fn prune_connections(
+/// SELECT-NEIGHBORS-HEURISTIC — Algorithm 4 from the HNSW paper.
+///
+/// `candidates`: (dist_to_q, node_idx) sorted ascending — caller must pre-sort.
+/// `q_vec`: vector of the base element q.
+/// `keep_pruned`: fill remaining slots with discarded elements (maintains M connections
+/// even in sparse graphs; recommended `true` for production).
+///
+/// Selects up to `m` neighbors such that each selected neighbor `e` is closer to `q`
+/// than to any already-selected neighbor `r` — ensuring angular diversity and
+/// longer-range graph edges for better recall vs. simple nearest-M selection.
+fn select_neighbors_heuristic<M: DistFn>(
+    candidates: &[(f32, usize)],
+    flat_vecs: &[f32],
+    dim: usize,
+    m: usize,
+    keep_pruned: bool,
+) -> Vec<usize> {
+    let mut result: Vec<(f32, usize)> = Vec::with_capacity(m);
+    let mut discarded: Vec<(f32, usize)> = Vec::new();
+
+    'cand: for &(d_q_e, e) in candidates {
+        if result.len() >= m {
+            break;
+        }
+        let e_vec = &flat_vecs[e * dim..(e + 1) * dim];
+        // Discard e if any already-selected r is closer to e than q is.
+        // This enforces diversity: selected neighbors span different directions from q.
+        for &(_, r) in &result {
+            let r_vec = &flat_vecs[r * dim..(r + 1) * dim];
+            if M::dist(e_vec, r_vec) < d_q_e {
+                if keep_pruned {
+                    discarded.push((d_q_e, e));
+                }
+                continue 'cand;
+            }
+        }
+        result.push((d_q_e, e));
+    }
+
+    if keep_pruned {
+        for (d, e) in discarded {
+            if result.len() >= m {
+                break;
+            }
+            result.push((d, e));
+        }
+    }
+
+    result.into_iter().map(|(_, nb)| nb).collect()
+}
+
+fn prune_connections<M: DistFn>(
     conn: &mut Vec<usize>,
     node_vec: &[f32],
     flat_vecs: &[f32],
     dim: usize,
     m_max: usize,
-    metric: VectorMetric,
 ) {
-    let mut sorted: Vec<(f32, usize)> = conn
-        .iter()
-        .map(|&nb| {
-            (
-                dist(metric, node_vec, &flat_vecs[nb * dim..(nb + 1) * dim]),
-                nb,
-            )
-        })
-        .collect();
-    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    *conn = sorted.into_iter().take(m_max).map(|(_, nb)| nb).collect();
-}
-
-// ── Distance ──────────────────────────────────────────────────────────────────
-
-#[inline(always)]
-fn dist(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32 {
-    match metric {
-        VectorMetric::Cosine => cosine_distance(a, b),
-        VectorMetric::Euclidean => euclidean_distance(a, b),
-        VectorMetric::DotProduct => -dot_product(a, b),
+    if conn.len() <= m_max {
+        return;
     }
+    let mut candidates: Vec<(f32, usize)> = conn
+        .iter()
+        .map(|&nb| (M::dist(node_vec, &flat_vecs[nb * dim..(nb + 1) * dim]), nb))
+        .collect();
+    candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    *conn = select_neighbors_heuristic::<M>(&candidates, flat_vecs, dim, m_max, true);
 }
 
 fn random_level(rng: &mut impl Rng, ml: f64) -> usize {

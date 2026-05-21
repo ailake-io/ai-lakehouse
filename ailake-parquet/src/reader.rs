@@ -38,7 +38,7 @@ impl ParquetVectorReader {
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
 
         // Collect all batches (usually just one, but handle multi-row-group files too).
-        let batches: Vec<RecordBatch> = reader
+        let mut batches: Vec<RecordBatch> = reader
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
 
