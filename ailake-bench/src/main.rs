@@ -3,13 +3,19 @@
 //! Measures write throughput, search QPS, and recall@10 on real ANN data.
 //!
 //! Usage:
-//!   ailake-bench --dataset-dir /data/sift1m [--top-k 10] [--ef 50] [--shard-size 100000]
+//!   ailake-bench --dataset-dir /data/sift1m [--engine ailake|lancedb|all]
+//!
+//! LanceDB comparison requires: --features lancedb-bench
 //!
 //! Download the dataset first:
 //!   ./scripts/download_sift1m.sh /data/sift1m
 
+mod bench_result;
 mod dataset;
 mod metrics;
+
+#[cfg(feature = "lancedb-bench")]
+mod lancedb_bench;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,10 +26,20 @@ use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use clap::Parser;
 
-use ailake_catalog::{HadoopCatalog, TableIdent};
+use ailake_catalog::{CatalogProvider, HadoopCatalog, IndexStatus, TableIdent};
 use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
 use ailake_query::{SearchConfig, SearchSession, TableWriter};
 use ailake_store::{LocalStore, Store};
+
+use bench_result::BenchResult;
+
+#[derive(clap::ValueEnum, Clone, Debug, Default)]
+enum Engine {
+    #[default]
+    Ailake,
+    Lancedb,
+    All,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -39,7 +55,11 @@ struct Args {
     #[arg(long)]
     table_dir: Option<PathBuf>,
 
-    /// Vectors per shard file
+    /// Which engine(s) to benchmark
+    #[arg(long, default_value = "ailake")]
+    engine: Engine,
+
+    /// Vectors per AI-Lake shard file
     #[arg(long, default_value_t = 100_000)]
     shard_size: usize,
 
@@ -47,25 +67,84 @@ struct Args {
     #[arg(long, default_value_t = 10)]
     top_k: usize,
 
-    /// HNSW ef_search parameter
+    /// AI-Lake HNSW ef_search parameter
     #[arg(long, default_value_t = 50)]
     ef: usize,
 
     /// Truncate base set (useful for smoke-tests, e.g. --limit 10000)
     #[arg(long)]
     limit: Option<usize>,
+
+    /// LanceDB IVF nprobes during search (requires --features lancedb-bench)
+    #[arg(long, default_value_t = 20)]
+    lancedb_nprobes: usize,
+
+    /// LanceDB IVF number of partitions (requires --features lancedb-bench)
+    #[arg(long, default_value_t = 256)]
+    lancedb_partitions: u32,
+
+    /// LanceDB HNSW ef_construction during index build (requires --features lancedb-bench)
+    #[arg(long, default_value_t = 100)]
+    lancedb_ef_construction: u32,
+
+    /// Number of concurrent LanceDB search queries (requires --features lancedb-bench)
+    #[arg(long, default_value_t = 32)]
+    lancedb_concurrency: usize,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-
-    // ── Load dataset ──────────────────────────────────────────────────────────
     let ds = dataset::load(&args.dataset_dir, args.limit)?;
 
-    // ── Set up AI-Lake table ──────────────────────────────────────────────────
+    match args.engine {
+        Engine::Ailake => {
+            let r = run_ailake(&args, &ds).await?;
+            bench_result::print_single(&r, ds.base.len(), args.top_k);
+        }
+        Engine::Lancedb => {
+            #[cfg(not(feature = "lancedb-bench"))]
+            anyhow::bail!("--engine lancedb requires recompiling with --features lancedb-bench");
+            #[cfg(feature = "lancedb-bench")]
+            {
+                let r = lancedb_bench::run(
+                    &ds,
+                    args.top_k,
+                    args.lancedb_nprobes,
+                    args.lancedb_partitions,
+                    args.lancedb_ef_construction,
+                    args.lancedb_concurrency,
+                )
+                .await?;
+                bench_result::print_single(&r, ds.base.len(), args.top_k);
+            }
+        }
+        Engine::All => {
+            #[cfg(not(feature = "lancedb-bench"))]
+            anyhow::bail!("--engine all requires recompiling with --features lancedb-bench");
+            #[cfg(feature = "lancedb-bench")]
+            {
+                let ailake = run_ailake(&args, &ds).await?;
+                let lancedb = lancedb_bench::run(
+                    &ds,
+                    args.top_k,
+                    args.lancedb_nprobes,
+                    args.lancedb_partitions,
+                    args.lancedb_ef_construction,
+                    args.lancedb_concurrency,
+                )
+                .await?;
+                bench_result::print_comparison(&ailake, &lancedb, args.top_k);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_ailake(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<BenchResult> {
     let tmp;
-    let table_root = match &args.table_dir {
+    let table_root: PathBuf = match &args.table_dir {
         Some(p) => p.clone(),
         None => {
             tmp = tempfile::TempDir::new().context("create temp dir")?;
@@ -87,16 +166,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // ── Write phase ───────────────────────────────────────────────────────────
-    eprintln!("\nWrite phase …");
+    eprintln!("\nAI-Lake write phase …");
     let write_start = Instant::now();
 
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
     let total_base = ds.base.len();
     let shard_size = args.shard_size;
     let num_shards = total_base.div_ceil(shard_size);
-
-    // Track shard base offsets so recall can map local RowId → global id
-    let mut shard_offsets: Vec<u64> = Vec::with_capacity(num_shards);
 
     let mut writer = TableWriter::create_or_open(
         catalog.clone(),
@@ -117,11 +193,9 @@ async fn main() -> anyhow::Result<()> {
         let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(ids))])?;
 
         writer
-            .write_batch(&batch, shard_vecs)
+            .write_batch_deferred(&batch, shard_vecs)
             .await
             .with_context(|| format!("write shard {shard_idx}"))?;
-
-        shard_offsets.push(base_offset as u64);
 
         eprint!(
             "\r  shard {}/{} ({} vectors)",
@@ -134,25 +208,40 @@ async fn main() -> anyhow::Result<()> {
 
     let snapshot_id = writer.commit().await.context("commit")?;
     let write_elapsed = write_start.elapsed();
-    let write_throughput = total_base as f64 / write_elapsed.as_secs_f64();
+    let write_vec_per_sec = total_base as f64 / write_elapsed.as_secs_f64();
 
     eprintln!(
-        "  committed snapshot {}  ({:.1}s  {:.0} vec/s)",
+        "  committed snapshot {}  ({:.1}s  {:.0} vec/s) — Parquet-only, HNSW building …",
         snapshot_id,
         write_elapsed.as_secs_f64(),
-        write_throughput,
+        write_vec_per_sec,
     );
 
-    // ── Search phase ──────────────────────────────────────────────────────────
-    eprintln!("\nSearch phase (top_k={} ef={}) …", args.top_k, args.ef);
+    // ── Wait for background HNSW builds ──────────────────────────────────────
+    eprintln!("  Waiting for {num_shards} background HNSW build(s) …");
+    let index_start = Instant::now();
+    loop {
+        let files = catalog
+            .list_files(&table, None)
+            .await
+            .context("list files")?;
+        let ready = files
+            .iter()
+            .filter(|f| f.index_status == IndexStatus::Ready)
+            .count();
+        if ready >= num_shards {
+            break;
+        }
+        eprint!("\r  Indexing: {ready}/{num_shards} shards ready …");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let index_build_elapsed = index_start.elapsed();
+    eprintln!(
+        "\r  All {num_shards} shards indexed in {:.1}s                    ",
+        index_build_elapsed.as_secs_f64()
+    );
 
-    let search_cfg = SearchConfig {
-        top_k: args.top_k,
-        ef_search: args.ef,
-        pruning_threshold: f32::INFINITY,
-        rerank_factor: None,
-    };
-
+    // ── Load indexes ──────────────────────────────────────────────────────────
     eprintln!("  Loading indexes into memory …");
     let load_start = Instant::now();
     let session = SearchSession::load(
@@ -172,19 +261,29 @@ async fn main() -> anyhow::Result<()> {
         load_elapsed.as_secs_f64()
     );
 
+    // ── Search phase ──────────────────────────────────────────────────────────
+    eprintln!(
+        "\nAI-Lake search phase (top_k={}, ef={}) …",
+        args.top_k, args.ef
+    );
+
+    let search_cfg = SearchConfig {
+        top_k: args.top_k,
+        ef_search: args.ef,
+        pruning_threshold: f32::INFINITY,
+        rerank_factor: None,
+    };
+
     let num_queries = ds.queries.len();
     let mut latencies_us: Vec<u64> = Vec::with_capacity(num_queries);
     let mut recall_sum = 0.0f64;
-
     let search_wall_start = Instant::now();
 
     for (qi, query) in ds.queries.iter().enumerate() {
         let t0 = Instant::now();
         let results = session.search_query(query, &search_cfg);
-        let elapsed_us = t0.elapsed().as_micros() as u64;
-        latencies_us.push(elapsed_us);
+        latencies_us.push(t0.elapsed().as_micros() as u64);
 
-        // Convert SearchResult → global IDs
         let result_ids: Vec<u32> = results
             .iter()
             .map(|r| {
@@ -193,8 +292,7 @@ async fn main() -> anyhow::Result<()> {
             })
             .collect();
 
-        let recall = metrics::recall_at_k(&result_ids, &ds.ground_truth[qi], args.top_k);
-        recall_sum += recall;
+        recall_sum += metrics::recall_at_k(&result_ids, &ds.ground_truth[qi], args.top_k);
 
         if (qi + 1) % 1000 == 0 {
             eprint!("\r  {}/{} queries …", qi + 1, num_queries);
@@ -204,41 +302,20 @@ async fn main() -> anyhow::Result<()> {
 
     let search_wall_ns = search_wall_start.elapsed().as_nanos() as u64;
     let lat = metrics::LatencyStats::compute(&mut latencies_us, search_wall_ns);
-    let mean_recall = recall_sum / num_queries as f64;
 
-    // ── Report ────────────────────────────────────────────────────────────────
-    println!();
-    println!("AI-Lake Benchmark — SIFT-1M ({}D, Euclidean, F16)", ds.dim);
-    println!("{}", "=".repeat(58));
-    println!(
-        "Dataset    {:>10} base  |  {:>6} queries  |  {} GT neighbors",
-        fmt_int(total_base),
-        fmt_int(num_queries),
-        ds.ground_truth.first().map(|v| v.len()).unwrap_or(0),
-    );
-    println!();
-    println!("Write phase");
-    println!("  Shards        : {} × {} vectors", num_shards, shard_size);
-    println!("  Wall time     : {:.1} s", write_elapsed.as_secs_f64());
-    println!("  Throughput    : {:.0} vec/s", write_throughput);
-    println!();
-    println!("Index load");
-    println!("  Shards loaded : {}", session.shard_count());
-    println!("  Load time     : {:.2} s", load_elapsed.as_secs_f64());
-    println!();
-    println!(
-        "Search phase  (top_k={}, ef={})  [indexes pre-loaded]",
-        args.top_k, args.ef
-    );
-    println!("  Recall@{}     : {:.4}", args.top_k, mean_recall);
-    println!("  QPS           : {:.0}", lat.qps);
-    println!("  Latency mean  : {:.3} ms", lat.mean_ms);
-    println!("  Latency p50   : {:.3} ms", lat.p50_ms);
-    println!("  Latency p95   : {:.3} ms", lat.p95_ms);
-    println!("  Latency p99   : {:.3} ms", lat.p99_ms);
-    println!();
-
-    Ok(())
+    Ok(BenchResult {
+        engine: format!("AI-Lake 0.2 ({num_shards} shards, deferred HNSW+F16)"),
+        write_secs: write_elapsed.as_secs_f64(),
+        write_vec_per_sec,
+        index_build_secs: index_build_elapsed.as_secs_f64(),
+        load_secs: load_elapsed.as_secs_f64(),
+        recall: recall_sum / num_queries as f64,
+        qps: lat.qps,
+        mean_ms: lat.mean_ms,
+        p50_ms: lat.p50_ms,
+        p95_ms: lat.p95_ms,
+        p99_ms: lat.p99_ms,
+    })
 }
 
 /// Extract the part number from a path like "data/part-00007.parquet" → 7.
@@ -250,16 +327,4 @@ fn parse_part_num(file_path: &str) -> usize {
         .and_then(|rest| rest.strip_suffix(".parquet"))
         .and_then(|num_str| num_str.parse().ok())
         .unwrap_or(0)
-}
-
-fn fmt_int(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out.chars().rev().collect()
 }

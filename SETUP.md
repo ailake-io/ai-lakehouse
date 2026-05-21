@@ -70,7 +70,7 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Deve terminar com `83 passed, 1 ignored`.
+Deve terminar com `78 passed`.
 
 ### Testes por crate
 
@@ -337,13 +337,16 @@ bash ailake-bench/scripts/download_sift1m.sh
 cargo run --release -p ailake-bench -- --dataset-dir data/sift1m
 ```
 
-Resultado esperado (CPU com AVX2):
+Resultado esperado (CPU com AVX2, parallel HNSW build):
 ```
 Write phase
   Throughput    : ~2400 vec/s
 
+Build phase  (10 shards, parallel)
+  Build time    : ~155 s  (vs ~220 s single-threaded)
+
 Search phase  (top_k=10, ef=50)  [indexes pre-loaded]
-  Recall@10     : ~0.96
+  Recall@10     : ~0.996
   QPS           : ~450
   Latency mean  : ~2.2 ms
   Latency p99   : ~4.5 ms

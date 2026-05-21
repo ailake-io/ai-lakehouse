@@ -95,6 +95,7 @@ mod tests {
             vector_column: None,
             vector_dim: None,
             extra_vector_indexes: vec![],
+            index_status: ailake_catalog::IndexStatus::Ready,
         };
         let query = vec![0.0f32, 0.0, 1.0];
         let kept = VectorPruner::prune(vec![entry], &query, VectorMetric::Cosine, 0.0);

@@ -11,6 +11,7 @@ gpu = ["dep:candle-core", "candle-core/cuda"]
 [dependencies]
 ailake-core  = { path = "../ailake-core" }
 ailake-vec   = { path = "../ailake-vec" }
+half         = { workspace = true }
 serde        = { workspace = true }
 bincode      = { workspace = true }
 rand         = { workspace = true }

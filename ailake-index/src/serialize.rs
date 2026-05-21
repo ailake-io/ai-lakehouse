@@ -72,6 +72,7 @@ impl HnswSerializer {
             dim: snap.dim,
             row_ids: snap.row_ids,
             flat_vecs: snap.flat_vecs,
+            flat_vecs_f16: None, // populated at runtime by quantize_to_f16() if needed
             neighbors: snap.neighbors,
             node_levels: snap.node_levels,
             entry_point: snap.entry_point,

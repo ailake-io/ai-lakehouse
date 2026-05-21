@@ -24,9 +24,10 @@ pub mod jdbc;
 pub use databricks::{databricks_aws, databricks_azure, databricks_gcp, DatabricksAuth};
 pub use hadoop::HadoopCatalog;
 pub use provider::{
-    decode_centroid, encode_centroid_b64, make_data_file_entry, make_multi_column_data_file_entry,
-    new_snapshot_id, CatalogProvider, DataFileEntry, ExtraVectorIndex, NewSnapshot, SnapshotId,
-    SnapshotOperation, TableIdent, TableMetadata, TableProperties, VectorIndexInfo,
+    decode_centroid, encode_centroid_b64, make_data_file_entry, make_data_file_entry_indexing,
+    make_multi_column_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,
+    ExtraVectorIndex, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation, TableIdent,
+    TableMetadata, TableProperties, VectorIndexInfo,
 };
 pub use rest::{RestCatalog, RestCatalogAuth, RestCatalogConfig};
 
