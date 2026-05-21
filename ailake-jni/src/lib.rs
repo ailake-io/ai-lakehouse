@@ -85,8 +85,10 @@ fn do_search(
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
     };
-    rt().block_on(rs_search(&table, &query, config, vec_col, dim, catalog, store))
-        .unwrap_or_default()
+    rt().block_on(rs_search(
+        &table, &query, config, vec_col, dim, catalog, store,
+    ))
+    .unwrap_or_default()
 }
 
 // ── uniffi exports ────────────────────────────────────────────────────────────
@@ -106,14 +108,23 @@ pub fn vector_search(table_uri: String, query_bytes: Vec<u8>, top_k: u32) -> Vec
         .collect();
 
     // uniffi surface: warehouse = table_uri, namespace/table read from catalog metadata
-    do_search(table_uri, "default", "table", "embedding", 0, query, top_k, 50)
-        .into_iter()
-        .map(|r| RowResult {
-            row_id: r.row_id.as_u64(),
-            distance: r.distance,
-            file_path: r.file_path,
-        })
-        .collect()
+    do_search(
+        table_uri,
+        "default",
+        "table",
+        "embedding",
+        0,
+        query,
+        top_k,
+        50,
+    )
+    .into_iter()
+    .map(|r| RowResult {
+        row_id: r.row_id.as_u64(),
+        distance: r.distance,
+        file_path: r.file_path,
+    })
+    .collect()
 }
 
 /// Assemble JSON-serialized chunks into structured XML context for LLM input.
@@ -205,10 +216,11 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     };
     let query = std::slice::from_raw_parts(query_ptr, query_len as usize).to_vec();
     let dim = query.len() as u32;
-    let results: Vec<RowResultJson> = do_search(uri, "default", "table", "embedding", dim, query, top_k, 50)
-        .into_iter()
-        .map(RowResultJson::from)
-        .collect();
+    let results: Vec<RowResultJson> =
+        do_search(uri, "default", "table", "embedding", dim, query, top_k, 50)
+            .into_iter()
+            .map(RowResultJson::from)
+            .collect();
     let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
     CString::new(json)
         .unwrap_or_else(|_| CString::new("[]").unwrap())
@@ -242,10 +254,18 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         #[serde(default = "default_ef")]
         ef_search: u32,
     }
-    fn default_ns() -> String { "default".into() }
-    fn default_col() -> String { "embedding".into() }
-    fn default_topk() -> u32 { 10 }
-    fn default_ef() -> u32 { 50 }
+    fn default_ns() -> String {
+        "default".into()
+    }
+    fn default_col() -> String {
+        "embedding".into()
+    }
+    fn default_topk() -> u32 {
+        10
+    }
+    fn default_ef() -> u32 {
+        50
+    }
 
     if request_json.is_null() {
         return cstr_err_json("null request_json");
@@ -270,9 +290,16 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         req.ef_search,
     );
     #[derive(serde::Serialize)]
-    struct Resp { ok: bool, results: Vec<RowResultJson> }
-    let body = Resp { ok: true, results: results.into_iter().map(RowResultJson::from).collect() };
-    let json = serde_json::to_string(&body).unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialize\"}".into());
+    struct Resp {
+        ok: bool,
+        results: Vec<RowResultJson>,
+    }
+    let body = Resp {
+        ok: true,
+        results: results.into_iter().map(RowResultJson::from).collect(),
+    };
+    let json = serde_json::to_string(&body)
+        .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialize\"}".into());
     CString::new(json).unwrap_or_default().into_raw()
 }
 
@@ -320,8 +347,12 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         ids: Vec<i64>,
         embeddings: Vec<Vec<f32>>,
     }
-    fn default_ns() -> String { "default".into() }
-    fn default_col() -> String { "embedding".into() }
+    fn default_ns() -> String {
+        "default".into()
+    }
+    fn default_col() -> String {
+        "embedding".into()
+    }
 
     if request_json.is_null() {
         return cstr_err_json("null request_json");
@@ -341,8 +372,8 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     let metric = parse_metric(req.metric.as_deref().unwrap_or("euclidean"));
     let precision = match req.precision.as_deref().unwrap_or("f16") {
         "f32" => VectorPrecision::F32,
-        "i8"  => VectorPrecision::I8,
-        _     => VectorPrecision::F16,
+        "i8" => VectorPrecision::I8,
+        _ => VectorPrecision::F16,
     };
     let policy = VectorStoragePolicy {
         column_name: req.vec_col.clone(),
@@ -354,17 +385,16 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     };
 
     let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
-    let store: std::sync::Arc<dyn ailake_store::Store> = std::sync::Arc::new(LocalStore::new(&req.warehouse));
+    let store: std::sync::Arc<dyn ailake_store::Store> =
+        std::sync::Arc::new(LocalStore::new(&req.warehouse));
     let catalog = std::sync::Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
 
     let schema = std::sync::Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-    let batch = match RecordBatch::try_new(
-        schema,
-        vec![std::sync::Arc::new(Int64Array::from(req.ids))],
-    ) {
-        Ok(b) => b,
-        Err(e) => return cstr_err_json(e),
-    };
+    let batch =
+        match RecordBatch::try_new(schema, vec![std::sync::Arc::new(Int64Array::from(req.ids))]) {
+            Ok(b) => b,
+            Err(e) => return cstr_err_json(e),
+        };
 
     let result = rt().block_on(async {
         let mut writer = TableWriter::create_or_open(catalog, store, policy, table).await?;
@@ -373,11 +403,17 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     });
 
     #[derive(serde::Serialize)]
-    struct Resp { ok: bool, snapshot_id: i64 }
+    struct Resp {
+        ok: bool,
+        snapshot_id: i64,
+    }
     match result {
         Ok(snap) => {
-            let json = serde_json::to_string(&Resp { ok: true, snapshot_id: snap as i64 })
-                .unwrap_or_default();
+            let json = serde_json::to_string(&Resp {
+                ok: true,
+                snapshot_id: snap as i64,
+            })
+            .unwrap_or_default();
             CString::new(json).unwrap_or_default().into_raw()
         }
         Err(e) => cstr_err_json(e),
