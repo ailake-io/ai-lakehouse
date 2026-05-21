@@ -1,0 +1,2 @@
+io.ailake.flink.AilakeVectorConnectorFactory
+io.ailake.flink.AilakeCatalogFactory
