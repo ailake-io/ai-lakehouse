@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
 use ailake_core::{AilakeResult, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
@@ -256,69 +258,83 @@ impl SearchSession {
             None => config.top_k,
         };
 
-        let mut all_results: Vec<SearchResult> = Vec::new();
-
-        for shard in &self.shards {
-            // Geometric pruning per shard (works for both Ready and Indexing).
-            if let Some(centroid) = ailake_catalog::decode_centroid(&shard.entry, self.metric) {
-                let dist = match self.metric {
-                    VectorMetric::Cosine => ailake_vec::cosine_distance(query, &centroid.values),
-                    VectorMetric::Euclidean => {
-                        ailake_vec::euclidean_distance(query, &centroid.values)
+        let mut all_results: Vec<SearchResult> = self
+            .shards
+            .par_iter()
+            .flat_map(|shard| {
+                // Geometric pruning per shard.
+                if let Some(centroid) = ailake_catalog::decode_centroid(&shard.entry, self.metric) {
+                    let dist = match self.metric {
+                        VectorMetric::Cosine => {
+                            ailake_vec::cosine_distance(query, &centroid.values)
+                        }
+                        VectorMetric::Euclidean => {
+                            ailake_vec::euclidean_distance(query, &centroid.values)
+                        }
+                        VectorMetric::DotProduct => {
+                            -ailake_vec::dot_product(query, &centroid.values)
+                        }
+                    };
+                    if dist - centroid.radius > config.pruning_threshold {
+                        return vec![];
                     }
-                    VectorMetric::DotProduct => -ailake_vec::dot_product(query, &centroid.values),
-                };
-                if dist - centroid.radius > config.pruning_threshold {
-                    continue;
                 }
-            }
 
-            if let Some(index) = &shard.index {
-                // Ready shard: HNSW search.
-                let local_results = index.search(query, candidate_k, config.ef_search);
-                if config.rerank_factor.is_some() {
-                    if let Some(raw) = &shard.raw_vectors {
-                        for (row_id, _approx_dist) in local_results {
-                            let idx = row_id.as_u64() as usize;
-                            let exact_dist = raw
-                                .get(idx)
-                                .map(|v| exact_distance(self.metric, query, v))
-                                .unwrap_or(f32::INFINITY);
-                            all_results.push(SearchResult {
-                                row_id,
-                                distance: exact_dist,
-                                file_path: shard.entry.path.clone(),
-                            });
+                if let Some(index) = &shard.index {
+                    // Ready shard: HNSW search.
+                    let local_results = index.search(query, candidate_k, config.ef_search);
+                    if config.rerank_factor.is_some() {
+                        if let Some(raw) = &shard.raw_vectors {
+                            local_results
+                                .into_iter()
+                                .map(|(row_id, _approx_dist)| {
+                                    let idx = row_id.as_u64() as usize;
+                                    let exact_dist = raw
+                                        .get(idx)
+                                        .map(|v| exact_distance(self.metric, query, v))
+                                        .unwrap_or(f32::INFINITY);
+                                    SearchResult {
+                                        row_id,
+                                        distance: exact_dist,
+                                        file_path: shard.entry.path.clone(),
+                                    }
+                                })
+                                .collect()
+                        } else {
+                            local_results
+                                .into_iter()
+                                .map(|(row_id, distance)| SearchResult {
+                                    row_id,
+                                    distance,
+                                    file_path: shard.entry.path.clone(),
+                                })
+                                .collect()
                         }
                     } else {
-                        for (row_id, distance) in local_results {
-                            all_results.push(SearchResult {
+                        local_results
+                            .into_iter()
+                            .map(|(row_id, distance)| SearchResult {
                                 row_id,
                                 distance,
                                 file_path: shard.entry.path.clone(),
-                            });
-                        }
+                            })
+                            .collect()
                     }
-                } else {
-                    for (row_id, distance) in local_results {
-                        all_results.push(SearchResult {
+                } else if let Some(raw) = &shard.raw_vectors {
+                    // Indexing shard: exact flat scan.
+                    flat_search(raw, query, candidate_k, self.metric)
+                        .into_iter()
+                        .map(|(row_id, distance)| SearchResult {
                             row_id,
                             distance,
                             file_path: shard.entry.path.clone(),
-                        });
-                    }
+                        })
+                        .collect()
+                } else {
+                    vec![]
                 }
-            } else if let Some(raw) = &shard.raw_vectors {
-                // Indexing shard: exact flat scan (HNSW not yet ready).
-                for (row_id, distance) in flat_search(raw, query, candidate_k, self.metric) {
-                    all_results.push(SearchResult {
-                        row_id,
-                        distance,
-                        file_path: shard.entry.path.clone(),
-                    });
-                }
-            }
-        }
+            })
+            .collect();
 
         all_results.sort_by(|a, b| {
             a.distance
