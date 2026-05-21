@@ -16,3 +16,4 @@ pub use mem_table::{MemTableConfig, MemTableWriter};
 pub use pruner::VectorPruner;
 pub use scanner::{search, SearchConfig, SearchResult, SearchSession};
 pub use writer::{MultiVectorBatch, TableWriter};
+pub use ailake_index::IvfPqConfig;

@@ -8,7 +8,8 @@ use ailake_catalog::{
     TableProperties, VectorIndexInfo,
 };
 use ailake_core::{AilakeResult, VectorStoragePolicy};
-use ailake_file::{AilakeFileReader, AilakeFileWriter, VectorColumnBatch};
+use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBatch};
+use ailake_index::IvfPqConfig;
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
 use arrow_array::RecordBatch;
@@ -144,6 +145,53 @@ impl TableWriter {
                 dim: self.policy.dim,
                 hnsw_offset: hnsw_abs_offset,
                 hnsw_len,
+            },
+        );
+        self.pending_files.push(entry);
+        Ok(())
+    }
+
+    /// Write batch with IVF-PQ index built synchronously (no background task).
+    ///
+    /// Smaller index than HNSW; better for S3 sequential-scan workloads.
+    pub async fn write_batch_ivf_pq(
+        &mut self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+        ivf_config: IvfPqConfig,
+    ) -> AilakeResult<()> {
+        let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
+        let file_path = format!("data/part-{:05}.parquet", part_num);
+
+        let file_writer =
+            AilakeFileWriter::new(self.policy.clone()).with_index_type(IndexType::IvfPq(ivf_config));
+        let file_bytes: Bytes = file_writer.write(batch, embeddings)?;
+        let file_size = file_bytes.len() as u64;
+
+        self.store.put(&file_path, file_bytes.clone()).await?;
+
+        let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
+
+        let reader = ailake_file::AilakeFileReader::new(
+            file_bytes,
+            &self.policy.column_name,
+            self.policy.dim,
+        );
+        let header = reader.read_header()?;
+        let ailk_start = reader.ailk_offset()?;
+        let index_abs_offset = ailk_start + header.hnsw_offset;
+        let index_len = header.hnsw_len;
+
+        let entry = make_data_file_entry(
+            &file_path,
+            embeddings.len() as u64,
+            file_size,
+            &centroid,
+            VectorIndexInfo {
+                column: &self.policy.column_name,
+                dim: self.policy.dim,
+                hnsw_offset: index_abs_offset,
+                hnsw_len: index_len,
             },
         );
         self.pending_files.push(entry);
