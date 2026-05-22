@@ -42,8 +42,6 @@ pub fn gcs_store(config: GcsConfig, prefix: impl Into<String>) -> AilakeResult<O
         }
     }
 
-    let store = b
-        .build()
-        .map_err(|e| AilakeError::Store(e.to_string()))?;
+    let store = b.build().map_err(|e| AilakeError::Store(e.to_string()))?;
     Ok(ObjectStoreBackend::new(Arc::new(store), prefix))
 }

@@ -71,8 +71,6 @@ pub fn azure_store(
         }
     }
 
-    let store = b
-        .build()
-        .map_err(|e| AilakeError::Store(e.to_string()))?;
+    let store = b.build().map_err(|e| AilakeError::Store(e.to_string()))?;
     Ok(ObjectStoreBackend::new(Arc::new(store), prefix))
 }

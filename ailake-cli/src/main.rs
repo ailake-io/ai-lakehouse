@@ -131,7 +131,9 @@ async fn run(cli: Cli) -> Result<(), String> {
             file,
             embeddings,
         } => {
-            eprintln!("not yet implemented: insert table={table} file={file} embeddings={embeddings}");
+            eprintln!(
+                "not yet implemented: insert table={table} file={file} embeddings={embeddings}"
+            );
             Err("not yet implemented".into())
         }
         Commands::Search {
@@ -148,9 +150,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             Err("not yet implemented".into())
         }
         Commands::Compact { table, target_size } => {
-            eprintln!(
-                "not yet implemented: compact table={table} target_size={target_size}"
-            );
+            eprintln!("not yet implemented: compact table={table} target_size={target_size}");
             Err("not yet implemented".into())
         }
         Commands::Info { table } => {

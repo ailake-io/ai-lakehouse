@@ -81,8 +81,6 @@ pub fn s3_store(config: S3Config, prefix: impl Into<String>) -> AilakeResult<Obj
         S3Credentials::InstanceProfile | S3Credentials::Default => {}
     }
 
-    let store = b
-        .build()
-        .map_err(|e| AilakeError::Store(e.to_string()))?;
+    let store = b.build().map_err(|e| AilakeError::Store(e.to_string()))?;
     Ok(ObjectStoreBackend::new(Arc::new(store), prefix))
 }
