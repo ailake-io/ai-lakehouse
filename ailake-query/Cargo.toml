@@ -25,3 +25,6 @@ rand        = { workspace = true }
 
 [[example]]
 name = "demo"
+
+[[example]]
+name = "write_fixture"
