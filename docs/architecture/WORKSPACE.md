@@ -67,7 +67,7 @@ Vector data transformations. No I/O.
 - `BlockCompressor::zstd(level)`, `BlockCompressor::lz4()` — block-level compression
 
 ### `ailake-index`
-HNSW index lifecycle. Search backend priority: GPU (candle-core + CUDA, optional) → real HNSW graph (CPU, always available).
+HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) + AMD ROCm (runtime libloading). CPU fallback always available.
 
 - `HnswBuilder` — builds HNSW from `(RowId, &[f32])` pairs
   - Parameters: `M` (max connections), `ef_construction`, `metric`
@@ -76,18 +76,25 @@ HNSW index lifecycle. Search backend priority: GPU (candle-core + CUDA, optional
   - Internal layout: contiguous `flat_vecs: Vec<f32>` (row-major), `row_ids: Vec<u64>`, `neighbors: Vec<Vec<Vec<usize>>>`, `node_levels`, `entry_point`, `max_layer`
   - Visited tracking: thread-local generation bitmap — O(1) reset by incrementing generation counter; no per-query allocation
   - `search(query: &[f32], top_k: usize, ef_search: usize) -> Vec<(RowId, f32)>`
-  - GPU path: `try_gpu_search()` via `candle-core/cuda` — compiled in with `--features gpu`, used only when CUDA available at runtime; returns `None` otherwise (falls through to HNSW graph path)
-  - CPU fallback: `brute_force()` via `rayon::par_iter()` — activated only when `neighbors` is empty (old serialized format compatibility)
+  - CPU fallback: `brute_force()` via `rayon::par_iter()` — activated only when `neighbors` is empty
+- `IvfPqIndex` / `IvfPqConfig` / `IvfPqSerializer` — inverted file index with Product Quantization
+  - `IvfPqConfig::for_dataset(dim, n)` — scales `nlist` to √n clamped [16, 1024]
+  - `kmeans_dispatch()` — priority: CUDA → ROCm → CPU rayon
+- `AnyIndex` — enum dispatching search to `HnswIndex` or `IvfPqIndex`
 - `HnswSerializer` — bincode-based serialization of the full HNSW graph
-  - `to_bytes(index: &HnswIndex) -> Vec<u8>`
-  - `from_bytes(bytes: &[u8]) -> HnswIndex`
-  - Old format (empty `neighbors`) triggers brute-force fallback automatically
 - `MmapLoader` — opens a serialized HNSW from a memory-mapped byte slice
   - Lazy: graph traversal only pages in the regions touched during search
+- `hardware::HardwareBackend` — `CpuSimd` / `NvidiaCuda` / `AmdRocm`
+- `hardware::HardwareProfile` — `has_cuda`, `has_rocm`, `backend`, `cpu_logical_cores`, `has_avx2`, `has_avx512`
+- `hardware::detect_backend()` — probed once via `OnceLock`; AMD probed before NVIDIA
+- `hardware::detect_cuda()` — true only for `NvidiaCuda` (not ROCm compat layer)
+- `hardware::detect_rocm()` — true only for `AmdRocm`
+- `gpu::try_gpu_search_batch()` / `try_gpu_kmeans()` — NVIDIA CUDA via `candle-core` (feature `gpu`)
+- `gpu::try_rocm_search_batch()` / `try_rocm_kmeans()` — AMD ROCm via `libloading` hipBLAS (always compiled; returns `None` if no ROCm at runtime)
 
 **Feature flags**:
-- Default build (no flags): HNSW graph on CPU, works everywhere, no CUDA required
-- `--features ailake-index/gpu`: adds GPU brute-force path; requires CUDA toolkit at build time; detects GPU at runtime and falls back to HNSW graph if unavailable
+- Default build (no flags): HNSW/IVF-PQ on CPU; AMD ROCm detected and used at runtime if `libamdhip64.so` + `libhipblas.so` present
+- `--features ailake-index/gpu`: adds NVIDIA CUDA path via `candle-core`; requires CUDA Toolkit at build time; detects CUDA at runtime and falls back to ROCm/CPU if unavailable
 
 ### `ailake-file`
 **Owns the unified file format.** This is the integration crate that combines Parquet + AI-Lake footer.
@@ -243,8 +250,11 @@ bincode     = "1"
 memmap2     = "0.9"
 rayon       = "1"
 
-# GPU (included only when ailake-index's "gpu" feature is enabled)
+# GPU — NVIDIA CUDA (compile-time feature "gpu")
 candle-core = "0.8"
+
+# GPU — AMD ROCm + runtime CUDA detection (always compiled, dlopen at runtime)
+libloading  = "0.8"
 
 # Compression
 lz4_flex    = "0.11"
@@ -286,7 +296,7 @@ debug       = true
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
 | **Phase 3** | ✅ Complete | Catalog backends (NessieCatalog, JdbcCatalog, GlueCatalog), uniffi JVM bindings, multi-column vectors |
-| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search ✅, HNSW perf optimizations ✅, LanceDB/pgvector/Deep Lake comparisons ✅; `ailake-flink` pending |
+| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search ✅, HNSW perf optimizations ✅, LanceDB/pgvector/Deep Lake comparisons ✅, IVF-PQ native index ✅, GPU k-means (CUDA + ROCm) ✅, AMD ROCm hipBLAS backend ✅, adaptive index selection (`IndexType::Auto`) ✅; `ailake-flink` pending |
 
 ### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
@@ -335,8 +345,11 @@ Deferred (external env required):
 Delivered in Phase 4:
 - Reranking after PQ: `SearchConfig.rerank_factor`, `exact_distance()` in `ailake-vec`
 - Public format spec: `docs/specs/FILE_FORMAT.md` — binary layout, AILK header/trailer, KV metadata keys
-- GPU search: candle-core + CUDA backend in `ailake-index`, automatic CPU fallback via rayon
-- GPU FFI evaluation: `docs/specs/GPU_FFI_EVALUATION.md` — cuVS evaluated, candle-core chosen
+- GPU search: NVIDIA CUDA (candle-core, `gpu` feature) + AMD ROCm (hipBLAS SGEMM via libloading, runtime-only) in `ailake-index`; automatic CPU fallback via rayon; detection priority: AMD ROCm → NVIDIA CUDA → CPU SIMD
+- Hardware abstraction: `HardwareBackend` enum, `HardwareProfile`, `detect_backend()` / `detect_cuda()` / `detect_rocm()` in `ailake-index/src/hardware.rs`
+- GPU k-means dispatch: CUDA → ROCm → CPU for IVF-PQ training (`kmeans_dispatch` in `ivf_pq.rs`)
+- Adaptive index selection: `IndexType::Auto`, `write_batch_auto()`, `CompactionIndexStrategy::Auto`
+- GPU FFI evaluation: `docs/specs/GPU_FFI_EVALUATION.md` — cuVS evaluated, candle-core + hipBLAS chosen
 - Real HNSW graph: custom implementation in `ailake-index` (Malkov & Yashunin 2018); generation bitmap visited tracker; contiguous `flat_vecs` layout
 - SIMD distance functions: AVX2 + NEON in `ailake-vec/src/distance.rs`; runtime detection; 2× unrolled AVX2 for dot/euclidean
 - `SearchSession` in `ailake-query`: pre-loaded multi-query search, eliminates per-query I/O

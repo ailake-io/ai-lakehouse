@@ -61,7 +61,7 @@ Decisions are numbered and immutable once merged. To change a decision, add a ne
 - `cargo build --target aarch64-unknown-linux-musl` works without extra setup.
 - HNSW graph serializes naturally via `bincode` — no custom FFI serialization adapter needed.
 - hnsw_rs has a smaller user base than Faiss. Mitigated by: (a) the unified file architecture bounds individual HNSW size to ~10-20 MB per file, well within hnsw_rs's tested range; (b) the algorithm is the same as Faiss HNSW, so recall characteristics match the published HNSW literature.
-- GPU support not available (Faiss has CUDA). Deferred to Phase 4 via FFI to cuVS if needed.
+- GPU support not available (Faiss has CUDA). Addressed in Phase 4: NVIDIA via candle-core (`gpu` feature), AMD ROCm via hipBLAS libloading — see ADR-012.
 
 **Rejected alternatives**:
 - Faiss via C FFI: would require `libfaiss.so` as a runtime dependency, complicating distribution. Cross-compilation becomes a non-trivial build engineering project.
@@ -246,3 +246,38 @@ The single-file design unifies dimensional data, vectors, and the HNSW index int
 - Markdown: headings are less semantically explicit than XML tags.
 - JSON: verbose, harder for LLMs to read as natural language context.
 - Plain text with separators: loses structural information; model must infer attribution.
+
+---
+
+## ADR-012: Multi-vendor GPU support — NVIDIA CUDA + AMD ROCm
+
+**Date**: 2026-05-22
+**Status**: Accepted
+
+**Context**: Phase 4 added NVIDIA GPU acceleration via `candle-core`. Two problems remained:
+1. The build-time `gpu` feature creates two distinct binaries — users on CPU-only machines get a different build than GPU users. CI cannot test the GPU path without a GPU runner.
+2. AMD ROCm GPUs (growing share of data-center deployments) received no acceleration despite being capable of the same SGEMM-based distance computation.
+
+**Decision**: Two independent GPU backends in `ailake-index`:
+
+1. **NVIDIA CUDA** — compile-time `gpu` feature, `candle-core` matmul. Requires CUDA Toolkit at build time. Detected at runtime via libloading probe of `libcuda.so.1` + `cuDeviceGetCount`. Returns `None` → CPU fallback if no device found.
+
+2. **AMD ROCm** — no compile-time dependency. `libloading` dlopen of `libamdhip64.so` + `libhipblas.so` at runtime. SGEMM via `hipblasSgemm` with RAII guards for device memory and hipBLAS handle. Returns `None` → CPU fallback if libraries absent.
+
+Detection priority: AMD ROCm first, then NVIDIA CUDA, then CPU. AMD is checked first because ROCm installations often provide a CUDA compatibility layer (`libcuda.so.1`) that would misidentify the backend without the priority check.
+
+`HardwareBackend` enum (`CpuSimd` / `NvidiaCuda` / `AmdRocm`) — single `OnceLock` caches the result for the process lifetime. `HardwareProfile` struct exposes `has_cuda`, `has_rocm`, `backend`, `cpu_logical_cores`, SIMD flags.
+
+**Consequences**:
+- Default binary (no `gpu` feature) transparently uses AMD ROCm acceleration when available — zero build system change required for AMD deployments.
+- NVIDIA binary (`--features gpu`) retains full candle-core path; ROCm path also available as fallback if CUDA probe fails.
+- `kmeans_dispatch` in `ivf_pq.rs` follows priority: CUDA → ROCm → CPU rayon.
+- `SearchSession::search_batch()` follows priority: NVIDIA → AMD → CPU per shard.
+- Adaptive index selection (`IndexType::Auto`) uses `has_cuda || has_rocm` as the GPU-capable check; both vendors justify IVF-PQ over HNSW.
+- hipBLAS SGEMM implementation is ~180 lines of `unsafe` libloading code, encapsulated in `rocm_impl` module with RAII cleanup — no unsafe surface exposed to callers.
+
+**Rejected alternatives**:
+- AMD via `candle-core` ROCm feature: `candle-core/rocm` is not a stable feature; would require matching build-time dependency as CUDA; less portable than the libloading approach.
+- AMD via cuVS FFI: cuVS is NVIDIA-only by design; rejected.
+- Single `gpu` feature covering both vendors: would force users to install one vendor's SDK to get the other vendor's support. Separate compile-time / runtime approach is cleaner.
+- HIP CUDA compatibility layer reliance: AMD ROCm ships `libcuda.so.1` as a compat shim, but relying on it would break vendor identification and could silently use the wrong code path.
