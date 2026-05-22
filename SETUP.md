@@ -1527,55 +1527,55 @@ cd ailake-flink
 gradle wrapper   # só na primeira vez
 ./gradlew shadowJar
 
-ls build/libs/ailake-flink-0.1.0-all.jar
+ls build/libs/ailake-flink-0.1.0-plugin.jar
 ```
+
+O shadow jar (`-plugin`) inclui JNA e Jackson. Dependências Flink ficam fora (são `compileOnly`).
 
 ### 17D. Registrar o conector no Flink (SQL Client ou DataStream)
 
 ```sql
 -- Flink SQL Client
-ADD JAR '/path/to/ailake-flink-0.1.0-all.jar';
+ADD JAR '/path/to/ailake-flink-0.1.0-plugin.jar';
 
-CREATE TABLE embeddings (
-  id       BIGINT,
-  text     STRING,
-  row_id   BIGINT,
-  distance DOUBLE
+-- Tabela source + sink
+CREATE TABLE docs (
+  id        BIGINT,
+  text      STRING,
+  embedding BYTES,
+  _distance FLOAT   -- preenchido pelo vector search, ignorado em writes
 ) WITH (
-  'connector'          = 'ailake-vector',
-  'table-uri'          = 's3://my-lake/docs/',
-  'vector-column'      = 'embedding',
-  'vector-dim'         = '1536',
-  'top-k'              = '10',
-  'native-lib-path'    = '/opt/ailake/lib'
+  'connector'        = 'ailake',
+  'warehouse'        = 's3://my-lake/',
+  'namespace'        = 'default',
+  'table-name'       = 'docs',
+  'vector.column'    = 'embedding',
+  'vector.dim'       = '1536',
+  'vector.metric'    = 'cosine',
+  'vector.precision' = 'f16',
+  'search.top-k'     = '10',
+  'search.ef'        = '50'
 );
 
-SELECT * FROM embeddings
-WHERE ailake_query_vector = '[0.1, 0.2, ...]'
-LIMIT 10;
+SELECT id, text, _distance FROM docs;
+```
+
+O vetor de consulta é passado como parâmetro do job (`ailake.query.vector` — floats separados por vírgula):
+
+```bash
+flink run \
+  -D "pipeline.global-job-parameters=ailake.query.vector=0.021,-0.043,0.118,..." \
+  my-pipeline.jar
 ```
 
 Para streaming ingestion (sink):
 
 ```sql
-CREATE TABLE ailake_sink (
-  id          BIGINT,
-  chunk_text  STRING,
-  embedding   BYTES    -- raw float32 bytes
-) WITH (
-  'connector'       = 'ailake-vector',
-  'table-uri'       = 's3://my-lake/docs/',
-  'vector-column'   = 'embedding',
-  'vector-dim'      = '1536',
-  'mode'            = 'sink',
-  'native-lib-path' = '/opt/ailake/lib'
-);
-
-INSERT INTO ailake_sink
+INSERT INTO docs
 SELECT id, chunk_text, embedding FROM kafka_source;
 ```
 
-O sink usa `MemTableWriter` internamente — acumula micro-batches e faz flush por tamanho/contagem/tempo (ver seção 19).
+O sink (`AilakeSinkFunction`) acumula 10.000 linhas e chama `AilakeNativeLoader.writeBatch()` ao fazer flush.
 
 ### 17E. Testes do plugin Flink
 
@@ -1856,7 +1856,7 @@ ldconfig -p | grep -E "libamdhip|libcuda"
 O jar do plugin não foi adicionado ao Flink.
 ```bash
 # SQL Client — adicionar antes de CREATE TABLE
-ADD JAR '/path/to/ailake-flink-0.1.0-all.jar';
+ADD JAR '/path/to/ailake-flink-0.1.0-plugin.jar';
 
 # ou via flink-conf.yaml
 classloader.parent-first-patterns.additional: io.ailake

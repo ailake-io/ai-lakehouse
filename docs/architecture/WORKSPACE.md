@@ -293,7 +293,7 @@ debug       = true
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
 | **Phase 3** | ✅ Complete | Catalog backends (NessieCatalog, JdbcCatalog, GlueCatalog), uniffi JVM bindings, multi-column vectors |
-| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search ✅, HNSW perf optimizations ✅, LanceDB/pgvector/Deep Lake comparisons ✅, IVF-PQ native index ✅, GPU k-means (CUDA + ROCm) ✅, AMD ROCm hipBLAS backend ✅, adaptive index selection (`IndexType::Auto`) ✅; `ailake-flink` pending |
+| **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS runtime-only), HNSW perf optimizations, IVF-PQ native index, GPU k-means, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog, JNA bridge) |
 
 ### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
@@ -363,5 +363,4 @@ Delivered in Phase 4:
   - `bench_result::print_multi_comparison` — N-engine side-by-side table, highlights fastest QPS
   - Deep Lake: `scripts/deeplake_bench.py` (Python) — exact kNN on subset; ANN requires paid Deep Memory plan (no Rust SDK available)
 
-Remaining Phase 4:
-- `ailake-flink` (separate Java repo): Flink sink/source connector
+Phase 4 complete. See Phase 5 for next planned work.
