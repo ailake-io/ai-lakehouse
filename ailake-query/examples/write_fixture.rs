@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use ailake_catalog::{CatalogProvider, HadoopCatalog, TableIdent};
 use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
-use ailake_query::{TableWriter};
+use ailake_query::TableWriter;
 use ailake_store::{LocalStore, Store};
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
@@ -29,7 +29,9 @@ fn make_batch(offset: usize) -> (RecordBatch, Vec<Vec<f32>>) {
         Field::new("text", DataType::Utf8, false),
     ]));
     let ids: Vec<i32> = (offset as i32..(offset + rows) as i32).collect();
-    let texts: Vec<String> = (offset..offset + rows).map(|i| format!("doc_{i}")).collect();
+    let texts: Vec<String> = (offset..offset + rows)
+        .map(|i| format!("doc_{i}"))
+        .collect();
     let texts_ref: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
 
     let batch = RecordBatch::try_new(
@@ -66,8 +68,8 @@ fn make_batch(offset: usize) -> (RecordBatch, Vec<Vec<f32>>) {
 
 #[tokio::main]
 async fn main() {
-    let out = std::env::var("COMPAT_FIXTURE_PATH")
-        .unwrap_or_else(|_| "./compat-fixture".to_string());
+    let out =
+        std::env::var("COMPAT_FIXTURE_PATH").unwrap_or_else(|_| "./compat-fixture".to_string());
 
     std::fs::create_dir_all(&out).expect("create fixture dir");
     println!("writing fixture to: {out}");
@@ -97,8 +99,16 @@ async fn main() {
     let total_rows = ROWS_PER_BATCH * BATCHES;
     for b in 0..BATCHES {
         let (batch, embs) = make_batch(b * ROWS_PER_BATCH);
-        writer.write_batch(&batch, &embs).await.expect("write batch");
-        println!("  batch {}/{} written ({} rows)", b + 1, BATCHES, ROWS_PER_BATCH);
+        writer
+            .write_batch(&batch, &embs)
+            .await
+            .expect("write batch");
+        println!(
+            "  batch {}/{} written ({} rows)",
+            b + 1,
+            BATCHES,
+            ROWS_PER_BATCH
+        );
     }
 
     writer.commit().await.expect("commit");
