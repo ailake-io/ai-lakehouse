@@ -12,4 +12,3 @@ dependencies = ["pyarrow>=14.0", "numpy>=1.24"]
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "ailake"
-python-source = "python"
