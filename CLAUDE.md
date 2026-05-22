@@ -386,17 +386,18 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 ## 10. Roadmap de Implementação
 
 ### Fase 1 — Fundação (MVP local)
-- [ ] `ailake-core`: tipos base (`VectorColumn`, `VectorMetric`, `LlmContextSchema`, `RowId`)
-- [ ] `ailake-parquet`: leitor/escritor Parquet com tipo `FIXED_LEN_BYTE_ARRAY` + metadados custom
-- [ ] `ailake-vec`: quantização escalar F32 → F16 → I8
-- [ ] `ailake-index`: HNSW via `hnsw_rs`, serialização via `bincode`
-- [ ] `ailake-file`: writer/reader do arquivo unificado (Parquet + rodapé AI-Lake)
-- [ ] `ailake-catalog`: escrita de `metadata.json` compatível com Iceberg Spec v2 + custom-properties
-- [ ] CLI: `ailake create`, `ailake insert`, `ailake search` em filesystem local
-- [ ] Validação: PyIceberg consegue ler a parte tabular sem o SDK AI-Lake
+- [x] `ailake-core`: tipos base (`VectorColumn`, `VectorMetric`, `LlmContextSchema`, `RowId`)
+- [x] `ailake-parquet`: leitor/escritor Parquet com tipo `FIXED_LEN_BYTE_ARRAY` + metadados custom
+- [x] `ailake-vec`: quantização escalar F32 → F16 → I8
+- [x] `ailake-index`: HNSW via `hnsw_rs`, serialização via `bincode`
+- [x] `ailake-file`: writer/reader do arquivo unificado (Parquet + rodapé AI-Lake)
+- [x] `ailake-catalog`: escrita de `metadata.json` compatível com Iceberg Spec v2 + custom-properties
+- [x] CLI: `ailake create`, `ailake insert`, `ailake search`, `ailake compact`, `ailake info`
+- [ ] Validação: PyIceberg consegue ler a parte tabular sem o SDK AI-Lake (requer ambiente externo)
 
 ### Fase 2 — Distribuição e Object Storage
 - [x] `ailake-store`: integração `object_store` (S3, GCS, Azure Blob) — `ObjectStoreBackend`
+- [x] `ailake-store`: builders tipados `S3Config`, `GcsConfig`, `AzureConfig` + `store_from_url()`
 - [x] `ailake-index`: carga via `memmap2` — tempfile + Mmap, lazy paging do grafo HNSW
 - [x] Job de compaction assíncrono (Tokio): `CompactionPlanner` + `CompactionExecutor`
 - [x] `ailake-vec`: Product Quantization (PQ) — `PQCodebook` com k-means++ + ADC
@@ -413,10 +414,15 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] Suporte a múltiplas colunas vetoriais (`embedding` + `context_embedding`)
 
 ### Fase 4 — Produção
-- [ ] Benchmarks públicos vs. LanceDB, Deep Lake, pgvector
-- [x] Avaliação de FFI para GPU (cuVS/NVIDIA)
-- [x] Documentação de spec pública do formato
+- [x] Benchmarks públicos vs. LanceDB, Deep Lake, pgvector (`ailake-bench`)
+- [x] Avaliação de FFI para GPU (cuVS/NVIDIA) — runtime libloading CUDA + ROCm
+- [x] Documentação de spec pública do formato (`docs/specs/FILE_FORMAT.md`)
 - [x] Reranking automático após PQ
+- [x] IVF-PQ native index + adaptive index selection (HNSW vs IVF-PQ por hardware)
+- [x] GPU k-means para treino IVF-PQ; GPU batch search com fallback CPU
+- [x] `MemTable` write buffer para ingestão streaming
+- [x] AVX-512 + FMA + F16C SIMD para kernels de distância
+- [x] Flink connector (`VectorScanSource` + `VectorScanTableFactory`)
 
 ---
 

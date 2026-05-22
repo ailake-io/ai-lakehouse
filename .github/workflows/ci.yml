@@ -12,6 +12,7 @@ env:
 
 jobs:
   fmt:
+    name: fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,23 +22,27 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
+    name: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   unit:
+    name: unit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --lib
+      - run: cargo test --workspace --lib --bins
 
   integration:
+    name: integration
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,11 +51,11 @@ jobs:
       - run: cargo test -p ailake-tests -- --test-threads=1
 
   compat-parquet:
+    name: compat-parquet
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: pip install pyarrow --break-system-packages
-      - run: cargo test -p ailake-tests --test parquet_trailing_bytes -- --ignored
+      - run: cargo test -p ailake-tests --test parquet_trailing_bytes
       - run: cargo test -p ailake-tests --test positional_invariant

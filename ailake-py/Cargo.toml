@@ -8,7 +8,11 @@ name = "ailake"
 crate-type = ["cdylib"]
 
 [dependencies]
-ailake-query = { path = "../ailake-query" }
-ailake-core  = { path = "../ailake-core" }
-pyo3         = { workspace = true }
-tokio        = { workspace = true }
+ailake-query   = { path = "../ailake-query" }
+ailake-core    = { path = "../ailake-core" }
+ailake-catalog = { path = "../ailake-catalog" }
+ailake-store   = { path = "../ailake-store" }
+pyo3           = { workspace = true }
+tokio          = { workspace = true }
+arrow-array    = { workspace = true }
+arrow-schema   = { workspace = true }

@@ -1,3 +1,14 @@
+use std::sync::Arc;
+
+use ailake_catalog::{
+    hadoop::HadoopCatalog,
+    provider::{CatalogProvider, TableIdent, TableProperties},
+};
+use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
+use ailake_query::{
+    CompactionConfig, CompactionExecutor, CompactionPlanner, SearchConfig, TableWriter,
+};
+use ailake_store::store_from_url;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -9,8 +20,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 )]
 struct Cli {
     /// Storage URL (s3://bucket/prefix, gs://bucket/prefix, az://container/prefix, /local/path)
-    #[arg(long, global = true, env = "AILAKE_STORE_URL")]
-    store: Option<String>,
+    #[arg(long, global = true, env = "AILAKE_STORE_URL", default_value = ".")]
+    store: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -20,7 +31,7 @@ struct Cli {
 enum Commands {
     /// Create a new AI-Lake table
     Create {
-        /// Table name
+        /// Table name (namespace.table or just table — defaults to namespace "default")
         table: String,
         /// Vector column dimensionality
         #[arg(long)]
@@ -31,12 +42,15 @@ enum Commands {
         /// Vector precision
         #[arg(long, value_enum, default_value = "f16")]
         precision: Precision,
+        /// Vector column name
+        #[arg(long, default_value = "embedding")]
+        column: String,
     },
-    /// Insert a Parquet file into a table
+    /// Insert a Parquet file (with an embedding column) into a table
     Insert {
         /// Table name
         table: String,
-        /// Path to source Parquet file
+        /// Path to source Parquet file on the local filesystem
         file: String,
         /// Name of the embeddings column in the source file
         #[arg(long, default_value = "embedding")]
@@ -52,19 +66,22 @@ enum Commands {
         /// Number of results to return
         #[arg(long, default_value = "10")]
         top_k: usize,
-        /// Pruning threshold (geometric; lower = more aggressive pruning)
+        /// Geometric pruning threshold (0.0–1.0; lower = more aggressive)
         #[arg(long, default_value = "0.8")]
         pruning_threshold: f32,
     },
-    /// Compact small files in a table into a single larger file
+    /// Compact small files in a table into a larger merged file
     Compact {
         /// Table name
         table: String,
-        /// Target file size in bytes
+        /// Target file size in bytes (default: 512 MiB)
         #[arg(long, default_value = "536870912")]
         target_size: u64,
+        /// Minimum number of small files required to trigger compaction
+        #[arg(long, default_value = "4")]
+        min_files: usize,
     },
-    /// Print table statistics (file count, row count, index type)
+    /// Print table statistics
     Info {
         /// Table name
         table: String,
@@ -78,11 +95,40 @@ enum Metric {
     Dot,
 }
 
+impl From<Metric> for VectorMetric {
+    fn from(m: Metric) -> Self {
+        match m {
+            Metric::Cosine => VectorMetric::Cosine,
+            Metric::Euclidean => VectorMetric::Euclidean,
+            Metric::Dot => VectorMetric::DotProduct,
+        }
+    }
+}
+
 #[derive(ValueEnum, Clone)]
 enum Precision {
     F32,
     F16,
     I8,
+}
+
+impl From<Precision> for VectorPrecision {
+    fn from(p: Precision) -> Self {
+        match p {
+            Precision::F32 => VectorPrecision::F32,
+            Precision::F16 => VectorPrecision::F16,
+            Precision::I8 => VectorPrecision::I8,
+        }
+    }
+}
+
+/// Parse "namespace.table" → (namespace, table).
+/// Plain "table" → ("default", "table").
+fn parse_table_ident(s: &str) -> TableIdent {
+    match s.split_once('.') {
+        Some((ns, name)) => TableIdent::new(ns, name),
+        None => TableIdent::new("default", s),
+    }
 }
 
 #[tokio::main]
@@ -96,66 +142,312 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let result = run(cli).await;
-    if let Err(e) = result {
+    if let Err(e) = run(cli).await {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
+    let store = store_from_url(&cli.store).map_err(|e| e.to_string())?;
+    let catalog = Arc::new(HadoopCatalog::new(Arc::clone(&store), ""));
+
     match cli.command {
         Commands::Create {
             table,
             dim,
             metric,
             precision,
+            column,
         } => {
-            let metric_s = match metric {
-                Metric::Cosine => "cosine",
-                Metric::Euclidean => "euclidean",
-                Metric::Dot => "dot",
+            let ident = parse_table_ident(&table);
+            let policy = VectorStoragePolicy {
+                column_name: column,
+                dim,
+                metric: metric.into(),
+                precision: precision.into(),
+                pq: None,
+                keep_raw_for_reranking: false,
             };
-            let prec_s = match precision {
-                Precision::F32 => "f32",
-                Precision::F16 => "f16",
-                Precision::I8 => "i8",
-            };
-            eprintln!(
-                "not yet implemented: create table={table} dim={dim} metric={metric_s} precision={prec_s}"
-            );
-            Err("not yet implemented".into())
+
+            catalog
+                .create_table(
+                    &ident,
+                    &TableProperties {
+                        policy,
+                        extra: std::collections::HashMap::new(),
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+            println!("created table {table}");
+            Ok(())
         }
+
         Commands::Insert {
             table,
             file,
             embeddings,
         } => {
-            eprintln!(
-                "not yet implemented: insert table={table} file={file} embeddings={embeddings}"
-            );
-            Err("not yet implemented".into())
+            let ident = parse_table_ident(&table);
+
+            // Read source Parquet from local disk.
+            let raw = std::fs::read(&file).map_err(|e| format!("failed to read {file}: {e}"))?;
+            let bytes = bytes::Bytes::from(raw);
+
+            let reader = ailake_parquet::ParquetVectorReader::new(bytes, &embeddings);
+            let (batch, embs) = reader.read_all().map_err(|e| e.to_string())?;
+
+            let dim = embs.first().map(|v| v.len() as u32).unwrap_or(0);
+            if dim == 0 {
+                return Err("source file has no embedding rows".into());
+            }
+
+            // Load existing policy from catalog, or default to cosine/f16.
+            let policy = match catalog.load_table(&ident).await {
+                Ok(meta) => VectorStoragePolicy {
+                    column_name: embeddings.clone(),
+                    dim,
+                    metric: meta
+                        .properties
+                        .get("ailake.vector-metric")
+                        .map(|m| match m.as_str() {
+                            "euclidean" => VectorMetric::Euclidean,
+                            "dot" => VectorMetric::DotProduct,
+                            _ => VectorMetric::Cosine,
+                        })
+                        .unwrap_or(VectorMetric::Cosine),
+                    precision: VectorPrecision::F16,
+                    pq: None,
+                    keep_raw_for_reranking: false,
+                },
+                Err(_) => VectorStoragePolicy {
+                    column_name: embeddings.clone(),
+                    dim,
+                    metric: VectorMetric::Cosine,
+                    precision: VectorPrecision::F16,
+                    pq: None,
+                    keep_raw_for_reranking: false,
+                },
+            };
+
+            let mut writer =
+                TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+            let rows = embs.len();
+            writer
+                .write_batch(&batch, &embs)
+                .await
+                .map_err(|e| e.to_string())?;
+            writer.commit().await.map_err(|e| e.to_string())?;
+
+            println!("inserted {rows} rows into {table}");
+            Ok(())
         }
+
         Commands::Search {
             table,
             query,
             top_k,
             pruning_threshold,
         } => {
-            eprintln!(
-                "not yet implemented: search table={table} top_k={top_k} \
-                 pruning_threshold={pruning_threshold} query_len={}",
-                query.split(',').count()
+            let ident = parse_table_ident(&table);
+
+            let query_vec: Vec<f32> = query
+                .split(',')
+                .map(|s| s.trim().parse::<f32>().map_err(|e| e.to_string()))
+                .collect::<Result<_, _>>()?;
+            let dim = query_vec.len() as u32;
+
+            let config = SearchConfig {
+                top_k,
+                ef_search: top_k * 5,
+                pruning_threshold,
+                rerank_factor: None,
+            };
+
+            let results = ailake_query::search(
+                &ident,
+                &query_vec,
+                config,
+                "embedding",
+                dim,
+                catalog as Arc<dyn CatalogProvider>,
+                store,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+            if results.is_empty() {
+                println!("no results");
+                return Ok(());
+            }
+
+            println!("{:<6} {:<12} file", "rank", "distance");
+            for (i, r) in results.iter().enumerate() {
+                println!("{:<6} {:<12.6} {}", i + 1, r.distance, r.file_path);
+            }
+            Ok(())
+        }
+
+        Commands::Compact {
+            table,
+            target_size,
+            min_files,
+        } => {
+            let ident = parse_table_ident(&table);
+
+            let meta = catalog
+                .load_table(&ident)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let dim = meta
+                .properties
+                .get("ailake.vector-dim")
+                .and_then(|v| v.parse::<u32>().ok())
+                .ok_or("table missing ailake.vector-dim property")?;
+            let column = meta
+                .properties
+                .get("ailake.vector-column")
+                .cloned()
+                .unwrap_or_else(|| "embedding".to_string());
+
+            let policy = VectorStoragePolicy {
+                column_name: column,
+                dim,
+                metric: VectorMetric::Cosine,
+                precision: VectorPrecision::F16,
+                pq: None,
+                keep_raw_for_reranking: false,
+            };
+
+            let files = catalog
+                .list_files(&ident, None)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let config = CompactionConfig {
+                min_files_to_compact: min_files,
+                target_file_size_bytes: target_size,
+                index_strategy: Default::default(),
+            };
+            let planner = CompactionPlanner::new(config);
+            let to_compact = planner.plan(&files);
+
+            if to_compact.is_empty() {
+                println!("nothing to compact ({} files below threshold)", files.len());
+                return Ok(());
+            }
+
+            println!(
+                "compacting {} of {} files...",
+                to_compact.len(),
+                files.len()
             );
-            Err("not yet implemented".into())
+
+            let executor = CompactionExecutor::new(Arc::clone(&store), policy);
+            let output_path = format!(
+                "data/compacted-{}.parquet",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            );
+            let new_entry = executor
+                .compact(&to_compact, &output_path)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            // Build replacement file list: keep files not compacted + add merged.
+            let compacted_paths: std::collections::HashSet<&str> =
+                to_compact.iter().map(|f| f.path.as_str()).collect();
+            let mut remaining: Vec<_> = files
+                .into_iter()
+                .filter(|f| !compacted_paths.contains(f.path.as_str()))
+                .collect();
+            remaining.push(new_entry);
+
+            let snap = ailake_catalog::provider::NewSnapshot {
+                snapshot_id: ailake_catalog::provider::new_snapshot_id(),
+                parent_snapshot_id: meta.current_snapshot_id,
+                files: remaining,
+                operation: ailake_catalog::provider::SnapshotOperation::Replace,
+            };
+            catalog
+                .commit_snapshot(&ident, snap)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            println!("compacted into {output_path}");
+            Ok(())
         }
-        Commands::Compact { table, target_size } => {
-            eprintln!("not yet implemented: compact table={table} target_size={target_size}");
-            Err("not yet implemented".into())
-        }
+
         Commands::Info { table } => {
-            eprintln!("not yet implemented: info table={table}");
-            Err("not yet implemented".into())
+            let ident = parse_table_ident(&table);
+
+            let meta = catalog
+                .load_table(&ident)
+                .await
+                .map_err(|e| e.to_string())?;
+            let files = catalog
+                .list_files(&ident, None)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let file_count = files.len();
+            let row_count: u64 = files.iter().map(|f| f.record_count).sum();
+            let size_bytes: u64 = files.iter().map(|f| f.file_size_bytes).sum();
+            let ready = files
+                .iter()
+                .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Ready)
+                .count();
+
+            println!("table:       {table}");
+            println!(
+                "location:    {}",
+                meta.properties
+                    .get("ailake.location")
+                    .cloned()
+                    .unwrap_or_else(|| meta.location.clone())
+            );
+            println!(
+                "vector:      col={} dim={} metric={}",
+                meta.properties
+                    .get("ailake.vector-column")
+                    .map(String::as_str)
+                    .unwrap_or("-"),
+                meta.properties
+                    .get("ailake.vector-dim")
+                    .map(String::as_str)
+                    .unwrap_or("-"),
+                meta.properties
+                    .get("ailake.vector-metric")
+                    .map(String::as_str)
+                    .unwrap_or("-"),
+            );
+            println!("files:       {file_count} ({ready} indexed)");
+            println!("rows:        {row_count}");
+            println!("size:        {}", format_bytes(size_bytes));
+            if let Some(snap_id) = meta.current_snapshot_id {
+                println!("snapshot:    {snap_id}");
+            }
+            Ok(())
         }
+    }
+}
+
+fn format_bytes(b: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * MB;
+    if b >= GB {
+        format!("{:.2} GiB", b as f64 / GB as f64)
+    } else if b >= MB {
+        format!("{:.2} MiB", b as f64 / MB as f64)
+    } else {
+        format!("{b} B")
     }
 }
