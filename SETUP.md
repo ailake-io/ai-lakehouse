@@ -70,7 +70,7 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Deve terminar com `96 passed` (2 ignored — testes que requerem servidor externo).
+Deve terminar com `105 passed` (2 ignored — testes que requerem servidor externo).
 
 ### Testes por crate
 
@@ -436,78 +436,173 @@ cargo bench -p ailake-file
 
 ---
 
-## 8F. GPU search — build e verificação
+## 8F. GPU search — NVIDIA CUDA e AMD ROCm
 
-### Pré-requisitos
+Dois backends GPU independentes, com detecção e fallback automáticos em runtime:
+
+| Backend | Detecção | Compute | Requisito de build |
+|---------|----------|---------|-------------------|
+| **NVIDIA CUDA** | `libcuda.so.1` + `cuDeviceGetCount` | candle-core matmul | `--features ailake-index/gpu` (CUDA Toolkit) |
+| **AMD ROCm** | `libamdhip64.so` + `hipGetDeviceCount` | hipBLAS SGEMM via libloading | nenhum — runtime only |
+| **CPU** | fallback | rayon paralelo | nenhum |
+
+**Prioridade de detecção**: AMD ROCm → NVIDIA CUDA → CPU SIMD.
+AMD é verificado primeiro pois sistemas ROCm frequentemente expõem uma camada de compatibilidade CUDA (`libcuda.so.1`), o que identificaria incorretamente como NVIDIA sem essa prioridade.
+
+---
+
+### 8F-1. NVIDIA CUDA
+
+#### Pré-requisitos
 
 | Requisito | Versão mínima |
 |-----------|---------------|
-| NVIDIA GPU | Arquitetura Ampere+ (sm_80) recomendada |
+| GPU NVIDIA | Arquitetura Ampere+ (sm_80) recomendada |
 | CUDA Toolkit | 12.x (`nvcc`, headers em `/usr/local/cuda`) |
 | Driver NVIDIA | ≥ 525 |
 
-### Build com suporte GPU
+#### Build com suporte CUDA
 
 ```bash
 # Requer CUDA Toolkit instalado no sistema de build
 cargo build --release --features ailake-index/gpu
 ```
 
-O binário resultante detecta automaticamente em runtime:
-- **GPU disponível**: usa `candle-core` + cuBLAS para cálculo de distâncias em lote
-- **Sem GPU / CUDA não instalado**: cai silenciosamente para CPU paralelo (rayon)
+O binário detecta CUDA automaticamente em runtime via `libloading` (sem crash em máquinas sem CUDA):
+- **NVIDIA GPU disponível**: usa `candle-core` cuBLAS para distâncias em lote
+- **Sem CUDA em runtime**: cai silenciosamente para AMD ROCm ou CPU
 
-### Verificar detecção de GPU
-
-```rust
-// Exemplo mínimo — em código Rust
-use candle_core::Device;
-let dev = Device::cuda_if_available(0).unwrap();
-println!("Backend: {:?}", dev);
-// GPU presente:   Cuda(CudaDevice { ordinal: 0 })
-// Sem GPU:        Cpu
-```
-
-### Teste de busca com GPU
+#### Verificar detecção CUDA
 
 ```bash
-# Gerar tabela demo (dim=64, 1000 linhas)
-cargo run --example demo -p ailake-query 2>&1 | grep Workspace
-# Workspace: /tmp/ailakeXXXXXX
-
-# Busca — o backend GPU é selecionado automaticamente
-AILAKE_TABLE=/tmp/ailakeXXXXXX/warehouse/default.db/table \
-cargo run --features ailake-index/gpu --example demo -p ailake-query
+# Probing em runtime (sem precisar do feature gpu em código)
+use ailake_index::{detect_backend, HardwareBackend};
+assert_eq!(detect_backend(), HardwareBackend::NvidiaCuda);
 ```
 
-### Quando GPU bate CPU
+---
 
-| Arquivo (vetores) | dim | CPU rayon | GPU brute-force |
-|-------------------|-----|-----------|-----------------|
-| 10k               | 1536 | ~2 ms    | ~3 ms (overhead domina) |
-| 100k              | 1536 | ~20 ms   | ~2 ms |
-| 500k              | 1536 | ~100 ms  | ~4 ms |
+### 8F-2. AMD ROCm
 
-GPU vence a partir de ~50k vetores/arquivo para dim=1536.
+#### Pré-requisitos
 
-### Métricas suportadas no GPU
+| Requisito | Versão mínima |
+|-----------|---------------|
+| GPU AMD | GCN4+ (Polaris) ou RDNA1+ recomendado |
+| ROCm | 5.0+ (`libamdhip64.so` + `libhipblas.so`) |
+| Driver amdgpu | incluído no ROCm |
 
-| Métrica | Implementação GPU |
-|---------|-------------------|
-| Cosine | normalizar linhas → dot product → `1 - sim` |
-| Euclidean | `broadcast_sub` → `sqr` → `sum` → `sqrt` |
-| DotProduct | matmul negado (`-q @ V.T`) |
-
-### GPU k-means para IVF-PQ
-
-Com a feature `gpu` ativa, o treinamento do `IvfPqIndex` (k-means para centróides grosseiros e para o `PQCodebook`) também usa GPU via `try_gpu_kmeans`:
-
-- **Sem GPU em runtime**: `kmeans_dispatch` cai silenciosamente para CPU (rayon).
-- **Impacto em builds sem `gpu`**: sem mudança — o caminho CPU permanece inalterado.
+#### Build — nenhuma flag adicional necessária
 
 ```bash
-# Build + treino IVF-PQ acelerado por GPU
+# Build padrão — ROCm detectado e usado em runtime automaticamente
+cargo build --release
+
+# ROCm + CUDA ao mesmo tempo (ROCm tem prioridade por ser detectado primeiro)
 cargo build --release --features ailake-index/gpu
+```
+
+O backend ROCm usa `libhipblas.so` via `libloading` — sem dependência de compilação. O binário roda em qualquer máquina e apenas usa ROCm quando `libamdhip64.so` + `libhipblas.so` estiverem instalados.
+
+#### Verificar detecção ROCm
+
+```bash
+# Via HardwareProfile::detect()
+use ailake_index::{detect_backend, detect_rocm, HardwareBackend};
+assert!(detect_rocm());
+assert_eq!(detect_backend(), HardwareBackend::AmdRocm);
+```
+
+---
+
+### 8F-3. Verificar detecção via benchmark
+
+O engine `ailake-auto` imprime o perfil de hardware antes de rodar:
+
+```bash
+cargo run --release -p ailake-bench -- \
+    --dataset-dir data/sift1m --engine ailake-auto --limit 50000
+```
+
+Saída esperada em máquina NVIDIA:
+```
+Hardware detection:
+  Backend      : NVIDIA CUDA
+  CUDA GPU     : true
+  ROCm GPU     : false
+  CPU cores    : 16
+  AVX2         : true
+  AVX-512F     : false
+  Index chosen : IVF-PQ  (shard_size=100000)
+```
+
+Saída esperada em máquina AMD ROCm:
+```
+Hardware detection:
+  Backend      : AMD ROCm
+  CUDA GPU     : false
+  ROCm GPU     : true
+  CPU cores    : 16
+  AVX2         : true
+  AVX-512F     : false
+  Index chosen : IVF-PQ  (shard_size=100000)
+```
+
+Saída esperada em CPU-only:
+```
+Hardware detection:
+  Backend      : CPU (no GPU)
+  CUDA GPU     : false
+  ROCm GPU     : false
+  CPU cores    : 8
+  AVX2         : true
+  AVX-512F     : false
+  Index chosen : HNSW  (shard_size=100000)
+```
+
+---
+
+### 8F-4. Quando GPU bate CPU
+
+| Arquivo (vetores) | dim | CPU rayon | NVIDIA/AMD GPU |
+|-------------------|-----|-----------|----------------|
+| 10k | 1536 | ~2 ms | ~3 ms (overhead domina) |
+| 100k | 1536 | ~20 ms | ~2 ms |
+| 500k | 1536 | ~100 ms | ~4 ms |
+
+GPU vence a partir de ~50k vetores/arquivo para dim=1536. Aplicável para ambos os vendors.
+
+---
+
+### 8F-5. Métricas suportadas em GPU
+
+| Métrica | NVIDIA (candle) | AMD (hipBLAS SGEMM) |
+|---------|-----------------|---------------------|
+| **Cosine** | normalizar → dot → `1 − sim` | normalizar CPU → SGEMM → `1 + raw` |
+| **Euclidean** | `broadcast_sub → sqr → sum → sqrt` | SGEMM (−2·q·d) + norms CPU → sqrt |
+| **DotProduct** | matmul negado (`−q @ V.T`) | SGEMM com alpha=−1 |
+
+---
+
+### 8F-6. GPU k-means para IVF-PQ
+
+O treinamento do `IvfPqIndex` (k-means para centróides grosseiros e `PQCodebook`) usa GPU via `kmeans_dispatch` com prioridade NVIDIA → AMD → CPU:
+
+```
+NVIDIA (feature gpu)  →  try_gpu_kmeans (candle matmul)
+AMD ROCm (runtime)    →  try_rocm_kmeans (hipBLAS SGEMM)
+CPU fallback          →  kmeans_centroids (rayon paralelo)
+```
+
+- **Sem GPU em runtime**: `kmeans_dispatch` cai silenciosamente para CPU.
+- **AMD sem hipBLAS instalado**: mesmo que `libamdhip64.so` exista, `try_rocm_kmeans` retorna `None` se `libhipblas.so` não for encontrado → CPU fallback.
+
+```bash
+# Build + treino IVF-PQ acelerado por GPU NVIDIA
+cargo build --release --features ailake-index/gpu
+
+# AMD ROCm — sem flag de build necessária
+cargo build --release
 ```
 
 ---
@@ -1592,7 +1687,9 @@ if mt.is_full() { mt.flush().await?; }
 ailake-core/      tipos base: VectorMetric, VectorPrecision, RowId, AilakeError
 ailake-parquet/   leitura/escrita Parquet com coluna VECTOR; write_batch_multi_vec / read_all_multi_vec
 ailake-vec/       quantização F32→F16, PQ (PQCodebook), BlockCompressor, SIMD distances (AVX2/NEON), centróides
-ailake-index/     HNSW + IVF-PQ (AnyIndex enum); GPU k-means (try_gpu_kmeans); bincode, MmapLoader (memmap2)
+ailake-index/     HNSW + IVF-PQ (AnyIndex enum); hardware detection (HardwareBackend: NvidiaCuda/AmdRocm/CpuSimd);
+                  NVIDIA GPU via candle-core (feature gpu); AMD ROCm via hipBLAS libloading (runtime, no build flag);
+                  kmeans_dispatch: CUDA → ROCm → CPU; bincode, MmapLoader (memmap2)
 ailake-file/      arquivo unificado: AILK suporta IndexType::Hnsw e IndexType::IvfPq
 ailake-catalog/   catálogo Iceberg: HadoopCatalog, RestCatalog, NessieCatalog, JdbcCatalog, GlueCatalog
 ailake-store/     abstração de storage: LocalStore + ObjectStoreBackend (S3/GCS/Azure via object_store)
@@ -1735,18 +1832,35 @@ cargo build --features gpu
 ```
 
 **GPU build compila mas busca usa CPU (log não mostra "gpu")**
-`Device::cuda_if_available(0)` retornou `None` em runtime. Verificar:
+`detect_backend()` retornou `CpuSimd`. Verificar:
 ```bash
-nvidia-smi                        # GPU visível?
-ls /dev/nvidia*                   # Dispositivos de driver presentes?
-echo $CUDA_VISIBLE_DEVICES        # Não deve estar vazio ou "NoDevFiles"
+nvidia-smi                        # GPU NVIDIA visível?
+rocm-smi                          # GPU AMD visível?
+ls /dev/nvidia*                   # Dispositivos NVIDIA presentes?
+ls /dev/kfd                       # Dispositivo AMD KFD presente?
+echo $CUDA_VISIBLE_DEVICES        # Não deve ser "NoDevFiles"
 ```
-Se GPU existe mas não é detectada, adicionar log temporário:
-```rust
-match Device::cuda_if_available(0) {
-    Ok(d) => eprintln!("device: {:?}", d),
-    Err(e) => eprintln!("cuda error: {e}"),
-}
+Para NVIDIA: `libcuda.so.1` deve existir (`ldconfig -p | grep libcuda`).
+Para AMD: `libamdhip64.so` e `libhipblas.so` devem existir (`ldconfig -p | grep -E "hip|hsa"`).
+
+**AMD ROCm detectado mas busca usa CPU**
+`detect_rocm()` retorna `true` (HIP runtime ok) mas `try_rocm_search_batch` retorna `None`.
+Causa mais comum: `libhipblas.so` não instalado (ROCm Math Libraries são opcionais).
+```bash
+# Verificar presença do hipBLAS
+ldconfig -p | grep hipblas
+
+# Instalar hipBLAS (Ubuntu/ROCm PPA)
+sudo apt install hipblas
+# ou
+sudo apt install rocm-libs
+```
+
+**`ailake-auto` mostra `Backend: NVIDIA CUDA` em máquina AMD**
+ROCm com camada de compatibilidade CUDA instalada — `libcuda.so.1` existe (fornecida pelo pacote `hip-runtime-amd`). Neste caso, se `libamdhip64.so` também existe, o backend correto `AmdRocm` já é escolhido (AMD é verificado primeiro). Se ainda aparece NVIDIA, verificar:
+```bash
+ldconfig -p | grep -E "libamdhip|libcuda"
+# libamdhip64.so deve aparecer para ROCm ser detectado como AmdRocm
 ```
 
 **Plugin Flink: `ClassNotFoundException: io.ailake.flink.AilakeVectorConnectorFactory`**

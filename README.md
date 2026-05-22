@@ -93,7 +93,8 @@ ailake/
 │       ├── lib.rs              # AnyIndex enum — dispatches HNSW or IVF-PQ
 │       ├── hnsw.rs             # hnsw_rs wrapper
 │       ├── ivf_pq.rs           # IvfPqIndex, IvfPqConfig, IvfPqSerializer
-│       ├── gpu.rs              # try_gpu_kmeans — GPU k-means via candle-core + CUDA
+│       ├── gpu.rs              # NVIDIA CUDA (candle-core) + AMD ROCm (hipBLAS) GPU backends
+│       ├── hardware.rs         # HardwareProfile, HardwareBackend detection (CUDA / ROCm / CPU)
 │       ├── serialize.rs        # bincode serialization
 │       └── mmap_loader.rs      # memmap2 loading
 ├── ailake-query/
@@ -151,6 +152,6 @@ cargo check --workspace
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW loading, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
 | **Phase 3** | ✅ Complete | Catalog backends (Nessie/JDBC/Glue), uniffi JVM bindings, multi-column vectors, Spark/Trino/Flink plugins |
-| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search ✅, HNSW optimizations ✅, IVF-PQ native index ✅, GPU k-means for IVF-PQ ✅, `MemTableWriter` streaming buffer ✅, multi-vector Parquet columns ✅; LanceDB/pgvector public comparisons pending |
+| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search ✅, HNSW optimizations ✅, IVF-PQ native index ✅, GPU k-means for IVF-PQ ✅, `MemTableWriter` streaming buffer ✅, multi-vector Parquet columns ✅, AMD ROCm backend (hipBLAS SGEMM, runtime-only) ✅; LanceDB/pgvector public comparisons pending |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.
