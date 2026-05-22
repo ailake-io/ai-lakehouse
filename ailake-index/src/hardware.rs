@@ -58,7 +58,7 @@ const CUDA_DRIVER_LIB: &str = "";
 /// CUDA driver API result code — 0 means success.
 type CUresult = i32;
 
-pub(crate) fn detect_cuda() -> bool {
+pub fn detect_cuda() -> bool {
     use std::sync::OnceLock;
     static HAS_CUDA: OnceLock<bool> = OnceLock::new();
     *HAS_CUDA.get_or_init(probe_cuda_driver)

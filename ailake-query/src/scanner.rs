@@ -248,6 +248,102 @@ impl SearchSession {
         self.shards.len()
     }
 
+    /// Search multiple queries in one call.
+    ///
+    /// For shards with raw vectors (Indexing or reranking): dispatches to GPU batch
+    /// matmul when a CUDA device is available, falling back to CPU flat scan.
+    /// For indexed shards (HNSW / IVF-PQ): rayon parallel-map over queries — graph
+    /// traversal is inherently sequential and has no GPU batch path.
+    ///
+    /// Returns one `Vec<SearchResult>` per input query, in the same order.
+    pub fn search_batch(&self, queries: &[Vec<f32>], config: &SearchConfig) -> Vec<Vec<SearchResult>> {
+        if queries.is_empty() {
+            return vec![];
+        }
+
+        let n_queries = queries.len();
+        let candidate_k = match config.rerank_factor {
+            Some(factor) => config.top_k * factor,
+            None => config.top_k,
+        };
+        let use_gpu = ailake_index::hardware::detect_cuda();
+
+        // Accumulate per-query results across all shards.
+        let mut all_results: Vec<Vec<SearchResult>> = (0..n_queries).map(|_| Vec::new()).collect();
+
+        for shard in &self.shards {
+            if let Some(raw) = &shard.raw_vectors {
+                // Flat-scan shard (Indexing or load_raw=true) — try GPU batch path.
+                if use_gpu && !raw.is_empty() {
+                    let dim = raw[0].len();
+                    let flat: Vec<f32> = raw.iter().flat_map(|v| v.iter().copied()).collect();
+                    let row_ids: Vec<u64> = (0..raw.len() as u64).collect();
+                    let q_refs: Vec<&[f32]> = queries.iter().map(|q| q.as_slice()).collect();
+
+                    if let Some(batch) = ailake_index::gpu::try_gpu_search_batch(
+                        &q_refs, &row_ids, &flat, dim, self.metric, candidate_k,
+                    ) {
+                        for (qi, results) in batch.into_iter().enumerate() {
+                            for (row_id, distance) in results {
+                                all_results[qi].push(SearchResult {
+                                    row_id,
+                                    distance,
+                                    file_path: shard.entry.path.clone(),
+                                });
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                // CPU fallback for flat scan.
+                for (qi, query) in queries.iter().enumerate() {
+                    for (row_id, distance) in
+                        flat_search(raw, query, candidate_k, self.metric)
+                    {
+                        all_results[qi].push(SearchResult {
+                            row_id,
+                            distance,
+                            file_path: shard.entry.path.clone(),
+                        });
+                    }
+                }
+            } else if let Some(index) = &shard.index {
+                // Indexed shard — rayon parallel-map over queries.
+                let shard_results: Vec<Vec<SearchResult>> = queries
+                    .par_iter()
+                    .map(|query| {
+                        index
+                            .search(query, candidate_k, config.ef_search)
+                            .into_iter()
+                            .map(|(row_id, distance)| SearchResult {
+                                row_id,
+                                distance,
+                                file_path: shard.entry.path.clone(),
+                            })
+                            .collect()
+                    })
+                    .collect();
+
+                for (qi, results) in shard_results.into_iter().enumerate() {
+                    all_results[qi].extend(results);
+                }
+            }
+        }
+
+        // Sort + truncate per query.
+        for results in &mut all_results {
+            results.sort_by(|a, b| {
+                a.distance
+                    .partial_cmp(&b.distance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(config.top_k);
+        }
+
+        all_results
+    }
+
     /// Search using pre-loaded indexes. No I/O — pure in-memory search.
     pub fn search_query(&self, query: &[f32], config: &SearchConfig) -> Vec<SearchResult> {
         let candidate_k = match config.rerank_factor {

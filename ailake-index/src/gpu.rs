@@ -5,7 +5,20 @@
 //! must then fall back to the CPU path.
 
 #[cfg(feature = "gpu")]
-pub use gpu_impl::{try_gpu_kmeans, try_gpu_search};
+pub use gpu_impl::{try_gpu_kmeans, try_gpu_search, try_gpu_search_batch};
+
+/// No-op stub: returns `None` so callers degrade to CPU without feature-gating at call site.
+#[cfg(not(feature = "gpu"))]
+pub fn try_gpu_search_batch(
+    _queries: &[&[f32]],
+    _row_ids: &[u64],
+    _flat_vecs: &[f32],
+    _dim: usize,
+    _metric: ailake_core::VectorMetric,
+    _top_k: usize,
+) -> Option<Vec<Vec<(ailake_core::RowId, f32)>>> {
+    None
+}
 
 #[cfg(feature = "gpu")]
 mod gpu_impl {
@@ -95,6 +108,79 @@ mod gpu_impl {
     fn normalize_rows_2d(t: &Tensor) -> Option<Tensor> {
         let norms = t.sqr().ok()?.sum_keepdim(1).ok()?.sqrt().ok()?;
         t.broadcast_div(&norms).ok()
+    }
+
+    /// GPU batch top-k search: computes a [Q × N] distance matrix in one matmul.
+    ///
+    /// `queries` is a slice of Q query vectors (each of length `dim`).
+    /// `flat_vecs` is row-major [N × dim].
+    ///
+    /// Returns `None` when no CUDA device is available or on any GPU error;
+    /// the caller must fall back to CPU flat scan.
+    pub fn try_gpu_search_batch(
+        queries: &[&[f32]],
+        row_ids: &[u64],
+        flat_vecs: &[f32],
+        dim: usize,
+        metric: VectorMetric,
+        top_k: usize,
+    ) -> Option<Vec<Vec<(RowId, f32)>>> {
+        let n = row_ids.len();
+        let q_count = queries.len();
+        if n == 0 || q_count == 0 {
+            return Some(vec![vec![]; q_count]);
+        }
+
+        let dev = cuda_device()?;
+
+        // Upload DB vectors [N, dim] once.
+        let db = Tensor::from_slice(flat_vecs, (n, dim), &dev).ok()?;
+
+        // Flatten queries into [Q, dim].
+        let q_flat: Vec<f32> = queries.iter().flat_map(|q| q.iter().copied()).collect();
+        let q_tensor = Tensor::from_slice(&q_flat, (q_count, dim), &dev).ok()?;
+
+        // Compute [Q, N] distance matrix.
+        let dist_matrix: Vec<Vec<f32>> = match metric {
+            VectorMetric::DotProduct => {
+                let dots = q_tensor.matmul(&db.t().ok()?).ok()?; // [Q, N]
+                dots.neg().ok()?.to_vec2::<f32>().ok()?
+            }
+            VectorMetric::Cosine => {
+                let q_n = normalize_rows_2d(&q_tensor)?;
+                let db_n = normalize_rows_2d(&db)?;
+                let cos_sim = q_n.matmul(&db_n.t().ok()?).ok()?; // [Q, N]
+                let ones = Tensor::ones((q_count, n), DType::F32, &dev).ok()?;
+                ones.sub(&cos_sim).ok()?.to_vec2::<f32>().ok()?
+            }
+            VectorMetric::Euclidean => {
+                // ||q - d||^2 = ||q||^2 + ||d||^2 - 2·q·dᵀ
+                let q_sq = q_tensor.sqr().ok()?.sum_keepdim(1).ok()?; // [Q, 1]
+                let db_sq = db.sqr().ok()?.sum_keepdim(1).ok()?.t().ok()?; // [1, N]
+                let cross = q_tensor.matmul(&db.t().ok()?).ok()?; // [Q, N]
+                let cross2 = cross.affine(2.0, 0.0).ok()?;
+                let sq = q_sq.broadcast_add(&db_sq).ok()?.broadcast_sub(&cross2).ok()?;
+                sq.sqrt().ok()?.to_vec2::<f32>().ok()?
+            }
+        };
+
+        // Top-k per query — CPU sort (k << N).
+        let results = dist_matrix
+            .into_iter()
+            .map(|dists| {
+                let mut indexed: Vec<(usize, f32)> = dists.into_iter().enumerate().collect();
+                indexed.sort_unstable_by(|a, b| {
+                    a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                indexed.truncate(top_k);
+                indexed
+                    .into_iter()
+                    .map(|(i, d)| (RowId::new(row_ids[i]), d))
+                    .collect()
+            })
+            .collect();
+
+        Some(results)
     }
 
     /// GPU k-means via candle matmul. Returns `None` when no CUDA device is found.
