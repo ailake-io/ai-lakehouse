@@ -12,12 +12,27 @@ use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
 
+/// Index strategy for the merged file produced by compaction.
+#[derive(Debug, Clone, Default)]
+pub enum CompactionIndexStrategy {
+    /// Detect GPU / CPU cores at compaction time and pick the best index.
+    /// IVF-PQ on GPU/many-core machines; HNSW elsewhere. (default)
+    #[default]
+    Auto,
+    /// Always rebuild with HNSW — highest recall, larger index.
+    ForceHnsw,
+    /// Always rebuild with IVF-PQ — smaller index, better S3 throughput.
+    ForceIvfPq,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompactionConfig {
     /// Trigger compaction only if at least this many files are eligible.
     pub min_files_to_compact: usize,
     /// Target output file size in bytes. Files below this are merged.
     pub target_file_size_bytes: u64,
+    /// Index algorithm for the merged output file.
+    pub index_strategy: CompactionIndexStrategy,
 }
 
 impl Default for CompactionConfig {
@@ -25,6 +40,7 @@ impl Default for CompactionConfig {
         Self {
             min_files_to_compact: 4,
             target_file_size_bytes: 128 * 1024 * 1024, // 128 MB
+            index_strategy: CompactionIndexStrategy::Auto,
         }
     }
 }
@@ -60,15 +76,30 @@ impl CompactionPlanner {
 }
 
 /// Executes compaction plans: reads N small files, merges them into a single
-/// AI-Lake file with a rebuilt HNSW index, and commits to the catalog.
+/// AI-Lake file with a rebuilt index, and commits to the catalog.
+///
+/// The index algorithm is chosen via `CompactionIndexStrategy` (default: `Auto`,
+/// which detects GPU / CPU cores at compaction time — the same heuristic used
+/// by `write_batch_auto`).
 pub struct CompactionExecutor {
     store: Arc<dyn Store>,
     policy: VectorStoragePolicy,
+    index_strategy: CompactionIndexStrategy,
 }
 
 impl CompactionExecutor {
     pub fn new(store: Arc<dyn Store>, policy: VectorStoragePolicy) -> Self {
-        Self { store, policy }
+        Self {
+            store,
+            policy,
+            index_strategy: CompactionIndexStrategy::Auto,
+        }
+    }
+
+    /// Override the default (Auto) index strategy for this executor.
+    pub fn with_index_strategy(mut self, strategy: CompactionIndexStrategy) -> Self {
+        self.index_strategy = strategy;
+        self
     }
 
     /// Merge `files` into a single new file at `output_path`.
@@ -112,8 +143,21 @@ impl CompactionExecutor {
         let merged_batch = concat_batches(schema.unwrap(), &all_batches)?;
         let record_count = merged_batch.num_rows() as u64;
 
-        // Write merged file
-        let writer = AilakeFileWriter::new(self.policy.clone());
+        // Write merged file with adaptive index selection.
+        let writer = {
+            let base = AilakeFileWriter::new(self.policy.clone());
+            match &self.index_strategy {
+                CompactionIndexStrategy::Auto => base.with_auto_index(),
+                CompactionIndexStrategy::ForceHnsw => base,
+                CompactionIndexStrategy::ForceIvfPq => {
+                    let cfg = ailake_index::IvfPqConfig::for_dataset(
+                        self.policy.dim as usize,
+                        all_embeddings.len(),
+                    );
+                    base.with_ivf_pq(cfg)
+                }
+            }
+        };
         let file_bytes = writer.write(&merged_batch, &all_embeddings)?;
         let file_size = file_bytes.len() as u64;
         self.store.put(output_path, file_bytes.clone()).await?;
@@ -193,6 +237,7 @@ mod tests {
         let planner = CompactionPlanner::new(CompactionConfig {
             min_files_to_compact: 4,
             target_file_size_bytes: 1024 * 1024,
+            ..Default::default()
         });
         let files: Vec<DataFileEntry> = (0..3)
             .map(|i| DataFileEntry {
@@ -217,6 +262,7 @@ mod tests {
         let planner = CompactionPlanner::new(CompactionConfig {
             min_files_to_compact: 2,
             target_file_size_bytes: 1000,
+            ..Default::default()
         });
         let files = vec![
             DataFileEntry {
