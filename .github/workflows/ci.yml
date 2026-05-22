@@ -111,7 +111,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install maturin
         run: pip install maturin --break-system-packages
-      - name: Build ailake-py
-        run: cd ailake-py && maturin develop --release
+      - name: Build ailake-py wheel
+        run: cd ailake-py && maturin build --release --out dist
+      - name: Install ailake wheel
+        run: pip install ailake-py/dist/*.whl --break-system-packages
       - name: Check ailake Python SDK
         run: python3 tests/compat/check_ailake_py.py
