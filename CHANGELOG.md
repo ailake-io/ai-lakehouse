@@ -7,6 +7,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.5.0] — 2026-05-22
+
+### Added
+- **IVF-PQ native index**: `IvfPqIndex` for S3 workloads — coarse IVF quantizer + PQ ADC; `TableWriter::write_batch_ivf_pq` (`ailake-index`)
+- **GPU k-means for IVF-PQ training**: k-means++ centroid training offloaded to CUDA via `candle-core` when GPU is available
+- **Adaptive index selection**: `HardwareCapability` detection at startup; `TableWriter` and compaction automatically choose HNSW vs IVF-PQ based on dataset size and hardware
+- **Runtime CUDA detection**: `libloading`-based dynamic loader with `OnceLock` cache; zero-cost when no GPU present (`ailake-index`)
+- **NVIDIA GPU backend** (`nvidia_impl`): replaces `candle-core` direct dep — loaded at runtime via `libloading` from system CUDA libs
+- **AMD ROCm backend** (`rocm_impl`): hipBLAS SGEMM compute path; auto-detected alongside CUDA
+- **GPU batch search**: `try_gpu_search_batch` in `SearchSession`; falls back to rayon CPU if GPU unavailable
+- **MemTable write buffer**: `MemTable` accumulates rows in memory before HNSW/IVF-PQ build, enabling streaming ingestion (`ailake-query`)
+- **Multi-vector column support**: `List<FixedSizeBinary>` Parquet encoding for parallel vector columns (`ailake-parquet`)
+- **AVX-512 + FMA + F16C SIMD**: extended distance kernels on top of existing AVX2/NEON paths (`ailake-vec`)
+- **`ailake-cli`**: binary crate with `create`, `insert`, `search`, `compact`, `info` subcommands; `--store` global flag accepts `s3://`, `gs://`, `az://`, local paths
+- **Cloud credential builders**: typed `S3Config`/`S3Credentials`, `GcsConfig`/`GcsCredentials`, `AzureConfig`/`AzureCredentials` with feature-gated modules (`store-s3`, `store-gcs`, `store-azure`)
+  - S3: static keys, WebIdentity (IRSA), EC2 IMDSv2, or full default chain
+  - GCS: service account file/JSON, Application Default Credentials (Workload Identity)
+  - Azure: client secret, Managed Identity (system/user-assigned), access key, SAS token, Azure CLI
+- **`store_from_url()`**: zero-config URL dispatch — infers provider and credentials from scheme + env vars
+- **Dual license**: MIT + Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`)
+- **`ailake-auto` bench engine**: benchmark harness selects index automatically, matching production behavior
+- **`CHANGELOG.md`**: release notes for all versions (this file)
+
+### Changed
+- CUDA backend decoupled from compile-time `candle-core` dep — now fully runtime-loaded via `libloading`
+- Compaction job uses adaptive index selection instead of always rebuilding HNSW
+
+### Fixed
+- Redundant closure replaced with fn pointer in `PQCodebook::train` (clippy)
+- `cargo fmt` violations in `ivf_pq`, `pq`, `writer`, `lib`, `gpu`, `scanner`, `ailake-cli`, `ailake-store`
+
+---
+
 ## [0.4.0] — 2026-05-21
 
 ### Added
@@ -94,6 +127,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+[0.5.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.1.0...v0.2.0
