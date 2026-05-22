@@ -17,12 +17,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `compact`: `CompactionPlanner` selects small files, `CompactionExecutor` merges, commits `Replace` snapshot
   - `info`: aggregates file count, row count, size, indexed shard count from catalog
 - **`ailake-py` re-enabled in workspace**: fixed compilation after PyO3 and API drift
-- **Compatibility test suite**: automated compat checks for PyArrow, DuckDB, and PyIceberg in CI; Spark + Trino via manual `workflow_dispatch`
+- **Compatibility test suite**: automated compat checks for PyArrow, DuckDB, PyIceberg, and ailake-py in CI; Spark + Trino + JVM plugins via manual `workflow_dispatch`
   - `tests/compat/check_pyarrow.py`: verifies AI-Lake Parquet files are readable by standard `pyarrow.parquet`
   - `tests/compat/check_duckdb.py`: verifies `parquet_scan()` compatibility and id-range integrity
   - `tests/compat/check_pyiceberg.py`: verifies Iceberg Spec v2 metadata via `StaticTable.from_metadata`; falls back to JSON validation
+  - `tests/compat/check_ailake_py.py`: verifies ailake Python SDK — `TableWriter.write_batch` → `commit` → `search` → `assemble_context`
+  - `tests/compat/check_jni_cabi.py`: verifies ailake-jni C-ABI via ctypes — `ailake_write_batch_json` + `ailake_search_json`; validates the interface used by all JVM connectors (Flink, Spark, Trino) via JNA
   - `ailake-query/examples/write_fixture`: generates a deterministic 1000-row fixture used by all compat tests
-  - `.github/workflows/compat-heavy.yml`: Spark (PySpark local mode) and Trino (Docker service) compat jobs on `workflow_dispatch`
+  - `ailake-flink/src/test/.../AilakeJniIntegrationTest.kt`: Flink JNA integration test via `AilakeNativeLoader.writeBatch` + `search`
+  - `spark-plugin/src/test/.../AilakeNativeIntegrationTest.scala`: Spark `AilakeNative.search` integration test with real native lib
+  - `trino-plugin/src/test/.../AilakeNativeIntegrationTest.kt`: Trino `AilakeNative.search` integration test with real native lib
+  - `.github/workflows/compat-heavy.yml`: Spark (PySpark), Trino (Docker), and JVM plugin integration tests on `workflow_dispatch`
 
 ### Fixed
 - `ailake-py`: missing deps (`ailake-catalog`, `ailake-store`, `arrow-array`, `arrow-schema`) added to `Cargo.toml`

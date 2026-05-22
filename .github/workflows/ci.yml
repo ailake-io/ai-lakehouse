@@ -101,3 +101,17 @@ jobs:
         run: pip install "pyiceberg[pyarrow]" --break-system-packages
       - name: Check PyIceberg compatibility
         run: python3 tests/compat/check_pyiceberg.py ./compat-fixture
+
+  compat-ailake-py:
+    name: compat-ailake-py
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install maturin
+        run: pip install maturin --break-system-packages
+      - name: Build ailake-py
+        run: cd ailake-py && maturin develop --release
+      - name: Check ailake Python SDK
+        run: python3 tests/compat/check_ailake_py.py
