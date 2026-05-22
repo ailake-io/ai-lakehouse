@@ -298,6 +298,12 @@ mod rocm_impl {
     const OP_T: i32 = 112; // HIPBLAS_OP_T — transpose
     const OP_N: i32 = 111; // HIPBLAS_OP_N — no-transpose
 
+    // Type aliases for HIP runtime function pointers (avoids clippy::type_complexity).
+    type HipMallocFn = unsafe extern "C" fn(*mut *mut c_void, usize) -> i32;
+    type HipFreeFn = unsafe extern "C" fn(*mut c_void) -> i32;
+    type HipMemcpyFn = unsafe extern "C" fn(*mut c_void, *const c_void, usize, i32) -> i32;
+    type HipSyncFn = unsafe extern "C" fn() -> i32;
+
     #[cfg(target_os = "linux")]
     const HIP_LIB: &str = "libamdhip64.so";
     #[cfg(windows)]
@@ -384,7 +390,7 @@ mod rocm_impl {
         if n == 0 || q == 0 {
             return Some(vec![vec![]; q]);
         }
-        batch_inner(queries, row_ids, flat_vecs, dim, metric, top_k, n, q)
+        batch_inner(queries, row_ids, flat_vecs, dim, metric, top_k)
     }
 
     /// k-means on an AMD ROCm GPU.
@@ -418,32 +424,22 @@ mod rocm_impl {
     /// Returns: (malloc_fn, free_fn, memcpy_fn, sync_fn)
     unsafe fn load_hip_fns(
         lib: &Library,
-    ) -> Option<(
-        unsafe extern "C" fn(*mut *mut c_void, usize) -> i32,
-        unsafe extern "C" fn(*mut c_void) -> i32,
-        unsafe extern "C" fn(*mut c_void, *const c_void, usize, i32) -> i32,
-        unsafe extern "C" fn() -> i32,
-    )> {
-        let malloc_sym: Symbol<unsafe extern "C" fn(*mut *mut c_void, usize) -> i32> =
-            lib.get(b"hipMalloc\0").ok()?;
-        let free_sym: Symbol<unsafe extern "C" fn(*mut c_void) -> i32> =
-            lib.get(b"hipFree\0").ok()?;
-        let memcpy_sym: Symbol<
-            unsafe extern "C" fn(*mut c_void, *const c_void, usize, i32) -> i32,
-        > = lib.get(b"hipMemcpy\0").ok()?;
-        let sync_sym: Symbol<unsafe extern "C" fn() -> i32> =
-            lib.get(b"hipDeviceSynchronize\0").ok()?;
+    ) -> Option<(HipMallocFn, HipFreeFn, HipMemcpyFn, HipSyncFn)> {
+        let malloc_sym: Symbol<HipMallocFn> = lib.get(b"hipMalloc\0").ok()?;
+        let free_sym: Symbol<HipFreeFn> = lib.get(b"hipFree\0").ok()?;
+        let memcpy_sym: Symbol<HipMemcpyFn> = lib.get(b"hipMemcpy\0").ok()?;
+        let sync_sym: Symbol<HipSyncFn> = lib.get(b"hipDeviceSynchronize\0").ok()?;
         Some((*malloc_sym, *free_sym, *memcpy_sym, *sync_sym))
     }
 
     /// Allocate a device buffer and upload host data.
     unsafe fn upload(
         data: &[f32],
-        malloc_fn: unsafe extern "C" fn(*mut *mut c_void, usize) -> i32,
-        free_fn: unsafe extern "C" fn(*mut c_void) -> i32,
-        memcpy_fn: unsafe extern "C" fn(*mut c_void, *const c_void, usize, i32) -> i32,
+        malloc_fn: HipMallocFn,
+        free_fn: HipFreeFn,
+        memcpy_fn: HipMemcpyFn,
     ) -> Option<DevBuf> {
-        let bytes = data.len() * std::mem::size_of::<f32>();
+        let bytes = std::mem::size_of_val(data);
         let mut ptr: *mut c_void = std::ptr::null_mut();
         if malloc_fn(&mut ptr, bytes) != 0 {
             return None;
@@ -456,11 +452,7 @@ mod rocm_impl {
     }
 
     /// Allocate an uninitialised device buffer.
-    unsafe fn alloc_dev(
-        len: usize,
-        malloc_fn: unsafe extern "C" fn(*mut *mut c_void, usize) -> i32,
-        free_fn: unsafe extern "C" fn(*mut c_void) -> i32,
-    ) -> Option<DevBuf> {
+    unsafe fn alloc_dev(len: usize, malloc_fn: HipMallocFn, free_fn: HipFreeFn) -> Option<DevBuf> {
         let bytes = len * std::mem::size_of::<f32>();
         let mut ptr: *mut c_void = std::ptr::null_mut();
         if malloc_fn(&mut ptr, bytes) != 0 {
@@ -487,9 +479,9 @@ mod rocm_impl {
         dim: usize,
         metric: VectorMetric,
         top_k: usize,
-        n: usize,
-        q: usize,
     ) -> Option<Vec<Vec<(RowId, f32)>>> {
+        let n = row_ids.len();
+        let q = queries.len();
         // Load libraries
         let hip = unsafe { Library::new(HIP_LIB) }.ok()?;
         let blas_lib = unsafe { Library::new(BLAS_LIB) }.ok()?;
@@ -571,7 +563,7 @@ mod rocm_impl {
                 q_dev.ptr as *const c_void,
                 dim as i32,
                 &beta,
-                c_dev.ptr as *mut c_void,
+                c_dev.ptr,
                 n as i32,
             )
         };
@@ -721,7 +713,7 @@ mod rocm_impl {
                     x_dev.ptr as *const c_void,
                     dim as i32,
                     &beta,
-                    cross_dev.ptr as *mut c_void,
+                    cross_dev.ptr,
                     k as i32,
                 )
             };
