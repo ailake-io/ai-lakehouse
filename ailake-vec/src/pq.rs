@@ -24,13 +24,7 @@ impl PQCodebook {
         num_centroids: usize,
         max_iter: usize,
     ) -> Result<Self, AilakeError> {
-        Self::train_with_kmeans(
-            vectors,
-            num_subvectors,
-            num_centroids,
-            max_iter,
-            |vs, k, it| kmeans(vs, k, it),
-        )
+        Self::train_with_kmeans(vectors, num_subvectors, num_centroids, max_iter, kmeans)
     }
 
     /// Train PQ codebook with a custom k-means backend (e.g. GPU-accelerated).
