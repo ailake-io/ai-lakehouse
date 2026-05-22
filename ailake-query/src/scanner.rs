@@ -286,7 +286,7 @@ impl SearchSession {
                     let q_refs: Vec<&[f32]> = queries.iter().map(|q| q.as_slice()).collect();
 
                     let gpu_batch = if use_nvidia {
-                        ailake_index::gpu::try_gpu_search_batch(
+                        ailake_index::gpu::try_nvidia_search_batch(
                             &q_refs,
                             &row_ids,
                             &flat,

@@ -16,8 +16,7 @@ use ailake_vec::{kmeans_centroids, PQCodebook};
 
 /// K-means dispatch: NVIDIA CUDA → AMD ROCm → CPU rayon fallback.
 fn kmeans_dispatch(vecs: &[Vec<f32>], k: usize, max_iter: usize) -> Vec<Vec<f32>> {
-    #[cfg(feature = "gpu")]
-    if let Some(result) = crate::gpu::try_gpu_kmeans(vecs, k, max_iter) {
+    if let Some(result) = crate::gpu::try_nvidia_kmeans(vecs, k, max_iter) {
         return result;
     }
     if let Some(result) = crate::gpu::try_rocm_kmeans(vecs, k, max_iter) {

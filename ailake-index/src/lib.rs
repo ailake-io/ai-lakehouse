@@ -1,10 +1,9 @@
 //! ailake-index — HNSW and IVF-PQ index lifecycle
 //!
-//! Search backend priority:
-//!   1. GPU (candle-core + CUDA) — compiled when `--features gpu`, used when CUDA available at runtime
-//!   2. Parallel CPU brute-force (rayon) — always available, no special hardware needed
-//!
-//! Build with `cargo build --features ailake-index/gpu` to enable GPU support.
+//! Search backend priority (all detected at runtime, no build-time GPU SDK required):
+//!   1. NVIDIA CUDA — cuBLAS SGEMM via libloading dlopen of libcudart + libcublas
+//!   2. AMD ROCm    — hipBLAS SGEMM via libloading dlopen of libamdhip64 + libhipblas
+//!   3. CPU rayon   — parallel brute-force, always available
 
 pub mod gpu;
 pub mod hardware;
