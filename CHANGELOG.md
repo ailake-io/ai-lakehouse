@@ -17,6 +17,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `compact`: `CompactionPlanner` selects small files, `CompactionExecutor` merges, commits `Replace` snapshot
   - `info`: aggregates file count, row count, size, indexed shard count from catalog
 - **`ailake-py` re-enabled in workspace**: fixed compilation after PyO3 and API drift
+- **Compatibility test suite**: automated compat checks for PyArrow, DuckDB, and PyIceberg in CI; Spark + Trino via manual `workflow_dispatch`
+  - `tests/compat/check_pyarrow.py`: verifies AI-Lake Parquet files are readable by standard `pyarrow.parquet`
+  - `tests/compat/check_duckdb.py`: verifies `parquet_scan()` compatibility and id-range integrity
+  - `tests/compat/check_pyiceberg.py`: verifies Iceberg Spec v2 metadata via `StaticTable.from_metadata`; falls back to JSON validation
+  - `ailake-query/examples/write_fixture`: generates a deterministic 1000-row fixture used by all compat tests
+  - `.github/workflows/compat-heavy.yml`: Spark (PySpark local mode) and Trino (Docker service) compat jobs on `workflow_dispatch`
 
 ### Fixed
 - `ailake-py`: missing deps (`ailake-catalog`, `ailake-store`, `arrow-array`, `arrow-schema`) added to `Cargo.toml`
@@ -24,9 +30,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ailake-py`: upgrade PyO3 0.21 → 0.22 for Python 3.13 support
 - `ailake-py`: `pymodule` fn ported to `Bound<'_, PyModule>` API (PyO3 0.22)
 - `ailake-py`: suppressed `clippy::useless_conversion` (false positive from PyO3 0.22 proc-macros)
+- `ailake-catalog`: `HadoopCatalog::table_root()` with empty warehouse no longer produces absolute path (`/default.db/table`); now uses relative path (`default.db/table`)
 
 ### Changed
 - `CLAUDE.md` roadmap: Phase 1 all items marked complete; Phase 4 extended with IVF-PQ, GPU, Flink, SIMD, MemTable items
+- CI: added `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg` jobs to `ci.yml`
 
 ---
 

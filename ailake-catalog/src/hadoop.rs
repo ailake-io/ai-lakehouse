@@ -29,7 +29,11 @@ impl HadoopCatalog {
     }
 
     fn table_root(&self, table: &TableIdent) -> String {
-        format!("{}/{}.db/{}", self.warehouse, table.namespace, table.name)
+        if self.warehouse.is_empty() {
+            format!("{}.db/{}", table.namespace, table.name)
+        } else {
+            format!("{}/{}.db/{}", self.warehouse, table.namespace, table.name)
+        }
     }
 
     fn current_metadata_path(&self, table: &TableIdent) -> String {

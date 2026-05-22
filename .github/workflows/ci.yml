@@ -59,3 +59,45 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p ailake-tests --test parquet_trailing_bytes
       - run: cargo test -p ailake-tests --test positional_invariant
+
+  compat-pyarrow:
+    name: compat-pyarrow
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build fixture
+        run: cargo run --example write_fixture -p ailake-query
+      - name: Install PyArrow
+        run: pip install pyarrow --break-system-packages
+      - name: Check PyArrow compatibility
+        run: python3 tests/compat/check_pyarrow.py ./compat-fixture
+
+  compat-duckdb:
+    name: compat-duckdb
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build fixture
+        run: cargo run --example write_fixture -p ailake-query
+      - name: Install DuckDB
+        run: pip install duckdb --break-system-packages
+      - name: Check DuckDB compatibility
+        run: python3 tests/compat/check_duckdb.py ./compat-fixture
+
+  compat-pyiceberg:
+    name: compat-pyiceberg
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build fixture
+        run: cargo run --example write_fixture -p ailake-query
+      - name: Install PyIceberg
+        run: pip install "pyiceberg[pyarrow]" --break-system-packages
+      - name: Check PyIceberg compatibility
+        run: python3 tests/compat/check_pyiceberg.py ./compat-fixture
