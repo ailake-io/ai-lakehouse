@@ -156,11 +156,12 @@ Object storage abstraction. Thin wrapper over the `object_store` crate.
   - `get_range(path, range: Range<u64>) → Bytes` — critical for partial reads of HNSW footer from S3
   - `put(path, Bytes)`, `list(prefix)`, `file_size(path)`, `exists(path)`, `delete(path)`
 - `LocalStore` — filesystem implementation (dev/tests)
-- `ObjectStoreBackend` — wraps any `Arc<dyn object_store::ObjectStore>`:
-  - S3: `object_store::aws::AmazonS3Builder`
-  - GCS: `object_store::gcp::GoogleCloudStorageBuilder`
-  - Azure: `object_store::azure::MicrosoftAzureBuilder`
-  - Feature-gated: `store-s3`, `store-gcs`, `store-azure`
+- `ObjectStoreBackend` — wraps any `Arc<dyn object_store::ObjectStore>` behind the `Store` trait; used internally by all typed builders
+- **Typed credential builders** (feature-gated):
+  - `s3_store(S3Config, prefix)` — `store-s3`; `S3Credentials`: `Static` / `WebIdentity` (IRSA) / `InstanceProfile` / `Default`
+  - `gcs_store(GcsConfig, prefix)` — `store-gcs`; `GcsCredentials`: `ServiceAccountFile` / `ServiceAccountJson` / `ApplicationDefault` (ADC + Workload Identity)
+  - `azure_store(AzureConfig, prefix)` — `store-azure`; `AzureCredentials`: `ClientSecret` / `ManagedIdentity` / `AccessKey` / `SasToken` / `AzureCli`
+- `store_from_url(url)` — URL-based auto-builder; reads credentials from env; dispatches by scheme: `s3://`, `gs://`, `az://`, `file://`
 - All async, all return `AilakeError` on failure
 
 ### `ailake-query`
@@ -293,7 +294,7 @@ debug       = true
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
 | **Phase 3** | ✅ Complete | Catalog backends (NessieCatalog, JdbcCatalog, GlueCatalog), uniffi JVM bindings, multi-column vectors |
-| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search ✅, HNSW perf optimizations ✅, LanceDB/pgvector/Deep Lake comparisons ✅, IVF-PQ native index ✅, GPU k-means (CUDA + ROCm) ✅, AMD ROCm hipBLAS backend ✅, adaptive index selection (`IndexType::Auto`) ✅; `ailake-flink` pending |
+| **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS runtime-only), HNSW perf optimizations, IVF-PQ native index, GPU k-means, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog, JNA bridge) |
 
 ### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
@@ -363,5 +364,4 @@ Delivered in Phase 4:
   - `bench_result::print_multi_comparison` — N-engine side-by-side table, highlights fastest QPS
   - Deep Lake: `scripts/deeplake_bench.py` (Python) — exact kNN on subset; ANN requires paid Deep Memory plan (no Rust SDK available)
 
-Remaining Phase 4:
-- `ailake-flink` (separate Java repo): Flink sink/source connector
+Phase 4 complete. See Phase 5 for next planned work.

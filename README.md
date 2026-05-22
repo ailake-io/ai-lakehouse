@@ -152,6 +152,6 @@ cargo check --workspace
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW loading, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
 | **Phase 3** | ✅ Complete | Catalog backends (Nessie/JDBC/Glue), uniffi JVM bindings, multi-column vectors, Spark/Trino/Flink plugins |
-| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search ✅, HNSW optimizations ✅, IVF-PQ native index ✅, GPU k-means for IVF-PQ ✅, `MemTableWriter` streaming buffer ✅, multi-vector Parquet columns ✅, AMD ROCm backend (hipBLAS SGEMM, runtime-only) ✅, NVIDIA runtime-only backend (cuBLAS libloading, no build-time CUDA SDK) ✅; LanceDB/pgvector public comparisons pending |
+| **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog) |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.

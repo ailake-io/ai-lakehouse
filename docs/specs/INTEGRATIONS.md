@@ -18,6 +18,7 @@ AI-Lake tables are read-compatible with any engine that supports Apache Iceberg 
 | **Apache Spark 3.5** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `spark-plugin/` | ✅ Structured Streaming |
 | **Apache Spark 4.0** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `spark-plugin/` (untested) | ✅ Structured Streaming |
 | **Trino 430** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `trino-plugin/` | — |
+| **Apache Flink 1.18+** | ✅ Iceberg connector | ✅ `ailake-flink` sink | ✅ `ailake-flink` source | ✅ `AilakeSinkFunction` |
 | **Apache Beam 2.56+** | ✅ Managed IcebergIO | ✅ Managed IcebergIO | via SDK direct | ✅ Streaming read/write |
 | **DuckDB 0.10+** | ✅ Iceberg extension | Read-only | — | — |
 | **PyIceberg 0.6+** | ✅ | ✅ | via SDK direct | — |
@@ -341,13 +342,137 @@ results = (
 |---|---|---|---|
 | **Direct** | ✅ | ✅ | Dev/testing |
 | **Google Cloud Dataflow** | ✅ | ✅ | Managed upgrades automatic |
-| **Apache Flink** | ✅ | ✅ | |
+| **Apache Flink** | ✅ | ✅ | See §4 for native `ailake-flink` connector (preferred over Beam on Flink) |
 | **Apache Spark** | ✅ | ✅ | Uses Spark Iceberg reader |
 | **Apache Samza** | ✅ | Untested | |
 
 ---
 
-## 4. Cloud Providers
+## 4. Apache Flink
+
+### Architecture
+
+`ailake-flink` is a Kotlin/Gradle module (`ailake-flink/`) that implements the Flink Table API connector. It bridges to the Rust SDK via JNA (Java Native Access) loading `libailake_jni.so`.
+
+```
+Flink SQL DDL
+  └─ AilakeVectorConnectorFactory  (connector = 'ailake')
+       ├─ AilakeVectorTableSource  →  AilakeInputFormat  →  AilakeNativeLoader.search()
+       └─ AilakeVectorTableSink   →  AilakeSinkFunction  →  AilakeNativeLoader.writeBatch()
+
+AilakeCatalogFactory  →  AilakeCatalog  (Flink catalog API, delegates to ailake-catalog Rust)
+```
+
+### Version support
+
+| Dependency | Version |
+|---|---|
+| Apache Flink | 1.18.1 |
+| Kotlin | 1.9.23 |
+| JVM | 11+ |
+| JNA | 5.14.0 |
+
+### Build
+
+```bash
+cd ailake-flink
+./gradlew shadowJar
+# Output: build/libs/ailake-flink-0.1.0-plugin.jar
+```
+
+The shadow jar bundles JNA and Jackson. Flink dependencies are `compileOnly` — provided by the cluster.
+
+### SQL DDL
+
+```sql
+-- Create AI-Lake table source + sink
+CREATE TABLE docs (
+  id        BIGINT,
+  text      STRING,
+  embedding BYTES,
+  _distance FLOAT   -- populated by vector search, ignored on writes
+) WITH (
+  'connector'        = 'ailake',
+  'warehouse'        = 's3://my-lake/',
+  'namespace'        = 'default',
+  'table-name'       = 'docs',
+  'vector.column'    = 'embedding',
+  'vector.dim'       = '1536',
+  'vector.metric'    = 'cosine',
+  'vector.precision' = 'f16',
+  'search.top-k'     = '10',
+  'search.ef'        = '50'
+);
+
+-- Write (streaming ingest)
+INSERT INTO docs SELECT id, text, embedding FROM upstream_source;
+
+-- Read (vector search — query vector passed as job parameter)
+SELECT id, text, _distance FROM docs;
+```
+
+### Query vector at runtime
+
+The query vector is passed via Flink job parameter `ailake.query.vector` (comma-separated floats):
+
+```bash
+flink run \
+  -p 4 \
+  -D "pipeline.global-job-parameters=ailake.query.vector=0.021,-0.043,0.118,..." \
+  my-pipeline.jar
+```
+
+Or programmatically:
+
+```kotlin
+val env = StreamExecutionEnvironment.getExecutionEnvironment()
+env.config.setGlobalJobParameters(
+    mapOf("ailake.query.vector" to floatVector.joinToString(","))
+)
+```
+
+### Catalog registration
+
+```sql
+CREATE CATALOG ailake_catalog WITH (
+  'type'      = 'ailake',
+  'warehouse' = 's3://my-lake/'
+);
+
+USE CATALOG ailake_catalog;
+SHOW DATABASES;
+```
+
+### Deploy to Flink cluster
+
+1. Build the plugin jar: `./gradlew shadowJar`
+2. Copy `ailake-flink-0.1.0-plugin.jar` to `$FLINK_HOME/lib/`
+3. Copy `libailake_jni.so` to a path in `java.library.path` on all TaskManagers:
+
+```yaml
+# flink-conf.yaml
+env.java.opts.taskmanager: -Djava.library.path=/opt/ailake/lib
+```
+
+Or set `ailake.native.lib` system property or `AILAKE_NATIVE_LIB` env var to point directly to the `.so`.
+
+### Connector options
+
+| Option | Required | Default | Description |
+|---|---|---|---|
+| `warehouse` | ✅ | — | S3/GCS/Azure/local root path |
+| `table-name` | ✅ | — | AI-Lake table name |
+| `vector.dim` | ✅ | — | Embedding dimension |
+| `namespace` | | `default` | Iceberg namespace |
+| `vector.column` | | `embedding` | Vector column name |
+| `vector.metric` | | `euclidean` | `cosine` / `euclidean` / `dot_product` |
+| `vector.precision` | | `f16` | `f16` / `f32` / `i8` |
+| `search.top-k` | | `10` | Results per query |
+| `search.ef` | | `50` | HNSW ef_search parameter |
+
+---
+
+## 5. Cloud Providers
 
 ### 4A — Amazon Web Services (AWS)
 
@@ -576,7 +701,7 @@ writer = ailake.TableWriter(
 
 ---
 
-## 5. Catalog compatibility summary
+## 6. Catalog compatibility summary
 
 | Catalog | Protocol | AWS | GCP | Azure | Self-hosted |
 |---|---|---|---|---|---|
@@ -592,7 +717,7 @@ writer = ailake.TableWriter(
 
 ---
 
-## 6. `ailake-catalog` crate — catalog abstraction
+## 7. `ailake-catalog` crate — catalog abstraction
 
 The `ailake-catalog` crate provides a `CatalogProvider` trait that all catalog backends implement. The `ailake-query` layer uses only this trait — switching catalogs requires only a config change, not code changes.
 
@@ -661,7 +786,7 @@ writer = ailake.TableWriter(
 
 ---
 
-## 7. AI-Lake-specific SQL UDF (Phase 3)
+## 8. AI-Lake-specific SQL UDF (Phase 3)
 
 When the AI-Lake plugin is loaded in Spark or Trino, the following SQL surface is exposed:
 
@@ -691,7 +816,7 @@ The `ailake_embed` / `ailake.system.embed` function calls a configured embedding
 
 ---
 
-## 8. Compatibility tests (CI)
+## 9. Compatibility tests (CI)
 
 All integration tests use Docker Compose to spin up required services.
 

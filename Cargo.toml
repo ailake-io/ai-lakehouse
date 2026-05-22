@@ -9,6 +9,7 @@ members = [
     "ailake-catalog",
     "ailake-store",
     "ailake-query",
+    "ailake-cli",
     "tests",
     "ailake-jni",
     "ailake-bench",
@@ -61,6 +62,9 @@ reqwest     = { version = "0.12", features = ["json"] }
 # Bindings
 pyo3        = { version = "0.21", features = ["extension-module"] }
 uniffi      = "0.27"
+
+# CLI
+clap        = { version = "4", features = ["derive", "env"] }
 
 # Observability
 tracing            = "0.1"
