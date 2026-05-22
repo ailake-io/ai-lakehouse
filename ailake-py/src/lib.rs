@@ -3,22 +3,37 @@
 //! Thin async-to-sync bridge. All logic lives in ailake-query and friends.
 //! Build with: maturin develop --release
 
+// PyO3 0.22 proc-macros emit implicit Into<PyErr> conversions that clippy
+// flags as useless_conversion. Suppress it for the whole crate.
+#![allow(clippy::useless_conversion)]
+
 use std::sync::Arc;
 
+use arrow_array::{RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyDict, PyList};
 
-use ailake_catalog::HadoopCatalog;
-use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
+use ailake_catalog::{
+    hadoop::HadoopCatalog,
+    provider::{CatalogProvider, TableIdent},
+};
+use ailake_core::{VectorMetric, VectorStoragePolicy};
 use ailake_query::{
     search as rs_search, Chunk, ContextAssembler, ContextAssemblerConfig, SearchConfig,
     TableWriter as RsTableWriter,
 };
-use ailake_store::LocalStore;
+use ailake_store::{store::Store, LocalStore};
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Runtime::new().expect("tokio runtime")
+}
+
+fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>) {
+    let store: Arc<dyn Store> = Arc::new(LocalStore::new(path));
+    let catalog: Arc<dyn CatalogProvider> = Arc::new(HadoopCatalog::new(Arc::clone(&store), ""));
+    (catalog, store)
 }
 
 /// Python-facing table writer. Wraps ailake_query::TableWriter.
@@ -33,26 +48,15 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine"))]
-    fn new(
-        path: &str,
-        vector_column: &str,
-        dim: u32,
-        metric: &str,
-    ) -> PyResult<Self> {
+    fn new(path: &str, vector_column: &str, dim: u32, metric: &str) -> PyResult<Self> {
         let rt = rt();
-        let policy = VectorStoragePolicy::default_f16(
-            vector_column,
-            dim,
-            parse_metric(metric)?,
-        );
-        let catalog = Arc::new(HadoopCatalog::new(path));
-        let store = Arc::new(LocalStore::new(path));
-        let table = ailake_catalog::TableIdent::new("default", "table");
+        let policy = VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
+        let (catalog, store) = local_catalog_store(path);
+        let table = TableIdent::new("default", "table");
 
-        let writer = rt.block_on(RsTableWriter::create_or_open(
-            catalog, store, policy, table,
-        ))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let writer = rt
+            .block_on(RsTableWriter::create_or_open(catalog, store, policy, table))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok(Self {
             inner: Some(writer),
@@ -66,14 +70,7 @@ impl TableWriter {
     ///   texts: list[str] — text content for each row
     ///   embeddings: list[list[float]] — one embedding per row
     fn write_batch(&mut self, texts: Vec<String>, embeddings: Vec<Vec<f32>>) -> PyResult<()> {
-        use arrow_array::{RecordBatch, StringArray};
-        use arrow_schema::{DataType, Field, Schema};
-
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "text",
-            DataType::Utf8,
-            false,
-        )]));
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
         let text_arr = StringArray::from(texts);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -107,11 +104,9 @@ impl TableWriter {
 #[pyo3(signature = (path, query, top_k=10))]
 fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult<PyObject> {
     let rt = rt();
-    let catalog = Arc::new(HadoopCatalog::new(path));
-    let store = Arc::new(LocalStore::new(path));
-    let table = ailake_catalog::TableIdent::new("default", "table");
+    let (catalog, store) = local_catalog_store(path);
+    let table = TableIdent::new("default", "table");
 
-    // Load dim from table metadata
     let meta = rt
         .block_on(catalog.load_table(&table))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -147,7 +142,7 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
 
     let list = PyList::empty_bound(py);
     for r in results {
-        let d = pyo3::types::PyDict::new_bound(py);
+        let d = PyDict::new_bound(py);
         d.set_item("row_id", r.row_id.as_u64())?;
         d.set_item("distance", r.distance)?;
         d.set_item("file", r.file_path)?;
@@ -166,8 +161,7 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
 #[pyfunction]
 #[pyo3(signature = (chunks, max_tokens=4096, dedup_threshold=0.05))]
 fn assemble_context(
-    py: Python<'_>,
-    chunks: Vec<pyo3::Bound<'_, pyo3::types::PyDict>>,
+    chunks: Vec<Bound<'_, PyDict>>,
     max_tokens: usize,
     dedup_threshold: f32,
 ) -> PyResult<String> {
@@ -233,7 +227,7 @@ fn parse_metric(s: &str) -> PyResult<VectorMetric> {
 }
 
 #[pymodule]
-fn ailake(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
     m.add_function(wrap_pyfunction!(search, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_context, m)?)?;
