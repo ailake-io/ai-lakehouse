@@ -256,7 +256,11 @@ impl SearchSession {
     /// traversal is inherently sequential and has no GPU batch path.
     ///
     /// Returns one `Vec<SearchResult>` per input query, in the same order.
-    pub fn search_batch(&self, queries: &[Vec<f32>], config: &SearchConfig) -> Vec<Vec<SearchResult>> {
+    pub fn search_batch(
+        &self,
+        queries: &[Vec<f32>],
+        config: &SearchConfig,
+    ) -> Vec<Vec<SearchResult>> {
         if queries.is_empty() {
             return vec![];
         }
@@ -281,7 +285,12 @@ impl SearchSession {
                     let q_refs: Vec<&[f32]> = queries.iter().map(|q| q.as_slice()).collect();
 
                     if let Some(batch) = ailake_index::gpu::try_gpu_search_batch(
-                        &q_refs, &row_ids, &flat, dim, self.metric, candidate_k,
+                        &q_refs,
+                        &row_ids,
+                        &flat,
+                        dim,
+                        self.metric,
+                        candidate_k,
                     ) {
                         for (qi, results) in batch.into_iter().enumerate() {
                             for (row_id, distance) in results {
@@ -298,9 +307,7 @@ impl SearchSession {
 
                 // CPU fallback for flat scan.
                 for (qi, query) in queries.iter().enumerate() {
-                    for (row_id, distance) in
-                        flat_search(raw, query, candidate_k, self.metric)
-                    {
+                    for (row_id, distance) in flat_search(raw, query, candidate_k, self.metric) {
                         all_results[qi].push(SearchResult {
                             row_id,
                             distance,

@@ -159,7 +159,11 @@ mod gpu_impl {
                 let db_sq = db.sqr().ok()?.sum_keepdim(1).ok()?.t().ok()?; // [1, N]
                 let cross = q_tensor.matmul(&db.t().ok()?).ok()?; // [Q, N]
                 let cross2 = cross.affine(2.0, 0.0).ok()?;
-                let sq = q_sq.broadcast_add(&db_sq).ok()?.broadcast_sub(&cross2).ok()?;
+                let sq = q_sq
+                    .broadcast_add(&db_sq)
+                    .ok()?
+                    .broadcast_sub(&cross2)
+                    .ok()?;
                 sq.sqrt().ok()?.to_vec2::<f32>().ok()?
             }
         };

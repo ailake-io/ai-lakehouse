@@ -584,7 +584,11 @@ async fn run_ailake_auto(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<B
     eprintln!("  AVX2         : {}", hw.has_avx2);
     eprintln!("  AVX-512F     : {}", hw.has_avx512);
     let shard_n = args.shard_size;
-    let index_choice = if hw.recommend_ivf_pq(shard_n) { "IVF-PQ" } else { "HNSW" };
+    let index_choice = if hw.recommend_ivf_pq(shard_n) {
+        "IVF-PQ"
+    } else {
+        "HNSW"
+    };
     eprintln!("  Index chosen : {index_choice}  (shard_size={shard_n})");
 
     let tmp;
