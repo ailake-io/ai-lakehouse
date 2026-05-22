@@ -51,6 +51,9 @@ rayon       = "1"
 # GPU (included only when ailake-index's "gpu" feature is enabled)
 candle-core = "0.8"
 
+# Runtime dynamic library loading (CUDA driver detection without compile-time feature)
+libloading  = "0.8"
+
 # Compression
 lz4_flex    = "0.11"
 zstd        = "0.13"

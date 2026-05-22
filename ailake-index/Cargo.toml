@@ -19,6 +19,7 @@ thiserror    = { workspace = true }
 memmap2      = { workspace = true }
 tempfile     = { workspace = true }
 rayon        = { workspace = true }
+libloading   = { workspace = true }
 candle-core  = { workspace = true, optional = true }
 
 [dev-dependencies]

@@ -46,14 +46,60 @@ impl HardwareProfile {
     }
 }
 
-fn detect_cuda() -> bool {
-    #[cfg(feature = "gpu")]
-    {
-        use candle_core::Device;
-        matches!(Device::cuda_if_available(0), Ok(d) if d.is_cuda())
+/// Platform-specific CUDA driver library name.
+#[cfg(target_os = "linux")]
+const CUDA_DRIVER_LIB: &str = "libcuda.so.1";
+#[cfg(windows)]
+const CUDA_DRIVER_LIB: &str = "nvcuda.dll";
+/// macOS has no CUDA support.
+#[cfg(not(any(target_os = "linux", windows)))]
+const CUDA_DRIVER_LIB: &str = "";
+
+/// CUDA driver API result code — 0 means success.
+type CUresult = i32;
+
+pub(crate) fn detect_cuda() -> bool {
+    use std::sync::OnceLock;
+    static HAS_CUDA: OnceLock<bool> = OnceLock::new();
+    *HAS_CUDA.get_or_init(probe_cuda_driver)
+}
+
+/// Dynamically load the CUDA driver library and count devices.
+///
+/// Uses dlopen (Linux) / LoadLibrary (Windows) so the binary starts cleanly on
+/// machines without a CUDA driver — the library simply won't be found and we
+/// return false instead of crashing at startup.
+fn probe_cuda_driver() -> bool {
+    if CUDA_DRIVER_LIB.is_empty() {
+        return false;
     }
-    #[cfg(not(feature = "gpu"))]
-    false
+
+    // Safety: libloading loads and immediately queries then drops the library.
+    // All function pointers are used only within this scope.
+    let lib = match unsafe { libloading::Library::new(CUDA_DRIVER_LIB) } {
+        Ok(l) => l,
+        Err(_) => return false, // driver not installed
+    };
+
+    // cuInit must succeed before any other driver API call.
+    let cu_init: libloading::Symbol<unsafe extern "C" fn(u32) -> CUresult> =
+        match unsafe { lib.get(b"cuInit\0") } {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+    if unsafe { cu_init(0) } != 0 {
+        return false;
+    }
+
+    // cuDeviceGetCount returns the number of CUDA-capable devices.
+    let cu_count: libloading::Symbol<unsafe extern "C" fn(*mut i32) -> CUresult> =
+        match unsafe { lib.get(b"cuDeviceGetCount\0") } {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+    let mut count = 0i32;
+    let rc = unsafe { cu_count(&mut count) };
+    rc == 0 && count > 0
 }
 
 fn detect_avx2() -> bool {

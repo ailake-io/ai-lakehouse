@@ -12,6 +12,22 @@ mod gpu_impl {
     use ailake_core::{RowId, VectorMetric};
     use candle_core::{DType, Device, Tensor};
 
+    /// Acquire the cached CUDA device.
+    ///
+    /// Returns `None` when:
+    /// - `detect_cuda()` found no CUDA driver / devices (fast OnceLock path)
+    /// - candle fails to initialise the device (OOM, driver mismatch, etc.)
+    fn cuda_device() -> Option<Device> {
+        // Fast early-exit via libloading probe — avoids candle init overhead on CPU-only hosts.
+        if !crate::hardware::detect_cuda() {
+            return None;
+        }
+        match Device::cuda_if_available(0) {
+            Ok(d) if d.is_cuda() => Some(d),
+            _ => None,
+        }
+    }
+
     /// Run brute-force top-k vector search on the GPU.
     ///
     /// `flat_vecs` is a contiguous row-major array: flat_vecs[i*dim..(i+1)*dim] = vector i.
@@ -32,10 +48,7 @@ mod gpu_impl {
             return Some(vec![]);
         }
 
-        let dev = match Device::cuda_if_available(0) {
-            Ok(d) if d.is_cuda() => d,
-            _ => return None,
-        };
+        let dev = cuda_device()?;
 
         let db = Tensor::from_slice(flat_vecs, (n, dim), &dev).ok()?;
         let q = Tensor::from_slice(query, (1, dim), &dev).ok()?;
@@ -101,10 +114,7 @@ mod gpu_impl {
         let dim = vectors[0].len();
         let k = k.min(n);
 
-        let dev = match Device::cuda_if_available(0) {
-            Ok(d) if d.is_cuda() => d,
-            _ => return None,
-        };
+        let dev = cuda_device()?;
 
         // Flatten + upload all vectors to GPU once
         let flat: Vec<f32> = vectors.iter().flat_map(|v| v.iter().copied()).collect();
