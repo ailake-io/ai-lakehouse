@@ -163,8 +163,8 @@ impl TableWriter {
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = format!("data/part-{:05}.parquet", part_num);
 
-        let file_writer =
-            AilakeFileWriter::new(self.policy.clone()).with_index_type(IndexType::IvfPq(ivf_config));
+        let file_writer = AilakeFileWriter::new(self.policy.clone())
+            .with_index_type(IndexType::IvfPq(ivf_config));
         let file_bytes: Bytes = file_writer.write(batch, embeddings)?;
         let file_size = file_bytes.len() as u64;
 

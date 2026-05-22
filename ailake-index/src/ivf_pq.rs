@@ -116,8 +116,14 @@ impl IvfPqIndex {
             .collect();
 
         // Train global PQ on all vectors
-        let pq = PQCodebook::train_with_kmeans(vecs, pq_m, config.pq_k.min(256), config.max_iter, kmeans_dispatch)
-            .map_err(|e| AilakeError::Catalog(format!("PQ training failed: {e}")))?;
+        let pq = PQCodebook::train_with_kmeans(
+            vecs,
+            pq_m,
+            config.pq_k.min(256),
+            config.max_iter,
+            kmeans_dispatch,
+        )
+        .map_err(|e| AilakeError::Catalog(format!("PQ training failed: {e}")))?;
 
         // Build inverted lists
         let mut inv_row_ids = vec![Vec::new(); nlist];
