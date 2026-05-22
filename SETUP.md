@@ -130,35 +130,161 @@ cargo test -p tests --test context_assembler
 - `dedup_removes_near_identical_chunks` — embeddings idênticos → só 1 chunk sobrevive
 - `grouping_restores_chunk_order` — chunks fora de ordem → XML com `chunk_index` crescente
 
-### 3F. ObjectStoreBackend (cloud storage)
+### 3F. Cloud storage — credential builders
 
-Os backends S3/GCS/Azure não têm testes automáticos sem Docker (deferred para Fase 3). Para testar manualmente com MinIO local:
+`ailake-store` expõe builders tipados por cloud para configurar credenciais explicitamente. Para uso rápido via env, `store_from_url` usa a cadeia padrão de cada cloud.
+
+#### S3 — variantes de credencial
+
+```rust
+use ailake_store::{s3_store, S3Config, S3Credentials};
+
+// Desenvolvimento / MinIO / LocalStack — key explícita
+let store = s3_store(S3Config {
+    bucket: "my-bucket".into(),
+    region: "us-east-1".into(),
+    endpoint: Some("http://localhost:9000".into()),
+    allow_http: true,
+    credentials: S3Credentials::Static {
+        access_key_id: "minioadmin".into(),
+        secret_access_key: "minioadmin".into(),
+        session_token: None,
+    },
+}, "warehouse/")?;
+
+// EC2 com IAM Instance Profile (IMDSv2)
+let store = s3_store(S3Config {
+    bucket: "prod-bucket".into(),
+    region: "us-east-1".into(),
+    endpoint: None,
+    allow_http: false,
+    credentials: S3Credentials::InstanceProfile,
+}, "warehouse/")?;
+
+// EKS com IRSA (AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN injetados pelo EKS controller)
+let store = s3_store(S3Config {
+    bucket: "prod-bucket".into(),
+    region: "us-east-1".into(),
+    endpoint: None,
+    allow_http: false,
+    credentials: S3Credentials::WebIdentity,
+}, "warehouse/")?;
+
+// Cadeia completa automática: env vars → ~/.aws → WebIdentity → IMDSv2
+let store = s3_store(S3Config {
+    bucket: "prod-bucket".into(),
+    region: "us-east-1".into(),
+    endpoint: None,
+    allow_http: false,
+    credentials: S3Credentials::Default,
+}, "warehouse/")?;
+
+// URL-based — usa S3Credentials::Default, region lida de AWS_DEFAULT_REGION
+let store = ailake_store::store_from_url("s3://prod-bucket/warehouse")?;
+```
+
+Requer feature `store-s3`:
+```bash
+cargo build --features ailake-store/store-s3
+```
+
+#### GCS — variantes de credencial
+
+```rust
+use ailake_store::{gcs_store, GcsConfig, GcsCredentials};
+
+// Arquivo JSON de service account
+let store = gcs_store(GcsConfig {
+    bucket: "my-gcs-bucket".into(),
+    credentials: GcsCredentials::ServiceAccountFile("/secrets/sa.json".into()),
+}, "warehouse/")?;
+
+// JSON inline (do secrets manager / env var)
+let store = gcs_store(GcsConfig {
+    bucket: "my-gcs-bucket".into(),
+    credentials: GcsCredentials::ServiceAccountJson(
+        std::env::var("GCP_SA_JSON")?,
+    ),
+}, "warehouse/")?;
+
+// GKE Workload Identity / Cloud Run / GOOGLE_APPLICATION_CREDENTIALS
+// → metadata server usado automaticamente quando env var ausente
+let store = gcs_store(GcsConfig {
+    bucket: "my-gcs-bucket".into(),
+    credentials: GcsCredentials::ApplicationDefault,
+}, "warehouse/")?;
+
+// URL-based — usa ApplicationDefault
+let store = ailake_store::store_from_url("gs://my-gcs-bucket/warehouse")?;
+```
+
+Requer feature `store-gcs`:
+```bash
+cargo build --features ailake-store/store-gcs
+```
+
+#### Azure Blob / ADLS Gen2 — variantes de credencial
+
+```rust
+use ailake_store::{azure_store, AzureConfig, AzureCredentials};
+
+// Service principal (Entra app registration) — produção
+let store = azure_store(AzureConfig {
+    account_name: "mystorageaccount".into(),
+    container: "my-container".into(),
+    credentials: AzureCredentials::ClientSecret {
+        tenant_id: std::env::var("AZURE_TENANT_ID")?,
+        client_id: std::env::var("AZURE_CLIENT_ID")?,
+        client_secret: std::env::var("AZURE_CLIENT_SECRET")?,
+    },
+}, "warehouse/")?;
+
+// Managed Identity — system-assigned (sem client_id)
+let store = azure_store(AzureConfig {
+    account_name: "mystorageaccount".into(),
+    container: "my-container".into(),
+    credentials: AzureCredentials::ManagedIdentity { client_id: None },
+}, "warehouse/")?;
+
+// Managed Identity — user-assigned
+let store = azure_store(AzureConfig {
+    account_name: "mystorageaccount".into(),
+    container: "my-container".into(),
+    credentials: AzureCredentials::ManagedIdentity {
+        client_id: Some("00000000-0000-0000-0000-000000000000".into()),
+    },
+}, "warehouse/")?;
+
+// Storage account access key (dev / admin)
+let store = azure_store(AzureConfig {
+    account_name: "mystorageaccount".into(),
+    container: "my-container".into(),
+    credentials: AzureCredentials::AccessKey(
+        std::env::var("AZURE_STORAGE_KEY")?,
+    ),
+}, "warehouse/")?;
+
+// URL-based — usa ManagedIdentity, account lida de AZURE_STORAGE_ACCOUNT_NAME
+let store = ailake_store::store_from_url("az://my-container/warehouse")?;
+```
+
+Requer feature `store-azure`:
+```bash
+cargo build --features ailake-store/store-azure
+```
+
+#### MinIO local para testes S3
 
 ```bash
-# Subir MinIO
 docker run -p 9000:9000 -p 9001:9001 \
   -e MINIO_ROOT_USER=minioadmin \
   -e MINIO_ROOT_PASSWORD=minioadmin \
   minio/minio server /data --console-address ":9001"
 
-# Criar bucket via mc ou console (http://localhost:9001)
+# Criar bucket via console em http://localhost:9001
 ```
 
-```rust
-use object_store::aws::AmazonS3Builder;
-use ailake_store::ObjectStoreBackend;
-
-let s3 = AmazonS3Builder::new()
-    .with_bucket_name("test-bucket")
-    .with_region("us-east-1")
-    .with_endpoint("http://localhost:9000")
-    .with_access_key_id("minioadmin")
-    .with_secret_access_key("minioadmin")
-    .with_allow_http(true)
-    .build()?;
-
-let store = ObjectStoreBackend::new(Arc::new(s3), "warehouse/");
-```
+Use `S3Credentials::Static` com `endpoint: Some("http://localhost:9000")` e `allow_http: true` como mostrado acima.
 
 ---
 
@@ -742,15 +868,13 @@ let catalog = RestCatalog::new(
 ### 9F. Azure Blob + Apache Polaris (produção Azure)
 
 ```rust
-use object_store::azure::MicrosoftAzureBuilder;
-use ailake_store::ObjectStoreBackend;
+use ailake_store::{azure_store, AzureConfig, AzureCredentials};
 
-let azure = MicrosoftAzureBuilder::new()
-    .with_account("myaccount")
-    .with_access_key("my-access-key")
-    .with_container("mycontainer")
-    .build()?;
-let store = Arc::new(ObjectStoreBackend::new(Arc::new(azure), "warehouse/"));
+let store = Arc::new(azure_store(AzureConfig {
+    account_name: "myaccount".into(),
+    container: "mycontainer".into(),
+    credentials: AzureCredentials::AccessKey(std::env::var("AZURE_STORAGE_KEY")?),
+}, "warehouse/")?)
 
 let catalog = RestCatalog::new(
     RestCatalogConfig {
@@ -778,16 +902,18 @@ Os helpers `databricks_azure` / `databricks_aws` / `databricks_gcp` constroem o 
 
 ```rust
 use ailake_catalog::{databricks_azure, DatabricksAuth, RestCatalog};
-use object_store::azure::MicrosoftAzureBuilder;
-use ailake_store::ObjectStoreBackend;
+use ailake_store::{azure_store, AzureConfig, AzureCredentials};
 use std::sync::Arc;
 
-let azure = MicrosoftAzureBuilder::new()
-    .with_account("myaccount")
-    .with_access_key("my-access-key")
-    .with_container("mycontainer")
-    .build()?;
-let store = Arc::new(ObjectStoreBackend::new(Arc::new(azure), "warehouse/"));
+let store = Arc::new(azure_store(AzureConfig {
+    account_name: "myaccount".into(),
+    container: "mycontainer".into(),
+    credentials: AzureCredentials::ClientSecret {
+        tenant_id: std::env::var("AZURE_TENANT_ID")?,
+        client_id: std::env::var("AZURE_CLIENT_ID")?,
+        client_secret: std::env::var("AZURE_CLIENT_SECRET")?,
+    },
+}, "warehouse/")?)
 
 let catalog = RestCatalog::new(
     databricks_azure(
@@ -817,13 +943,15 @@ Scope: `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default` (recurso Databricks no Az
 
 ```rust
 use ailake_catalog::{databricks_aws, DatabricksAuth};
-use object_store::aws::AmazonS3Builder;
+use ailake_store::{s3_store, S3Config, S3Credentials};
 
-let s3 = AmazonS3Builder::new()
-    .with_bucket_name("my-bucket")
-    .with_region("us-east-1")
-    .build()?;
-let store = Arc::new(ObjectStoreBackend::new(Arc::new(s3), "warehouse/"));
+let store = Arc::new(s3_store(S3Config {
+    bucket: "my-bucket".into(),
+    region: "us-east-1".into(),
+    endpoint: None,
+    allow_http: false,
+    credentials: S3Credentials::Default,
+}, "warehouse/")?)
 
 let catalog = RestCatalog::new(
     databricks_aws(
@@ -851,12 +979,12 @@ export GCP_TOKEN=$(gcloud auth print-access-token)
 
 ```rust
 use ailake_catalog::{databricks_gcp, DatabricksAuth};
-use object_store::gcp::GoogleCloudStorageBuilder;
+use ailake_store::{gcs_store, GcsConfig, GcsCredentials};
 
-let gcs = GoogleCloudStorageBuilder::new()
-    .with_bucket_name("my-bucket")
-    .build()?;
-let store = Arc::new(ObjectStoreBackend::new(Arc::new(gcs), "warehouse/"));
+let store = Arc::new(gcs_store(GcsConfig {
+    bucket: "my-bucket".into(),
+    credentials: GcsCredentials::ApplicationDefault,
+}, "warehouse/")?)
 
 let catalog = RestCatalog::new(
     databricks_gcp(
@@ -1078,17 +1206,18 @@ Cobre encoding dos parâmetros Glue e formato dos paths.
 
 ```rust
 use ailake_catalog::{GlueCatalog, GlueCatalogConfig};
-use ailake_store::ObjectStoreBackend;
-use object_store::aws::AmazonS3Builder;
+use ailake_store::{s3_store, S3Config, S3Credentials};
 use std::sync::Arc;
 
-let s3 = AmazonS3Builder::new()
-    .with_bucket_name("my-bucket")
-    .with_region("us-east-1")
-    .build()?;
-let store = Arc::new(ObjectStoreBackend::new(Arc::new(s3), "warehouse/"));
+// Cadeia automática: env vars → ~/.aws → IMDSv2 → WebIdentity (IRSA)
+let store = Arc::new(s3_store(S3Config {
+    bucket: "my-bucket".into(),
+    region: "us-east-1".into(),
+    endpoint: None,
+    allow_http: false,
+    credentials: S3Credentials::Default,
+}, "warehouse/")?);
 
-// Carrega credenciais do ambiente (AWS_ACCESS_KEY_ID / IAM role / ~/.aws)
 let catalog = GlueCatalog::from_env(
     GlueCatalogConfig {
         database: "my_glue_database".into(),

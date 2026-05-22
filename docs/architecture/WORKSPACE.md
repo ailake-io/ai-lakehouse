@@ -156,11 +156,12 @@ Object storage abstraction. Thin wrapper over the `object_store` crate.
   - `get_range(path, range: Range<u64>) → Bytes` — critical for partial reads of HNSW footer from S3
   - `put(path, Bytes)`, `list(prefix)`, `file_size(path)`, `exists(path)`, `delete(path)`
 - `LocalStore` — filesystem implementation (dev/tests)
-- `ObjectStoreBackend` — wraps any `Arc<dyn object_store::ObjectStore>`:
-  - S3: `object_store::aws::AmazonS3Builder`
-  - GCS: `object_store::gcp::GoogleCloudStorageBuilder`
-  - Azure: `object_store::azure::MicrosoftAzureBuilder`
-  - Feature-gated: `store-s3`, `store-gcs`, `store-azure`
+- `ObjectStoreBackend` — wraps any `Arc<dyn object_store::ObjectStore>` behind the `Store` trait; used internally by all typed builders
+- **Typed credential builders** (feature-gated):
+  - `s3_store(S3Config, prefix)` — `store-s3`; `S3Credentials`: `Static` / `WebIdentity` (IRSA) / `InstanceProfile` / `Default`
+  - `gcs_store(GcsConfig, prefix)` — `store-gcs`; `GcsCredentials`: `ServiceAccountFile` / `ServiceAccountJson` / `ApplicationDefault` (ADC + Workload Identity)
+  - `azure_store(AzureConfig, prefix)` — `store-azure`; `AzureCredentials`: `ClientSecret` / `ManagedIdentity` / `AccessKey` / `SasToken` / `AzureCli`
+- `store_from_url(url)` — URL-based auto-builder; reads credentials from env; dispatches by scheme: `s3://`, `gs://`, `az://`, `file://`
 - All async, all return `AilakeError` on failure
 
 ### `ailake-query`
