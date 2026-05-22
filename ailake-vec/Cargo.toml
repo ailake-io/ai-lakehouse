@@ -9,6 +9,7 @@ half        = { workspace = true }
 lz4_flex    = { workspace = true }
 zstd        = { workspace = true }
 thiserror   = { workspace = true }
+serde       = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }

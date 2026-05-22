@@ -27,7 +27,7 @@ half        = { version = "2", features = ["serde"] }
 async-trait = "0.1"
 
 # Async
-tokio       = { version = "1", features = ["full"] }
+tokio       = { version = "1", features = ["rt-multi-thread", "io-util", "fs", "sync", "time", "macros"] }
 futures     = "0.3"
 
 # Data
@@ -35,7 +35,8 @@ parquet      = { version = "52", features = ["async"] }
 arrow-array  = "52"
 arrow-schema = "52"
 arrow-select = "52"
-object_store = { version = "0.10", features = ["aws", "gcp", "azure"] }
+arrow-buffer = "52"
+object_store = { version = "0.10" }  # cloud features added per-crate via ailake-store feature flags
 
 # Iceberg
 iceberg     = "0.3"
@@ -47,8 +48,8 @@ bincode     = "1"
 memmap2     = "0.9"
 rayon       = "1"
 
-# GPU (included only when ailake-index's "gpu" feature is enabled)
-candle-core = "0.8"
+# Runtime dynamic library loading — GPU backend detection without build-time SDK
+libloading  = "0.8"
 
 # Compression
 lz4_flex    = "0.11"
@@ -72,9 +73,11 @@ proptest    = "1"
 rand        = "0.8"
 
 [profile.release]
-lto         = "thin"
+lto           = "thin"
 codegen-units = 1
-opt-level   = 3
+opt-level     = 3
+strip         = "symbols"
+panic         = "abort"
 
 [profile.bench]
 inherits    = "release"

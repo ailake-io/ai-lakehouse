@@ -3,11 +3,6 @@ name = "ailake-index"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-# Build with GPU support (requires CUDA toolkit at build time).
-# At runtime, GPU is used when CUDA is available; falls back to CPU otherwise.
-gpu = ["dep:candle-core", "candle-core/cuda"]
-
 [dependencies]
 ailake-core  = { path = "../ailake-core" }
 ailake-vec   = { path = "../ailake-vec" }
@@ -19,7 +14,7 @@ thiserror    = { workspace = true }
 memmap2      = { workspace = true }
 tempfile     = { workspace = true }
 rayon        = { workspace = true }
-candle-core  = { workspace = true, optional = true }
+libloading   = { workspace = true }
 
 [dev-dependencies]
 rand        = { workspace = true }

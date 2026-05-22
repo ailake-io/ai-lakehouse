@@ -13,7 +13,7 @@ pub mod writer;
 
 pub use footer::{
     AilakeHeader, AilakeTrailer, DistanceMetric, Precision, AILAKE_FORMAT_VERSION, AILAKE_MAGIC,
-    HEADER_SIZE, TRAILER_SIZE,
+    FLAG_INDEX_IVF_PQ, HEADER_SIZE, TRAILER_SIZE,
 };
 pub use reader::AilakeFileReader;
-pub use writer::{AilakeFileWriter, VectorColumnBatch};
+pub use writer::{AilakeFileWriter, IndexType, VectorColumnBatch};

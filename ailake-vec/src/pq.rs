@@ -2,8 +2,9 @@
 // At dim=1536, M=48: 6144 bytes → 48 bytes per vector (128x reduction, ~93-95% recall@10).
 
 use ailake_core::AilakeError;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PQCodebook {
     /// Number of sub-vectors (M)
     pub num_subvectors: usize,
@@ -23,6 +24,23 @@ impl PQCodebook {
         num_centroids: usize,
         max_iter: usize,
     ) -> Result<Self, AilakeError> {
+        Self::train_with_kmeans(vectors, num_subvectors, num_centroids, max_iter, kmeans)
+    }
+
+    /// Train PQ codebook with a custom k-means backend (e.g. GPU-accelerated).
+    ///
+    /// `kmeans_fn(vecs, k, max_iter)` must return exactly `k` centroids of the
+    /// same dimensionality as `vecs`.  The built-in CPU path passes `kmeans`.
+    pub fn train_with_kmeans<F>(
+        vectors: &[Vec<f32>],
+        num_subvectors: usize,
+        num_centroids: usize,
+        max_iter: usize,
+        kmeans_fn: F,
+    ) -> Result<Self, AilakeError>
+    where
+        F: Fn(&[Vec<f32>], usize, usize) -> Vec<Vec<f32>>,
+    {
         if vectors.is_empty() {
             return Err(AilakeError::Catalog(
                 "PQ training requires at least 1 vector".into(),
@@ -42,7 +60,7 @@ impl PQCodebook {
             let start = m * sub_dim;
             let end = start + sub_dim;
             let sub_vecs: Vec<Vec<f32>> = vectors.iter().map(|v| v[start..end].to_vec()).collect();
-            let sub_centroids = kmeans(&sub_vecs, n_train, max_iter);
+            let sub_centroids = kmeans_fn(&sub_vecs, n_train, max_iter);
             centroids.push(sub_centroids);
         }
 
@@ -197,6 +215,13 @@ fn nearest_centroid(point: &[f32], centroids: &[Vec<f32>]) -> usize {
 
 fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
+}
+
+/// Train k-means centroids on `vectors`. Returns `k` centroids of same dimensionality.
+/// Exposed for IVF coarse quantizer training.
+pub fn kmeans_centroids(vectors: &[Vec<f32>], k: usize, max_iter: usize) -> Vec<Vec<f32>> {
+    let k_eff = k.min(vectors.len());
+    kmeans(vectors, k_eff, max_iter)
 }
 
 #[cfg(test)]

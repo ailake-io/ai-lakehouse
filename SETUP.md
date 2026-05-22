@@ -42,18 +42,12 @@ Primeira compilação leva ~2-3 min (baixa dependências Arrow/Parquet).
 cargo build --workspace --features store-s3      # Amazon S3
 cargo build --workspace --features store-gcs     # Google Cloud Storage
 cargo build --workspace --features store-azure   # Azure Blob
-
-# GPU (requer CUDA Toolkit ≥ 12 instalado — headers + nvcc)
-# Em runtime usa GPU se disponível; cai para CPU paralelo caso contrário.
-cargo build --release --features ailake-index/gpu
-
-# Tudo junto: S3 + GPU
-cargo build --release --features "store-s3 ailake-index/gpu"
 ```
 
-**Regra de ouro**: builds sem `ailake-index/gpu` compilam e rodam em qualquer
-máquina (incluindo CPU-only). O binário com `gpu` detecta CUDA em runtime
-automaticamente — sem GPU instalada, continua funcionando via CPU.
+**Regra de ouro**: o build padrão (`cargo build`) compila e roda em qualquer
+máquina — CPU-only, NVIDIA ou AMD. Não existe mais flag `ailake-index/gpu`.
+Ambas as GPUs são detectadas em runtime via `libloading` sem dependência de
+compilação.
 
 ---
 
@@ -70,16 +64,17 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Deve terminar com `78 passed`.
+Deve terminar com `105 passed` (2 ignored — testes que requerem servidor externo).
 
 ### Testes por crate
 
 | Crate | O que cobre |
 |---|---|
 | `ailake-vec` | Quantização F32→F16, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centróides, `exact_distance`, SIMD (AVX2/NEON) |
-| `ailake-index` | HNSW build/search (grafo real + geração bitmap + flat_vecs), serialização bincode, MmapLoader round-trip |
-| `ailake-file` | Escrita/leitura do arquivo unificado, layout AILK, integridade |
-| `ailake-query` | ContextAssembler (dedup, grouping, XML, budget), pruning geométrico, reranking pós-PQ |
+| `ailake-index` | HNSW build/search, IVF-PQ (train/search/serialize), GPU k-means dispatch, serialização bincode, MmapLoader round-trip |
+| `ailake-file` | Escrita/leitura do arquivo unificado, layout AILK (HNSW e IVF-PQ), integridade |
+| `ailake-query` | ContextAssembler, pruning geométrico, reranking pós-PQ, MemTableWriter, write_batch_ivf_pq |
+| `ailake-parquet` | write_batch_multi_vec / read_all_multi_vec (multi-vector columns) |
 | `tests` (integração) | write→read→search end-to-end, invariante posicional, compatibilidade PyArrow, pruning, context assembler |
 
 ---
@@ -435,67 +430,221 @@ cargo bench -p ailake-file
 
 ---
 
-## 8F. GPU search — build e verificação
+## 8F. GPU search — NVIDIA CUDA e AMD ROCm
 
-### Pré-requisitos
+Dois backends GPU independentes. Ambos usam `libloading` dlopen em runtime —
+**zero dependência de build** para qualquer GPU. O mesmo binário roda em
+CPU-only, NVIDIA e AMD sem recompilação.
+
+| Backend | Detecção | Compute | Requisito de build |
+|---------|----------|---------|-------------------|
+| **NVIDIA CUDA** | `libcuda.so.1` + `cuDeviceGetCount` | cuBLAS SGEMM via libloading | **nenhum** — runtime only |
+| **AMD ROCm** | `libamdhip64.so` + `hipGetDeviceCount` | hipBLAS SGEMM via libloading | **nenhum** — runtime only |
+| **CPU** | fallback | rayon paralelo | nenhum |
+
+**Prioridade de detecção**: AMD ROCm → NVIDIA CUDA → CPU SIMD.
+AMD é verificado primeiro pois sistemas ROCm frequentemente expõem uma camada de compatibilidade CUDA (`libcuda.so.1`), o que identificaria incorretamente como NVIDIA sem essa prioridade.
+
+---
+
+### 8F-1. NVIDIA CUDA
+
+#### Pré-requisitos de runtime (nenhum de build)
 
 | Requisito | Versão mínima |
 |-----------|---------------|
-| NVIDIA GPU | Arquitetura Ampere+ (sm_80) recomendada |
-| CUDA Toolkit | 12.x (`nvcc`, headers em `/usr/local/cuda`) |
-| Driver NVIDIA | ≥ 525 |
+| GPU NVIDIA | Arquitetura Maxwell+ (sm_50) |
+| Driver NVIDIA | ≥ 450 |
+| `libcudart.so` | CUDA 11.x ou 12.x em `LD_LIBRARY_PATH` |
+| `libcublas.so` | CUDA 11.x ou 12.x em `LD_LIBRARY_PATH` |
 
-### Build com suporte GPU
+Não é necessário CUDA Toolkit, `nvcc` ou headers — apenas as bibliotecas de runtime.
+
+#### Build — nenhuma flag adicional necessária
 
 ```bash
-# Requer CUDA Toolkit instalado no sistema de build
+# Build padrão — NVIDIA detectado e usado em runtime automaticamente
+cargo build --release
+```
+
+O binário detecta CUDA via `libloading` (dlopen de `libcuda.so.1`,
+`libcudart.so`, `libcublas.so`). Sem GPU: cai silenciosamente para AMD ROCm ou CPU.
+
+#### Verificar detecção CUDA
+
+```rust
+use ailake_index::{detect_backend, HardwareBackend};
+assert_eq!(detect_backend(), HardwareBackend::NvidiaCuda);
+```
+
+---
+
+### 8F-2. AMD ROCm
+
+#### Pré-requisitos
+
+| Requisito | Versão mínima |
+|-----------|---------------|
+| GPU AMD | GCN4+ (Polaris) ou RDNA1+ recomendado |
+| ROCm | 5.0+ (`libamdhip64.so` + `libhipblas.so`) |
+| Driver amdgpu | incluído no ROCm |
+
+#### Build — nenhuma flag adicional necessária
+
+```bash
+# Build padrão — ROCm detectado e usado em runtime automaticamente
+cargo build --release
+
+# ROCm + CUDA ao mesmo tempo (ROCm tem prioridade por ser detectado primeiro)
 cargo build --release --features ailake-index/gpu
 ```
 
-O binário resultante detecta automaticamente em runtime:
-- **GPU disponível**: usa `candle-core` + cuBLAS para cálculo de distâncias em lote
-- **Sem GPU / CUDA não instalado**: cai silenciosamente para CPU paralelo (rayon)
+O backend ROCm usa `libhipblas.so` via `libloading` — sem dependência de compilação. O binário roda em qualquer máquina e apenas usa ROCm quando `libamdhip64.so` + `libhipblas.so` estiverem instalados.
 
-### Verificar detecção de GPU
-
-```rust
-// Exemplo mínimo — em código Rust
-use candle_core::Device;
-let dev = Device::cuda_if_available(0).unwrap();
-println!("Backend: {:?}", dev);
-// GPU presente:   Cuda(CudaDevice { ordinal: 0 })
-// Sem GPU:        Cpu
-```
-
-### Teste de busca com GPU
+#### Verificar detecção ROCm
 
 ```bash
-# Gerar tabela demo (dim=64, 1000 linhas)
-cargo run --example demo -p ailake-query 2>&1 | grep Workspace
-# Workspace: /tmp/ailakeXXXXXX
-
-# Busca — o backend GPU é selecionado automaticamente
-AILAKE_TABLE=/tmp/ailakeXXXXXX/warehouse/default.db/table \
-cargo run --features ailake-index/gpu --example demo -p ailake-query
+# Via HardwareProfile::detect()
+use ailake_index::{detect_backend, detect_rocm, HardwareBackend};
+assert!(detect_rocm());
+assert_eq!(detect_backend(), HardwareBackend::AmdRocm);
 ```
 
-### Quando GPU bate CPU
+---
 
-| Arquivo (vetores) | dim | CPU rayon | GPU brute-force |
-|-------------------|-----|-----------|-----------------|
-| 10k               | 1536 | ~2 ms    | ~3 ms (overhead domina) |
-| 100k              | 1536 | ~20 ms   | ~2 ms |
-| 500k              | 1536 | ~100 ms  | ~4 ms |
+### 8F-3. Verificar detecção via benchmark
 
-GPU vence a partir de ~50k vetores/arquivo para dim=1536.
+O engine `ailake-auto` imprime o perfil de hardware antes de rodar:
 
-### Métricas suportadas no GPU
+```bash
+cargo run --release -p ailake-bench -- \
+    --dataset-dir data/sift1m --engine ailake-auto --limit 50000
+```
 
-| Métrica | Implementação GPU |
-|---------|-------------------|
-| Cosine | normalizar linhas → dot product → `1 - sim` |
-| Euclidean | `broadcast_sub` → `sqr` → `sum` → `sqrt` |
-| DotProduct | matmul negado (`-q @ V.T`) |
+Saída esperada em máquina NVIDIA:
+```
+Hardware detection:
+  Backend      : NVIDIA CUDA
+  CUDA GPU     : true
+  ROCm GPU     : false
+  CPU cores    : 16
+  AVX2         : true
+  AVX-512F     : false
+  Index chosen : IVF-PQ  (shard_size=100000)
+```
+
+Saída esperada em máquina AMD ROCm:
+```
+Hardware detection:
+  Backend      : AMD ROCm
+  CUDA GPU     : false
+  ROCm GPU     : true
+  CPU cores    : 16
+  AVX2         : true
+  AVX-512F     : false
+  Index chosen : IVF-PQ  (shard_size=100000)
+```
+
+Saída esperada em CPU-only:
+```
+Hardware detection:
+  Backend      : CPU (no GPU)
+  CUDA GPU     : false
+  ROCm GPU     : false
+  CPU cores    : 8
+  AVX2         : true
+  AVX-512F     : false
+  Index chosen : HNSW  (shard_size=100000)
+```
+
+---
+
+### 8F-4. Quando GPU bate CPU
+
+| Arquivo (vetores) | dim | CPU rayon | NVIDIA/AMD GPU |
+|-------------------|-----|-----------|----------------|
+| 10k | 1536 | ~2 ms | ~3 ms (overhead domina) |
+| 100k | 1536 | ~20 ms | ~2 ms |
+| 500k | 1536 | ~100 ms | ~4 ms |
+
+GPU vence a partir de ~50k vetores/arquivo para dim=1536. Aplicável para ambos os vendors.
+
+---
+
+### 8F-5. Métricas suportadas em GPU
+
+| Métrica | NVIDIA (cuBLAS SGEMM) | AMD (hipBLAS SGEMM) |
+|---------|-----------------------|---------------------|
+| **Cosine** | normalizar CPU → SGEMM → `1 + raw` | normalizar CPU → SGEMM → `1 + raw` |
+| **Euclidean** | SGEMM (−2·q·d) + norms CPU → sqrt | SGEMM (−2·q·d) + norms CPU → sqrt |
+| **DotProduct** | SGEMM com alpha=−1 | SGEMM com alpha=−1 |
+
+Ambos os backends usam formulação SGEMM idêntica (`C[N×Q col-major] = alpha · db^T · queries`); diferem apenas nas constantes de operação (`CUBLAS_OP_T=1` vs `HIPBLAS_OP_T=112`) e nos nomes das bibliotecas.
+
+---
+
+### 8F-6. GPU k-means para IVF-PQ
+
+O treinamento do `IvfPqIndex` (k-means para centróides grosseiros e `PQCodebook`) usa GPU via `kmeans_dispatch` com prioridade NVIDIA → AMD → CPU:
+
+```
+NVIDIA (runtime)  →  try_nvidia_kmeans (cuBLAS SGEMM via libloading)
+AMD ROCm (runtime)  →  try_rocm_kmeans (hipBLAS SGEMM via libloading)
+CPU fallback        →  kmeans_centroids (rayon paralelo)
+```
+
+- **Sem GPU em runtime**: `kmeans_dispatch` cai silenciosamente para CPU.
+- **NVIDIA sem libcublas instalado**: mesmo que `libcuda.so.1` exista, `try_nvidia_kmeans` retorna `None` se `libcublas.so` não for encontrado → tenta AMD → CPU.
+- **AMD sem hipBLAS instalado**: mesmo que `libamdhip64.so` exista, `try_rocm_kmeans` retorna `None` se `libhipblas.so` não for encontrado → CPU fallback.
+
+```bash
+# Build padrão — GPU acelerado automaticamente se disponível (NVIDIA ou AMD)
+cargo build --release
+```
+
+---
+
+## 8G. Benchmark IVF-PQ (`--engine ailake-ivf-pq`)
+
+IVF-PQ usa índice com inverted lists codificadas por Product Quantization, em vez do grafo HNSW. Índice 10-100× menor — boa escolha para S3 onde acesso sequencial é mais barato.
+
+```bash
+# Benchmark básico (SIFT-1M, defaults: nlist=256, nprobe=8, pq_m=8)
+cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --engine ailake-ivf-pq
+
+# Ajustar parâmetros
+cargo run --release -p ailake-bench -- \
+    --dataset-dir data/sift1m \
+    --engine ailake-ivf-pq \
+    --ivf-nlist 512 \
+    --ivf-nprobe 16 \
+    --ivf-pq-m 16
+
+# Comparação completa AI-Lake HNSW + IVF-PQ + LanceDB + pgvector
+cargo run --release -p ailake-bench --features lancedb-bench,pgvector-bench -- \
+    --dataset-dir data/sift1m \
+    --engine all \
+    --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
+```
+
+Parâmetros IVF-PQ:
+
+| Flag | Default | Descrição |
+|---|---|---|
+| `--ivf-nlist` | 256 | Células Voronoi (inverted lists). Regra: `sqrt(n)` |
+| `--ivf-nprobe` | 8 | Células consultadas por query. Maior = melhor recall |
+| `--ivf-pq-m` | 8 | Sub-vetores PQ. Deve dividir 128 para SIFT |
+
+Resultado esperado (SIFT-1M, CPU, nlist=256, nprobe=8):
+```
+AI-Lake IVF-PQ write phase (nlist=256, nprobe=8, pq_m=8) …
+  Throughput    : ~1800 vec/s  (k-means mais lento que HNSW insert)
+
+Search phase  (top_k=10)
+  Recall@10     : ~0.94
+  QPS           : ~2100
+  Index size    : ~5 MB  (vs ~80 MB HNSW para 1M vetores dim=128)
+```
 
 ---
 
@@ -1349,19 +1498,206 @@ Os testes de integração (`AilakeSparkExtensionsTest`) iniciam um SparkSession 
 
 ---
 
+## 17. Plugin Flink — AilakeVectorConnector
+
+O `ailake-flink` é um conector Flink Table API (Kotlin/Gradle) que usa a biblioteca nativa `libailake_jni.so` via JNA para leitura e escrita vetorial em tabelas AI-Lake.
+
+### 17A. Pré-requisitos adicionais
+
+| Ferramenta | Versão | Instalação |
+|---|---|---|
+| JDK | 17+ | `sudo apt install openjdk-17-jdk` |
+| Gradle | 8+ | `sdk install gradle` (ou usar wrapper) |
+| Apache Flink | 1.18+ | [flink.apache.org](https://flink.apache.org/downloads/) |
+
+### 17B. Passo 1 — Compilar a biblioteca nativa
+
+```bash
+# Na raiz do projeto (mesma lib do plugin Trino/Spark)
+cargo build --release -p ailake-jni
+
+# Linux:
+ls -lh target/release/libailake_jni.so
+```
+
+### 17C. Passo 2 — Compilar o fat-jar
+
+```bash
+cd ailake-flink
+gradle wrapper   # só na primeira vez
+./gradlew shadowJar
+
+ls build/libs/ailake-flink-0.1.0-all.jar
+```
+
+### 17D. Registrar o conector no Flink (SQL Client ou DataStream)
+
+```sql
+-- Flink SQL Client
+ADD JAR '/path/to/ailake-flink-0.1.0-all.jar';
+
+CREATE TABLE embeddings (
+  id       BIGINT,
+  text     STRING,
+  row_id   BIGINT,
+  distance DOUBLE
+) WITH (
+  'connector'          = 'ailake-vector',
+  'table-uri'          = 's3://my-lake/docs/',
+  'vector-column'      = 'embedding',
+  'vector-dim'         = '1536',
+  'top-k'              = '10',
+  'native-lib-path'    = '/opt/ailake/lib'
+);
+
+SELECT * FROM embeddings
+WHERE ailake_query_vector = '[0.1, 0.2, ...]'
+LIMIT 10;
+```
+
+Para streaming ingestion (sink):
+
+```sql
+CREATE TABLE ailake_sink (
+  id          BIGINT,
+  chunk_text  STRING,
+  embedding   BYTES    -- raw float32 bytes
+) WITH (
+  'connector'       = 'ailake-vector',
+  'table-uri'       = 's3://my-lake/docs/',
+  'vector-column'   = 'embedding',
+  'vector-dim'      = '1536',
+  'mode'            = 'sink',
+  'native-lib-path' = '/opt/ailake/lib'
+);
+
+INSERT INTO ailake_sink
+SELECT id, chunk_text, embedding FROM kafka_source;
+```
+
+O sink usa `MemTableWriter` internamente — acumula micro-batches e faz flush por tamanho/contagem/tempo (ver seção 19).
+
+### 17E. Testes do plugin Flink
+
+```bash
+cd ailake-flink
+./gradlew test
+
+# Saída esperada:
+# AilakeVectorConnectorFactoryTest: tests passed
+```
+
+Testes rodam sem servidor Flink nem biblioteca nativa — degradação graciosa via mock JNA.
+
+---
+
+## 18. Multi-vector columns (`write_batch_multi_vec`)
+
+Armazena múltiplos embeddings por linha como `List<FixedSizeBinary>` — útil quando um documento tem vários chunks e você quer evitar explosão de linhas.
+
+### 18A. Escrever com múltiplos vetores por linha
+
+```rust
+use ailake_parquet::writer::write_batch_multi_vec;
+
+// 3 documentos, cada um com 2 embeddings de dim=64
+let texts = vec!["doc A".to_string(), "doc B".to_string(), "doc C".to_string()];
+let multi_embeddings: Vec<Vec<Vec<f32>>> = vec![
+    vec![vec![0.1_f32; 64], vec![0.2_f32; 64]],  // doc A: 2 vecs
+    vec![vec![0.3_f32; 64]],                       // doc B: 1 vec
+    vec![vec![0.4_f32; 64], vec![0.5_f32; 64]],   // doc C: 2 vecs
+];
+
+let batch = write_batch_multi_vec(&texts, &multi_embeddings, "embedding", 64)?;
+```
+
+### 18B. Ler de volta
+
+```rust
+use ailake_parquet::reader::read_all_multi_vec;
+
+let (texts, multi_vecs) = read_all_multi_vec(&parquet_bytes, "embedding", 64)?;
+// multi_vecs[i] = Vec<Vec<f32>> para o documento i
+```
+
+### 18C. O que leitores Parquet padrão veem
+
+Leitores sem plugin AI-Lake (Spark, Trino, DuckDB) leem a coluna como `List<BINARY>` — bytes opacos, sem erro. A semântica de vetor só é ativada pelo SDK.
+
+---
+
+## 19. MemTableWriter — buffer para streaming ingestion
+
+`MemTableWriter` acumula micro-batches em RAM e faz flush para um único shard Parquet quando os thresholds de tamanho/linhas/tempo são atingidos. Reduz a frequência de builds HNSW em pipelines Flink/Spark Streaming.
+
+### 19A. Uso básico
+
+```rust
+use ailake_query::mem_table::{MemTableWriter, MemTableConfig};
+use std::time::Duration;
+
+let config = MemTableConfig {
+    flush_size_bytes: 128 * 1024 * 1024,  // flush após 128 MiB
+    flush_max_rows:   200_000,             // flush após 200k linhas
+    flush_interval:   Duration::from_secs(60), // flush após 60s inativo
+};
+
+let mut mt = MemTableWriter::new(catalog, store, policy, table, config);
+
+// Loop de ingestão streaming
+loop {
+    let (batch, embeddings) = receive_micro_batch().await;
+    mt.insert(&batch, &embeddings).await?;
+
+    // Flush automático se threshold atingido
+    if let Some(snap_id) = mt.flush_if_due().await? {
+        println!("Flushed snapshot {snap_id}");
+    }
+}
+
+// Flush final ao encerrar o job
+let snap_id = mt.flush().await?;
+```
+
+### 19B. Thresholds padrão
+
+| Threshold | Default | Trigger |
+|---|---|---|
+| `flush_size_bytes` | 64 MiB | Bytes acumulados de embeddings |
+| `flush_max_rows` | 100,000 | Linhas acumuladas |
+| `flush_interval` | 30s | Tempo desde último flush |
+
+`flush_if_due()` verifica os três. `flush()` força independente dos thresholds.
+
+### 19C. Inspecionar estado do buffer
+
+```rust
+println!("Buffered: {} rows, {} bytes", mt.buffered_rows(), mt.buffered_bytes());
+if mt.is_full() { mt.flush().await?; }
+```
+
+---
+
 ## Estrutura dos crates
 
 ```
 ailake-core/      tipos base: VectorMetric, VectorPrecision, RowId, AilakeError
-ailake-parquet/   leitura/escrita Parquet com coluna VECTOR (FIXED_LEN_BYTE_ARRAY)
+ailake-parquet/   leitura/escrita Parquet com coluna VECTOR; write_batch_multi_vec / read_all_multi_vec
 ailake-vec/       quantização F32→F16, PQ (PQCodebook), BlockCompressor, SIMD distances (AVX2/NEON), centróides
-ailake-index/     HNSW custom (grafo real, bitmap visited, flat_vecs), bincode, MmapLoader (memmap2)
-ailake-file/      arquivo unificado: AILK entre row groups e footer Parquet
-ailake-catalog/   catálogo Iceberg: HadoopCatalog, RestCatalog, DatabricksAuth helpers
+ailake-index/     HNSW + IVF-PQ (AnyIndex enum); hardware detection (HardwareBackend: NvidiaCuda/AmdRocm/CpuSimd);
+                  NVIDIA via cuBLAS libloading (runtime, no build flag); AMD ROCm via hipBLAS libloading (runtime, no build flag);
+                  kmeans_dispatch: NVIDIA → ROCm → CPU; bincode, MmapLoader (memmap2)
+ailake-file/      arquivo unificado: AILK suporta IndexType::Hnsw e IndexType::IvfPq
+ailake-catalog/   catálogo Iceberg: HadoopCatalog, RestCatalog, NessieCatalog, JdbcCatalog, GlueCatalog
 ailake-store/     abstração de storage: LocalStore + ObjectStoreBackend (S3/GCS/Azure via object_store)
-ailake-query/     TableWriter, SearchSession, search() com pruning geométrico, ContextAssembler, CompactionExecutor
-ailake-bench/     benchmark público SIFT-1M (write throughput, QPS, Recall@10)
+ailake-query/     TableWriter (write_batch, write_batch_ivf_pq, write_batch_multi), MemTableWriter,
+                  search() com pruning geométrico, ContextAssembler, CompactionExecutor
+ailake-bench/     benchmark SIFT-1M: HNSW, IVF-PQ (--engine ailake-ivf-pq), LanceDB, pgvector
 ailake-py/        bindings PyO3 (fora do workspace — compilar com maturin)
+ailake-jni/       bindings uniffi C-ABI para Spark, Trino e Flink
+spark-plugin/     Spark 3.5 Catalyst strategy (Kotlin/Gradle)
+trino-plugin/     Trino connector (Java/Gradle)
+ailake-flink/     Flink Table API connector (Kotlin/Gradle)
 tests/            testes de integração e compatibilidade
 ```
 
@@ -1467,42 +1803,82 @@ SearchConfig {
 }
 ```
 
-**Build GPU falha com `error: could not find native library 'cudart'`**
-CUDA toolkit não está no PATH ou não foi instalado:
+**NVIDIA GPU disponível mas busca usa CPU (`try_nvidia_search_batch` retorna `None`)**
+Runtime libraries ausentes ou fora do `LD_LIBRARY_PATH`. Não é necessário CUDA Toolkit — apenas as libs de runtime:
 ```bash
-# Verificar instalação
-nvcc --version
-ls /usr/local/cuda/lib64/libcudart.so
+# Ubuntu — instalar apenas runtime (sem nvcc/headers)
+sudo apt install libcuda1 libcublas-12-x
 
-# Ubuntu — instalar toolkit
-sudo apt install nvidia-cuda-toolkit
+# Ou via CUDA keyring (canonical)
+sudo apt install cuda-libraries-12-x
 
-# Após instalar, exportar variáveis
-export CUDA_HOME=/usr/local/cuda
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+# Verificar presença
+ldconfig -p | grep -E "libcuda|libcublas"
+ls /usr/local/cuda/lib64/libcudart.so*
+
+# Exportar se não estiver no path padrão
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
 
-**Build GPU falha com `candle-core: feature cuda not available`**
-O crate `candle-core` requer a feature `cuda` explicitamente:
+**GPU build compila mas busca usa CPU (log não mostra "NVIDIA" ou "AMD")**
+`detect_backend()` retornou `CpuSimd`. Verificar:
 ```bash
-# Correto
-cargo build --features ailake-index/gpu
+nvidia-smi                        # GPU NVIDIA visível?
+rocm-smi                          # GPU AMD visível?
+ls /dev/nvidia*                   # Dispositivos NVIDIA presentes?
+ls /dev/kfd                       # Dispositivo AMD KFD presente?
+echo $CUDA_VISIBLE_DEVICES        # Não deve ser "NoDevFiles"
+```
+Para NVIDIA: `libcuda.so.1` deve existir (`ldconfig -p | grep libcuda`).
+Para AMD: `libamdhip64.so` e `libhipblas.so` devem existir (`ldconfig -p | grep -E "hip|hsa"`).
 
-# Incorreto — não ativa CUDA no candle
-cargo build --features gpu
+**AMD ROCm detectado mas busca usa CPU**
+`detect_rocm()` retorna `true` (HIP runtime ok) mas `try_rocm_search_batch` retorna `None`.
+Causa mais comum: `libhipblas.so` não instalado (ROCm Math Libraries são opcionais).
+```bash
+# Verificar presença do hipBLAS
+ldconfig -p | grep hipblas
+
+# Instalar hipBLAS (Ubuntu/ROCm PPA)
+sudo apt install hipblas
+# ou
+sudo apt install rocm-libs
 ```
 
-**GPU build compila mas busca usa CPU (log não mostra "gpu")**
-`Device::cuda_if_available(0)` retornou `None` em runtime. Verificar:
+**`ailake-auto` mostra `Backend: NVIDIA CUDA` em máquina AMD**
+ROCm com camada de compatibilidade CUDA instalada — `libcuda.so.1` existe (fornecida pelo pacote `hip-runtime-amd`). Neste caso, se `libamdhip64.so` também existe, o backend correto `AmdRocm` já é escolhido (AMD é verificado primeiro). Se ainda aparece NVIDIA, verificar:
 ```bash
-nvidia-smi                        # GPU visível?
-ls /dev/nvidia*                   # Dispositivos de driver presentes?
-echo $CUDA_VISIBLE_DEVICES        # Não deve estar vazio ou "NoDevFiles"
+ldconfig -p | grep -E "libamdhip|libcuda"
+# libamdhip64.so deve aparecer para ROCm ser detectado como AmdRocm
 ```
-Se GPU existe mas não é detectada, adicionar log temporário:
+
+**Plugin Flink: `ClassNotFoundException: io.ailake.flink.AilakeVectorConnectorFactory`**
+O jar do plugin não foi adicionado ao Flink.
+```bash
+# SQL Client — adicionar antes de CREATE TABLE
+ADD JAR '/path/to/ailake-flink-0.1.0-all.jar';
+
+# ou via flink-conf.yaml
+classloader.parent-first-patterns.additional: io.ailake
+```
+
+**Plugin Flink: conector registrado mas sink não persiste**
+`libailake_jni.so` não está no `java.library.path` do TaskManager:
+```bash
+# Adicionar em flink-conf.yaml
+env.java.opts.taskmanager: -Djava.library.path=/opt/ailake/lib
+```
+
+**`IvfPqConfig` — `pq_m` deve dividir `dim`**
+Build falha com `"pq_m X does not divide dim Y"`. Usar `IvfPqConfig::for_dim(dim)` para derivar valores válidos automaticamente:
 ```rust
-match Device::cuda_if_available(0) {
-    Ok(d) => eprintln!("device: {:?}", d),
-    Err(e) => eprintln!("cuda error: {e}"),
+let cfg = IvfPqConfig::for_dim(1536);  // pq_m=96, nlist=256, nprobe=8
+```
+
+**`MemTableWriter::flush()` retorna erro após `insert` vazio**
+Chamar `flush()` sem nenhum `insert` prévio retorna `Err(EmptyBatch)`. Verificar `buffered_rows() > 0` antes:
+```rust
+if mt.buffered_rows() > 0 {
+    mt.flush().await?;
 }
 ```

@@ -466,18 +466,6 @@ pub struct HnswIndex {
 impl HnswIndex {
     /// Dispatch on `self.metric` once; all inner search logic is monomorphic.
     pub fn search(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
-        #[cfg(feature = "gpu")]
-        if let Some(r) = crate::gpu::try_gpu_search(
-            query,
-            &self.row_ids,
-            &self.flat_vecs,
-            self.dim as usize,
-            self.metric,
-            top_k,
-        ) {
-            return r;
-        }
-
         match self.metric {
             VectorMetric::Cosine => self.search_typed::<CosineDist>(query, top_k, ef),
             VectorMetric::Euclidean => self.search_typed::<EuclideanDist>(query, top_k, ef),

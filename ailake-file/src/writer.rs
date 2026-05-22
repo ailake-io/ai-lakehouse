@@ -1,14 +1,34 @@
-use ailake_core::{AilakeResult, Centroid, VectorStoragePolicy};
-use ailake_index::{HnswBuilder, HnswConfig, HnswSerializer};
+use ailake_core::{AilakeResult, Centroid, RowId, VectorStoragePolicy};
+use ailake_index::{HnswBuilder, HnswConfig, HnswSerializer, IvfPqConfig, IvfPqSerializer};
 use ailake_parquet::ParquetVectorWriter;
 use ailake_vec::compute_centroid_and_radius;
 use arrow_array::RecordBatch;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::footer::{
-    AilakeHeader, AilakeTrailer, DistanceMetric, Precision, AILAKE_FORMAT_VERSION, HEADER_SIZE,
-    TRAILER_SIZE,
+    AilakeHeader, AilakeTrailer, DistanceMetric, Precision, AILAKE_FORMAT_VERSION,
+    FLAG_INDEX_IVF_PQ, HEADER_SIZE, TRAILER_SIZE,
 };
+
+/// Which index algorithm to embed in the AILK section.
+#[derive(Debug, Clone)]
+pub enum IndexType {
+    /// HNSW (default). Best recall for in-memory workloads.
+    Hnsw(HnswConfig),
+    /// IVF-PQ. Best for S3: 10-100x smaller index, sequential inverted-list reads.
+    IvfPq(IvfPqConfig),
+    /// Detect hardware at write time and pick the best index automatically.
+    ///
+    /// Chooses IVF-PQ when a GPU or ≥8 CPU cores are available AND the dataset
+    /// has ≥5 000 vectors. Falls back to HNSW otherwise (local/low-power hardware).
+    Auto,
+}
+
+impl Default for IndexType {
+    fn default() -> Self {
+        IndexType::Hnsw(HnswConfig::default())
+    }
+}
 
 /// One vector column to embed in a multi-column write.
 pub struct VectorColumnBatch<'a> {
@@ -18,19 +38,36 @@ pub struct VectorColumnBatch<'a> {
 
 pub struct AilakeFileWriter {
     policy: VectorStoragePolicy,
-    hnsw_config: HnswConfig,
+    index_type: IndexType,
 }
 
 impl AilakeFileWriter {
     pub fn new(policy: VectorStoragePolicy) -> Self {
         Self {
             policy,
-            hnsw_config: HnswConfig::default(),
+            index_type: IndexType::default(),
         }
     }
 
     pub fn with_hnsw_config(mut self, config: HnswConfig) -> Self {
-        self.hnsw_config = config;
+        self.index_type = IndexType::Hnsw(config);
+        self
+    }
+
+    pub fn with_ivf_pq(mut self, config: IvfPqConfig) -> Self {
+        self.index_type = IndexType::IvfPq(config);
+        self
+    }
+
+    pub fn with_index_type(mut self, index_type: IndexType) -> Self {
+        self.index_type = index_type;
+        self
+    }
+
+    /// Use `IndexType::Auto`: detect GPU / CPU cores at write time and pick the
+    /// best index. Equivalent to `.with_index_type(IndexType::Auto)`.
+    pub fn with_auto_index(mut self) -> Self {
+        self.index_type = IndexType::Auto;
         self
     }
 
@@ -106,7 +143,7 @@ impl AilakeFileWriter {
                 col.embeddings,
                 record_count,
                 current_offset,
-                &self.hnsw_config,
+                &self.index_type,
             )?;
             let kv_key = if i == 0 {
                 "ailake.footer_offset".to_string()
@@ -141,53 +178,85 @@ impl AilakeFileWriter {
     }
 }
 
-/// Build a complete AILK section (header + centroid + HNSW + trailer) for one vector column.
+/// Build a complete AILK section (header + centroid + index + trailer) for one vector column.
 fn build_ailk_section(
     policy: &VectorStoragePolicy,
     embeddings: &[Vec<f32>],
     record_count: u64,
     ailk_abs_offset: u64,
-    hnsw_config: &HnswConfig,
+    index_type: &IndexType,
 ) -> AilakeResult<Bytes> {
     let centroid: Centroid = compute_centroid_and_radius(embeddings, policy.metric);
     let centroid_bytes = encode_centroid(&centroid);
 
-    let mut builder = HnswBuilder::new(policy.dim, policy.metric, hnsw_config.clone());
-    for (i, v) in embeddings.iter().enumerate() {
-        builder.insert(ailake_core::RowId::new(i as u64), v.clone());
-    }
-    let index = builder.build();
-    let hnsw_bytes = HnswSerializer::to_bytes(&index)?;
+    // Resolve Auto to a concrete variant before matching.
+    let resolved: IndexType;
+    let index_type = if matches!(index_type, IndexType::Auto) {
+        let profile = ailake_index::HardwareProfile::detect();
+        resolved = if profile.recommend_ivf_pq(embeddings.len()) {
+            IndexType::IvfPq(ailake_index::IvfPqConfig::for_dataset(
+                policy.dim as usize,
+                embeddings.len(),
+            ))
+        } else {
+            IndexType::Hnsw(ailake_index::HnswConfig::default())
+        };
+        &resolved
+    } else {
+        index_type
+    };
+
+    let (index_bytes, flags) = match index_type {
+        IndexType::Hnsw(hnsw_config) => {
+            let mut builder = HnswBuilder::new(policy.dim, policy.metric, hnsw_config.clone());
+            for (i, v) in embeddings.iter().enumerate() {
+                builder.insert(RowId::new(i as u64), v.clone());
+            }
+            let index = builder.build();
+            (HnswSerializer::to_bytes(&index)?, 0u16)
+        }
+        IndexType::IvfPq(ivf_config) => {
+            let row_ids: Vec<RowId> = (0..embeddings.len() as u64).map(RowId::new).collect();
+            let index = ailake_index::IvfPqIndex::train(
+                &row_ids,
+                embeddings,
+                policy.metric,
+                ivf_config.clone(),
+            )?;
+            (IvfPqSerializer::to_bytes(&index)?, FLAG_INDEX_IVF_PQ)
+        }
+        IndexType::Auto => unreachable!("Auto resolved above"),
+    };
 
     let centroid_offset = HEADER_SIZE as u64;
     let centroid_len = centroid_bytes.len() as u64;
-    let hnsw_offset_in_ailk = centroid_offset + centroid_len;
-    let hnsw_len = hnsw_bytes.len() as u64;
-    let ailk_total_len = HEADER_SIZE as u64 + centroid_len + hnsw_len + TRAILER_SIZE as u64;
+    let index_offset_in_ailk = centroid_offset + centroid_len;
+    let index_len = index_bytes.len() as u64;
+    let ailk_total_len = HEADER_SIZE as u64 + centroid_len + index_len + TRAILER_SIZE as u64;
 
     let header = AilakeHeader {
         format_version: AILAKE_FORMAT_VERSION,
-        flags: 0,
+        flags,
         dim: policy.dim,
         precision: Precision::from(policy.precision),
         distance_metric: DistanceMetric::from(policy.metric),
         record_count,
         centroid_offset,
         centroid_len,
-        hnsw_offset: hnsw_offset_in_ailk,
-        hnsw_len,
+        hnsw_offset: index_offset_in_ailk,
+        hnsw_len: index_len,
     };
     let trailer = AilakeTrailer {
         footer_offset: ailk_abs_offset,
         footer_len: ailk_total_len,
         format_version: AILAKE_FORMAT_VERSION,
-        flags: 0,
+        flags,
     };
 
     let mut buf = BytesMut::with_capacity(ailk_total_len as usize);
     buf.put_slice(&header.to_bytes());
     buf.put_slice(&centroid_bytes);
-    buf.put_slice(&hnsw_bytes);
+    buf.put_slice(&index_bytes);
     buf.put_slice(&trailer.to_bytes());
     Ok(buf.freeze())
 }

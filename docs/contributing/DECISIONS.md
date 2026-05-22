@@ -61,7 +61,7 @@ Decisions are numbered and immutable once merged. To change a decision, add a ne
 - `cargo build --target aarch64-unknown-linux-musl` works without extra setup.
 - HNSW graph serializes naturally via `bincode` — no custom FFI serialization adapter needed.
 - hnsw_rs has a smaller user base than Faiss. Mitigated by: (a) the unified file architecture bounds individual HNSW size to ~10-20 MB per file, well within hnsw_rs's tested range; (b) the algorithm is the same as Faiss HNSW, so recall characteristics match the published HNSW literature.
-- GPU support not available (Faiss has CUDA). Deferred to Phase 4 via FFI to cuVS if needed.
+- GPU support not available (Faiss has CUDA). Addressed in Phase 4: NVIDIA via candle-core (`gpu` feature), AMD ROCm via hipBLAS libloading — see ADR-012.
 
 **Rejected alternatives**:
 - Faiss via C FFI: would require `libfaiss.so` as a runtime dependency, complicating distribution. Cross-compilation becomes a non-trivial build engineering project.
@@ -246,3 +246,41 @@ The single-file design unifies dimensional data, vectors, and the HNSW index int
 - Markdown: headings are less semantically explicit than XML tags.
 - JSON: verbose, harder for LLMs to read as natural language context.
 - Plain text with separators: loses structural information; model must infer attribution.
+
+---
+
+## ADR-012: Multi-vendor GPU support — NVIDIA CUDA + AMD ROCm (both runtime-only)
+
+**Date**: 2026-05-22
+**Status**: Accepted (updated 2026-05-22 — NVIDIA path migrated from candle-core to libloading)
+
+**Context**: Phase 4 originally added NVIDIA GPU acceleration via `candle-core` (compile-time `gpu` feature) and AMD ROCm via `libloading` (runtime-only). Two problems with the asymmetric approach:
+1. The build-time `gpu` feature required CUDA Toolkit installed on the build machine — distribution and CI became complex.
+2. Binary bloat: `candle-core` + its dependency tree added ~2-3 MB to every build even without CUDA hardware.
+
+**Decision**: Both GPU backends use `libloading` dlopen with no compile-time GPU SDK required:
+
+1. **NVIDIA CUDA** — `libloading` dlopen of `libcudart.so` (tries `.so`, `.so.12`, `.so.11`) + `libcublas.so`. `cublasSgemm_v2` via function pointer. RAII guards (`DevBuf` / `BlasHandle`) identical in structure to ROCm. Returns `None` → CPU fallback if libraries absent. `candle-core` removed from workspace. `gpu` feature flag removed.
+
+2. **AMD ROCm** — `libloading` dlopen of `libamdhip64.so` + `libhipblas.so`. `hipblasSgemm` via function pointer. Same RAII pattern. Returns `None` → CPU fallback if libraries absent.
+
+Both backends share identical SGEMM formulation: `C[N×Q col-major] = alpha · db^T · queries`. Constants differ: `CUBLAS_OP_N=0 / CUBLAS_OP_T=1` vs `HIPBLAS_OP_N=111 / HIPBLAS_OP_T=112`.
+
+Detection priority: AMD ROCm first, then NVIDIA CUDA, then CPU. AMD is checked first because ROCm installations often provide a CUDA compatibility layer (`libcuda.so.1`) that would misidentify the backend without the priority check.
+
+`HardwareBackend` enum (`CpuSimd` / `NvidiaCuda` / `AmdRocm`) — single `OnceLock` caches the result for the process lifetime. `HardwareProfile` struct exposes `has_cuda`, `has_rocm`, `backend`, `cpu_logical_cores`, SIMD flags.
+
+**Consequences**:
+- Single binary for all deployments (CPU-only, NVIDIA, AMD) — zero build flag difference.
+- No CUDA Toolkit, `nvcc`, or GPU headers required at build time; only runtime libraries (`libcudart.so`, `libcublas.so`) needed on the deployment machine.
+- `kmeans_dispatch` in `ivf_pq.rs` follows priority: NVIDIA → ROCm → CPU rayon.
+- `SearchSession::search_batch()` follows priority: NVIDIA → AMD → CPU per shard.
+- Adaptive index selection (`IndexType::Auto`) uses `has_cuda || has_rocm` as the GPU-capable check; both vendors justify IVF-PQ over HNSW.
+- Binary size: 13 MB → 9.3 MB (ailake-bench) after removing candle-core + adding strip/panic=abort.
+- Each backend is ~220 lines of `unsafe` libloading code in its own module (`nvidia_impl` / `rocm_impl`) with RAII cleanup — no unsafe surface exposed to callers.
+
+**Rejected alternatives**:
+- NVIDIA via `candle-core`: build-time CUDA Toolkit dependency; binary size overhead; `gpu` feature creates two distinct binaries; CI cannot test GPU path without GPU runner. Superseded by libloading approach.
+- AMD via `candle-core` ROCm feature: `candle-core/rocm` is not a stable feature; requires build-time dependency.
+- AMD via cuVS FFI: cuVS is NVIDIA-only by design; rejected.
+- HIP CUDA compatibility layer reliance: AMD ROCm ships `libcuda.so.1` as a compat shim, but relying on it would break vendor identification and could silently use the wrong code path.

@@ -16,6 +16,7 @@ pgvector-bench = ["dep:pgvector", "dep:tokio-postgres", "dep:futures", "dep:byte
 [dependencies]
 ailake-catalog = { path = "../ailake-catalog" }
 ailake-core    = { path = "../ailake-core" }
+ailake-index   = { path = "../ailake-index" }
 ailake-query   = { path = "../ailake-query" }
 ailake-store   = { path = "../ailake-store" }
 

@@ -1,7 +1,12 @@
-# GPU FFI Evaluation — cuVS / NVIDIA for AI-Lake Vector Search
+# GPU FFI Evaluation — cuVS / NVIDIA + AMD ROCm for AI-Lake Vector Search
 
-**Status**: Decision document — evaluated 2026-05-19. GPU search implemented via `candle-core` (Option D) in Phase 4.
-**Conclusion**: cuVS FFI deferred to Phase 5. `candle-core` GPU brute-force + rayon parallel CPU implemented in `ailake-index`. See §7.
+**Status**: Decision document — evaluated 2026-05-19, updated 2026-05-22.
+**Conclusion**: cuVS FFI deferred to Phase 5. Two GPU backends implemented in `ailake-index`:
+- **NVIDIA CUDA** (Phase 4): `cuBLAS` SGEMM via `libloading` — runtime-only, no compile-time dependency (replaced `candle-core`).
+- **AMD ROCm** (Phase 4): `hipBLAS` SGEMM via `libloading` — runtime-only, no compile-time dependency.
+
+Both backends require zero build-time GPU SDK. A single binary detects and uses
+NVIDIA or AMD hardware at startup via `dlopen`. See §7 (NVIDIA decision) and §8 (Phase 4 status).
 
 ---
 
@@ -22,13 +27,27 @@ candle-core approach.
 ## 2. Current State Diagnosis
 
 ```
-ailake-index::HnswIndex::search()
-  → GPU path: try_gpu_search() via candle-core/cuda (feature = "gpu")
-      → Runtime check: Device::cuda_if_available(0)
-      → If no CUDA device → returns None → falls through to CPU path
-  → CPU path: rayon par_iter() parallel brute-force (O(n))
-      → ef_search parameter accepted but ignored (no graph structure yet)
-      → node_count() and serialization are correct
+ailake-index::hardware::detect_backend()   ← OnceLock<HardwareBackend>, probed once
+  → probe_rocm_driver()  (libamdhip64.so + hipGetDeviceCount)  → AmdRocm
+  → probe_cuda_driver()  (libcuda.so.1   + cuDeviceGetCount)   → NvidiaCuda
+  → CpuSimd                                                      (fallback)
+
+ailake-index::ivf_pq::kmeans_dispatch()
+  → #[cfg(feature = "gpu")] try_gpu_kmeans()   (candle-core, NVIDIA only)
+  → try_rocm_kmeans()                           (hipBLAS SGEMM, AMD only)
+  → kmeans_centroids()                          (rayon CPU fallback)
+
+ailake-query::SearchSession::search_batch()
+  → flat-scan shards:
+      detect_cuda()  → try_gpu_search_batch()    (candle-core batch matmul)
+      detect_rocm()  → try_rocm_search_batch()   (hipBLAS SGEMM batch)
+      else           → flat_search() par_iter()   (CPU fallback)
+  → indexed shards: rayon parallel-map over queries → AnyIndex::search()
+
+ailake-file::AilakeFileWriter::IndexType::Auto
+  → HardwareProfile::detect()
+  → has_cuda || has_rocm || cpu_logical_cores > 8  →  IVF-PQ
+  → else                                           →  HNSW
 ```
 
 **Performance ceiling of brute force (single file, 1 CPU thread)**
@@ -151,23 +170,32 @@ let dots = q.matmul(&db.t()?)?;                      // 1 × N
 
 ## 5. Deployment Requirements
 
-Any GPU path adds these hard requirements to every deployment:
+### NVIDIA CUDA path (compile-time `--features ailake-index/gpu`)
 
 | Requirement | Note |
 |-------------|------|
-| NVIDIA GPU (Ampere+) | cuVS targets sm_80+ for optimal perf |
+| NVIDIA GPU (Ampere+) | cuVS targets sm_80+; candle works from sm_60 |
 | CUDA Toolkit 12.x | Headers + `nvcc` at build time |
 | CUDA runtime at deploy | `libcudart.so`, `libcublas.so` on PATH |
 | Driver ≥ 525 | Required by CUDA 12.x |
-| GPU VRAM | 1536-dim, 1M vectors = ~3 GB F16; must fit entirely in VRAM for GPU ANN |
+| GPU VRAM | 1536-dim, 1M vectors ≈ 3 GB F16 |
 
-This breaks:
-- Every CI environment without GPU (GitHub Actions standard runners)
-- Lambda / Fargate / Cloud Run deployments
-- Apple Silicon (CUDA unavailable)
-- Any CPU-only server (common in on-prem lakehouses)
+### AMD ROCm path (runtime only — no build dependency)
 
-Build CI would need a separate GPU-enabled runner (self-hosted or AWS `p3` / GCP `a2`).
+| Requirement | Note |
+|-------------|------|
+| AMD GPU (GCN4+ / RDNA1+) | Any ROCm-capable device |
+| ROCm 5.0+ at deploy | `libamdhip64.so` + `libhipblas.so` on runtime LD path |
+| No build requirement | `libloading` dlopen — binary compiles on any host |
+
+### Shared limitations
+
+Both GPU paths break:
+- GitHub Actions standard runners (no GPU) — CI uses CPU path automatically
+- Lambda / Fargate / Cloud Run
+- Apple Silicon (no CUDA or ROCm)
+
+The AMD ROCm path requires **no build-time dependency** — the binary degrades to CPU automatically when `libamdhip64.so` is absent. This is the key advantage over the NVIDIA CUDA path.
 
 ---
 
@@ -245,8 +273,8 @@ recall/latency tradeoff but requires the most complex build setup.
 
 ### Phase 5 GPU work items (future)
 
-- [x] Feature flag `ailake-index/gpu` — GPU path is optional, CPU path remains default (implemented in Phase 4)
-- [x] `candle` brute-force for batch queries (Option D) — safe, no bindgen (implemented in Phase 4)
+- [x] NVIDIA runtime path — no build-time CUDA SDK (replaced candle-core with cuBLAS libloading in Phase 4)
+- [x] AMD ROCm runtime path — hipBLAS SGEMM via libloading (Phase 4)
 - [ ] `GpuSearchConfig`: batch size, device id, VRAM budget
 - [ ] cuVS IVF-PQ bindgen (Option A) — for files > 500k vectors
 - [ ] GPU CI runner (self-hosted or `runs-on: [self-hosted, gpu]`)
@@ -256,10 +284,31 @@ recall/latency tradeoff but requires the most complex build setup.
 
 ## 8. Status After Phase 4
 
-**Implemented in Phase 4:**
+**Implemented in Phase 4 — NVIDIA CUDA (cuBLAS via libloading):**
 
-- `ailake-index/src/gpu.rs` — `try_gpu_search()` via `candle-core/cuda`; runtime detection via `Device::cuda_if_available(0)`; Cosine, Euclidean, DotProduct kernels via cublas matmul; returns `None` if no CUDA → falls back to CPU
-- `ailake-index/src/hnsw.rs` — CPU path replaced with `rayon::par_iter()` parallel brute-force; 4–16× speedup on multicore; `cpu_search()` function
-- Feature flag: `--features ailake-index/gpu` activates GPU; default build is CPU-only
+- `ailake-index/src/gpu.rs` `nvidia_impl` module — `try_nvidia_search_batch()`, `try_nvidia_kmeans()` via `libloading` dlopen of `libcudart.so` (tries `.so`, `.so.12`, `.so.11`) + `libcublas.so` (same fallback); RAII guards `DevBuf` (cudaFree) and `BlasHandle` (cublasDestroy_v2); Cosine/Euclidean/DotProduct via `cublasSgemm_v2`; no compile-time dependency; returns `None` if libraries not found
+- Replaces `candle-core` (Option D from §4) — eliminates compile-time CUDA Toolkit requirement and ~30% binary size from candle dependency tree
+- `gpu` feature flag removed from `ailake-index`; `candle-core` removed from workspace deps
+- SGEMM formulation identical to ROCm: `C[N×Q col-major] = alpha · db[N×dim]ᵀ · queries[Q×dim]`; only constants differ: `CUBLAS_OP_N=0`, `CUBLAS_OP_T=1` (vs HIP 111/112)
+- `kmeans_dispatch` priority: `try_nvidia_kmeans` → `try_rocm_kmeans` → `kmeans_centroids` (rayon)
 
-**Next step (Phase 5):** Wire `hnsw_rs` graph into `ailake-index` to replace brute-force with true HNSW traversal (10–100× speedup at typical file sizes). cuVS FFI remains deferred — reopen condition: ≥2 conditions from §7 Step 3 hold simultaneously.
+**Implemented in Phase 4 — AMD ROCm (hipBLAS SGEMM):**
+
+- `ailake-index/src/gpu.rs` `rocm_impl` module — `try_rocm_search_batch()`, `try_rocm_kmeans()` via `libloading` dlopen of `libamdhip64.so` + `libhipblas.so`; RAII guards for device buffers and hipBLAS handle; Cosine/Euclidean/DotProduct computed via SGEMM with norms on CPU; no compile-time dependency; returns `None` if libraries not found
+- SGEMM formulation: `C[N×Q col-major] = alpha · db[N×dim]ᵀ · queries[Q×dim]`, where alpha encodes metric scaling; norms computed on CPU, broadcast-added after D2H copy
+- k-means: `cross[K×N col-major] = −2 · centroids · vectorsᵀ`; argmin and centroid update on CPU — only the O(n·k·dim) matmul runs on GPU
+
+**Implemented in Phase 4 — Hardware abstraction:**
+
+- `ailake-index/src/hardware.rs` — `HardwareBackend` enum (`CpuSimd`/`NvidiaCuda`/`AmdRocm`); `OnceLock<HardwareBackend>` caches detection result; AMD probed before NVIDIA to handle ROCm CUDA-compat layer; `HardwareProfile` struct includes `has_cuda`, `has_rocm`, `backend`, `cpu_logical_cores`, `has_avx2`, `has_avx512`
+- `detect_backend()`, `detect_cuda()`, `detect_rocm()` — public functions used by dispatch in `ivf_pq.rs`, `scanner.rs`
+
+**Implemented in Phase 4 — Adaptive index selection:**
+
+- `ailake-file::IndexType::Auto` — resolved at write time via `HardwareProfile::detect()`; IVF-PQ chosen when `has_cuda || has_rocm || cpu_logical_cores > 8 && n >= 5000`; HNSW otherwise
+- `ailake-query::TableWriter::write_batch_auto()` — thin wrapper that delegates to IVF-PQ or HNSW path based on hardware profile
+- `ailake-query::CompactionIndexStrategy` — Auto/ForceHnsw/ForceIvfPq; compaction respects same hardware-adaptive logic
+
+**Binary size impact (Phase 4 final):** `ailake-bench` 13 MB unstripped → 9.3 MB (auto-stripped, panic=abort, no candle-core). `libailake_jni.so` 12 MB → 9.0 MB.
+
+**Next step (Phase 5):** cuVS FFI remains deferred — reopen condition: ≥2 conditions from §7 Step 3 hold simultaneously. Current SGEMM GPU path is adequate for files up to ~500k vectors at dim=1536.

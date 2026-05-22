@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
 use ailake_core::{AilakeResult, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
-use ailake_index::HnswIndex;
+use ailake_index::AnyIndex;
 use ailake_store::Store;
 use ailake_vec::exact_distance;
 use bytes::Bytes;
@@ -104,7 +104,7 @@ pub async fn search(
             continue;
         }
 
-        let index = reader.load_index_for_column(vector_column)?;
+        let index = reader.load_any_index_for_column(vector_column)?;
         let local_results = index.search(query, candidate_k, config.ef_search);
 
         if config.rerank_factor.is_some() {
@@ -180,7 +180,7 @@ pub struct SearchSession {
 struct LoadedShard {
     entry: DataFileEntry,
     /// None when the shard is still being indexed (IndexStatus::Indexing).
-    index: Option<HnswIndex>,
+    index: Option<AnyIndex>,
     /// Raw F32 vectors: always present for Indexing shards (flat scan), optionally
     /// present for Ready shards when `load_raw = true` (reranking).
     raw_vectors: Option<Vec<Vec<f32>>>,
@@ -224,11 +224,8 @@ impl SearchSession {
                     raw_vectors: Some(raw_vecs),
                 });
             } else if reader.is_ailake_file() {
-                let mut index = reader.load_index_for_column(vector_column)?;
+                let mut index = reader.load_any_index_for_column(vector_column)?;
                 let raw_vectors = if load_raw {
-                    // F16 search + F32 rerank: use half-precision for HNSW distances
-                    // (halves memory bandwidth per distance call), then rerank top
-                    // candidates with exact F32 from raw_vectors.
                     index.quantize_to_f16();
                     let (_, vecs) = reader.read_parquet()?;
                     Some(vecs)
@@ -249,6 +246,125 @@ impl SearchSession {
     /// Number of loaded shards.
     pub fn shard_count(&self) -> usize {
         self.shards.len()
+    }
+
+    /// Search multiple queries in one call.
+    ///
+    /// For shards with raw vectors (Indexing or reranking): dispatches to GPU batch
+    /// matmul when a CUDA device is available, falling back to CPU flat scan.
+    /// For indexed shards (HNSW / IVF-PQ): rayon parallel-map over queries — graph
+    /// traversal is inherently sequential and has no GPU batch path.
+    ///
+    /// Returns one `Vec<SearchResult>` per input query, in the same order.
+    pub fn search_batch(
+        &self,
+        queries: &[Vec<f32>],
+        config: &SearchConfig,
+    ) -> Vec<Vec<SearchResult>> {
+        if queries.is_empty() {
+            return vec![];
+        }
+
+        let n_queries = queries.len();
+        let candidate_k = match config.rerank_factor {
+            Some(factor) => config.top_k * factor,
+            None => config.top_k,
+        };
+        let use_nvidia = ailake_index::hardware::detect_cuda();
+        let use_amd = ailake_index::hardware::detect_rocm();
+
+        // Accumulate per-query results across all shards.
+        let mut all_results: Vec<Vec<SearchResult>> = (0..n_queries).map(|_| Vec::new()).collect();
+
+        for shard in &self.shards {
+            if let Some(raw) = &shard.raw_vectors {
+                // Flat-scan shard — try GPU batch path (NVIDIA first, then AMD ROCm).
+                if !raw.is_empty() {
+                    let dim = raw[0].len();
+                    let flat: Vec<f32> = raw.iter().flat_map(|v| v.iter().copied()).collect();
+                    let row_ids: Vec<u64> = (0..raw.len() as u64).collect();
+                    let q_refs: Vec<&[f32]> = queries.iter().map(|q| q.as_slice()).collect();
+
+                    let gpu_batch = if use_nvidia {
+                        ailake_index::gpu::try_nvidia_search_batch(
+                            &q_refs,
+                            &row_ids,
+                            &flat,
+                            dim,
+                            self.metric,
+                            candidate_k,
+                        )
+                    } else if use_amd {
+                        ailake_index::gpu::try_rocm_search_batch(
+                            &q_refs,
+                            &row_ids,
+                            &flat,
+                            dim,
+                            self.metric,
+                            candidate_k,
+                        )
+                    } else {
+                        None
+                    };
+
+                    if let Some(batch) = gpu_batch {
+                        for (qi, results) in batch.into_iter().enumerate() {
+                            for (row_id, distance) in results {
+                                all_results[qi].push(SearchResult {
+                                    row_id,
+                                    distance,
+                                    file_path: shard.entry.path.clone(),
+                                });
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                // CPU fallback for flat scan.
+                for (qi, query) in queries.iter().enumerate() {
+                    for (row_id, distance) in flat_search(raw, query, candidate_k, self.metric) {
+                        all_results[qi].push(SearchResult {
+                            row_id,
+                            distance,
+                            file_path: shard.entry.path.clone(),
+                        });
+                    }
+                }
+            } else if let Some(index) = &shard.index {
+                // Indexed shard — rayon parallel-map over queries.
+                let shard_results: Vec<Vec<SearchResult>> = queries
+                    .par_iter()
+                    .map(|query| {
+                        index
+                            .search(query, candidate_k, config.ef_search)
+                            .into_iter()
+                            .map(|(row_id, distance)| SearchResult {
+                                row_id,
+                                distance,
+                                file_path: shard.entry.path.clone(),
+                            })
+                            .collect()
+                    })
+                    .collect();
+
+                for (qi, results) in shard_results.into_iter().enumerate() {
+                    all_results[qi].extend(results);
+                }
+            }
+        }
+
+        // Sort + truncate per query.
+        for results in &mut all_results {
+            results.sort_by(|a, b| {
+                a.distance
+                    .partial_cmp(&b.distance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(config.top_k);
+        }
+
+        all_results
     }
 
     /// Search using pre-loaded indexes. No I/O — pure in-memory search.
@@ -281,7 +397,7 @@ impl SearchSession {
                 }
 
                 if let Some(index) = &shard.index {
-                    // Ready shard: HNSW search.
+                    // Ready shard: HNSW or IVF-PQ search (dispatched by AnyIndex).
                     let local_results = index.search(query, candidate_k, config.ef_search);
                     if config.rerank_factor.is_some() {
                         if let Some(raw) = &shard.raw_vectors {
