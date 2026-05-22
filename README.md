@@ -87,12 +87,22 @@ ailake/
 │       ├── store.rs                  # Store trait
 │       ├── local.rs                  # LocalStore — filesystem (dev/tests)
 │       └── object_store_backend.rs   # ObjectStoreBackend — S3/GCS/Azure via object_store
+├── ailake-index/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs              # AnyIndex enum — dispatches HNSW or IVF-PQ
+│       ├── hnsw.rs             # hnsw_rs wrapper
+│       ├── ivf_pq.rs           # IvfPqIndex, IvfPqConfig, IvfPqSerializer
+│       ├── gpu.rs              # try_gpu_kmeans — GPU k-means via candle-core + CUDA
+│       ├── serialize.rs        # bincode serialization
+│       └── mmap_loader.rs      # memmap2 loading
 ├── ailake-query/
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
-│       ├── writer.rs           # TableWriter — write_batch + commit
-│       ├── scanner.rs          # search() with geometric pruning
+│       ├── writer.rs           # TableWriter — write_batch, write_batch_ivf_pq, write_batch_multi
+│       ├── mem_table.rs        # MemTableWriter — streaming ingestion write buffer
+│       ├── scanner.rs          # search() with geometric pruning; AnyIndex dispatch
 │       ├── pruner.rs           # VectorPruner — centroid-based file pruning
 │       ├── compaction.rs       # CompactionPlanner + CompactionExecutor (async)
 │       └── context_assembler.rs # ContextAssembler — dedup, XML, token budget
@@ -101,10 +111,17 @@ ailake/
 │   ├── pyproject.toml
 │   └── src/
 │       └── lib.rs              # PyO3 bindings
-└── ailake-jni/
-    ├── Cargo.toml
-    └── src/
-        └── lib.rs              # uniffi bindings for Spark/Trino
+├── ailake-jni/
+│   ├── Cargo.toml
+│   └── src/
+│       └── lib.rs              # uniffi bindings for Spark/Trino/Flink
+└── ailake-flink/               # Kotlin — Flink Table API connector (Gradle)
+    ├── build.gradle.kts
+    └── src/main/kotlin/io/ailake/flink/
+        ├── AilakeCatalog.kt
+        ├── AilakeVectorConnectorFactory.kt
+        ├── AilakeVectorTableSink.kt
+        └── AilakeVectorTableSource.kt
 tests/
 ├── write_read_roundtrip.rs
 ├── iceberg_compat.rs
@@ -133,7 +150,7 @@ cargo check --workspace
 |---|---|---|
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW loading, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
-| **Phase 3** | ✅ Complete | Catalog backends (Nessie/JDBC/Glue), uniffi JVM bindings, multi-column vectors, Spark/Trino plugins |
-| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search ✅, HNSW optimizations (prefetch, SNH, F16 search, metric monomorphization) ✅; LanceDB/pgvector comparisons pending |
+| **Phase 3** | ✅ Complete | Catalog backends (Nessie/JDBC/Glue), uniffi JVM bindings, multi-column vectors, Spark/Trino/Flink plugins |
+| **Phase 4** | 🔄 In Progress | PQ reranking ✅, public format spec ✅, GPU search ✅, HNSW optimizations ✅, IVF-PQ native index ✅, GPU k-means for IVF-PQ ✅, `MemTableWriter` streaming buffer ✅, multi-vector Parquet columns ✅; LanceDB/pgvector public comparisons pending |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.

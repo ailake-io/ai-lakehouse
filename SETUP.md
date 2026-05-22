@@ -70,16 +70,17 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Deve terminar com `78 passed`.
+Deve terminar com `96 passed` (2 ignored — testes que requerem servidor externo).
 
 ### Testes por crate
 
 | Crate | O que cobre |
 |---|---|
 | `ailake-vec` | Quantização F32→F16, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centróides, `exact_distance`, SIMD (AVX2/NEON) |
-| `ailake-index` | HNSW build/search (grafo real + geração bitmap + flat_vecs), serialização bincode, MmapLoader round-trip |
-| `ailake-file` | Escrita/leitura do arquivo unificado, layout AILK, integridade |
-| `ailake-query` | ContextAssembler (dedup, grouping, XML, budget), pruning geométrico, reranking pós-PQ |
+| `ailake-index` | HNSW build/search, IVF-PQ (train/search/serialize), GPU k-means dispatch, serialização bincode, MmapLoader round-trip |
+| `ailake-file` | Escrita/leitura do arquivo unificado, layout AILK (HNSW e IVF-PQ), integridade |
+| `ailake-query` | ContextAssembler, pruning geométrico, reranking pós-PQ, MemTableWriter, write_batch_ivf_pq |
+| `ailake-parquet` | write_batch_multi_vec / read_all_multi_vec (multi-vector columns) |
 | `tests` (integração) | write→read→search end-to-end, invariante posicional, compatibilidade PyArrow, pruning, context assembler |
 
 ---
@@ -496,6 +497,62 @@ GPU vence a partir de ~50k vetores/arquivo para dim=1536.
 | Cosine | normalizar linhas → dot product → `1 - sim` |
 | Euclidean | `broadcast_sub` → `sqr` → `sum` → `sqrt` |
 | DotProduct | matmul negado (`-q @ V.T`) |
+
+### GPU k-means para IVF-PQ
+
+Com a feature `gpu` ativa, o treinamento do `IvfPqIndex` (k-means para centróides grosseiros e para o `PQCodebook`) também usa GPU via `try_gpu_kmeans`:
+
+- **Sem GPU em runtime**: `kmeans_dispatch` cai silenciosamente para CPU (rayon).
+- **Impacto em builds sem `gpu`**: sem mudança — o caminho CPU permanece inalterado.
+
+```bash
+# Build + treino IVF-PQ acelerado por GPU
+cargo build --release --features ailake-index/gpu
+```
+
+---
+
+## 8G. Benchmark IVF-PQ (`--engine ailake-ivf-pq`)
+
+IVF-PQ usa índice com inverted lists codificadas por Product Quantization, em vez do grafo HNSW. Índice 10-100× menor — boa escolha para S3 onde acesso sequencial é mais barato.
+
+```bash
+# Benchmark básico (SIFT-1M, defaults: nlist=256, nprobe=8, pq_m=8)
+cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --engine ailake-ivf-pq
+
+# Ajustar parâmetros
+cargo run --release -p ailake-bench -- \
+    --dataset-dir data/sift1m \
+    --engine ailake-ivf-pq \
+    --ivf-nlist 512 \
+    --ivf-nprobe 16 \
+    --ivf-pq-m 16
+
+# Comparação completa AI-Lake HNSW + IVF-PQ + LanceDB + pgvector
+cargo run --release -p ailake-bench --features lancedb-bench,pgvector-bench -- \
+    --dataset-dir data/sift1m \
+    --engine all \
+    --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
+```
+
+Parâmetros IVF-PQ:
+
+| Flag | Default | Descrição |
+|---|---|---|
+| `--ivf-nlist` | 256 | Células Voronoi (inverted lists). Regra: `sqrt(n)` |
+| `--ivf-nprobe` | 8 | Células consultadas por query. Maior = melhor recall |
+| `--ivf-pq-m` | 8 | Sub-vetores PQ. Deve dividir 128 para SIFT |
+
+Resultado esperado (SIFT-1M, CPU, nlist=256, nprobe=8):
+```
+AI-Lake IVF-PQ write phase (nlist=256, nprobe=8, pq_m=8) …
+  Throughput    : ~1800 vec/s  (k-means mais lento que HNSW insert)
+
+Search phase  (top_k=10)
+  Recall@10     : ~0.94
+  QPS           : ~2100
+  Index size    : ~5 MB  (vs ~80 MB HNSW para 1M vetores dim=128)
+```
 
 ---
 
@@ -1349,19 +1406,204 @@ Os testes de integração (`AilakeSparkExtensionsTest`) iniciam um SparkSession 
 
 ---
 
+## 17. Plugin Flink — AilakeVectorConnector
+
+O `ailake-flink` é um conector Flink Table API (Kotlin/Gradle) que usa a biblioteca nativa `libailake_jni.so` via JNA para leitura e escrita vetorial em tabelas AI-Lake.
+
+### 17A. Pré-requisitos adicionais
+
+| Ferramenta | Versão | Instalação |
+|---|---|---|
+| JDK | 17+ | `sudo apt install openjdk-17-jdk` |
+| Gradle | 8+ | `sdk install gradle` (ou usar wrapper) |
+| Apache Flink | 1.18+ | [flink.apache.org](https://flink.apache.org/downloads/) |
+
+### 17B. Passo 1 — Compilar a biblioteca nativa
+
+```bash
+# Na raiz do projeto (mesma lib do plugin Trino/Spark)
+cargo build --release -p ailake-jni
+
+# Linux:
+ls -lh target/release/libailake_jni.so
+```
+
+### 17C. Passo 2 — Compilar o fat-jar
+
+```bash
+cd ailake-flink
+gradle wrapper   # só na primeira vez
+./gradlew shadowJar
+
+ls build/libs/ailake-flink-0.1.0-all.jar
+```
+
+### 17D. Registrar o conector no Flink (SQL Client ou DataStream)
+
+```sql
+-- Flink SQL Client
+ADD JAR '/path/to/ailake-flink-0.1.0-all.jar';
+
+CREATE TABLE embeddings (
+  id       BIGINT,
+  text     STRING,
+  row_id   BIGINT,
+  distance DOUBLE
+) WITH (
+  'connector'          = 'ailake-vector',
+  'table-uri'          = 's3://my-lake/docs/',
+  'vector-column'      = 'embedding',
+  'vector-dim'         = '1536',
+  'top-k'              = '10',
+  'native-lib-path'    = '/opt/ailake/lib'
+);
+
+SELECT * FROM embeddings
+WHERE ailake_query_vector = '[0.1, 0.2, ...]'
+LIMIT 10;
+```
+
+Para streaming ingestion (sink):
+
+```sql
+CREATE TABLE ailake_sink (
+  id          BIGINT,
+  chunk_text  STRING,
+  embedding   BYTES    -- raw float32 bytes
+) WITH (
+  'connector'       = 'ailake-vector',
+  'table-uri'       = 's3://my-lake/docs/',
+  'vector-column'   = 'embedding',
+  'vector-dim'      = '1536',
+  'mode'            = 'sink',
+  'native-lib-path' = '/opt/ailake/lib'
+);
+
+INSERT INTO ailake_sink
+SELECT id, chunk_text, embedding FROM kafka_source;
+```
+
+O sink usa `MemTableWriter` internamente — acumula micro-batches e faz flush por tamanho/contagem/tempo (ver seção 19).
+
+### 17E. Testes do plugin Flink
+
+```bash
+cd ailake-flink
+./gradlew test
+
+# Saída esperada:
+# AilakeVectorConnectorFactoryTest: tests passed
+```
+
+Testes rodam sem servidor Flink nem biblioteca nativa — degradação graciosa via mock JNA.
+
+---
+
+## 18. Multi-vector columns (`write_batch_multi_vec`)
+
+Armazena múltiplos embeddings por linha como `List<FixedSizeBinary>` — útil quando um documento tem vários chunks e você quer evitar explosão de linhas.
+
+### 18A. Escrever com múltiplos vetores por linha
+
+```rust
+use ailake_parquet::writer::write_batch_multi_vec;
+
+// 3 documentos, cada um com 2 embeddings de dim=64
+let texts = vec!["doc A".to_string(), "doc B".to_string(), "doc C".to_string()];
+let multi_embeddings: Vec<Vec<Vec<f32>>> = vec![
+    vec![vec![0.1_f32; 64], vec![0.2_f32; 64]],  // doc A: 2 vecs
+    vec![vec![0.3_f32; 64]],                       // doc B: 1 vec
+    vec![vec![0.4_f32; 64], vec![0.5_f32; 64]],   // doc C: 2 vecs
+];
+
+let batch = write_batch_multi_vec(&texts, &multi_embeddings, "embedding", 64)?;
+```
+
+### 18B. Ler de volta
+
+```rust
+use ailake_parquet::reader::read_all_multi_vec;
+
+let (texts, multi_vecs) = read_all_multi_vec(&parquet_bytes, "embedding", 64)?;
+// multi_vecs[i] = Vec<Vec<f32>> para o documento i
+```
+
+### 18C. O que leitores Parquet padrão veem
+
+Leitores sem plugin AI-Lake (Spark, Trino, DuckDB) leem a coluna como `List<BINARY>` — bytes opacos, sem erro. A semântica de vetor só é ativada pelo SDK.
+
+---
+
+## 19. MemTableWriter — buffer para streaming ingestion
+
+`MemTableWriter` acumula micro-batches em RAM e faz flush para um único shard Parquet quando os thresholds de tamanho/linhas/tempo são atingidos. Reduz a frequência de builds HNSW em pipelines Flink/Spark Streaming.
+
+### 19A. Uso básico
+
+```rust
+use ailake_query::mem_table::{MemTableWriter, MemTableConfig};
+use std::time::Duration;
+
+let config = MemTableConfig {
+    flush_size_bytes: 128 * 1024 * 1024,  // flush após 128 MiB
+    flush_max_rows:   200_000,             // flush após 200k linhas
+    flush_interval:   Duration::from_secs(60), // flush após 60s inativo
+};
+
+let mut mt = MemTableWriter::new(catalog, store, policy, table, config);
+
+// Loop de ingestão streaming
+loop {
+    let (batch, embeddings) = receive_micro_batch().await;
+    mt.insert(&batch, &embeddings).await?;
+
+    // Flush automático se threshold atingido
+    if let Some(snap_id) = mt.flush_if_due().await? {
+        println!("Flushed snapshot {snap_id}");
+    }
+}
+
+// Flush final ao encerrar o job
+let snap_id = mt.flush().await?;
+```
+
+### 19B. Thresholds padrão
+
+| Threshold | Default | Trigger |
+|---|---|---|
+| `flush_size_bytes` | 64 MiB | Bytes acumulados de embeddings |
+| `flush_max_rows` | 100,000 | Linhas acumuladas |
+| `flush_interval` | 30s | Tempo desde último flush |
+
+`flush_if_due()` verifica os três. `flush()` força independente dos thresholds.
+
+### 19C. Inspecionar estado do buffer
+
+```rust
+println!("Buffered: {} rows, {} bytes", mt.buffered_rows(), mt.buffered_bytes());
+if mt.is_full() { mt.flush().await?; }
+```
+
+---
+
 ## Estrutura dos crates
 
 ```
 ailake-core/      tipos base: VectorMetric, VectorPrecision, RowId, AilakeError
-ailake-parquet/   leitura/escrita Parquet com coluna VECTOR (FIXED_LEN_BYTE_ARRAY)
+ailake-parquet/   leitura/escrita Parquet com coluna VECTOR; write_batch_multi_vec / read_all_multi_vec
 ailake-vec/       quantização F32→F16, PQ (PQCodebook), BlockCompressor, SIMD distances (AVX2/NEON), centróides
-ailake-index/     HNSW custom (grafo real, bitmap visited, flat_vecs), bincode, MmapLoader (memmap2)
-ailake-file/      arquivo unificado: AILK entre row groups e footer Parquet
-ailake-catalog/   catálogo Iceberg: HadoopCatalog, RestCatalog, DatabricksAuth helpers
+ailake-index/     HNSW + IVF-PQ (AnyIndex enum); GPU k-means (try_gpu_kmeans); bincode, MmapLoader (memmap2)
+ailake-file/      arquivo unificado: AILK suporta IndexType::Hnsw e IndexType::IvfPq
+ailake-catalog/   catálogo Iceberg: HadoopCatalog, RestCatalog, NessieCatalog, JdbcCatalog, GlueCatalog
 ailake-store/     abstração de storage: LocalStore + ObjectStoreBackend (S3/GCS/Azure via object_store)
-ailake-query/     TableWriter, SearchSession, search() com pruning geométrico, ContextAssembler, CompactionExecutor
-ailake-bench/     benchmark público SIFT-1M (write throughput, QPS, Recall@10)
+ailake-query/     TableWriter (write_batch, write_batch_ivf_pq, write_batch_multi), MemTableWriter,
+                  search() com pruning geométrico, ContextAssembler, CompactionExecutor
+ailake-bench/     benchmark SIFT-1M: HNSW, IVF-PQ (--engine ailake-ivf-pq), LanceDB, pgvector
 ailake-py/        bindings PyO3 (fora do workspace — compilar com maturin)
+ailake-jni/       bindings uniffi C-ABI para Spark, Trino e Flink
+spark-plugin/     Spark 3.5 Catalyst strategy (Kotlin/Gradle)
+trino-plugin/     Trino connector (Java/Gradle)
+ailake-flink/     Flink Table API connector (Kotlin/Gradle)
 tests/            testes de integração e compatibilidade
 ```
 
@@ -1504,5 +1746,36 @@ Se GPU existe mas não é detectada, adicionar log temporário:
 match Device::cuda_if_available(0) {
     Ok(d) => eprintln!("device: {:?}", d),
     Err(e) => eprintln!("cuda error: {e}"),
+}
+```
+
+**Plugin Flink: `ClassNotFoundException: io.ailake.flink.AilakeVectorConnectorFactory`**
+O jar do plugin não foi adicionado ao Flink.
+```bash
+# SQL Client — adicionar antes de CREATE TABLE
+ADD JAR '/path/to/ailake-flink-0.1.0-all.jar';
+
+# ou via flink-conf.yaml
+classloader.parent-first-patterns.additional: io.ailake
+```
+
+**Plugin Flink: conector registrado mas sink não persiste**
+`libailake_jni.so` não está no `java.library.path` do TaskManager:
+```bash
+# Adicionar em flink-conf.yaml
+env.java.opts.taskmanager: -Djava.library.path=/opt/ailake/lib
+```
+
+**`IvfPqConfig` — `pq_m` deve dividir `dim`**
+Build falha com `"pq_m X does not divide dim Y"`. Usar `IvfPqConfig::for_dim(dim)` para derivar valores válidos automaticamente:
+```rust
+let cfg = IvfPqConfig::for_dim(1536);  // pq_m=96, nlist=256, nprobe=8
+```
+
+**`MemTableWriter::flush()` retorna erro após `insert` vazio**
+Chamar `flush()` sem nenhum `insert` prévio retorna `Err(EmptyBatch)`. Verificar `buffered_rows() > 0` antes:
+```rust
+if mt.buffered_rows() > 0 {
+    mt.flush().await?;
 }
 ```
