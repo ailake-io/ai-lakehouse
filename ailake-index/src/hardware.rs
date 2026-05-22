@@ -6,7 +6,8 @@
 /// Minimum vectors to justify IVF-PQ training (k-means + PQ codebook overhead).
 const MIN_VECTORS_FOR_IVF_PQ: usize = 5_000;
 
-/// Minimum logical CPU cores to consider "powerful" when no GPU is available.
+/// Minimum logical CPU cores (exclusive) to consider "powerful" when no GPU is available.
+/// IVF-PQ requires strictly more than this value (i.e. > 8).
 const MIN_CORES_FOR_IVF_PQ: usize = 8;
 
 /// Detected hardware capabilities.
@@ -41,7 +42,7 @@ impl HardwareProfile {
         if n_vectors < MIN_VECTORS_FOR_IVF_PQ {
             return false;
         }
-        self.has_cuda || self.cpu_logical_cores >= MIN_CORES_FOR_IVF_PQ
+        self.has_cuda || self.cpu_logical_cores > MIN_CORES_FOR_IVF_PQ
     }
 }
 
@@ -109,11 +110,23 @@ mod tests {
     fn large_dataset_many_cores_picks_ivf_pq() {
         let p = HardwareProfile {
             has_cuda: false,
-            cpu_logical_cores: MIN_CORES_FOR_IVF_PQ,
+            cpu_logical_cores: MIN_CORES_FOR_IVF_PQ + 1,
             has_avx2: false,
             has_avx512: false,
         };
         assert!(p.recommend_ivf_pq(MIN_VECTORS_FOR_IVF_PQ));
+    }
+
+    #[test]
+    fn large_dataset_exactly_threshold_picks_hnsw() {
+        // strictly > 8, so exactly 8 cores → HNSW
+        let p = HardwareProfile {
+            has_cuda: false,
+            cpu_logical_cores: MIN_CORES_FOR_IVF_PQ,
+            has_avx2: false,
+            has_avx512: false,
+        };
+        assert!(!p.recommend_ivf_pq(MIN_VECTORS_FOR_IVF_PQ));
     }
 
     #[test]
