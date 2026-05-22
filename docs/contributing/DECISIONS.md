@@ -249,35 +249,38 @@ The single-file design unifies dimensional data, vectors, and the HNSW index int
 
 ---
 
-## ADR-012: Multi-vendor GPU support — NVIDIA CUDA + AMD ROCm
+## ADR-012: Multi-vendor GPU support — NVIDIA CUDA + AMD ROCm (both runtime-only)
 
 **Date**: 2026-05-22
-**Status**: Accepted
+**Status**: Accepted (updated 2026-05-22 — NVIDIA path migrated from candle-core to libloading)
 
-**Context**: Phase 4 added NVIDIA GPU acceleration via `candle-core`. Two problems remained:
-1. The build-time `gpu` feature creates two distinct binaries — users on CPU-only machines get a different build than GPU users. CI cannot test the GPU path without a GPU runner.
-2. AMD ROCm GPUs (growing share of data-center deployments) received no acceleration despite being capable of the same SGEMM-based distance computation.
+**Context**: Phase 4 originally added NVIDIA GPU acceleration via `candle-core` (compile-time `gpu` feature) and AMD ROCm via `libloading` (runtime-only). Two problems with the asymmetric approach:
+1. The build-time `gpu` feature required CUDA Toolkit installed on the build machine — distribution and CI became complex.
+2. Binary bloat: `candle-core` + its dependency tree added ~2-3 MB to every build even without CUDA hardware.
 
-**Decision**: Two independent GPU backends in `ailake-index`:
+**Decision**: Both GPU backends use `libloading` dlopen with no compile-time GPU SDK required:
 
-1. **NVIDIA CUDA** — compile-time `gpu` feature, `candle-core` matmul. Requires CUDA Toolkit at build time. Detected at runtime via libloading probe of `libcuda.so.1` + `cuDeviceGetCount`. Returns `None` → CPU fallback if no device found.
+1. **NVIDIA CUDA** — `libloading` dlopen of `libcudart.so` (tries `.so`, `.so.12`, `.so.11`) + `libcublas.so`. `cublasSgemm_v2` via function pointer. RAII guards (`DevBuf` / `BlasHandle`) identical in structure to ROCm. Returns `None` → CPU fallback if libraries absent. `candle-core` removed from workspace. `gpu` feature flag removed.
 
-2. **AMD ROCm** — no compile-time dependency. `libloading` dlopen of `libamdhip64.so` + `libhipblas.so` at runtime. SGEMM via `hipblasSgemm` with RAII guards for device memory and hipBLAS handle. Returns `None` → CPU fallback if libraries absent.
+2. **AMD ROCm** — `libloading` dlopen of `libamdhip64.so` + `libhipblas.so`. `hipblasSgemm` via function pointer. Same RAII pattern. Returns `None` → CPU fallback if libraries absent.
+
+Both backends share identical SGEMM formulation: `C[N×Q col-major] = alpha · db^T · queries`. Constants differ: `CUBLAS_OP_N=0 / CUBLAS_OP_T=1` vs `HIPBLAS_OP_N=111 / HIPBLAS_OP_T=112`.
 
 Detection priority: AMD ROCm first, then NVIDIA CUDA, then CPU. AMD is checked first because ROCm installations often provide a CUDA compatibility layer (`libcuda.so.1`) that would misidentify the backend without the priority check.
 
 `HardwareBackend` enum (`CpuSimd` / `NvidiaCuda` / `AmdRocm`) — single `OnceLock` caches the result for the process lifetime. `HardwareProfile` struct exposes `has_cuda`, `has_rocm`, `backend`, `cpu_logical_cores`, SIMD flags.
 
 **Consequences**:
-- Default binary (no `gpu` feature) transparently uses AMD ROCm acceleration when available — zero build system change required for AMD deployments.
-- NVIDIA binary (`--features gpu`) retains full candle-core path; ROCm path also available as fallback if CUDA probe fails.
-- `kmeans_dispatch` in `ivf_pq.rs` follows priority: CUDA → ROCm → CPU rayon.
+- Single binary for all deployments (CPU-only, NVIDIA, AMD) — zero build flag difference.
+- No CUDA Toolkit, `nvcc`, or GPU headers required at build time; only runtime libraries (`libcudart.so`, `libcublas.so`) needed on the deployment machine.
+- `kmeans_dispatch` in `ivf_pq.rs` follows priority: NVIDIA → ROCm → CPU rayon.
 - `SearchSession::search_batch()` follows priority: NVIDIA → AMD → CPU per shard.
 - Adaptive index selection (`IndexType::Auto`) uses `has_cuda || has_rocm` as the GPU-capable check; both vendors justify IVF-PQ over HNSW.
-- hipBLAS SGEMM implementation is ~180 lines of `unsafe` libloading code, encapsulated in `rocm_impl` module with RAII cleanup — no unsafe surface exposed to callers.
+- Binary size: 13 MB → 9.3 MB (ailake-bench) after removing candle-core + adding strip/panic=abort.
+- Each backend is ~220 lines of `unsafe` libloading code in its own module (`nvidia_impl` / `rocm_impl`) with RAII cleanup — no unsafe surface exposed to callers.
 
 **Rejected alternatives**:
-- AMD via `candle-core` ROCm feature: `candle-core/rocm` is not a stable feature; would require matching build-time dependency as CUDA; less portable than the libloading approach.
+- NVIDIA via `candle-core`: build-time CUDA Toolkit dependency; binary size overhead; `gpu` feature creates two distinct binaries; CI cannot test GPU path without GPU runner. Superseded by libloading approach.
+- AMD via `candle-core` ROCm feature: `candle-core/rocm` is not a stable feature; requires build-time dependency.
 - AMD via cuVS FFI: cuVS is NVIDIA-only by design; rejected.
-- Single `gpu` feature covering both vendors: would force users to install one vendor's SDK to get the other vendor's support. Separate compile-time / runtime approach is cleaner.
 - HIP CUDA compatibility layer reliance: AMD ROCm ships `libcuda.so.1` as a compat shim, but relying on it would break vendor identification and could silently use the wrong code path.

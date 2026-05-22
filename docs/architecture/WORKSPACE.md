@@ -89,12 +89,12 @@ HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) 
 - `hardware::detect_backend()` — probed once via `OnceLock`; AMD probed before NVIDIA
 - `hardware::detect_cuda()` — true only for `NvidiaCuda` (not ROCm compat layer)
 - `hardware::detect_rocm()` — true only for `AmdRocm`
-- `gpu::try_gpu_search_batch()` / `try_gpu_kmeans()` — NVIDIA CUDA via `candle-core` (feature `gpu`)
-- `gpu::try_rocm_search_batch()` / `try_rocm_kmeans()` — AMD ROCm via `libloading` hipBLAS (always compiled; returns `None` if no ROCm at runtime)
+- `gpu::try_nvidia_search_batch()` / `try_nvidia_kmeans()` — NVIDIA cuBLAS SGEMM via `libloading` dlopen of `libcudart.so` + `libcublas.so`; returns `None` if libraries not found
+- `gpu::try_rocm_search_batch()` / `try_rocm_kmeans()` — AMD hipBLAS SGEMM via `libloading` dlopen of `libamdhip64.so` + `libhipblas.so`; returns `None` if libraries not found
 
-**Feature flags**:
-- Default build (no flags): HNSW/IVF-PQ on CPU; AMD ROCm detected and used at runtime if `libamdhip64.so` + `libhipblas.so` present
-- `--features ailake-index/gpu`: adds NVIDIA CUDA path via `candle-core`; requires CUDA Toolkit at build time; detects CUDA at runtime and falls back to ROCm/CPU if unavailable
+**Feature flags**: none. Both GPU backends are always compiled. Hardware detected at runtime.
+- Default build: CPU rayon; NVIDIA activated if `libcudart.so` + `libcublas.so` found; AMD activated if `libamdhip64.so` + `libhipblas.so` found (AMD checked first)
+- `candle-core` dependency removed; no CUDA Toolkit required at build time
 
 ### `ailake-file`
 **Owns the unified file format.** This is the integration crate that combines Parquet + AI-Lake footer.
@@ -234,7 +234,7 @@ half        = { version = "2", features = ["serde"] }
 async-trait = "0.1"
 
 # Async
-tokio       = { version = "1", features = ["full"] }
+tokio       = { version = "1", features = ["rt-multi-thread", "io-util", "fs", "sync", "time", "macros"] }
 futures     = "0.3"
 
 # Data
@@ -242,7 +242,7 @@ parquet      = { version = "52", features = ["async"] }
 arrow-array  = "52"
 arrow-schema = "52"
 arrow-select = "52"
-object_store = { version = "0.10", features = ["aws", "gcp", "azure"] }
+object_store = { version = "0.10" }  # cloud features per-crate via ailake-store flags
 
 # Vector index
 hnsw_rs     = "0.3"
@@ -250,10 +250,7 @@ bincode     = "1"
 memmap2     = "0.9"
 rayon       = "1"
 
-# GPU — NVIDIA CUDA (compile-time feature "gpu")
-candle-core = "0.8"
-
-# GPU — AMD ROCm + runtime CUDA detection (always compiled, dlopen at runtime)
+# GPU — runtime dlopen, both vendors; no build-time SDK required
 libloading  = "0.8"
 
 # Compression
@@ -345,11 +342,11 @@ Deferred (external env required):
 Delivered in Phase 4:
 - Reranking after PQ: `SearchConfig.rerank_factor`, `exact_distance()` in `ailake-vec`
 - Public format spec: `docs/specs/FILE_FORMAT.md` — binary layout, AILK header/trailer, KV metadata keys
-- GPU search: NVIDIA CUDA (candle-core, `gpu` feature) + AMD ROCm (hipBLAS SGEMM via libloading, runtime-only) in `ailake-index`; automatic CPU fallback via rayon; detection priority: AMD ROCm → NVIDIA CUDA → CPU SIMD
+- GPU search: NVIDIA CUDA (cuBLAS SGEMM, runtime-only, no build flag) + AMD ROCm (hipBLAS SGEMM, runtime-only) in `ailake-index`; automatic CPU fallback via rayon; detection priority: AMD ROCm → NVIDIA CUDA → CPU SIMD; `candle-core` removed from workspace
 - Hardware abstraction: `HardwareBackend` enum, `HardwareProfile`, `detect_backend()` / `detect_cuda()` / `detect_rocm()` in `ailake-index/src/hardware.rs`
 - GPU k-means dispatch: CUDA → ROCm → CPU for IVF-PQ training (`kmeans_dispatch` in `ivf_pq.rs`)
 - Adaptive index selection: `IndexType::Auto`, `write_batch_auto()`, `CompactionIndexStrategy::Auto`
-- GPU FFI evaluation: `docs/specs/GPU_FFI_EVALUATION.md` — cuVS evaluated, candle-core + hipBLAS chosen
+- GPU FFI evaluation: `docs/specs/GPU_FFI_EVALUATION.md` — cuVS evaluated, cuBLAS + hipBLAS libloading chosen (both runtime-only)
 - Real HNSW graph: custom implementation in `ailake-index` (Malkov & Yashunin 2018); generation bitmap visited tracker; contiguous `flat_vecs` layout
 - SIMD distance functions: AVX2 + NEON in `ailake-vec/src/distance.rs`; runtime detection; 2× unrolled AVX2 for dot/euclidean
 - `SearchSession` in `ailake-query`: pre-loaded multi-query search, eliminates per-query I/O

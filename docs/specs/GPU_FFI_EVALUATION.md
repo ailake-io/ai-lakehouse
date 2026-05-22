@@ -2,10 +2,11 @@
 
 **Status**: Decision document — evaluated 2026-05-19, updated 2026-05-22.
 **Conclusion**: cuVS FFI deferred to Phase 5. Two GPU backends implemented in `ailake-index`:
-- **NVIDIA CUDA** (Phase 4): `candle-core` GPU brute-force (Option D) — compile-time `gpu` feature.
+- **NVIDIA CUDA** (Phase 4): `cuBLAS` SGEMM via `libloading` — runtime-only, no compile-time dependency (replaced `candle-core`).
 - **AMD ROCm** (Phase 4): `hipBLAS` SGEMM via `libloading` — runtime-only, no compile-time dependency.
 
-See §7 (NVIDIA decision) and §8 (Phase 4 status including AMD).
+Both backends require zero build-time GPU SDK. A single binary detects and uses
+NVIDIA or AMD hardware at startup via `dlopen`. See §7 (NVIDIA decision) and §8 (Phase 4 status).
 
 ---
 
@@ -272,8 +273,8 @@ recall/latency tradeoff but requires the most complex build setup.
 
 ### Phase 5 GPU work items (future)
 
-- [x] Feature flag `ailake-index/gpu` — GPU path is optional, CPU path remains default (implemented in Phase 4)
-- [x] `candle` brute-force for batch queries (Option D) — safe, no bindgen (implemented in Phase 4)
+- [x] NVIDIA runtime path — no build-time CUDA SDK (replaced candle-core with cuBLAS libloading in Phase 4)
+- [x] AMD ROCm runtime path — hipBLAS SGEMM via libloading (Phase 4)
 - [ ] `GpuSearchConfig`: batch size, device id, VRAM budget
 - [ ] cuVS IVF-PQ bindgen (Option A) — for files > 500k vectors
 - [ ] GPU CI runner (self-hosted or `runs-on: [self-hosted, gpu]`)
@@ -283,10 +284,13 @@ recall/latency tradeoff but requires the most complex build setup.
 
 ## 8. Status After Phase 4
 
-**Implemented in Phase 4 — NVIDIA CUDA (candle-core):**
+**Implemented in Phase 4 — NVIDIA CUDA (cuBLAS via libloading):**
 
-- `ailake-index/src/gpu.rs` — `try_gpu_search()`, `try_gpu_search_batch()`, `try_gpu_kmeans()` via `candle-core/cuda`; runtime detection via libloading probe of `libcuda.so.1` (no crash on CPU-only machines); Cosine, Euclidean, DotProduct via cublas matmul; returns `None` if no device → caller falls back to CPU
-- Feature flag: `--features ailake-index/gpu` required at build time
+- `ailake-index/src/gpu.rs` `nvidia_impl` module — `try_nvidia_search_batch()`, `try_nvidia_kmeans()` via `libloading` dlopen of `libcudart.so` (tries `.so`, `.so.12`, `.so.11`) + `libcublas.so` (same fallback); RAII guards `DevBuf` (cudaFree) and `BlasHandle` (cublasDestroy_v2); Cosine/Euclidean/DotProduct via `cublasSgemm_v2`; no compile-time dependency; returns `None` if libraries not found
+- Replaces `candle-core` (Option D from §4) — eliminates compile-time CUDA Toolkit requirement and ~30% binary size from candle dependency tree
+- `gpu` feature flag removed from `ailake-index`; `candle-core` removed from workspace deps
+- SGEMM formulation identical to ROCm: `C[N×Q col-major] = alpha · db[N×dim]ᵀ · queries[Q×dim]`; only constants differ: `CUBLAS_OP_N=0`, `CUBLAS_OP_T=1` (vs HIP 111/112)
+- `kmeans_dispatch` priority: `try_nvidia_kmeans` → `try_rocm_kmeans` → `kmeans_centroids` (rayon)
 
 **Implemented in Phase 4 — AMD ROCm (hipBLAS SGEMM):**
 
@@ -305,4 +309,6 @@ recall/latency tradeoff but requires the most complex build setup.
 - `ailake-query::TableWriter::write_batch_auto()` — thin wrapper that delegates to IVF-PQ or HNSW path based on hardware profile
 - `ailake-query::CompactionIndexStrategy` — Auto/ForceHnsw/ForceIvfPq; compaction respects same hardware-adaptive logic
 
-**Next step (Phase 5):** cuVS FFI remains deferred — reopen condition: ≥2 conditions from §7 Step 3 hold simultaneously. Current brute-force GPU path is adequate for files up to ~500k vectors at dim=1536.
+**Binary size impact (Phase 4 final):** `ailake-bench` 13 MB unstripped → 9.3 MB (auto-stripped, panic=abort, no candle-core). `libailake_jni.so` 12 MB → 9.0 MB.
+
+**Next step (Phase 5):** cuVS FFI remains deferred — reopen condition: ≥2 conditions from §7 Step 3 hold simultaneously. Current SGEMM GPU path is adequate for files up to ~500k vectors at dim=1536.

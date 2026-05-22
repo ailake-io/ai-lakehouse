@@ -42,18 +42,12 @@ Primeira compilação leva ~2-3 min (baixa dependências Arrow/Parquet).
 cargo build --workspace --features store-s3      # Amazon S3
 cargo build --workspace --features store-gcs     # Google Cloud Storage
 cargo build --workspace --features store-azure   # Azure Blob
-
-# GPU (requer CUDA Toolkit ≥ 12 instalado — headers + nvcc)
-# Em runtime usa GPU se disponível; cai para CPU paralelo caso contrário.
-cargo build --release --features ailake-index/gpu
-
-# Tudo junto: S3 + GPU
-cargo build --release --features "store-s3 ailake-index/gpu"
 ```
 
-**Regra de ouro**: builds sem `ailake-index/gpu` compilam e rodam em qualquer
-máquina (incluindo CPU-only). O binário com `gpu` detecta CUDA em runtime
-automaticamente — sem GPU instalada, continua funcionando via CPU.
+**Regra de ouro**: o build padrão (`cargo build`) compila e roda em qualquer
+máquina — CPU-only, NVIDIA ou AMD. Não existe mais flag `ailake-index/gpu`.
+Ambas as GPUs são detectadas em runtime via `libloading` sem dependência de
+compilação.
 
 ---
 
@@ -438,12 +432,14 @@ cargo bench -p ailake-file
 
 ## 8F. GPU search — NVIDIA CUDA e AMD ROCm
 
-Dois backends GPU independentes, com detecção e fallback automáticos em runtime:
+Dois backends GPU independentes. Ambos usam `libloading` dlopen em runtime —
+**zero dependência de build** para qualquer GPU. O mesmo binário roda em
+CPU-only, NVIDIA e AMD sem recompilação.
 
 | Backend | Detecção | Compute | Requisito de build |
 |---------|----------|---------|-------------------|
-| **NVIDIA CUDA** | `libcuda.so.1` + `cuDeviceGetCount` | candle-core matmul | `--features ailake-index/gpu` (CUDA Toolkit) |
-| **AMD ROCm** | `libamdhip64.so` + `hipGetDeviceCount` | hipBLAS SGEMM via libloading | nenhum — runtime only |
+| **NVIDIA CUDA** | `libcuda.so.1` + `cuDeviceGetCount` | cuBLAS SGEMM via libloading | **nenhum** — runtime only |
+| **AMD ROCm** | `libamdhip64.so` + `hipGetDeviceCount` | hipBLAS SGEMM via libloading | **nenhum** — runtime only |
 | **CPU** | fallback | rayon paralelo | nenhum |
 
 **Prioridade de detecção**: AMD ROCm → NVIDIA CUDA → CPU SIMD.
@@ -453,29 +449,30 @@ AMD é verificado primeiro pois sistemas ROCm frequentemente expõem uma camada 
 
 ### 8F-1. NVIDIA CUDA
 
-#### Pré-requisitos
+#### Pré-requisitos de runtime (nenhum de build)
 
 | Requisito | Versão mínima |
 |-----------|---------------|
-| GPU NVIDIA | Arquitetura Ampere+ (sm_80) recomendada |
-| CUDA Toolkit | 12.x (`nvcc`, headers em `/usr/local/cuda`) |
-| Driver NVIDIA | ≥ 525 |
+| GPU NVIDIA | Arquitetura Maxwell+ (sm_50) |
+| Driver NVIDIA | ≥ 450 |
+| `libcudart.so` | CUDA 11.x ou 12.x em `LD_LIBRARY_PATH` |
+| `libcublas.so` | CUDA 11.x ou 12.x em `LD_LIBRARY_PATH` |
 
-#### Build com suporte CUDA
+Não é necessário CUDA Toolkit, `nvcc` ou headers — apenas as bibliotecas de runtime.
+
+#### Build — nenhuma flag adicional necessária
 
 ```bash
-# Requer CUDA Toolkit instalado no sistema de build
-cargo build --release --features ailake-index/gpu
+# Build padrão — NVIDIA detectado e usado em runtime automaticamente
+cargo build --release
 ```
 
-O binário detecta CUDA automaticamente em runtime via `libloading` (sem crash em máquinas sem CUDA):
-- **NVIDIA GPU disponível**: usa `candle-core` cuBLAS para distâncias em lote
-- **Sem CUDA em runtime**: cai silenciosamente para AMD ROCm ou CPU
+O binário detecta CUDA via `libloading` (dlopen de `libcuda.so.1`,
+`libcudart.so`, `libcublas.so`). Sem GPU: cai silenciosamente para AMD ROCm ou CPU.
 
 #### Verificar detecção CUDA
 
-```bash
-# Probing em runtime (sem precisar do feature gpu em código)
+```rust
 use ailake_index::{detect_backend, HardwareBackend};
 assert_eq!(detect_backend(), HardwareBackend::NvidiaCuda);
 ```
@@ -576,11 +573,13 @@ GPU vence a partir de ~50k vetores/arquivo para dim=1536. Aplicável para ambos 
 
 ### 8F-5. Métricas suportadas em GPU
 
-| Métrica | NVIDIA (candle) | AMD (hipBLAS SGEMM) |
-|---------|-----------------|---------------------|
-| **Cosine** | normalizar → dot → `1 − sim` | normalizar CPU → SGEMM → `1 + raw` |
-| **Euclidean** | `broadcast_sub → sqr → sum → sqrt` | SGEMM (−2·q·d) + norms CPU → sqrt |
-| **DotProduct** | matmul negado (`−q @ V.T`) | SGEMM com alpha=−1 |
+| Métrica | NVIDIA (cuBLAS SGEMM) | AMD (hipBLAS SGEMM) |
+|---------|-----------------------|---------------------|
+| **Cosine** | normalizar CPU → SGEMM → `1 + raw` | normalizar CPU → SGEMM → `1 + raw` |
+| **Euclidean** | SGEMM (−2·q·d) + norms CPU → sqrt | SGEMM (−2·q·d) + norms CPU → sqrt |
+| **DotProduct** | SGEMM com alpha=−1 | SGEMM com alpha=−1 |
+
+Ambos os backends usam formulação SGEMM idêntica (`C[N×Q col-major] = alpha · db^T · queries`); diferem apenas nas constantes de operação (`CUBLAS_OP_T=1` vs `HIPBLAS_OP_T=112`) e nos nomes das bibliotecas.
 
 ---
 
@@ -589,19 +588,17 @@ GPU vence a partir de ~50k vetores/arquivo para dim=1536. Aplicável para ambos 
 O treinamento do `IvfPqIndex` (k-means para centróides grosseiros e `PQCodebook`) usa GPU via `kmeans_dispatch` com prioridade NVIDIA → AMD → CPU:
 
 ```
-NVIDIA (feature gpu)  →  try_gpu_kmeans (candle matmul)
-AMD ROCm (runtime)    →  try_rocm_kmeans (hipBLAS SGEMM)
-CPU fallback          →  kmeans_centroids (rayon paralelo)
+NVIDIA (runtime)  →  try_nvidia_kmeans (cuBLAS SGEMM via libloading)
+AMD ROCm (runtime)  →  try_rocm_kmeans (hipBLAS SGEMM via libloading)
+CPU fallback        →  kmeans_centroids (rayon paralelo)
 ```
 
 - **Sem GPU em runtime**: `kmeans_dispatch` cai silenciosamente para CPU.
+- **NVIDIA sem libcublas instalado**: mesmo que `libcuda.so.1` exista, `try_nvidia_kmeans` retorna `None` se `libcublas.so` não for encontrado → tenta AMD → CPU.
 - **AMD sem hipBLAS instalado**: mesmo que `libamdhip64.so` exista, `try_rocm_kmeans` retorna `None` se `libhipblas.so` não for encontrado → CPU fallback.
 
 ```bash
-# Build + treino IVF-PQ acelerado por GPU NVIDIA
-cargo build --release --features ailake-index/gpu
-
-# AMD ROCm — sem flag de build necessária
+# Build padrão — GPU acelerado automaticamente se disponível (NVIDIA ou AMD)
 cargo build --release
 ```
 
@@ -1688,8 +1685,8 @@ ailake-core/      tipos base: VectorMetric, VectorPrecision, RowId, AilakeError
 ailake-parquet/   leitura/escrita Parquet com coluna VECTOR; write_batch_multi_vec / read_all_multi_vec
 ailake-vec/       quantização F32→F16, PQ (PQCodebook), BlockCompressor, SIMD distances (AVX2/NEON), centróides
 ailake-index/     HNSW + IVF-PQ (AnyIndex enum); hardware detection (HardwareBackend: NvidiaCuda/AmdRocm/CpuSimd);
-                  NVIDIA GPU via candle-core (feature gpu); AMD ROCm via hipBLAS libloading (runtime, no build flag);
-                  kmeans_dispatch: CUDA → ROCm → CPU; bincode, MmapLoader (memmap2)
+                  NVIDIA via cuBLAS libloading (runtime, no build flag); AMD ROCm via hipBLAS libloading (runtime, no build flag);
+                  kmeans_dispatch: NVIDIA → ROCm → CPU; bincode, MmapLoader (memmap2)
 ailake-file/      arquivo unificado: AILK suporta IndexType::Hnsw e IndexType::IvfPq
 ailake-catalog/   catálogo Iceberg: HadoopCatalog, RestCatalog, NessieCatalog, JdbcCatalog, GlueCatalog
 ailake-store/     abstração de storage: LocalStore + ObjectStoreBackend (S3/GCS/Azure via object_store)
@@ -1806,32 +1803,24 @@ SearchConfig {
 }
 ```
 
-**Build GPU falha com `error: could not find native library 'cudart'`**
-CUDA toolkit não está no PATH ou não foi instalado:
+**NVIDIA GPU disponível mas busca usa CPU (`try_nvidia_search_batch` retorna `None`)**
+Runtime libraries ausentes ou fora do `LD_LIBRARY_PATH`. Não é necessário CUDA Toolkit — apenas as libs de runtime:
 ```bash
-# Verificar instalação
-nvcc --version
-ls /usr/local/cuda/lib64/libcudart.so
+# Ubuntu — instalar apenas runtime (sem nvcc/headers)
+sudo apt install libcuda1 libcublas-12-x
 
-# Ubuntu — instalar toolkit
-sudo apt install nvidia-cuda-toolkit
+# Ou via CUDA keyring (canonical)
+sudo apt install cuda-libraries-12-x
 
-# Após instalar, exportar variáveis
-export CUDA_HOME=/usr/local/cuda
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+# Verificar presença
+ldconfig -p | grep -E "libcuda|libcublas"
+ls /usr/local/cuda/lib64/libcudart.so*
+
+# Exportar se não estiver no path padrão
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
 
-**Build GPU falha com `candle-core: feature cuda not available`**
-O crate `candle-core` requer a feature `cuda` explicitamente:
-```bash
-# Correto
-cargo build --features ailake-index/gpu
-
-# Incorreto — não ativa CUDA no candle
-cargo build --features gpu
-```
-
-**GPU build compila mas busca usa CPU (log não mostra "gpu")**
+**GPU build compila mas busca usa CPU (log não mostra "NVIDIA" ou "AMD")**
 `detect_backend()` retornou `CpuSimd`. Verificar:
 ```bash
 nvidia-smi                        # GPU NVIDIA visível?

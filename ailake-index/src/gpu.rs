@@ -225,14 +225,12 @@ mod nvidia_impl {
         let rt = try_open(RT_LIBS)?;
         let blas_lib = try_open(BLAS_LIBS)?;
 
-        let (cuda_malloc, cuda_free, cuda_memcpy, cuda_sync) =
-            unsafe { load_cuda_fns(&rt) }?;
+        let (cuda_malloc, cuda_free, cuda_memcpy, cuda_sync) = unsafe { load_cuda_fns(&rt) }?;
 
         let blas_create: Symbol<unsafe extern "C" fn(*mut *mut c_void) -> i32> =
             unsafe { blas_lib.get(b"cublasCreate_v2\0") }.ok()?;
         let blas_destroy: unsafe extern "C" fn(*mut c_void) -> i32 = *unsafe {
-            blas_lib
-                .get::<unsafe extern "C" fn(*mut c_void) -> i32>(b"cublasDestroy_v2\0")
+            blas_lib.get::<unsafe extern "C" fn(*mut c_void) -> i32>(b"cublasDestroy_v2\0")
         }
         .ok()?;
         let sgemm: Symbol<SgemmFn> = unsafe { blas_lib.get(b"cublasSgemm_v2\0") }.ok()?;
@@ -241,7 +239,10 @@ mod nvidia_impl {
         if unsafe { blas_create(&mut raw_handle) } != 0 {
             return None;
         }
-        let _blas = BlasHandle { handle: raw_handle, destroy_fn: blas_destroy };
+        let _blas = BlasHandle {
+            handle: raw_handle,
+            destroy_fn: blas_destroy,
+        };
 
         let q_flat: Vec<f32>;
         let db_data: &[f32];
@@ -372,14 +373,12 @@ mod nvidia_impl {
         let rt = try_open(RT_LIBS)?;
         let blas_lib = try_open(BLAS_LIBS)?;
 
-        let (cuda_malloc, cuda_free, cuda_memcpy, cuda_sync) =
-            unsafe { load_cuda_fns(&rt) }?;
+        let (cuda_malloc, cuda_free, cuda_memcpy, cuda_sync) = unsafe { load_cuda_fns(&rt) }?;
 
         let blas_create: Symbol<unsafe extern "C" fn(*mut *mut c_void) -> i32> =
             unsafe { blas_lib.get(b"cublasCreate_v2\0") }.ok()?;
         let blas_destroy: unsafe extern "C" fn(*mut c_void) -> i32 = *unsafe {
-            blas_lib
-                .get::<unsafe extern "C" fn(*mut c_void) -> i32>(b"cublasDestroy_v2\0")
+            blas_lib.get::<unsafe extern "C" fn(*mut c_void) -> i32>(b"cublasDestroy_v2\0")
         }
         .ok()?;
         let sgemm: Symbol<SgemmFn> = unsafe { blas_lib.get(b"cublasSgemm_v2\0") }.ok()?;
@@ -388,7 +387,10 @@ mod nvidia_impl {
         if unsafe { blas_create(&mut raw_handle) } != 0 {
             return None;
         }
-        let _blas = BlasHandle { handle: raw_handle, destroy_fn: blas_destroy };
+        let _blas = BlasHandle {
+            handle: raw_handle,
+            destroy_fn: blas_destroy,
+        };
 
         let flat: Vec<f32> = vectors.iter().flat_map(|v| v.iter().copied()).collect();
         let x_dev = unsafe { upload(&flat, cuda_malloc, cuda_free, cuda_memcpy) }?;
@@ -406,8 +408,7 @@ mod nvidia_impl {
         let mut prev_asgn: Vec<u32> = vec![];
 
         for _ in 0..max_iter {
-            let c_dev =
-                unsafe { upload(&centroids_flat, cuda_malloc, cuda_free, cuda_memcpy) }?;
+            let c_dev = unsafe { upload(&centroids_flat, cuda_malloc, cuda_free, cuda_memcpy) }?;
             let cross_dev = unsafe { alloc_dev(k * n, cuda_malloc, cuda_free) }?;
 
             // SGEMM: cross[K×N col-major] = -2 * centroids[K×dim] * vectors[N×dim]^T
