@@ -62,6 +62,23 @@ impl IvfPqConfig {
             ..Self::default()
         }
     }
+
+    /// Derive sensible defaults from both dimensionality and dataset size.
+    ///
+    /// `nlist` scales with sqrt(n_vectors) so each cluster gets ~4 vectors on average.
+    /// Clamped to [16, 1024] to avoid degenerate configs on tiny or huge datasets.
+    pub fn for_dataset(dim: usize, n_vectors: usize) -> Self {
+        let nlist = ((n_vectors as f64).sqrt() as usize).clamp(16, 1024);
+        let nprobe = (nlist / 8).max(1);
+        let pq_m_hint = (dim / 16).clamp(4, 64);
+        Self {
+            nlist,
+            nprobe,
+            pq_m: find_valid_pq_m(pq_m_hint, dim),
+            pq_k: 256,
+            max_iter: 25,
+        }
+    }
 }
 
 pub struct IvfPqIndex {

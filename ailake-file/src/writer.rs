@@ -17,6 +17,11 @@ pub enum IndexType {
     Hnsw(HnswConfig),
     /// IVF-PQ. Best for S3: 10-100x smaller index, sequential inverted-list reads.
     IvfPq(IvfPqConfig),
+    /// Detect hardware at write time and pick the best index automatically.
+    ///
+    /// Chooses IVF-PQ when a GPU or ≥8 CPU cores are available AND the dataset
+    /// has ≥5 000 vectors. Falls back to HNSW otherwise (local/low-power hardware).
+    Auto,
 }
 
 impl Default for IndexType {
@@ -56,6 +61,13 @@ impl AilakeFileWriter {
 
     pub fn with_index_type(mut self, index_type: IndexType) -> Self {
         self.index_type = index_type;
+        self
+    }
+
+    /// Use `IndexType::Auto`: detect GPU / CPU cores at write time and pick the
+    /// best index. Equivalent to `.with_index_type(IndexType::Auto)`.
+    pub fn with_auto_index(mut self) -> Self {
+        self.index_type = IndexType::Auto;
         self
     }
 
@@ -177,6 +189,23 @@ fn build_ailk_section(
     let centroid: Centroid = compute_centroid_and_radius(embeddings, policy.metric);
     let centroid_bytes = encode_centroid(&centroid);
 
+    // Resolve Auto to a concrete variant before matching.
+    let resolved: IndexType;
+    let index_type = if matches!(index_type, IndexType::Auto) {
+        let profile = ailake_index::HardwareProfile::detect();
+        resolved = if profile.recommend_ivf_pq(embeddings.len()) {
+            IndexType::IvfPq(ailake_index::IvfPqConfig::for_dataset(
+                policy.dim as usize,
+                embeddings.len(),
+            ))
+        } else {
+            IndexType::Hnsw(ailake_index::HnswConfig::default())
+        };
+        &resolved
+    } else {
+        index_type
+    };
+
     let (index_bytes, flags) = match index_type {
         IndexType::Hnsw(hnsw_config) => {
             let mut builder = HnswBuilder::new(policy.dim, policy.metric, hnsw_config.clone());
@@ -196,6 +225,7 @@ fn build_ailk_section(
             )?;
             (IvfPqSerializer::to_bytes(&index)?, FLAG_INDEX_IVF_PQ)
         }
+        IndexType::Auto => unreachable!("Auto resolved above"),
     };
 
     let centroid_offset = HEADER_SIZE as u64;

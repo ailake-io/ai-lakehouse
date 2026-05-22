@@ -7,11 +7,13 @@
 //! Build with `cargo build --features ailake-index/gpu` to enable GPU support.
 
 pub mod gpu;
+pub mod hardware;
 pub mod hnsw;
 pub mod ivf_pq;
 pub mod mmap_loader;
 pub mod serialize;
 
+pub use hardware::HardwareProfile;
 pub use hnsw::{HnswBuilder, HnswConfig, HnswIndex};
 pub use ivf_pq::{find_valid_pq_m, IvfPqConfig, IvfPqIndex, IvfPqSerializer};
 pub use mmap_loader::MmapLoader;

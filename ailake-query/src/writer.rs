@@ -151,6 +151,26 @@ impl TableWriter {
         Ok(())
     }
 
+    /// Write batch, auto-selecting the index based on detected hardware.
+    ///
+    /// Picks IVF-PQ when a CUDA GPU or ≥8 CPU cores are present AND the batch
+    /// has ≥5 000 vectors. Falls back to HNSW for weaker / local hardware.
+    /// Uses `IvfPqConfig::for_dataset` to scale nlist with dataset size.
+    pub async fn write_batch_auto(
+        &mut self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+    ) -> AilakeResult<()> {
+        let profile = ailake_index::HardwareProfile::detect();
+        if profile.recommend_ivf_pq(embeddings.len()) {
+            let ivf_config =
+                ailake_index::IvfPqConfig::for_dataset(self.policy.dim as usize, embeddings.len());
+            self.write_batch_ivf_pq(batch, embeddings, ivf_config).await
+        } else {
+            self.write_batch(batch, embeddings).await
+        }
+    }
+
     /// Write batch with IVF-PQ index built synchronously (no background task).
     ///
     /// Smaller index than HNSW; better for S3 sequential-scan workloads.
