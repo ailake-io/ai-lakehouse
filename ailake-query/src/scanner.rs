@@ -270,28 +270,44 @@ impl SearchSession {
             Some(factor) => config.top_k * factor,
             None => config.top_k,
         };
-        let use_gpu = ailake_index::hardware::detect_cuda();
+        let use_nvidia = ailake_index::hardware::detect_cuda();
+        let use_amd = ailake_index::hardware::detect_rocm();
 
         // Accumulate per-query results across all shards.
         let mut all_results: Vec<Vec<SearchResult>> = (0..n_queries).map(|_| Vec::new()).collect();
 
         for shard in &self.shards {
             if let Some(raw) = &shard.raw_vectors {
-                // Flat-scan shard (Indexing or load_raw=true) — try GPU batch path.
-                if use_gpu && !raw.is_empty() {
+                // Flat-scan shard — try GPU batch path (NVIDIA first, then AMD ROCm).
+                if !raw.is_empty() {
                     let dim = raw[0].len();
                     let flat: Vec<f32> = raw.iter().flat_map(|v| v.iter().copied()).collect();
                     let row_ids: Vec<u64> = (0..raw.len() as u64).collect();
                     let q_refs: Vec<&[f32]> = queries.iter().map(|q| q.as_slice()).collect();
 
-                    if let Some(batch) = ailake_index::gpu::try_gpu_search_batch(
-                        &q_refs,
-                        &row_ids,
-                        &flat,
-                        dim,
-                        self.metric,
-                        candidate_k,
-                    ) {
+                    let gpu_batch = if use_nvidia {
+                        ailake_index::gpu::try_gpu_search_batch(
+                            &q_refs,
+                            &row_ids,
+                            &flat,
+                            dim,
+                            self.metric,
+                            candidate_k,
+                        )
+                    } else if use_amd {
+                        ailake_index::gpu::try_rocm_search_batch(
+                            &q_refs,
+                            &row_ids,
+                            &flat,
+                            dim,
+                            self.metric,
+                            candidate_k,
+                        )
+                    } else {
+                        None
+                    };
+
+                    if let Some(batch) = gpu_batch {
                         for (qi, results) in batch.into_iter().enumerate() {
                             for (row_id, distance) in results {
                                 all_results[qi].push(SearchResult {

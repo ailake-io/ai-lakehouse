@@ -14,11 +14,13 @@ use serde::{Deserialize, Serialize};
 use ailake_core::{AilakeError, AilakeResult, RowId, VectorMetric};
 use ailake_vec::{kmeans_centroids, PQCodebook};
 
-/// K-means dispatch: GPU when `gpu` feature is enabled and a CUDA device is found,
-/// CPU fallback otherwise.
+/// K-means dispatch: NVIDIA CUDA → AMD ROCm → CPU rayon fallback.
 fn kmeans_dispatch(vecs: &[Vec<f32>], k: usize, max_iter: usize) -> Vec<Vec<f32>> {
     #[cfg(feature = "gpu")]
     if let Some(result) = crate::gpu::try_gpu_kmeans(vecs, k, max_iter) {
+        return result;
+    }
+    if let Some(result) = crate::gpu::try_rocm_kmeans(vecs, k, max_iter) {
         return result;
     }
     kmeans_centroids(vecs, k, max_iter)

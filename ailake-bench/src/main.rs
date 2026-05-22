@@ -578,8 +578,15 @@ async fn run_ailake_ivf_pq(args: &Args, ds: &dataset::Dataset) -> anyhow::Result
 async fn run_ailake_auto(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<BenchResult> {
     // Print hardware profile so the user can verify detection is correct.
     let hw = HardwareProfile::detect();
+    let backend_label = match hw.backend {
+        ailake_index::HardwareBackend::NvidiaCuda => "NVIDIA CUDA",
+        ailake_index::HardwareBackend::AmdRocm => "AMD ROCm",
+        ailake_index::HardwareBackend::CpuSimd => "CPU (no GPU)",
+    };
     eprintln!("\nHardware detection:");
+    eprintln!("  Backend      : {backend_label}");
     eprintln!("  CUDA GPU     : {}", hw.has_cuda);
+    eprintln!("  ROCm GPU     : {}", hw.has_rocm);
     eprintln!("  CPU cores    : {}", hw.cpu_logical_cores);
     eprintln!("  AVX2         : {}", hw.has_avx2);
     eprintln!("  AVX-512F     : {}", hw.has_avx512);
