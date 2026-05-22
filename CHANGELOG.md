@@ -7,6 +7,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+- **`ailake-cli` subcommands implemented**: `create`, `insert`, `search`, `compact`, `info` — all wired to real engine calls (no longer stubs)
+  - `create`: calls `catalog.create_table` with `VectorStoragePolicy`
+  - `insert`: reads local Parquet via `ParquetVectorReader`, calls `TableWriter::write_batch` + `commit`
+  - `search`: parses comma-separated query vector, calls `ailake_query::search`, prints ranked results
+  - `compact`: `CompactionPlanner` selects small files, `CompactionExecutor` merges, commits `Replace` snapshot
+  - `info`: aggregates file count, row count, size, indexed shard count from catalog
+- **`ailake-py` re-enabled in workspace**: fixed compilation after PyO3 and API drift
+
+### Fixed
+- `ailake-py`: missing deps (`ailake-catalog`, `ailake-store`, `arrow-array`, `arrow-schema`) added to `Cargo.toml`
+- `ailake-py`: `HadoopCatalog::new(path)` → `HadoopCatalog::new(Arc<dyn Store>, "")` (correct signature)
+- `ailake-py`: upgrade PyO3 0.21 → 0.22 for Python 3.13 support
+- `ailake-py`: `pymodule` fn ported to `Bound<'_, PyModule>` API (PyO3 0.22)
+- `ailake-py`: suppressed `clippy::useless_conversion` (false positive from PyO3 0.22 proc-macros)
+
+### Changed
+- `CLAUDE.md` roadmap: Phase 1 all items marked complete; Phase 4 extended with IVF-PQ, GPU, Flink, SIMD, MemTable items
+
+---
+
 ## [0.5.0] — 2026-05-22
 
 ### Added
@@ -127,6 +150,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+[Unreleased]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.2.0...v0.3.0
