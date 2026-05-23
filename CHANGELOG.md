@@ -10,6 +10,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **PyPI publish workflow** (`.github/workflows/publish-pypi.yml`): builds `ailake` wheels on push of `v*` tags — Linux x86_64 + aarch64 (manylinux), macOS x86_64 + arm64, Windows x86_64, sdist; Python 3.9–3.13; publishes via `PYPI_API_TOKEN` secret
+- **`ailake-py/pyproject.toml` version sync**: aligned to `0.0.5` matching `Cargo.toml`
 - **`ailake-cli` subcommands implemented**: `create`, `insert`, `search`, `compact`, `info` — all wired to real engine calls (no longer stubs)
   - `create`: calls `catalog.create_table` with `VectorStoragePolicy`
   - `insert`: reads local Parquet via `ParquetVectorReader`, calls `TableWriter::write_batch` + `commit`
