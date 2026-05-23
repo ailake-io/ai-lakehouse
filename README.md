@@ -1,5 +1,9 @@
 # AI-Lake Format
 
+[![CI](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/ailake-core.svg)](https://crates.io/crates/ailake-core)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
+
 Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 
 **Single self-contained file**: tabular data, embeddings, and HNSW index live together in one Parquet-extended file at the S3 layer. ACID transactions via Iceberg. Any Iceberg-compatible framework reads AI-Lake tables without modification — the vector index in the file footer is invisible to standard Parquet readers.
