@@ -1,7 +1,12 @@
 [package]
-name = "ailake-index"
-version = "0.0.5"
-edition = "2021"
+name        = "ailake-index"
+version     = "0.0.5"
+edition     = "2021"
+description = "HNSW and IVF-PQ vector indexes with GPU acceleration for AI-Lake"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+keywords    = ["hnsw", "vector-search", "ann", "embedding", "ivf"]
+categories  = ["algorithms", "database", "science"]
 
 [dependencies]
 ailake-core  = { path = "../ailake-core" }

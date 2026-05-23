@@ -1,7 +1,12 @@
 [package]
-name = "ailake-jni"
-version = "0.0.5"
-edition = "2021"
+name        = "ailake-jni"
+version     = "0.0.5"
+edition     = "2021"
+description = "JNI C-ABI bindings for AI-Lake — Spark, Trino, and Flink connectors via JNA/uniffi"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+keywords    = ["jni", "spark", "trino", "vector-search", "lakehouse"]
+categories  = ["database", "api-bindings"]
 
 [lib]
 crate-type = ["cdylib"]

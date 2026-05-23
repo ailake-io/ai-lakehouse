@@ -1,7 +1,12 @@
 [package]
-name = "ailake-query"
-version = "0.0.5"
-edition = "2021"
+name        = "ailake-query"
+version     = "0.0.5"
+edition     = "2021"
+description = "Query planner and executor for AI-Lake — vector search, compaction, ContextAssembler"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+keywords    = ["vector-search", "iceberg", "lakehouse", "hnsw", "rag"]
+categories  = ["database", "algorithms"]
 
 [dependencies]
 ailake-core    = { path = "../ailake-core" }

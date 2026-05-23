@@ -1,9 +1,12 @@
 [package]
-name         = "ailake-cli"
-version = "0.0.5"
-edition      = "2021"
-description  = "AI-Lake Format — administrative CLI"
-license      = "MIT OR Apache-2.0"
+name        = "ailake-cli"
+version     = "0.0.5"
+edition     = "2021"
+description = "AI-Lake Format — administrative CLI (create, insert, search, compact, info)"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+keywords    = ["cli", "iceberg", "vector", "lakehouse", "vector-search"]
+categories  = ["command-line-utilities", "database"]
 
 [[bin]]
 name = "ailake"

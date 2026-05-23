@@ -1,7 +1,12 @@
 [package]
-name = "ailake-catalog"
-version = "0.0.5"
-edition = "2021"
+name        = "ailake-catalog"
+version     = "0.0.5"
+edition     = "2021"
+description = "Iceberg Spec v2 catalog backends (Hadoop, REST, Glue, Nessie, JDBC) for AI-Lake"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+keywords    = ["iceberg", "catalog", "lakehouse", "parquet", "metadata"]
+categories  = ["database", "data-structures"]
 
 [features]
 catalog-glue   = ["dep:aws-sdk-glue", "dep:aws-config"]
