@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/ailake-core.svg)](https://crates.io/crates/ailake-core)
+[![PyPI](https://img.shields.io/pypi/v/ailake.svg)](https://pypi.org/p/ailake)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
 
 Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
@@ -106,6 +107,7 @@ ailake/
 │       ├── lib.rs
 │       ├── metadata.rs         # metadata.json read/write
 │       ├── snapshot.rs         # Iceberg snapshot with vector stats
+│       ├── databricks.rs       # Databricks Unity Catalog — config builders (Azure/AWS/GCP)
 │       ├── glue.rs             # AWS Glue catalog backend
 │       ├── rest.rs             # REST catalog backend (Polaris, Nessie, Unity)
 │       ├── nessie.rs           # Nessie-specific extensions
