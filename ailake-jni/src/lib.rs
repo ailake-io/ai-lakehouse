@@ -399,7 +399,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
 
     let result = rt().block_on(async {
         let mut writer = TableWriter::create_or_open(catalog, store, policy, table).await?;
-        writer.write_batch_deferred(&batch, &req.embeddings).await?;
+        writer.write_batch(&batch, &req.embeddings).await?;
         writer.commit().await
     });
 

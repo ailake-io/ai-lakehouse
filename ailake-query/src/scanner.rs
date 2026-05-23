@@ -100,7 +100,16 @@ pub async fn search(
         let file_bytes: Bytes = store.get(&file_entry.path).await?;
         let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
 
-        if !reader.is_ailake_file() {
+        if file_entry.index_status == IndexStatus::Indexing || !reader.is_ailake_file() {
+            // HNSW not yet built — flat scan over raw vectors.
+            let (_, raw_vectors) = reader.read_parquet()?;
+            for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
+                all_results.push(SearchResult {
+                    row_id,
+                    distance,
+                    file_path: file_entry.path.clone(),
+                });
+            }
             continue;
         }
 

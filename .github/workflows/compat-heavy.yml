@@ -1,4 +1,4 @@
-name: Compat Heavy (Spark + Trino)
+name: Compat Heavy (Spark + Trino + JVM Plugins)
 
 on:
   workflow_dispatch:
@@ -135,3 +135,49 @@ jobs:
           print(f"NOTE: Full Iceberg connector test requires external catalog (HMS/Glue).")
           print(f"      Local fixture has {expected} AI-Lake rows ready at ./compat-fixture/")
           EOF
+
+  compat-jvm-plugins:
+    name: compat-jvm-plugins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Build ailake-jni cdylib
+        run: cargo build --release -p ailake-jni
+
+      - name: Build fixture
+        run: cargo run --example write_fixture -p ailake-query
+
+      - name: Validate C-ABI (Flink/Spark/Trino JNA bridge)
+        run: |
+          AILAKE_NATIVE_LIB=$(pwd)/target/release/libailake_jni.so \
+          AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
+            python3 tests/compat/check_jni_cabi.py
+
+      - name: Flink JNI integration test
+        run: |
+          gradle -p ailake-flink test \
+            -Dailake.native.lib=$(pwd)/target/release/libailake_jni.so
+
+      - name: Spark plugin integration test
+        run: |
+          LD_LIBRARY_PATH=$(pwd)/target/release \
+          AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
+          AILAKE_LIB_PATH=$(pwd)/target/release \
+            gradle -p spark-plugin test
+
+      - name: Trino plugin integration test
+        run: |
+          LD_LIBRARY_PATH=$(pwd)/target/release \
+          AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
+          AILAKE_LIB_PATH=$(pwd)/target/release \
+            gradle -p trino-plugin test

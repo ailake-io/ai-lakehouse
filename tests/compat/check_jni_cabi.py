@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+Validates the ailake-jni C-ABI: ailake_write_batch_json + ailake_search_json.
+This is the common interface used by all JVM connectors (Flink, Spark, Trino) via JNA.
+
+Library location (in order):
+  1. AILAKE_NATIVE_LIB env var — explicit path to the .so
+  2. AILAKE_LIB_PATH env var — directory containing libailake_jni.so
+  3. LD_LIBRARY_PATH (standard dynamic linker search)
+
+Optional side-effect:
+  If AILAKE_SPARK_TRINO_FIXTURE is set, writes a second fixture with table="table"
+  (the hardcoded table name used by AilakeNative.search in Spark/Trino bridges).
+
+Usage:
+    AILAKE_NATIVE_LIB=target/release/libailake_jni.so \\
+      python3 tests/compat/check_jni_cabi.py
+
+    AILAKE_NATIVE_LIB=target/release/libailake_jni.so \\
+    AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \\
+      python3 tests/compat/check_jni_cabi.py
+"""
+
+import sys
+import os
+import json
+import ctypes
+import math
+import tempfile
+import pathlib
+
+DIM = 8
+N = 20
+
+
+# ── Load library ───────────────────────────────────────────────────────────────
+
+def _load_lib():
+    explicit = os.environ.get("AILAKE_NATIVE_LIB")
+    if explicit:
+        return ctypes.CDLL(explicit)
+    lib_dir = os.environ.get("AILAKE_LIB_PATH")
+    if lib_dir:
+        for name in ("libailake_jni.so", "ailake_jni.dll", "libailake_jni.dylib"):
+            candidate = pathlib.Path(lib_dir) / name
+            if candidate.exists():
+                return ctypes.CDLL(str(candidate))
+    try:
+        return ctypes.CDLL("libailake_jni.so")
+    except OSError:
+        return None
+
+
+lib = _load_lib()
+if lib is None:
+    print("SKIP: libailake_jni.so not found.")
+    print("      Build with: cargo build --release -p ailake-jni")
+    print("      Then: AILAKE_NATIVE_LIB=target/release/libailake_jni.so python3 ...")
+    sys.exit(0)
+
+# Wire up C-ABI signatures
+lib.ailake_version.argtypes = []
+lib.ailake_version.restype = ctypes.c_char_p
+
+lib.ailake_write_batch_json.argtypes = [ctypes.c_char_p]
+lib.ailake_write_batch_json.restype = ctypes.c_void_p
+
+lib.ailake_search_json.argtypes = [ctypes.c_char_p]
+lib.ailake_search_json.restype = ctypes.c_void_p
+
+lib.ailake_free_string.argtypes = [ctypes.c_void_p]
+lib.ailake_free_string.restype = None
+
+print(f"ailake-jni version: {lib.ailake_version().decode()}")
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _call(fn, req: dict) -> dict:
+    ptr = fn(json.dumps(req).encode())
+    try:
+        return json.loads(ctypes.string_at(ptr).decode())
+    finally:
+        lib.ailake_free_string(ptr)
+
+
+def make_embedding(i: int) -> list:
+    v = [float(i * DIM + j + 1) for j in range(DIM)]
+    norm = math.sqrt(sum(x * x for x in v))
+    return [x / norm for x in v]
+
+
+def write_fixture(warehouse: str, namespace: str, table: str) -> None:
+    embeddings = [make_embedding(i) for i in range(N)]
+    resp = _call(lib.ailake_write_batch_json, {
+        "warehouse": warehouse,
+        "namespace": namespace,
+        "table": table,
+        "vec_col": "embedding",
+        "dim": DIM,
+        "metric": "cosine",
+        "precision": "f16",
+        "ids": list(range(N)),
+        "embeddings": embeddings,
+    })
+    assert resp.get("ok"), f"write_batch failed: {resp}"
+
+
+def search_fixture(warehouse: str, namespace: str, table: str, query_idx: int) -> list:
+    resp = _call(lib.ailake_search_json, {
+        "warehouse": warehouse,
+        "namespace": namespace,
+        "table": table,
+        "vec_col": "embedding",
+        "dim": DIM,
+        "query": make_embedding(query_idx),
+        "top_k": 5,
+        "ef_search": 50,
+    })
+    assert resp.get("ok"), f"search failed: {resp}"
+    return resp["results"]
+
+
+# ── Write + search in temp dir ─────────────────────────────────────────────────
+
+with tempfile.TemporaryDirectory() as tmp:
+    write_fixture(tmp, "default", "cabi_test")
+    print(f"PASS (write): {N} rows written to temp warehouse")
+
+    query_idx = 7
+    results = search_fixture(tmp, "default", "cabi_test", query_idx)
+    assert len(results) > 0, "FAIL: search returned empty results"
+    best = min(results, key=lambda r: r["distance"])
+    assert best["row_id"] == query_idx, (
+        f"FAIL: nearest row_id={best['row_id']}, expected {query_idx}"
+    )
+    print(f"PASS (search): top-1 row_id={best['row_id']} distance={best['distance']:.6f}")
+    print(f"      results={[(r['row_id'], round(r['distance'], 4)) for r in results]}")
+
+# ── Optional: write Spark/Trino fixture (table="table") ───────────────────────
+
+spark_trino_fixture = os.environ.get("AILAKE_SPARK_TRINO_FIXTURE")
+if spark_trino_fixture:
+    pathlib.Path(spark_trino_fixture).mkdir(parents=True, exist_ok=True)
+    write_fixture(spark_trino_fixture, "default", "table")
+    print(f"PASS (spark/trino fixture): written to {spark_trino_fixture}/default.db/table")
+
+print()
+print("PASS: ailake-jni C-ABI (write + search) — JNA bridge interface validated.")
