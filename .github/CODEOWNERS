@@ -1,0 +1,30 @@
+# Global owner — reviews all PRs by default
+* @ThiagoLange
+
+# Core format and file layout
+/ailake-core/    @ThiagoLange
+/ailake-file/    @ThiagoLange
+/ailake-parquet/ @ThiagoLange
+
+# Vector index and quantization
+/ailake-index/   @ThiagoLange
+/ailake-vec/     @ThiagoLange
+
+# Query engine and catalog
+/ailake-query/   @ThiagoLange
+/ailake-catalog/ @ThiagoLange
+/ailake-store/   @ThiagoLange
+
+# Language bindings
+/ailake-py/      @ThiagoLange
+/ailake-jni/     @ThiagoLange
+
+# CLI and benchmarks
+/ailake-cli/     @ThiagoLange
+/ailake-bench/   @ThiagoLange
+
+# CI and release
+/.github/        @ThiagoLange
+
+# Docs and specs
+/docs/           @ThiagoLange
