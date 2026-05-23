@@ -9,7 +9,7 @@ keywords    = ["vector", "simd", "quantization", "embedding", "distance"]
 categories  = ["algorithms", "data-structures", "science"]
 
 [dependencies]
-ailake-core = { path = "../ailake-core" }
+ailake-core = { path = "../ailake-core", version = "0.0.5" }
 half        = { workspace = true }
 lz4_flex    = { workspace = true }
 zstd        = { workspace = true }

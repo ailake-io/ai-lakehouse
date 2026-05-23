@@ -12,10 +12,10 @@ categories  = ["database", "api-bindings"]
 crate-type = ["cdylib"]
 
 [dependencies]
-ailake-query   = { path = "../ailake-query" }
-ailake-catalog = { path = "../ailake-catalog" }
-ailake-store   = { path = "../ailake-store" }
-ailake-core    = { path = "../ailake-core" }
+ailake-query   = { path = "../ailake-query", version = "0.0.5" }
+ailake-catalog = { path = "../ailake-catalog", version = "0.0.5" }
+ailake-store   = { path = "../ailake-store", version = "0.0.5" }
+ailake-core    = { path = "../ailake-core", version = "0.0.5" }
 uniffi         = { version = "0.27", features = ["scaffolding-ffi-buffer-fns"] }
 tokio          = { workspace = true }
 serde          = { workspace = true }

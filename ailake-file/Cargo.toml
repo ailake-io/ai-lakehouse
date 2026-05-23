@@ -9,10 +9,10 @@ keywords    = ["parquet", "vector", "hnsw", "iceberg", "lakehouse"]
 categories  = ["database", "encoding", "filesystem"]
 
 [dependencies]
-ailake-core    = { path = "../ailake-core" }
-ailake-parquet = { path = "../ailake-parquet" }
-ailake-vec     = { path = "../ailake-vec" }
-ailake-index   = { path = "../ailake-index" }
+ailake-core    = { path = "../ailake-core", version = "0.0.5" }
+ailake-parquet = { path = "../ailake-parquet", version = "0.0.5" }
+ailake-vec     = { path = "../ailake-vec", version = "0.0.5" }
+ailake-index   = { path = "../ailake-index", version = "0.0.5" }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
 thiserror      = { workspace = true }
