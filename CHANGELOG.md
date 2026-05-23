@@ -30,12 +30,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `.github/workflows/compat-heavy.yml`: Spark (PySpark), Trino (Docker), and JVM plugin integration tests on `workflow_dispatch`
 
 ### Fixed
+- `ailake-jni`: `ailake_write_batch_json` used `write_batch_deferred` — background HNSW task raced with immediate search, producing empty results; switched to synchronous `write_batch`
+- `ailake-query`: `scanner::search` now falls back to exact flat scan for `IndexStatus::Indexing` files and Parquet-only files missing the AILK footer, consistent with `SearchSession` behavior
 - `ailake-py`: missing deps (`ailake-catalog`, `ailake-store`, `arrow-array`, `arrow-schema`) added to `Cargo.toml`
 - `ailake-py`: `HadoopCatalog::new(path)` → `HadoopCatalog::new(Arc<dyn Store>, "")` (correct signature)
 - `ailake-py`: upgrade PyO3 0.21 → 0.22 for Python 3.13 support
 - `ailake-py`: `pymodule` fn ported to `Bound<'_, PyModule>` API (PyO3 0.22)
 - `ailake-py`: suppressed `clippy::useless_conversion` (false positive from PyO3 0.22 proc-macros)
+- `ailake-py`: removed nonexistent `python-source` from `pyproject.toml`
 - `ailake-catalog`: `HadoopCatalog::table_root()` with empty warehouse no longer produces absolute path (`/default.db/table`); now uses relative path (`default.db/table`)
+- CI: `maturin develop` replaced with `maturin build` + `pip install` (no editable install in CI)
 
 ### Changed
 - `CLAUDE.md` roadmap: Phase 1 all items marked complete; Phase 4 extended with IVF-PQ, GPU, Flink, SIMD, MemTable items
@@ -43,7 +47,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.5.0] — 2026-05-22
+## [0.0.5] — 2026-05-22
 
 ### Added
 - **IVF-PQ native index**: `IvfPqIndex` for S3 workloads — coarse IVF quantizer + PQ ADC; `TableWriter::write_batch_ivf_pq` (`ailake-index`)
@@ -76,7 +80,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.4.0] — 2026-05-21
+## [0.0.4] — 2026-05-21
 
 ### Added
 - **HNSW graph search**: `SearchSession` with configurable `ef` parameter and layered graph traversal (`ailake-index`)
@@ -103,7 +107,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.3.0] — 2026-05-19
+## [0.0.3] — 2026-05-19
 
 ### Added
 - **Trino `VectorScanConnector`**: full Trino plugin with `VectorScanMetadata`, `VectorScanSplitManager`, and `VectorScanRecordSetProvider` (`ailake-jni`)
@@ -120,7 +124,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.2.0] — 2026-05-19
+## [0.0.2] — 2026-05-19
 
 ### Added
 - **`ailake-store`**: unified object storage abstraction over S3, GCS, Azure Blob, and local filesystem via `object_store` 0.10
@@ -141,7 +145,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.1.0] — 2026-05-18
+## [0.0.1] — 2026-05-18
 
 ### Added
 - **AI-Lake file format**: self-contained Parquet file carrying row group data, HNSW graph, and centroid in a single physical file
@@ -163,9 +167,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-[Unreleased]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.5.0...HEAD
-[0.5.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/tag/v0.1.0
+[Unreleased]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.5...HEAD
+[0.0.5]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.4...v0.0.5
+[0.0.4]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.3...v0.0.4
+[0.0.3]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.2...v0.0.3
+[0.0.2]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.1...v0.0.2
+[0.0.1]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/tag/v0.0.1
