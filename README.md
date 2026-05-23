@@ -26,6 +26,33 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 | [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md) | Test strategy, fixtures, CI matrix, compat test harness |
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Rust conventions, error handling, unsafe policy, testing rules |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | ADR log — why each key choice was made |
+| [`SETUP.md`](./SETUP.md) | Local dev setup — run the full stack (MinIO, Nessie, compat tests) on your machine |
+
+## Install
+
+**Rust** (add to `Cargo.toml`):
+```toml
+[dependencies]
+ailake-core  = "0.0.5"
+ailake-query = "0.0.5"   # search(), TableWriter, ContextAssembler
+ailake-store = "0.0.5"   # S3 / GCS / Azure / local backends
+```
+
+**Python**:
+```bash
+pip install ailake
+```
+
+```python
+import ailake
+
+writer = ailake.TableWriter("s3://my-lake/docs/")
+writer.write_batch(arrow_table, embeddings=np.array(..., dtype=np.float32))
+writer.commit()
+
+results = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20)
+# returns a PyArrow RecordBatch — zero-copy to pandas / polars
+```
 
 ## Repository layout
 

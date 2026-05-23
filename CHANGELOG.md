@@ -12,6 +12,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - **PyPI publish workflow** (`.github/workflows/publish-pypi.yml`): builds `ailake` wheels on push of `v*` tags — Linux x86_64 + aarch64 (manylinux), macOS x86_64 + arm64, Windows x86_64, sdist; Python 3.9–3.13; publishes via `PYPI_API_TOKEN` secret
 - **`ailake-py/pyproject.toml` version sync**: aligned to `0.0.5` matching `Cargo.toml`
+- **`tests/tests/iceberg_compat.rs`**: three new integration tests verifying Iceberg Spec v2 compliance — `metadata_json_is_iceberg_spec_v2`, `parquet_files_have_valid_magic_and_ailake_section`, `data_files_referenced_in_metadata`
+- **README install section**: `cargo add` snippets for Rust and `pip install ailake` + Python usage example
+- **README quick orientation**: added `SETUP.md` link (local dev + compat test guide)
 - **`ailake-cli` subcommands implemented**: `create`, `insert`, `search`, `compact`, `info` — all wired to real engine calls (no longer stubs)
   - `create`: calls `catalog.create_table` with `VectorStoragePolicy`
   - `insert`: reads local Parquet via `ParquetVectorReader`, calls `TableWriter::write_batch` + `commit`
