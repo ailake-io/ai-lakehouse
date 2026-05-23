@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-vec"
-version     = "0.0.5"
+version     = "0.0.6"
 edition     = "2021"
 description = "Vector quantization (F32/F16/I8/PQ) and SIMD distance kernels for AI-Lake"
 license     = "MIT OR Apache-2.0"
@@ -9,7 +9,7 @@ keywords    = ["vector", "simd", "quantization", "embedding", "distance"]
 categories  = ["algorithms", "data-structures", "science"]
 
 [dependencies]
-ailake-core = { path = "../ailake-core", version = "0.0.5" }
+ailake-core = { path = "../ailake-core", version = "0.0.6" }
 half        = { workspace = true }
 lz4_flex    = { workspace = true }
 zstd        = { workspace = true }

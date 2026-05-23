@@ -9,9 +9,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.6] - 2026-05-23
+
 ### Added
 - **PyPI publish workflow** (`.github/workflows/publish-pypi.yml`): builds `ailake` wheels on push of `v*` tags — Linux x86_64 + aarch64 (manylinux), macOS x86_64 + arm64, Windows x86_64, sdist; Python 3.9–3.13; publishes via `PYPI_API_TOKEN` secret
-- **`ailake-py/pyproject.toml` version sync**: aligned to `0.0.5` matching `Cargo.toml`
+- **Version bump**: all crates `0.0.5` → `0.0.6`
 - **README PyPI badge**: `[![PyPI](https://img.shields.io/pypi/v/ailake.svg)]` — links to pypi.org/p/ailake
 - **README workspace map**: added `databricks.rs` entry under `ailake-catalog/src/` (was present in code and `CATALOG_BACKENDS.md` but missing from README tree)
 - **`tests/tests/iceberg_compat.rs`**: three new integration tests verifying Iceberg Spec v2 compliance — `metadata_json_is_iceberg_spec_v2`, `parquet_files_have_valid_magic_and_ailake_section`, `data_files_referenced_in_metadata`
