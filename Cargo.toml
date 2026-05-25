@@ -56,7 +56,7 @@ lz4_flex    = "0.11"
 zstd        = "0.13"
 
 # Catalog backends
-reqwest     = { version = "0.12", features = ["json"] }
+reqwest     = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Bindings
 pyo3        = { version = "0.22", features = ["extension-module"] }
