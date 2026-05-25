@@ -20,6 +20,10 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: auto
           rust-toolchain: stable
+          before-script-linux: |
+            rustc --version && cargo --version
+            yum install -y cmake3 nasm 2>/dev/null || dnf install -y cmake nasm 2>/dev/null || true
+            cmake3 --version 2>/dev/null || cmake --version 2>/dev/null || true
           command: build
           args: --release --out dist --find-interpreter --manifest-path ailake-py/Cargo.toml
 
