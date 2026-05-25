@@ -24,7 +24,7 @@ async-trait  = { workspace = true }
 thiserror    = { workspace = true }
 uuid         = { workspace = true }
 bytes        = { workspace = true }
-reqwest      = { workspace = true, optional = true }
+reqwest      = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 base64       = "0.22"
 apache-avro  = { workspace = true }
 
