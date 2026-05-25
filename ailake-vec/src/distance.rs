@@ -6,6 +6,7 @@ use half::f16;
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
+        #[cfg(feature = "avx512")]
         if is_x86_feature_detected!("avx512f") {
             return unsafe { avx512::dot(a, b) };
         }
@@ -23,6 +24,7 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
+        #[cfg(feature = "avx512")]
         if is_x86_feature_detected!("avx512f") {
             return unsafe { avx512::euclidean(a, b) };
         }
@@ -40,6 +42,7 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
+        #[cfg(feature = "avx512")]
         if is_x86_feature_detected!("avx512f") {
             return unsafe { avx512::cosine(a, b) };
         }
@@ -74,6 +77,7 @@ pub fn exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32 {
 pub fn cosine_distance_f16(a: &[f32], b: &[f16]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
+        #[cfg(feature = "avx512")]
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("f16c") {
             return unsafe { avx512::cosine_f16(a, b) };
         }
@@ -87,6 +91,7 @@ pub fn cosine_distance_f16(a: &[f32], b: &[f16]) -> f32 {
 pub fn euclidean_distance_f16(a: &[f32], b: &[f16]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
+        #[cfg(feature = "avx512")]
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("f16c") {
             return unsafe { avx512::euclidean_f16(a, b) };
         }
@@ -100,6 +105,7 @@ pub fn euclidean_distance_f16(a: &[f32], b: &[f16]) -> f32 {
 pub fn dot_product_f16(a: &[f32], b: &[f16]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
+        #[cfg(feature = "avx512")]
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("f16c") {
             return unsafe { avx512::dot_f16(a, b) };
         }
@@ -471,8 +477,10 @@ mod avx2_f16c {
 //
 // 16 f32/iter (vs 8 for AVX2). Runtime-detected — skipped on this machine
 // (no avx512f), active on Xeon Scalable, Zen 4+, and Intel Core 12th gen+.
+// Requires Rust ≥ 1.89 (AVX-512 intrinsics stabilised there). Gated behind
+// the `avx512` feature so the default/manylinux build always succeeds.
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
 mod avx512 {
     use half::f16;
     use std::arch::x86_64::*;

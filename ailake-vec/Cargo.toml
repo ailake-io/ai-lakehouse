@@ -8,6 +8,9 @@ repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
 keywords    = ["vector", "simd", "quantization", "embedding", "distance"]
 categories  = ["algorithms", "data-structures", "science"]
 
+[features]
+avx512 = []  # enable AVX-512 kernels; requires Rust ≥ 1.89 (intrinsics stabilised there)
+
 [dependencies]
 ailake-core = { path = "../ailake-core", version     = "0.0.7" }
 half        = { workspace = true }
