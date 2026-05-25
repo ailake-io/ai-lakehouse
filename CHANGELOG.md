@@ -9,22 +9,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.6] - 2026-05-25
+
 ### Added
 - **Automatic Iceberg schema propagation on `commit()`**: `TableWriter.commit()` now calls `arrow_schema_to_iceberg_update` internally — no manual metadata patching required. The generated `IcebergSchemaUpdate` carries all Arrow fields (including vector columns) correctly typed as Iceberg types (`"long"`, `"string"`, `"bytes"`, `"timestamptz"`, `List`, `Struct`, `Map`), plus a complete `schema.name-mapping.default` so PyIceberg resolves Parquet columns by name when field-ids are absent.
 - **`write_fixture` example simplified**: removed the 37-line manual metadata patch block; schema propagation is now entirely automatic via `commit()`.
 - **`ailake-py` Python SDK compat test expanded**: `check_ailake_py.py` covers cosine search (self-distance ≈ 0), `top_k` enforcement, euclidean metric, multi-batch before commit, `assemble_context` with chunk presence, token budget enforcement, and `dedup_threshold` parameter acceptance; added error-path coverage (missing table → exception). CI job pins `python-version: '3.12'` and builds the wheel with `--interpreter python3.12`.
-
-### Changed
-- **`compat-heavy.yml` now triggers on `push: [main]` and weekly schedule** in addition to `workflow_dispatch`. Spark job upgraded to real Spark+Iceberg integration test (`iceberg-spark-runtime-3.5_2.12:1.5.2`, `HadoopCatalog` filesystem, SQL COUNT + MIN/MAX + schema validation). Trino job rewritten to use `tabulario/iceberg-rest:0.10.0` as REST catalog (wraps HadoopCatalog internally) + `trinodb/trino:436` via Docker, verified via both PyIceberg REST scan and Trino Python client.
-
-### Fixed
-- **Parquet `field_id` stamping**: all columns (batch columns + vector column) now carry the `PARQUET:field_id` metadata key set to their 1-based Iceberg field ID. Previously, field IDs were `-1` (unset), causing failures with strict readers like Spark with `spark.sql.iceberg.check-nullability=true`. The vector column field ID is always `batch_column_count + 1`.
-- **`schema.name-mapping.default` generated for all Arrow types**: previous implementation only mapped scalar types; the mapping now correctly handles `List` / `LargeList` / `FixedSizeList`, `Struct`, `Map`, `Timestamp` with and without timezone, and `FixedSizeBinary`. Unknown types fall back to `"binary"`. Returns `serde_json::Value` (not `String`) so nested types serialize as JSON objects, not escaped strings.
-
 - **`HadoopCatalog` versioned metadata layout**: catalog now writes `vN.metadata.json` + `version-hint.text` instead of `current.json`, matching Iceberg Hadoop catalog spec and enabling `PyIceberg.StaticTable.from_metadata` to locate the current metadata file via the version hint
 - **Absolute table location in metadata**: `create_table` now records the full absolute path as `location` (and `manifest-list` paths) when `write_fixture` passes the absolute warehouse path; PyIceberg and other readers can now resolve data file paths without additional config
 - **Default schema entry in `IcebergMetadata`**: `schemas` array now includes `[{"schema-id": 0, "type": "struct", "fields": []}]` so PyIceberg's `StaticTable` does not fail with `current-schema-id 0 can't be found in the schemas` before reaching the manifest stage
-- **Phase 2 Avro manifests — full PyIceberg `StaticTable.scan()` PASS**: replaced apache-avro 0.16 writer (strips `field-id` from schema JSON) with raw Avro OCF writer (`avro_raw.rs`) that embeds schema verbatim; manifest files now carry `logicalType: "map"` on map-typed fields and correct field-ids per Iceberg spec; `write_fixture` patches metadata after commit to add proper Iceberg schema fields (`id`, `text`, `embedding`) and `schema.name-mapping.default` property so PyIceberg can resolve Parquet columns without embedded field-ids; `check_pyiceberg.py` now reports `PASS (StaticTable)` with full scan of 1000 rows
+- **Phase 2 Avro manifests — full PyIceberg `StaticTable.scan()` PASS**: replaced apache-avro 0.16 writer (strips `field-id` from schema JSON) with raw Avro OCF writer (`avro_raw.rs`) that embeds schema verbatim; manifest files now carry `logicalType: "map"` on map-typed fields and correct field-ids per Iceberg spec; `check_pyiceberg.py` reports `PASS (StaticTable)` with full scan of 1000 rows
+- **PyPI publish workflow** (`.github/workflows/publish-pypi.yml`): builds `ailake` wheels on push of `v*` tags — Linux x86_64 + aarch64 (manylinux), macOS x86_64 + arm64, Windows x86_64, sdist; Python 3.9–3.13; publishes via `PYPI_API_TOKEN` secret
+- **Version bump**: all crates `0.0.5` → `0.0.6`
+- **README**: PyPI badge, `pip install ailake` snippet, `SETUP.md` link, workspace map updated with `databricks.rs`
+- **`tests/tests/iceberg_compat.rs`**: three integration tests — `metadata_json_is_iceberg_spec_v2`, `parquet_files_have_valid_magic_and_ailake_section`, `data_files_referenced_in_metadata`
+- **`ailake-cli` subcommands implemented**: `create`, `insert`, `search`, `compact`, `info` — wired to real engine calls
+- **`ailake-py` re-enabled**: PyO3 bindings compile and pass `check_ailake_py.py` end-to-end
+- **Compatibility test suite** (`tests/compat/`): `check_pyarrow.py`, `check_duckdb.py`, `check_pyiceberg.py`, `check_ailake_py.py`, `check_jni_cabi.py`; `write_fixture` example generates deterministic 1000-row fixture; Flink/Spark/Trino JNA integration tests in Gradle subprojects
 
 ### Fixed
 - `HadoopCatalog::create_table`: `location` field was computed as `/{namespace}.db/{table}` (leading `/` with empty warehouse) instead of using `table_root()` — now consistent
@@ -34,53 +37,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `avro_manifest.rs`: all six map-typed manifest fields (`column_sizes`, `value_counts`, `null_value_counts`, `nan_value_counts`, `lower_bounds`, `upper_bounds`) now carry `"logicalType": "map"` in the Avro schema so PyIceberg resolves them as `MapType` instead of `list`
 - `avro_raw.rs`: removed trailing zero-count block terminator from `write_avro_container`; apache-avro Reader handles EOF at block-count read (clean) but errors on block-byte-count read after count=0 (UnexpectedEof)
 - `HadoopCatalog::commit_snapshot`: data file paths are prefixed with warehouse root only when warehouse is an absolute path (starts with `/` or contains `://`); relative warehouse strings (used in unit tests) keep paths unchanged
-
----
-
-## [0.0.6] - 2026-05-23
-
-### Added
-- **PyPI publish workflow** (`.github/workflows/publish-pypi.yml`): builds `ailake` wheels on push of `v*` tags — Linux x86_64 + aarch64 (manylinux), macOS x86_64 + arm64, Windows x86_64, sdist; Python 3.9–3.13; publishes via `PYPI_API_TOKEN` secret
-- **Version bump**: all crates `0.0.5` → `0.0.6`
-- **README PyPI badge**: `[![PyPI](https://img.shields.io/pypi/v/ailake.svg)]` — links to pypi.org/p/ailake
-- **README workspace map**: added `databricks.rs` entry under `ailake-catalog/src/` (was present in code and `CATALOG_BACKENDS.md` but missing from README tree)
-- **`tests/tests/iceberg_compat.rs`**: three new integration tests verifying Iceberg Spec v2 compliance — `metadata_json_is_iceberg_spec_v2`, `parquet_files_have_valid_magic_and_ailake_section`, `data_files_referenced_in_metadata`
-- **README install section**: `cargo add` snippets for Rust and `pip install ailake` + Python usage example
-- **README quick orientation**: added `SETUP.md` link (local dev + compat test guide)
-- **`ailake-cli` subcommands implemented**: `create`, `insert`, `search`, `compact`, `info` — all wired to real engine calls (no longer stubs)
-  - `create`: calls `catalog.create_table` with `VectorStoragePolicy`
-  - `insert`: reads local Parquet via `ParquetVectorReader`, calls `TableWriter::write_batch` + `commit`
-  - `search`: parses comma-separated query vector, calls `ailake_query::search`, prints ranked results
-  - `compact`: `CompactionPlanner` selects small files, `CompactionExecutor` merges, commits `Replace` snapshot
-  - `info`: aggregates file count, row count, size, indexed shard count from catalog
-- **`ailake-py` re-enabled in workspace**: fixed compilation after PyO3 and API drift
-- **Compatibility test suite**: automated compat checks for PyArrow, DuckDB, PyIceberg, and ailake-py in CI; Spark + Trino + JVM plugins via manual `workflow_dispatch`
-  - `tests/compat/check_pyarrow.py`: verifies AI-Lake Parquet files are readable by standard `pyarrow.parquet`
-  - `tests/compat/check_duckdb.py`: verifies `parquet_scan()` compatibility and id-range integrity
-  - `tests/compat/check_pyiceberg.py`: verifies Iceberg Spec v2 metadata via `StaticTable.from_metadata`; falls back to JSON validation
-  - `tests/compat/check_ailake_py.py`: verifies ailake Python SDK — `TableWriter.write_batch` → `commit` → `search` → `assemble_context`
-  - `tests/compat/check_jni_cabi.py`: verifies ailake-jni C-ABI via ctypes — `ailake_write_batch_json` + `ailake_search_json`; validates the interface used by all JVM connectors (Flink, Spark, Trino) via JNA
-  - `ailake-query/examples/write_fixture`: generates a deterministic 1000-row fixture used by all compat tests
-  - `ailake-flink/src/test/.../AilakeJniIntegrationTest.kt`: Flink JNA integration test via `AilakeNativeLoader.writeBatch` + `search`
-  - `spark-plugin/src/test/.../AilakeNativeIntegrationTest.scala`: Spark `AilakeNative.search` integration test with real native lib
-  - `trino-plugin/src/test/.../AilakeNativeIntegrationTest.kt`: Trino `AilakeNative.search` integration test with real native lib
-  - `.github/workflows/compat-heavy.yml`: Spark (PySpark), Trino (Docker), and JVM plugin integration tests on `workflow_dispatch`
-
-### Fixed
 - `ailake-jni`: `ailake_write_batch_json` used `write_batch_deferred` — background HNSW task raced with immediate search, producing empty results; switched to synchronous `write_batch`
 - `ailake-query`: `scanner::search` now falls back to exact flat scan for `IndexStatus::Indexing` files and Parquet-only files missing the AILK footer, consistent with `SearchSession` behavior
-- `ailake-py`: missing deps (`ailake-catalog`, `ailake-store`, `arrow-array`, `arrow-schema`) added to `Cargo.toml`
-- `ailake-py`: `HadoopCatalog::new(path)` → `HadoopCatalog::new(Arc<dyn Store>, "")` (correct signature)
-- `ailake-py`: upgrade PyO3 0.21 → 0.22 for Python 3.13 support
-- `ailake-py`: `pymodule` fn ported to `Bound<'_, PyModule>` API (PyO3 0.22)
-- `ailake-py`: suppressed `clippy::useless_conversion` (false positive from PyO3 0.22 proc-macros)
-- `ailake-py`: removed nonexistent `python-source` from `pyproject.toml`
-- `ailake-catalog`: `HadoopCatalog::table_root()` with empty warehouse no longer produces absolute path (`/default.db/table`); now uses relative path (`default.db/table`)
-- CI: `maturin develop` replaced with `maturin build` + `pip install` (no editable install in CI)
+- `ailake-py`: missing deps (`ailake-catalog`, `ailake-store`, `arrow-array`, `arrow-schema`) added to `Cargo.toml`; `HadoopCatalog::new` signature corrected; upgraded PyO3 0.21 → 0.22 (`Bound` API, Python 3.13 support); `maturin develop` replaced with `maturin build` + `pip install` in CI
+- `ailake-catalog`: `HadoopCatalog::table_root()` with empty warehouse no longer produces absolute path
 
 ### Changed
+- **`compat-heavy.yml` now triggers on `push: [main]` and weekly schedule** in addition to `workflow_dispatch`. Spark job upgraded to real Spark+Iceberg integration test (`iceberg-spark-runtime-3.5_2.12:1.5.2`). Trino job rewritten to use `tabulario/iceberg-rest:0.10.0` + `trinodb/trino:436` via Docker.
 - `CLAUDE.md` roadmap: Phase 1 all items marked complete; Phase 4 extended with IVF-PQ, GPU, Flink, SIMD, MemTable items
-- CI: added `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg` jobs to `ci.yml`
+- CI: added `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg`, `compat-ailake-py` jobs to `ci.yml`; Python pinned to 3.12 for wheel builds
 
 ---
 
