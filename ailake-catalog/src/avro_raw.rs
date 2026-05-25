@@ -64,8 +64,7 @@ pub fn encode_empty_array(buf: &mut Vec<u8>) {
 
 const AVRO_MAGIC: &[u8] = &[0x4F, 0x62, 0x6A, 0x01]; // "Obj\x01"
 const SYNC_MARKER: &[u8] = &[
-    0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
-    0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+    0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
 ];
 
 /// Write an Avro Object Container File with the given schema JSON (verbatim)
@@ -76,7 +75,11 @@ const SYNC_MARKER: &[u8] = &[
 ///
 /// `extra_meta` allows callers to inject additional Avro file metadata entries
 /// (e.g. Iceberg manifest fields: schema, partition-spec, format-version).
-pub fn write_avro_container(schema_json: &str, extra_meta: &[(&str, &[u8])], records: &[Vec<u8>]) -> Vec<u8> {
+pub fn write_avro_container(
+    schema_json: &str,
+    extra_meta: &[(&str, &[u8])],
+    records: &[Vec<u8>],
+) -> Vec<u8> {
     let mut buf = Vec::new();
 
     // Magic
@@ -113,7 +116,7 @@ pub fn write_avro_container(schema_json: &str, extra_meta: &[(&str, &[u8])], rec
     if !records.is_empty() {
         let block: Vec<u8> = records.iter().flat_map(|r| r.iter().copied()).collect();
         encode_long(records.len() as i64, &mut buf); // object count
-        encode_long(block.len() as i64, &mut buf);   // byte count
+        encode_long(block.len() as i64, &mut buf); // byte count
         buf.extend_from_slice(&block);
         buf.extend_from_slice(SYNC_MARKER);
     }

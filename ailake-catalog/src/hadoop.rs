@@ -6,7 +6,9 @@ use std::sync::Arc;
 use ailake_core::{AilakeError, AilakeResult};
 use async_trait::async_trait;
 
-use crate::avro_manifest::{read_manifest_file, read_manifest_list, write_manifest_file, write_manifest_list_multi};
+use crate::avro_manifest::{
+    read_manifest_file, read_manifest_list, write_manifest_file, write_manifest_list_multi,
+};
 use crate::metadata::{IcebergMetadata, IcebergSnapshot};
 use crate::provider::{
     CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, TableIdent, TableMetadata,
@@ -41,7 +43,11 @@ impl HadoopCatalog {
     }
 
     fn versioned_metadata_path(&self, table: &TableIdent, version: u32) -> String {
-        format!("{}/metadata/v{}.metadata.json", self.table_root(table), version)
+        format!(
+            "{}/metadata/v{}.metadata.json",
+            self.table_root(table),
+            version
+        )
     }
 
     async fn current_version(&self, table: &TableIdent) -> AilakeResult<u32> {
@@ -67,10 +73,16 @@ impl HadoopCatalog {
         let next = self.current_version(table).await? + 1;
         let json = meta.to_json()?;
         self.store
-            .put(&self.versioned_metadata_path(table, next), Bytes::from(json.into_bytes()))
+            .put(
+                &self.versioned_metadata_path(table, next),
+                Bytes::from(json.into_bytes()),
+            )
             .await?;
         self.store
-            .put(&self.version_hint_path(table), Bytes::from(next.to_string()))
+            .put(
+                &self.version_hint_path(table),
+                Bytes::from(next.to_string()),
+            )
             .await
     }
 }
@@ -110,23 +122,26 @@ impl CatalogProvider for HadoopCatalog {
         // with the warehouse root only when the warehouse is itself an absolute path
         // (starts with '/' or contains a URI scheme). Relative warehouse names (e.g. in
         // unit tests) are left as-is so the store can resolve them normally.
-        let warehouse_prefix: Option<&str> = if self.warehouse.starts_with('/')
-            || self.warehouse.contains("://")
-        {
-            Some(&self.warehouse)
-        } else {
-            None
-        };
-        let abs_files: Vec<DataFileEntry> = snapshot.files.iter().map(|f| {
-            let path = if f.path.starts_with('/') || f.path.contains("://") {
-                f.path.clone()
-            } else if let Some(prefix) = warehouse_prefix {
-                format!("{}/{}", prefix, f.path)
+        let warehouse_prefix: Option<&str> =
+            if self.warehouse.starts_with('/') || self.warehouse.contains("://") {
+                Some(&self.warehouse)
             } else {
-                f.path.clone()
+                None
             };
-            DataFileEntry { path, ..f.clone() }
-        }).collect();
+        let abs_files: Vec<DataFileEntry> = snapshot
+            .files
+            .iter()
+            .map(|f| {
+                let path = if f.path.starts_with('/') || f.path.contains("://") {
+                    f.path.clone()
+                } else if let Some(prefix) = warehouse_prefix {
+                    format!("{}/{}", prefix, f.path)
+                } else {
+                    f.path.clone()
+                };
+                DataFileEntry { path, ..f.clone() }
+            })
+            .collect();
         let added_rows: i64 = abs_files.iter().map(|f| f.record_count as i64).sum();
         let manifest_file_path = format!("{}/metadata/{}-m0.avro", table_root, snap_id);
         let manifest_bytes = write_manifest_file(
@@ -158,9 +173,7 @@ impl CatalogProvider for HadoopCatalog {
         let manifest_list_path = format!("{}/metadata/snap-{}-1.avro", table_root, snap_id);
         // Build manifest list from all manifests
         let ml_bytes = write_manifest_list_multi(&all_manifests, snap_id, seq, added_rows);
-        self.store
-            .put(&manifest_list_path, ml_bytes)
-            .await?;
+        self.store.put(&manifest_list_path, ml_bytes).await?;
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -212,15 +225,15 @@ impl CatalogProvider for HadoopCatalog {
 
         // Read Avro manifest list → manifest file paths
         let ml_bytes = self.store.get(&snap.manifest_list).await?;
-        let manifest_paths = read_manifest_list(&ml_bytes)
-            .map_err(|e| AilakeError::Catalog(e.to_string()))?;
+        let manifest_paths =
+            read_manifest_list(&ml_bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
 
         // Read each manifest file → data file entries (with AI-Lake metadata from key_metadata)
         let mut entries: Vec<DataFileEntry> = Vec::new();
         for mpath in manifest_paths {
             let mf_bytes = self.store.get(&mpath).await?;
-            let file_entries = read_manifest_file(&mf_bytes)
-                .map_err(|e| AilakeError::Catalog(e.to_string()))?;
+            let file_entries =
+                read_manifest_file(&mf_bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
             entries.extend(file_entries);
         }
         Ok(entries)

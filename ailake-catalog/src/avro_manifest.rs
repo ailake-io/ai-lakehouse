@@ -107,23 +107,23 @@ pub fn write_manifest_file(
     let mut records: Vec<Vec<u8>> = Vec::with_capacity(files.len());
     for f in files {
         let mut rec = Vec::new();
-        encode_int(1, &mut rec);                                   // status=ADDED
-        encode_union_long(1, snapshot_id, &mut rec);               // snapshot_id
-        encode_union_long(1, sequence_number, &mut rec);           // sequence_number
-        encode_union_long(1, sequence_number, &mut rec);           // file_sequence_number
-        // data_file (nested record — no tag bytes in Avro binary)
-        encode_int(0, &mut rec);                                   // content=DATA
-        encode_string(&f.path, &mut rec);                          // file_path
-        encode_string("PARQUET", &mut rec);                        // file_format
-        // partition r102: empty record → 0 bytes
-        encode_long(f.record_count as i64, &mut rec);              // record_count
-        encode_long(f.file_size_bytes as i64, &mut rec);           // file_size_in_bytes
-        encode_union_null(&mut rec);                               // column_sizes
-        encode_union_null(&mut rec);                               // value_counts
-        encode_union_null(&mut rec);                               // null_value_counts
-        encode_union_null(&mut rec);                               // nan_value_counts
-        encode_union_null(&mut rec);                               // lower_bounds
-        encode_union_null(&mut rec);                               // upper_bounds
+        encode_int(1, &mut rec); // status=ADDED
+        encode_union_long(1, snapshot_id, &mut rec); // snapshot_id
+        encode_union_long(1, sequence_number, &mut rec); // sequence_number
+        encode_union_long(1, sequence_number, &mut rec); // file_sequence_number
+                                                         // data_file (nested record — no tag bytes in Avro binary)
+        encode_int(0, &mut rec); // content=DATA
+        encode_string(&f.path, &mut rec); // file_path
+        encode_string("PARQUET", &mut rec); // file_format
+                                            // partition r102: empty record → 0 bytes
+        encode_long(f.record_count as i64, &mut rec); // record_count
+        encode_long(f.file_size_bytes as i64, &mut rec); // file_size_in_bytes
+        encode_union_null(&mut rec); // column_sizes
+        encode_union_null(&mut rec); // value_counts
+        encode_union_null(&mut rec); // null_value_counts
+        encode_union_null(&mut rec); // nan_value_counts
+        encode_union_null(&mut rec); // lower_bounds
+        encode_union_null(&mut rec); // upper_bounds
         let ext = AilakeEntryExt {
             centroid_b64: f.centroid_b64.clone(),
             radius: f.radius,
@@ -138,10 +138,10 @@ pub fn write_manifest_file(
             Ok(bytes) => encode_union_bytes(1, &bytes, &mut rec), // key_metadata=bytes
             Err(_) => encode_union_null(&mut rec),                // key_metadata=null
         }
-        encode_union_null(&mut rec);                               // split_offsets
-        encode_union_null(&mut rec);                               // equality_ids
-        encode_union_null(&mut rec);                               // sort_order_id
-        // (encode_empty_array not needed here — only arrays that aren't union-wrapped)
+        encode_union_null(&mut rec); // split_offsets
+        encode_union_null(&mut rec); // equality_ids
+        encode_union_null(&mut rec); // sort_order_id
+                                     // (encode_empty_array not needed here — only arrays that aren't union-wrapped)
         let _ = encode_empty_array; // suppress unused warning
         records.push(rec);
     }
@@ -153,7 +153,11 @@ pub fn write_manifest_file(
         ("format-version", b"2"),
         ("content", b"data"),
     ];
-    Bytes::from(write_avro_container(MANIFEST_ENTRY_SCHEMA_STR, extra_meta, &records))
+    Bytes::from(write_avro_container(
+        MANIFEST_ENTRY_SCHEMA_STR,
+        extra_meta,
+        &records,
+    ))
 }
 
 /// Write an Iceberg Spec v2 manifest list (Avro) pointing to one manifest file.
@@ -189,24 +193,28 @@ pub fn write_manifest_list_multi(
     for (i, (path, len)) in manifests.iter().enumerate() {
         let rows = if i + 1 == n { added_rows } else { 0i64 };
         let mut rec = Vec::new();
-        encode_string(path, &mut rec);           // manifest_path
-        encode_long(*len, &mut rec);             // manifest_length
-        encode_int(0, &mut rec);                 // partition_spec_id
-        encode_int(0, &mut rec);                 // content=DATA
-        encode_long(sequence_number, &mut rec);  // sequence_number
-        encode_long(sequence_number, &mut rec);  // min_sequence_number
-        encode_long(snapshot_id, &mut rec);      // added_snapshot_id
-        encode_int(1, &mut rec);                 // added_data_files_count
-        encode_int(0, &mut rec);                 // existing_data_files_count
-        encode_int(0, &mut rec);                 // deleted_data_files_count
-        encode_long(rows, &mut rec);             // added_rows_count
-        encode_long(0, &mut rec);                // existing_rows_count
-        encode_long(0, &mut rec);                // deleted_rows_count
-        encode_empty_array(&mut rec);            // partitions (empty array)
+        encode_string(path, &mut rec); // manifest_path
+        encode_long(*len, &mut rec); // manifest_length
+        encode_int(0, &mut rec); // partition_spec_id
+        encode_int(0, &mut rec); // content=DATA
+        encode_long(sequence_number, &mut rec); // sequence_number
+        encode_long(sequence_number, &mut rec); // min_sequence_number
+        encode_long(snapshot_id, &mut rec); // added_snapshot_id
+        encode_int(1, &mut rec); // added_data_files_count
+        encode_int(0, &mut rec); // existing_data_files_count
+        encode_int(0, &mut rec); // deleted_data_files_count
+        encode_long(rows, &mut rec); // added_rows_count
+        encode_long(0, &mut rec); // existing_rows_count
+        encode_long(0, &mut rec); // deleted_rows_count
+        encode_empty_array(&mut rec); // partitions (empty array)
         records.push(rec);
     }
 
-    Bytes::from(write_avro_container(MANIFEST_LIST_SCHEMA_STR, &[], &records))
+    Bytes::from(write_avro_container(
+        MANIFEST_LIST_SCHEMA_STR,
+        &[],
+        &records,
+    ))
 }
 
 /// Read DataFileEntry records from an Iceberg manifest file (Avro).
@@ -223,8 +231,10 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                 .find(|(k, _)| k == "data_file")
                 .and_then(|(_, v)| {
                     if let Value::Record(df_fields) = v {
-                        df_fields.iter().find(|(k, _)| k == "key_metadata").and_then(|(_, v)| {
-                            match v {
+                        df_fields
+                            .iter()
+                            .find(|(k, _)| k == "key_metadata")
+                            .and_then(|(_, v)| match v {
                                 Value::Union(_, inner) => {
                                     if let Value::Bytes(b) = inner.as_ref() {
                                         Some(b.clone())
@@ -234,28 +244,48 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                                 }
                                 Value::Bytes(b) => Some(b.clone()),
                                 _ => None,
-                            }
-                        })
+                            })
                     } else {
                         None
                     }
                 });
 
-            let data_file = fields.iter().find(|(k, _)| k == "data_file").map(|(_, v)| v);
+            let data_file = fields
+                .iter()
+                .find(|(k, _)| k == "data_file")
+                .map(|(_, v)| v);
             if let Some(Value::Record(df_fields)) = data_file {
                 let path = df_fields
                     .iter()
                     .find(|(k, _)| k == "file_path")
-                    .and_then(|(_, v)| if let Value::String(s) = v { Some(s.clone()) } else { None });
+                    .and_then(|(_, v)| {
+                        if let Value::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    });
                 let record_count = df_fields
                     .iter()
                     .find(|(k, _)| k == "record_count")
-                    .and_then(|(_, v)| if let Value::Long(n) = v { Some(*n as u64) } else { None })
+                    .and_then(|(_, v)| {
+                        if let Value::Long(n) = v {
+                            Some(*n as u64)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(0);
                 let file_size_bytes = df_fields
                     .iter()
                     .find(|(k, _)| k == "file_size_in_bytes")
-                    .and_then(|(_, v)| if let Value::Long(n) = v { Some(*n as u64) } else { None })
+                    .and_then(|(_, v)| {
+                        if let Value::Long(n) = v {
+                            Some(*n as u64)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(0);
 
                 if let Some(path) = path {
@@ -274,8 +304,14 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                         hnsw_len: ext.as_ref().and_then(|e| e.hnsw_len),
                         vector_column: ext.as_ref().and_then(|e| e.vector_column.clone()),
                         vector_dim: ext.as_ref().and_then(|e| e.vector_dim),
-                        extra_vector_indexes: ext.as_ref().map(|e| e.extra_vector_indexes.clone()).unwrap_or_default(),
-                        index_status: ext.as_ref().map(|e| e.index_status.clone()).unwrap_or_default(),
+                        extra_vector_indexes: ext
+                            .as_ref()
+                            .map(|e| e.extra_vector_indexes.clone())
+                            .unwrap_or_default(),
+                        index_status: ext
+                            .as_ref()
+                            .map(|e| e.index_status.clone())
+                            .unwrap_or_default(),
                     });
                 }
             }
@@ -353,7 +389,13 @@ pub fn read_manifest_list(data: &[u8]) -> apache_avro::AvroResult<Vec<String>> {
             let path = fields
                 .iter()
                 .find(|(k, _)| k == "manifest_path")
-                .and_then(|(_, v)| if let Value::String(s) = v { Some(s.clone()) } else { None });
+                .and_then(|(_, v)| {
+                    if let Value::String(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                });
             if let Some(p) = path {
                 results.push(p);
             }
@@ -361,4 +403,3 @@ pub fn read_manifest_list(data: &[u8]) -> apache_avro::AvroResult<Vec<String>> {
     }
     Ok(results)
 }
-
