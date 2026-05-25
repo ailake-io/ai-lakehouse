@@ -1,7 +1,12 @@
 [package]
-name = "ailake-core"
-version = "0.1.0"
-edition = "2021"
+name        = "ailake-core"
+version     = "0.0.6"
+edition     = "2021"
+description = "Core types and traits for the AI-Lake vector-native Lakehouse format"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+keywords    = ["iceberg", "vector", "lakehouse", "embedding", "parquet"]
+categories  = ["database", "data-structures", "encoding"]
 
 [dependencies]
 serde       = { workspace = true }

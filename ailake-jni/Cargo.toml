@@ -1,16 +1,21 @@
 [package]
-name = "ailake-jni"
-version = "0.1.0"
-edition = "2021"
+name        = "ailake-jni"
+version     = "0.0.6"
+edition     = "2021"
+description = "JNI C-ABI bindings for AI-Lake — Spark, Trino, and Flink connectors via JNA/uniffi"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+keywords    = ["jni", "spark", "trino", "vector-search", "lakehouse"]
+categories  = ["database", "api-bindings"]
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-ailake-query   = { path = "../ailake-query" }
-ailake-catalog = { path = "../ailake-catalog" }
-ailake-store   = { path = "../ailake-store" }
-ailake-core    = { path = "../ailake-core" }
+ailake-query   = { path = "../ailake-query", version = "0.0.6" }
+ailake-catalog = { path = "../ailake-catalog", version = "0.0.6" }
+ailake-store   = { path = "../ailake-store", version = "0.0.6" }
+ailake-core    = { path = "../ailake-core", version = "0.0.6" }
 uniffi         = { version = "0.27", features = ["scaffolding-ffi-buffer-fns"] }
 tokio          = { workspace = true }
 serde          = { workspace = true }

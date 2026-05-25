@@ -1,10 +1,15 @@
 [package]
-name = "ailake-store"
-version = "0.1.0"
-edition = "2021"
+name        = "ailake-store"
+version     = "0.0.6"
+edition     = "2021"
+description = "Unified object storage abstraction (S3, GCS, Azure, local) for AI-Lake"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+keywords    = ["s3", "gcs", "azure", "object-storage", "lakehouse"]
+categories  = ["filesystem", "database", "network-programming"]
 
 [dependencies]
-ailake-core  = { path = "../ailake-core" }
+ailake-core  = { path = "../ailake-core", version = "0.0.6" }
 tokio        = { workspace = true }
 bytes        = { workspace = true }
 async-trait  = { workspace = true }

@@ -1,5 +1,10 @@
 # AI-Lake Format
 
+[![CI](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/ailake-core.svg)](https://crates.io/crates/ailake-core)
+[![PyPI](https://img.shields.io/pypi/v/ailake.svg)](https://pypi.org/p/ailake)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
+
 Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 
 **Single self-contained file**: tabular data, embeddings, and HNSW index live together in one Parquet-extended file at the S3 layer. ACID transactions via Iceberg. Any Iceberg-compatible framework reads AI-Lake tables without modification — the vector index in the file footer is invisible to standard Parquet readers.
@@ -22,6 +27,33 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 | [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md) | Test strategy, fixtures, CI matrix, compat test harness |
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Rust conventions, error handling, unsafe policy, testing rules |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | ADR log — why each key choice was made |
+| [`SETUP.md`](./SETUP.md) | Local dev setup — run the full stack (MinIO, Nessie, compat tests) on your machine |
+
+## Install
+
+**Rust** (add to `Cargo.toml`):
+```toml
+[dependencies]
+ailake-core  = "0.0.6"
+ailake-query = "0.0.6"   # search(), TableWriter, ContextAssembler
+ailake-store = "0.0.6"   # S3 / GCS / Azure / local backends
+```
+
+**Python**:
+```bash
+pip install ailake
+```
+
+```python
+import ailake
+
+writer = ailake.TableWriter("s3://my-lake/docs/")
+writer.write_batch(arrow_table, embeddings=np.array(..., dtype=np.float32))
+writer.commit()
+
+results = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20)
+# returns a PyArrow RecordBatch — zero-copy to pandas / polars
+```
 
 ## Repository layout
 
@@ -75,6 +107,7 @@ ailake/
 │       ├── lib.rs
 │       ├── metadata.rs         # metadata.json read/write
 │       ├── snapshot.rs         # Iceberg snapshot with vector stats
+│       ├── databricks.rs       # Databricks Unity Catalog — config builders (Azure/AWS/GCP)
 │       ├── glue.rs             # AWS Glue catalog backend
 │       ├── rest.rs             # REST catalog backend (Polaris, Nessie, Unity)
 │       ├── nessie.rs           # Nessie-specific extensions

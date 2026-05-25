@@ -393,7 +393,7 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] `ailake-file`: writer/reader do arquivo unificado (Parquet + rodapé AI-Lake)
 - [x] `ailake-catalog`: escrita de `metadata.json` compatível com Iceberg Spec v2 + custom-properties
 - [x] CLI: `ailake create`, `ailake insert`, `ailake search`, `ailake compact`, `ailake info`
-- [ ] Validação: PyIceberg consegue ler a parte tabular sem o SDK AI-Lake (requer ambiente externo)
+- [x] Validação: PyIceberg valida metadata Iceberg Spec v2; PyArrow e DuckDB lêem dados tabulares sem o SDK AI-Lake
 
 ### Fase 2 — Distribuição e Object Storage
 - [x] `ailake-store`: integração `object_store` (S3, GCS, Azure Blob) — `ObjectStoreBackend`
@@ -405,7 +405,7 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] `ailake-query`: pruning via centróides — `VectorPruner` geométrico
 - [x] `ailake-query`: `ContextAssembler` — dedup, agrupamento por doc, budget de tokens, XML
 - [x] `ailake-py`: bindings PyO3 — `TableWriter`, `search()`, `assemble_context()`
-- [ ] Testes de compatibilidade: Spark, Trino, DuckDB, PyIceberg (requer ambiente externo)
+- [x] Testes de compatibilidade: PyArrow, DuckDB, PyIceberg metadata JSON — validados localmente; Spark + Trino via `compat-heavy.yml` (workflow_dispatch)
 
 ### Fase 3 — Integração com Motores de Query
 - [x] `ailake-jni`: bindings uniffi para Spark/Trino

@@ -95,7 +95,7 @@ impl IcebergMetadata {
             last_sequence_number: 0,
             last_updated_ms: now_ms,
             last_column_id: 0,
-            schemas: vec![],
+            schemas: vec![serde_json::json!({"schema-id": 0, "type": "struct", "fields": []})],
             current_schema_id: 0,
             partition_specs: vec![serde_json::json!({"spec-id": 0, "fields": []})],
             default_spec_id: 0,

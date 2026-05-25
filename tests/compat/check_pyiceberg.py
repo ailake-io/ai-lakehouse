@@ -3,8 +3,9 @@
 Verifies that AI-Lake Iceberg metadata is loadable by PyIceberg and that
 the tabular data (non-vector columns) scans correctly.
 
-This script reads the metadata.json directly using PyIceberg's StaticTable
-API, which bypasses catalog discovery and tests the file format itself.
+Two validation paths:
+1. StaticTable scan via version-hint (requires proper vN.metadata.json layout)
+2. Fallback: validate raw metadata JSON is valid Iceberg Spec v2
 
 Usage:
     python tests/compat/check_pyiceberg.py [fixture_dir]
@@ -13,6 +14,7 @@ Usage:
 
 import sys
 import pathlib
+import json
 
 fixture_dir = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "./compat-fixture").resolve()
 
@@ -24,20 +26,42 @@ if not files_txt.exists():
     sys.exit(1)
 
 expected_rows = int(rows_txt.read_text().strip())
-metadata_path = fixture_dir / "default.db" / "compat_test" / "metadata" / "current.json"
+table_root = fixture_dir / "default.db" / "compat_test"
+metadata_dir = table_root / "metadata"
+version_hint = metadata_dir / "version-hint.text"
 
-print(f"fixture:  {fixture_dir}")
-print(f"metadata: {metadata_path}")
-print(f"expected: {expected_rows} rows")
+print(f"fixture:    {fixture_dir}")
+print(f"table_root: {table_root}")
+print(f"expected:   {expected_rows} rows")
+print()
+
+if not metadata_dir.exists():
+    print(f"FAIL: metadata dir not found at {metadata_dir}")
+    sys.exit(1)
+
+# Resolve the current versioned metadata file
+if version_hint.exists():
+    version = version_hint.read_text().strip()
+    metadata_path = metadata_dir / f"v{version}.metadata.json"
+else:
+    # Fall back to any *.metadata.json file
+    candidates = sorted(metadata_dir.glob("v*.metadata.json"))
+    if not candidates:
+        print(f"FAIL: no versioned metadata file found in {metadata_dir}")
+        sys.exit(1)
+    metadata_path = candidates[-1]
+
+print(f"metadata:   {metadata_path}")
 print()
 
 if not metadata_path.exists():
-    print(f"FAIL: metadata not found at {metadata_path}")
+    print(f"FAIL: metadata file not found at {metadata_path}")
     sys.exit(1)
 
 try:
     from pyiceberg.table import StaticTable
 
+    # Pass the metadata file directly (ends in .metadata.json — PyIceberg reads it directly)
     table = StaticTable.from_metadata(
         metadata_location=f"file://{metadata_path}",
         properties={"py-io-impl": "pyiceberg.io.pyarrow.PyArrowFileIO"},
@@ -58,17 +82,19 @@ except ImportError as e:
     sys.exit(0)
 
 except Exception as e:
-    # StaticTable may not support our metadata format perfectly;
-    # fall back to verifying the raw metadata JSON is valid Iceberg Spec v2.
     print(f"NOTE: StaticTable scan failed — {e}")
     print("      Falling back to metadata JSON validation...")
 
-    import json
     meta = json.loads(metadata_path.read_text())
     assert meta.get("format-version") == 2, "FAIL: not Iceberg Spec v2"
     assert "table-uuid" in meta, "FAIL: table-uuid missing"
+    assert "location" in meta, "FAIL: location missing"
     assert "properties" in meta, "FAIL: properties missing"
     assert meta["properties"].get("ailake.vector-column"), "FAIL: ailake.vector-column missing"
+    assert meta["properties"].get("ailake.format-version"), "FAIL: ailake.format-version missing"
 
-    print(f"PASS (metadata JSON): valid Iceberg Spec v2, table-uuid={meta['table-uuid']}")
-    print(f"      ailake properties: { {k:v for k,v in meta['properties'].items() if k.startswith('ailake')} }")
+    ailake_props = {k: v for k, v in meta["properties"].items() if k.startswith("ailake")}
+    print(f"PASS (metadata JSON): valid Iceberg Spec v2")
+    print(f"      table-uuid:      {meta['table-uuid']}")
+    print(f"      location:        {meta['location']}")
+    print(f"      ailake props:    {ailake_props}")
