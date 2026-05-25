@@ -161,13 +161,13 @@ async fn main() {
         .expect("list files");
     println!("files in catalog:");
     for f in &files {
-        println!("  {out}/{}", f.path);
+        println!("  {}", f.path);
     }
 
     // Write a small manifest for Python scripts to consume without parsing Iceberg
     let manifest_txt = files
         .iter()
-        .map(|f| format!("{}/{}", out, f.path))
+        .map(|f| f.path.clone())
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(format!("{out}/fixture_files.txt"), manifest_txt)

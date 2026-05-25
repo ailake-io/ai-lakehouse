@@ -61,21 +61,6 @@ fn find_files(root: &std::path::Path, ext: &str) -> Vec<std::path::PathBuf> {
     out
 }
 
-fn find_json_named(root: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(root) {
-        for entry in rd.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                out.extend(find_json_named(&path, name));
-            } else if path.file_name().and_then(|n| n.to_str()) == Some(name) {
-                out.push(path);
-            }
-        }
-    }
-    out
-}
-
 /// Find the current versioned metadata file (vN.metadata.json) by reading version-hint.text,
 /// or fall back to the highest-versioned file if the hint is missing.
 fn find_current_metadata(root: &std::path::Path) -> Vec<std::path::PathBuf> {

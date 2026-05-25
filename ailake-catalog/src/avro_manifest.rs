@@ -341,6 +341,31 @@ struct AilakeEntryExt {
     pub index_status: IndexStatus,
 }
 
+/// Read manifest file paths from an Iceberg manifest list (Avro).
+pub fn read_manifest_list(data: &[u8]) -> apache_avro::AvroResult<Vec<String>> {
+    let reader = apache_avro::Reader::new(data)?;
+    let mut results = Vec::new();
+    for value in reader {
+        let value = value?;
+        if let Value::Record(fields) = value {
+            let path = fields
+                .iter()
+                .find(|(k, _)| k == "manifest_path")
+                .and_then(|(_, v)| {
+                    if let Value::String(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                });
+            if let Some(p) = path {
+                results.push(p);
+            }
+        }
+    }
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,29 +402,4 @@ mod tests {
         assert_eq!(entries[0].record_count, 5);
         assert_eq!(entries[0].hnsw_offset, Some(100));
     }
-}
-
-/// Read manifest file paths from an Iceberg manifest list (Avro).
-pub fn read_manifest_list(data: &[u8]) -> apache_avro::AvroResult<Vec<String>> {
-    let reader = apache_avro::Reader::new(data)?;
-    let mut results = Vec::new();
-    for value in reader {
-        let value = value?;
-        if let Value::Record(fields) = value {
-            let path = fields
-                .iter()
-                .find(|(k, _)| k == "manifest_path")
-                .and_then(|(_, v)| {
-                    if let Value::String(s) = v {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
-                });
-            if let Some(p) = path {
-                results.push(p);
-            }
-        }
-    }
-    Ok(results)
 }
