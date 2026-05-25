@@ -19,6 +19,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: auto
+          rust-toolchain: stable
           command: build
           args: --release --out dist --find-interpreter --manifest-path ailake-py/Cargo.toml
 
