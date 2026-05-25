@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: PyO3/maturin-action@v1
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
         with:
           target: ${{ matrix.target }}
           manylinux: auto
@@ -47,6 +49,8 @@ jobs:
             3.13
 
       - uses: PyO3/maturin-action@v1
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
         with:
           target: ${{ matrix.target }}
           command: build
@@ -73,6 +77,8 @@ jobs:
             3.13
 
       - uses: PyO3/maturin-action@v1
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
         with:
           target: x86_64
           command: build
