@@ -300,7 +300,9 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "catalog-jdbc")]
     async fn sqlite_create_load_commit_drop() {
-        use crate::provider::{new_snapshot_id, DataFileEntry, NewSnapshot, SnapshotOperation};
+        use crate::provider::{
+            new_snapshot_id, DataFileEntry, IndexStatus, NewSnapshot, SnapshotOperation,
+        };
         use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
         use ailake_store::LocalStore;
 
@@ -351,8 +353,10 @@ mod tests {
                 vector_column: Some("embedding".into()),
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
             }],
             operation: SnapshotOperation::Append,
+            iceberg_schema: None,
         };
         let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 

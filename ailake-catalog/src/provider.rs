@@ -76,6 +76,20 @@ pub struct TableMetadata {
     pub current_snapshot_id: Option<SnapshotId>,
 }
 
+/// Iceberg schema update carried inside a snapshot commit.
+///
+/// When present, `HadoopCatalog::commit_snapshot` patches `schemas[0].fields`,
+/// `last-column-id`, and `schema.name-mapping.default` in the persisted metadata.
+/// REST/Glue/JDBC backends that delegate schema management to the server ignore this.
+#[derive(Debug, Clone)]
+pub struct IcebergSchemaUpdate {
+    /// Iceberg-typed field descriptors, e.g. `[{"id":1,"name":"id","required":false,"type":"int"}]`.
+    pub fields: Vec<serde_json::Value>,
+    pub last_column_id: i32,
+    /// Compact JSON string: `[{"field-id":1,"names":["id"]},...]`.
+    pub name_mapping_json: String,
+}
+
 /// Snapshot commit request.
 #[derive(Debug, Clone)]
 pub struct NewSnapshot {
@@ -83,6 +97,8 @@ pub struct NewSnapshot {
     pub parent_snapshot_id: Option<SnapshotId>,
     pub files: Vec<DataFileEntry>,
     pub operation: SnapshotOperation,
+    /// When set, the catalog backend should update the table schema on commit.
+    pub iceberg_schema: Option<IcebergSchemaUpdate>,
 }
 
 #[derive(Debug, Clone)]

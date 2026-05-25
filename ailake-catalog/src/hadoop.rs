@@ -203,6 +203,17 @@ impl CatalogProvider for HadoopCatalog {
         meta.current_snapshot_id = Some(snap_id);
         meta.snapshots.push(iceberg_snap);
 
+        if let Some(schema_update) = snapshot.iceberg_schema {
+            if let Some(schema) = meta.schemas.first_mut() {
+                schema["fields"] = serde_json::Value::Array(schema_update.fields);
+            }
+            meta.last_column_id = schema_update.last_column_id;
+            meta.properties.insert(
+                "schema.name-mapping.default".to_string(),
+                schema_update.name_mapping_json,
+            );
+        }
+
         self.save_metadata(table, &meta).await?;
         Ok(snap_id)
     }
@@ -316,6 +327,7 @@ mod tests {
                 index_status: crate::provider::IndexStatus::Ready,
             }],
             operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
         };
         let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 

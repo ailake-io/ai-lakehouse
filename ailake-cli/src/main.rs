@@ -376,6 +376,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 parent_snapshot_id: meta.current_snapshot_id,
                 files: remaining,
                 operation: ailake_catalog::provider::SnapshotOperation::Replace,
+                iceberg_schema: None,
             };
             catalog
                 .commit_snapshot(&ident, snap)

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use ailake_catalog::{
     encode_centroid_b64, make_data_file_entry, make_data_file_entry_indexing,
     make_multi_column_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,
-    ExtraVectorIndex, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation, TableIdent,
-    TableProperties, VectorIndexInfo,
+    ExtraVectorIndex, IcebergSchemaUpdate, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation,
+    TableIdent, TableProperties, VectorIndexInfo,
 };
 use ailake_core::{AilakeResult, VectorStoragePolicy};
 use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBatch};
@@ -13,7 +13,9 @@ use ailake_index::IvfPqConfig;
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
 use arrow_array::RecordBatch;
+use arrow_schema::SchemaRef;
 use bytes::Bytes;
+use serde_json;
 
 /// One vector column for a multi-column write batch.
 pub struct MultiVectorBatch<'a> {
@@ -29,6 +31,9 @@ pub struct TableWriter {
     part_counter: Arc<AtomicU32>,
     pending_files: Vec<DataFileEntry>,
     parent_snapshot_id: Option<SnapshotId>,
+    /// Arrow schema captured from the first write_batch call; used to populate
+    /// Iceberg schema fields and schema.name-mapping.default on commit.
+    captured_schema: Option<SchemaRef>,
 }
 
 impl TableWriter {
@@ -46,6 +51,7 @@ impl TableWriter {
             part_counter: Arc::new(AtomicU32::new(0)),
             pending_files: Vec::new(),
             parent_snapshot_id: None,
+            captured_schema: None,
         }
     }
 
@@ -68,6 +74,9 @@ impl TableWriter {
         batch: &RecordBatch,
         embeddings: &[Vec<f32>],
     ) -> AilakeResult<()> {
+        if self.captured_schema.is_none() {
+            self.captured_schema = Some(batch.schema());
+        }
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = format!("data/part-{:05}.parquet", part_num);
 
@@ -110,6 +119,9 @@ impl TableWriter {
         batch: &RecordBatch,
         embeddings: &[Vec<f32>],
     ) -> AilakeResult<()> {
+        if self.captured_schema.is_none() {
+            self.captured_schema = Some(batch.schema());
+        }
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = format!("data/part-{:05}.parquet", part_num);
 
@@ -180,6 +192,9 @@ impl TableWriter {
         embeddings: &[Vec<f32>],
         ivf_config: IvfPqConfig,
     ) -> AilakeResult<()> {
+        if self.captured_schema.is_none() {
+            self.captured_schema = Some(batch.schema());
+        }
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = format!("data/part-{:05}.parquet", part_num);
 
@@ -228,6 +243,9 @@ impl TableWriter {
         columns: &[MultiVectorBatch<'_>],
     ) -> AilakeResult<()> {
         use ailake_core::AilakeError;
+        if self.captured_schema.is_none() {
+            self.captured_schema = Some(batch.schema());
+        }
 
         if columns.is_empty() {
             return Err(AilakeError::InvalidArgument(
@@ -316,11 +334,16 @@ impl TableWriter {
 
     /// Commit all staged files as a new Iceberg snapshot.
     pub async fn commit(mut self) -> AilakeResult<SnapshotId> {
+        let iceberg_schema = self
+            .captured_schema
+            .as_deref()
+            .map(|s| arrow_schema_to_iceberg_update(s, &self.policy));
         let snapshot = NewSnapshot {
             snapshot_id: new_snapshot_id(),
             parent_snapshot_id: self.parent_snapshot_id,
             files: std::mem::take(&mut self.pending_files),
             operation: SnapshotOperation::Append,
+            iceberg_schema,
         };
         self.catalog.commit_snapshot(&self.table, snapshot).await
     }
@@ -345,6 +368,98 @@ impl TableWriter {
                 .await?;
         }
         Ok(Self::new(catalog, store, policy, table))
+    }
+}
+
+/// Convert an Arrow schema to an Iceberg schema update for catalog commits.
+///
+/// Maps Arrow DataType → Iceberg type string. The vector column uses `fixed[N]`
+/// where N = dim * bytes_per_element based on the policy precision.
+fn arrow_schema_to_iceberg_update(
+    schema: &arrow_schema::Schema,
+    policy: &VectorStoragePolicy,
+) -> IcebergSchemaUpdate {
+    let bytes_per_dim: u32 = match policy.precision {
+        ailake_core::VectorPrecision::F32 => 4,
+        ailake_core::VectorPrecision::F16 => 2,
+        ailake_core::VectorPrecision::I8 => 1,
+        ailake_core::VectorPrecision::Binary => 1,
+    };
+    let vec_fixed_len = policy.dim * bytes_per_dim;
+
+    let mut fields: Vec<serde_json::Value> = Vec::new();
+    let mut name_mapping: Vec<serde_json::Value> = Vec::new();
+
+    for (idx, field) in schema.fields().iter().enumerate() {
+        let field_id = (idx + 1) as i32;
+        let iceberg_type = arrow_type_to_iceberg_string(
+            field.data_type(),
+            field.name(),
+            &policy.column_name,
+            vec_fixed_len,
+        );
+        fields.push(serde_json::json!({
+            "id": field_id,
+            "name": field.name(),
+            "required": false,
+            "type": iceberg_type,
+        }));
+        name_mapping.push(serde_json::json!({
+            "field-id": field_id,
+            "names": [field.name()],
+        }));
+    }
+
+    // Append the vector column — it lives outside the RecordBatch schema.
+    let vec_field_id = schema.fields().len() as i32 + 1;
+    fields.push(serde_json::json!({
+        "id": vec_field_id,
+        "name": policy.column_name,
+        "required": false,
+        "type": format!("fixed[{vec_fixed_len}]"),
+    }));
+    name_mapping.push(serde_json::json!({
+        "field-id": vec_field_id,
+        "names": [policy.column_name],
+    }));
+
+    let last_column_id = vec_field_id;
+    let name_mapping_json = serde_json::to_string(&name_mapping).unwrap_or_else(|_| "[]".into());
+
+    IcebergSchemaUpdate {
+        fields,
+        last_column_id,
+        name_mapping_json,
+    }
+}
+
+fn arrow_type_to_iceberg_string(
+    dt: &arrow_schema::DataType,
+    field_name: &str,
+    vec_column: &str,
+    vec_fixed_len: u32,
+) -> String {
+    use arrow_schema::DataType;
+    if field_name == vec_column {
+        return format!("fixed[{vec_fixed_len}]");
+    }
+    match dt {
+        DataType::Boolean => "boolean".into(),
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::UInt8 | DataType::UInt16 => {
+            "int".into()
+        }
+        DataType::Int64 | DataType::UInt32 | DataType::UInt64 => "long".into(),
+        DataType::Float16 | DataType::Float32 => "float".into(),
+        DataType::Float64 => "double".into(),
+        DataType::Utf8 | DataType::LargeUtf8 => "string".into(),
+        DataType::Binary | DataType::LargeBinary => "binary".into(),
+        DataType::Date32 | DataType::Date64 => "date".into(),
+        DataType::Timestamp(_, _) => "timestamptz".into(),
+        DataType::Time32(_) | DataType::Time64(_) => "time".into(),
+        DataType::FixedSizeBinary(n) => format!("fixed[{n}]"),
+        DataType::Decimal128(p, s) => format!("decimal({p}, {s})"),
+        DataType::Decimal256(p, s) => format!("decimal({p}, {s})"),
+        _ => "binary".into(),
     }
 }
 
@@ -425,6 +540,7 @@ async fn build_and_patch_index(
                     parent_snapshot_id,
                     files,
                     operation: SnapshotOperation::Replace,
+                    iceberg_schema: None,
                 },
             )
             .await?;
