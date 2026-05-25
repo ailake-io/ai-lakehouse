@@ -10,6 +10,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Automatic Iceberg schema propagation on `commit()`**: `TableWriter.commit()` now calls `arrow_schema_to_iceberg_update` internally — no manual metadata patching required. The generated `IcebergSchemaUpdate` carries all Arrow fields (including vector columns) correctly typed as Iceberg types (`"long"`, `"string"`, `"bytes"`, `"timestamptz"`, `List`, `Struct`, `Map`), plus a complete `schema.name-mapping.default` so PyIceberg resolves Parquet columns by name when field-ids are absent.
+- **`write_fixture` example simplified**: removed the 37-line manual metadata patch block; schema propagation is now entirely automatic via `commit()`.
+- **`ailake-py` Python SDK compat test expanded**: `check_ailake_py.py` covers cosine search (self-distance ≈ 0), `top_k` enforcement, euclidean metric, multi-batch before commit, `assemble_context` with chunk presence, token budget enforcement, and `dedup_threshold` parameter acceptance; added error-path coverage (missing table → exception). CI job pins `python-version: '3.12'` and builds the wheel with `--interpreter python3.12`.
+
+### Changed
+- **`compat-heavy.yml` now triggers on `push: [main]` and weekly schedule** in addition to `workflow_dispatch`. Spark job upgraded to real Spark+Iceberg integration test (`iceberg-spark-runtime-3.5_2.12:1.5.2`, `HadoopCatalog` filesystem, SQL COUNT + MIN/MAX + schema validation). Trino job rewritten to use `tabulario/iceberg-rest:0.10.0` as REST catalog (wraps HadoopCatalog internally) + `trinodb/trino:436` via Docker, verified via both PyIceberg REST scan and Trino Python client.
+
+### Fixed
+- **Parquet `field_id` stamping**: all columns (batch columns + vector column) now carry the `PARQUET:field_id` metadata key set to their 1-based Iceberg field ID. Previously, field IDs were `-1` (unset), causing failures with strict readers like Spark with `spark.sql.iceberg.check-nullability=true`. The vector column field ID is always `batch_column_count + 1`.
+- **`schema.name-mapping.default` generated for all Arrow types**: previous implementation only mapped scalar types; the mapping now correctly handles `List` / `LargeList` / `FixedSizeList`, `Struct`, `Map`, `Timestamp` with and without timezone, and `FixedSizeBinary`. Unknown types fall back to `"binary"`. Returns `serde_json::Value` (not `String`) so nested types serialize as JSON objects, not escaped strings.
+
 - **`HadoopCatalog` versioned metadata layout**: catalog now writes `vN.metadata.json` + `version-hint.text` instead of `current.json`, matching Iceberg Hadoop catalog spec and enabling `PyIceberg.StaticTable.from_metadata` to locate the current metadata file via the version hint
 - **Absolute table location in metadata**: `create_table` now records the full absolute path as `location` (and `manifest-list` paths) when `write_fixture` passes the absolute warehouse path; PyIceberg and other readers can now resolve data file paths without additional config
 - **Default schema entry in `IcebergMetadata`**: `schemas` array now includes `[{"schema-id": 0, "type": "struct", "fields": []}]` so PyIceberg's `StaticTable` does not fail with `current-schema-id 0 can't be found in the schemas` before reaching the manifest stage

@@ -15,11 +15,11 @@
 | Category | Location | Runs in | What it covers |
 |---|---|---|---|
 | Unit | `src/` inline `#[cfg(test)]` | `cargo test` | Single function, no I/O |
-| Integration | `tests/` at workspace root | `cargo test --features integration` | Multiple crates, local FS |
+| Integration | `tests/` at workspace root | `cargo test -p ailake-tests` | Multiple crates, local FS |
 | Property-based | `src/` inline or `tests/` | `cargo test` | Invariants across random inputs |
 | Benchmark | `benches/` per crate | `cargo bench` | Performance regressions |
-| Compat (Phase 2) | `tests/compat/` | Docker Compose | External engines read AI-Lake files |
-| Compat (Phase 3) | `tests/compat/engines/` | Docker Compose | Spark / Trino / Beam |
+| Compat (Python/DuckDB) | `tests/compat/` | `ci.yml` — every PR | PyArrow, DuckDB, PyIceberg, ailake-py SDK |
+| Compat (Spark/Trino/JVM) | `tests/compat/` + Gradle | `compat-heavy.yml` — push to main + weekly | Spark+Iceberg, Trino+REST, Flink/Spark/Trino JVM plugins |
 
 ---
 
@@ -297,6 +297,22 @@ fn grouping_restores_chunk_order() {
         "chunks should be in document order in the assembled context");
 }
 ```
+
+---
+
+### `ailake-query` — Iceberg schema mapping unit tests
+
+`ailake-query/src/writer.rs` contains 7 inline unit tests for `arrow_schema_to_iceberg_update`:
+
+| Test | What it checks |
+|---|---|
+| `schema_fields_match_arrow_columns` | Simple `Int64 + Utf8` → Iceberg `"long"` + `"string"`, field-ids start at 1 |
+| `timestamp_with_tz_maps_to_timestamptz` | `Timestamp(Microsecond, Some("UTC"))` → `"timestamptz"` |
+| `list_type_generates_nested_json` | `List<Utf8>` → `{"type":"list","element-id":N,"element":"string",...}` |
+| `struct_type_generates_nested_json` | `Struct<f32>` → `{"type":"struct","fields":[...]}` |
+| `vector_column_not_duplicated` | When vector column already in batch schema, not appended twice |
+| `multi_vec_extra_policies` | Second vector column gets correct field-id (`N+2`) |
+| `top_level_field_ids_align_with_parquet` | Iceberg field-ids match `PARQUET:field_id` stamps on all columns |
 
 ---
 
@@ -611,68 +627,33 @@ cargo bench --workspace
 
 ## CI matrix (GitHub Actions)
 
-```yaml
-# .github/workflows/ci.yml
+### `ci.yml` — every PR and push to `main`/`develop`
 
-jobs:
-  unit:
-    runs-on: ubuntu-latest
-    steps:
-      - cargo test --workspace
+| Job | Command | What it covers |
+|---|---|---|
+| `fmt` | `cargo fmt --all -- --check` | Formatting |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | Lints |
+| `unit` | `cargo test --workspace --lib --bins` | All unit tests (119 passed, 3 ignored) |
+| `integration` | `cargo test -p ailake-tests -- --test-threads=1` | End-to-end write/read/search, iceberg_compat |
+| `compat-parquet` | `cargo test -p ailake-tests --test parquet_trailing_bytes --test positional_invariant` | Parquet spec compliance |
+| `compat-pyarrow` | `write_fixture` + `pip install pyarrow` + `check_pyarrow.py` | PyArrow reads AI-Lake Parquet |
+| `compat-duckdb` | `write_fixture` + `pip install duckdb` + `check_duckdb.py` | DuckDB reads via `parquet_scan` |
+| `compat-pyiceberg` | `write_fixture` + `pip install pyiceberg[pyarrow]` + `check_pyiceberg.py` | PyIceberg `StaticTable.scan()` |
+| `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context |
 
-  clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - cargo clippy --workspace --all-targets -- -D warnings
+### `compat-heavy.yml` — push to `main` and weekly (Monday 03:00 UTC)
 
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - cargo fmt --workspace --check
-
-  integration:
-    runs-on: ubuntu-latest
-    services:
-      minio:
-        image: minio/minio
-        ...
-      nessie:
-        image: projectnessie/nessie:latest
-        ...
-    steps:
-      - cargo test --workspace --features integration -- --test-threads=1
-
-  compat-parquet:
-    runs-on: ubuntu-latest
-    steps:
-      - pip install pyarrow pyiceberg
-      - cargo test --test parquet_trailing_bytes
-      - cargo test --test pyiceberg_read
-
-  bench-regression:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - cargo bench --workspace -- --output-format bencher | tee bench_output.txt
-      # Compare against baseline — fail if >10% regression
-
-  compat-engines:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'   # only on main, expensive
-    steps:
-      - docker compose -f tests/docker/compose-engines.yml up -d
-      - ./tests/compat/run_all_engines.sh
-      - docker compose down
-```
+| Job | What it covers |
+|---|---|
+| `compat-spark` | PySpark: direct Parquet read + Spark+Iceberg HadoopCatalog SQL (`COUNT`, `MIN`/`MAX`, schema) |
+| `compat-trino` | Trino: `tabulario/iceberg-rest` REST catalog + `trinodb/trino:436`; PyIceberg REST scan + Trino Python client |
+| `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests |
 
 ### Failure policy
 
 | Test suite | Failure blocks |
 |---|---|
-| `unit` | Every PR |
-| `clippy` | Every PR |
-| `fmt` | Every PR |
-| `integration` | Every PR |
-| `compat-parquet` | Every PR |
-| `bench-regression` | Every PR (>10% regression) |
-| `compat-engines` | Release only (runs on main merge) |
+| `fmt`, `clippy` | Every PR |
+| `unit`, `integration`, `compat-parquet` | Every PR |
+| `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg`, `compat-ailake-py` | Every PR |
+| `compat-spark`, `compat-trino`, `compat-jvm-plugins` | Release (runs on every main merge + weekly) |

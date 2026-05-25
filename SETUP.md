@@ -64,7 +64,7 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Deve terminar com `112 passed` (3 ignored — testes que requerem servidor externo ou PyArrow instalado).
+Deve terminar com `119 passed` (3 ignored — testes que requerem servidor externo ou PyArrow instalado).
 
 ### Testes por crate
 
@@ -73,7 +73,7 @@ Deve terminar com `112 passed` (3 ignored — testes que requerem servidor exter
 | `ailake-vec` | Quantização F32→F16, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centróides, `exact_distance`, SIMD (AVX2/NEON) |
 | `ailake-index` | HNSW build/search, IVF-PQ (train/search/serialize), GPU k-means dispatch, serialização bincode, MmapLoader round-trip |
 | `ailake-file` | Escrita/leitura do arquivo unificado, layout AILK (HNSW e IVF-PQ), integridade |
-| `ailake-query` | ContextAssembler, pruning geométrico, reranking pós-PQ, MemTableWriter, write_batch_ivf_pq |
+| `ailake-query` | ContextAssembler, pruning geométrico, reranking pós-PQ, MemTableWriter, write_batch_ivf_pq; `arrow_schema_to_iceberg_update` (propagação automática de schema no commit) |
 | `ailake-parquet` | write_batch_multi_vec / read_all_multi_vec (multi-vector columns) |
 | `tests` (integração) | write→read→search end-to-end, invariante posicional, compatibilidade PyArrow, pruning, context assembler |
 

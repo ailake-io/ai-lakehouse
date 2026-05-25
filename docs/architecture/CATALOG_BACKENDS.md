@@ -45,9 +45,19 @@ pub struct NewSnapshot {
     pub snapshot_id: SnapshotId,
     pub parent_snapshot_id: Option<SnapshotId>,
     pub files: Vec<DataFileEntry>,
-    pub operation: SnapshotOperation,   // Append | Overwrite | Delete | Replace
+    pub operation: SnapshotOperation,        // Append | Overwrite | Delete | Replace
+    pub iceberg_schema: Option<IcebergSchemaUpdate>, // schema + name-mapping for metadata.json
+    pub index_status: IndexStatus,           // Ready | Indexing (for deferred HNSW builds)
+}
+
+pub struct IcebergSchemaUpdate {
+    pub fields: Vec<serde_json::Value>,      // Iceberg-typed field descriptors
+    pub last_column_id: i32,
+    pub name_mapping: Vec<serde_json::Value>, // schema.name-mapping.default entries
 }
 ```
+
+`TableWriter.commit()` populates `iceberg_schema` automatically via `arrow_schema_to_iceberg_update`, which converts each Arrow field to its Iceberg type (`"long"`, `"string"`, `"bytes"`, `"timestamptz"`, nested `List`/`Struct`/`Map` JSON objects) and generates `name_mapping` entries for name-based Parquet column resolution. Callers (CLI compaction, external integrations) that don't go through `TableWriter` can pass `iceberg_schema: None` to keep the existing schema.
 
 All vector statistics (centroid, radius, HNSW offsets) live in `DataFileEntry` fields, which are stored in `custom_properties` of each Iceberg DataFile entry — a spec-defined extension point ignored by unknown readers.
 
