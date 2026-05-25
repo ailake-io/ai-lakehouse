@@ -1,6 +1,10 @@
 name: Compat Heavy (Spark + Trino + JVM Plugins)
 
 on:
+  schedule:
+    - cron: '0 3 * * 1'   # every Monday 03:00 UTC
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       fixture_rows:
@@ -27,12 +31,11 @@ jobs:
       - name: Install PySpark + PyArrow
         run: pip install pyspark pyarrow --break-system-packages
 
-      - name: Check Spark compatibility
+      - name: Check Spark Parquet compatibility (direct read)
         run: |
           python3 - <<'EOF'
-          import sys
-          import pathlib
-          import pyarrow.parquet as pq
+          import sys, pathlib
+          from pyspark.sql import SparkSession
 
           fixture_dir = pathlib.Path("./compat-fixture")
           expected = int((fixture_dir / "fixture_rows.txt").read_text().strip())
@@ -42,12 +45,9 @@ jobs:
               if p.strip()
           ]
 
-          # PySpark reads Parquet files natively via Hadoop (no Iceberg plugin needed
-          # to validate format compatibility for tabular data).
-          from pyspark.sql import SparkSession
           spark = (
               SparkSession.builder
-              .appName("ailake-compat")
+              .appName("ailake-parquet-compat")
               .master("local[2]")
               .config("spark.driver.memory", "1g")
               .config("spark.sql.shuffle.partitions", "2")
@@ -64,28 +64,75 @@ jobs:
           assert "text" in cols, f"FAIL: 'text' column missing"
           assert "embedding" in cols, f"FAIL: 'embedding' column missing"
 
-          id_range = df.agg({"id": "min"}).collect()[0][0], df.agg({"id": "max"}).collect()[0][0]
+          id_range = (
+              df.agg({"id": "min"}).collect()[0][0],
+              df.agg({"id": "max"}).collect()[0][0],
+          )
           assert id_range[0] == 0, f"FAIL: min id {id_range[0]} != 0"
           assert id_range[1] == expected - 1, f"FAIL: max id {id_range[1]} != {expected - 1}"
 
-          print(f"PASS: Spark read {total} rows (id range {id_range}), schema={cols}")
+          print(f"PASS (Parquet): Spark read {total} rows, schema={cols}, id={id_range}")
+          spark.stop()
+          EOF
+
+      - name: Check Spark + Iceberg HadoopCatalog (SQL query)
+        run: |
+          python3 - <<'EOF'
+          import sys, os, pathlib
+          from pyspark.sql import SparkSession
+
+          fixture_dir = pathlib.Path("./compat-fixture").resolve()
+          expected = int((fixture_dir / "fixture_rows.txt").read_text().strip())
+
+          spark = (
+              SparkSession.builder
+              .appName("ailake-iceberg-compat")
+              .master("local[2]")
+              .config("spark.driver.memory", "1g")
+              .config("spark.sql.shuffle.partitions", "2")
+              # Iceberg Spark extension + HadoopCatalog (no HMS needed)
+              .config(
+                  "spark.jars.packages",
+                  "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2",
+              )
+              .config(
+                  "spark.sql.extensions",
+                  "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+              )
+              .config("spark.sql.catalog.ailake", "org.apache.iceberg.spark.SparkCatalog")
+              .config("spark.sql.catalog.ailake.type", "hadoop")
+              .config("spark.sql.catalog.ailake.warehouse", f"file://{fixture_dir}")
+              .getOrCreate()
+          )
+          spark.sparkContext.setLogLevel("ERROR")
+
+          count = spark.sql(
+              "SELECT count(*) AS n FROM ailake.default.compat_test"
+          ).collect()[0][0]
+          assert count == expected, f"FAIL: Iceberg SQL count {count} != {expected}"
+
+          row = spark.sql(
+              "SELECT MIN(id) AS lo, MAX(id) AS hi FROM ailake.default.compat_test"
+          ).collect()[0]
+          assert row["lo"] == 0, f"FAIL: min id {row['lo']}"
+          assert row["hi"] == expected - 1, f"FAIL: max id {row['hi']}"
+
+          # Verify schema via Iceberg catalog
+          cols = spark.sql(
+              "SELECT * FROM ailake.default.compat_test LIMIT 1"
+          ).columns
+          for c in ("id", "text", "embedding"):
+              assert c in cols, f"FAIL: column '{c}' missing from schema {cols}"
+
+          print(
+              f"PASS (Iceberg SQL): {count} rows, id={row['lo']}..{row['hi']}, schema={cols}"
+          )
           spark.stop()
           EOF
 
   compat-trino:
     name: compat-trino
     runs-on: ubuntu-latest
-    services:
-      trino:
-        image: trinodb/trino:latest
-        ports:
-          - 8080:8080
-        options: >-
-          --health-cmd "curl -sf http://localhost:8080/v1/info | grep -q '\"starting\":false'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 30
-
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -94,46 +141,113 @@ jobs:
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
 
-      - name: Wait for Trino
+      - name: Start Iceberg REST catalog + Trino
         run: |
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/v1/info | grep -q '"starting":false'; then
-              echo "Trino ready"
+          docker network create ailake-net
+
+          # Iceberg REST catalog backed by the fixture warehouse.
+          # tabulario/iceberg-rest wraps a HadoopCatalog internally when
+          # CATALOG_WAREHOUSE is a file:// URI, so it discovers the table
+          # that write_fixture already created there.
+          docker run -d --name iceberg-rest \
+            --network ailake-net \
+            -p 8181:8181 \
+            -v "$GITHUB_WORKSPACE/compat-fixture:/warehouse" \
+            -e CATALOG_WAREHOUSE="file:///warehouse" \
+            tabulario/iceberg-rest:0.10.0
+
+          # Trino catalog config pointing to the REST catalog.
+          mkdir -p "$GITHUB_WORKSPACE/trino-catalog"
+          cat > "$GITHUB_WORKSPACE/trino-catalog/ailake.properties" <<'PROPS'
+          connector.name=iceberg
+          iceberg.catalog.type=rest
+          iceberg.rest-catalog.uri=http://iceberg-rest:8181
+          PROPS
+
+          # Trino server with custom catalog config mounted.
+          docker run -d --name trino \
+            --network ailake-net \
+            -p 8080:8080 \
+            -v "$GITHUB_WORKSPACE/trino-catalog:/etc/trino/catalog" \
+            trinodb/trino:436
+
+      - name: Wait for services
+        run: |
+          echo "Waiting for iceberg-rest..."
+          for i in $(seq 1 40); do
+            if curl -sf http://localhost:8181/v1/config > /dev/null 2>&1; then
+              echo "iceberg-rest ready after $((i * 3))s"
               break
             fi
-            echo "waiting... ($i/30)"
+            sleep 3
+          done
+
+          echo "Waiting for Trino..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8080/v1/info 2>/dev/null | grep -q '"starting":false'; then
+              echo "Trino ready after $((i * 5))s"
+              break
+            fi
             sleep 5
           done
 
-      - name: Install trino-client
-        run: pip install trino --break-system-packages
+      - name: Install Python deps
+        run: pip install trino "pyiceberg[pyarrow]" pyarrow --break-system-packages
 
-      - name: Check Trino reads fixture Parquet via memory connector
+      - name: Verify via PyIceberg REST catalog
         run: |
           python3 - <<'EOF'
-          # Trino memory connector compatibility check:
-          # Validates Trino server is accessible and can execute queries.
-          # Full Iceberg connector test requires external HMS/Glue catalog setup.
+          from pyiceberg.catalog.rest import RestCatalog
+          import pathlib
+
+          expected = int(pathlib.Path("compat-fixture/fixture_rows.txt").read_text().strip())
+          catalog = RestCatalog("ailake", uri="http://localhost:8181")
+
+          namespaces = catalog.list_namespaces()
+          print(f"namespaces: {namespaces}")
+          assert any("default" in str(ns) for ns in namespaces), \
+              f"FAIL: 'default' namespace not found in {namespaces}"
+
+          tables = catalog.list_tables("default")
+          print(f"tables: {tables}")
+          assert any("compat_test" in str(t) for t in tables), \
+              f"FAIL: 'compat_test' not found in {tables}"
+
+          table = catalog.load_table("default.compat_test")
+          df = table.scan().to_arrow()
+          assert len(df) == expected, f"FAIL: PyIceberg REST got {len(df)} rows, expected {expected}"
+          print(f"PASS (PyIceberg REST): {len(df)} rows, schema={df.schema.names}")
+          EOF
+
+      - name: Verify via Trino
+        run: |
+          python3 - <<'EOF'
           import trino
           import pathlib
 
-          fixture_dir = pathlib.Path("./compat-fixture")
-          expected = int((fixture_dir / "fixture_rows.txt").read_text().strip())
+          expected = int(pathlib.Path("compat-fixture/fixture_rows.txt").read_text().strip())
 
           conn = trino.dbapi.connect(
-              host="localhost",
-              port=8080,
-              user="ailake",
-              catalog="tpch",
-              schema="tiny",
+              host="localhost", port=8080, user="ailake",
+              catalog="ailake", schema="default",
           )
           cur = conn.cursor()
-          cur.execute("SELECT count(*) FROM tpch.tiny.orders")
-          result = cur.fetchone()[0]
-          assert result > 0, "FAIL: Trino not reachable or query returned 0"
-          print(f"PASS: Trino reachable — tpch.tiny.orders has {result} rows")
-          print(f"NOTE: Full Iceberg connector test requires external catalog (HMS/Glue).")
-          print(f"      Local fixture has {expected} AI-Lake rows ready at ./compat-fixture/")
+
+          cur.execute("SHOW TABLES IN ailake.default")
+          tables = [r[0] for r in cur.fetchall()]
+          print(f"Trino tables: {tables}")
+          assert "compat_test" in tables, f"FAIL: compat_test not found in {tables}"
+
+          cur.execute("SELECT count(*) FROM ailake.default.compat_test")
+          count = cur.fetchone()[0]
+          assert count == expected, f"FAIL: Trino count {count} != {expected}"
+
+          cur.execute("SELECT MIN(id), MAX(id) FROM ailake.default.compat_test")
+          min_id, max_id = cur.fetchone()
+          assert min_id == 0, f"FAIL: min id {min_id}"
+          assert max_id == expected - 1, f"FAIL: max id {max_id}"
+
+          print(f"PASS (Trino): {count} rows via Iceberg REST catalog, id={min_id}..{max_id}")
           EOF
 
   compat-jvm-plugins:
