@@ -7,13 +7,13 @@
 
 pub mod avro_manifest;
 pub mod avro_raw;
+#[cfg(feature = "rest-catalog")]
+pub mod databricks;
 pub mod hadoop;
 pub mod metadata;
 pub mod provider;
 #[cfg(feature = "rest-catalog")]
 pub mod rest;
-#[cfg(feature = "rest-catalog")]
-pub mod databricks;
 pub mod snapshot;
 
 #[cfg(feature = "catalog-glue")]
