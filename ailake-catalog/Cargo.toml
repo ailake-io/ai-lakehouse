@@ -9,8 +9,9 @@ keywords    = ["iceberg", "catalog", "lakehouse", "parquet", "metadata"]
 categories  = ["database", "data-structures"]
 
 [features]
+rest-catalog   = ["dep:reqwest"]           # REST + Nessie HTTP catalog backends
 catalog-glue   = ["dep:aws-sdk-glue", "dep:aws-config"]
-catalog-nessie = []
+catalog-nessie = ["rest-catalog"]
 catalog-jdbc   = ["dep:sqlx"]
 
 [dependencies]
@@ -23,7 +24,7 @@ async-trait  = { workspace = true }
 thiserror    = { workspace = true }
 uuid         = { workspace = true }
 bytes        = { workspace = true }
-reqwest      = { workspace = true }
+reqwest      = { workspace = true, optional = true }
 base64       = "0.22"
 apache-avro  = { workspace = true }
 

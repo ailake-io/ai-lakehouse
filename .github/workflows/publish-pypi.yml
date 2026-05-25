@@ -20,15 +20,6 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: auto
           rust-toolchain: stable
-          before-script-linux: |
-            yum install -y openssl-devel 2>/dev/null \
-              || dnf install -y openssl-devel 2>/dev/null \
-              || apt-get install -y libssl-dev 2>/dev/null \
-              || true
-            mkdir -p /usr/local/lib/pkgconfig
-            find /usr -name "openssl.pc" 2>/dev/null \
-              | xargs -I{} cp -f {} /usr/local/lib/pkgconfig/ 2>/dev/null || true
-            ls /usr/local/lib/pkgconfig/
           command: build
           args: --release --out dist --find-interpreter --manifest-path ailake-py/Cargo.toml
 
