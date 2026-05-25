@@ -51,29 +51,29 @@ Written as strict Iceberg Spec v2. The only AI-Lake additions are inside the `pr
 
 **Why this is safe**: `properties` is a `Map<String, String>` with no reserved namespace in Iceberg Spec v2. All existing readers pass unknown keys through or ignore them.
 
-### 2. `metadata/snap-{SNAPSHOT_ID}.avro`
+### 2. `metadata/{SNAP_ID}-m0.avro` and `metadata/snap-{SNAP_ID}-1.avro`
 
-Standard Iceberg manifest list (Avro). Each `DataFile` entry uses Iceberg's `custom-properties` field to carry per-file vector statistics:
+Two Avro OCF files per snapshot:
 
-```
-DataFile {
-  file_path: "data/part-00001.parquet"
-  file_format: PARQUET
-  partition: { ... }
-  record_count: 50000
-  file_size_in_bytes: 16777216
-  custom_properties: {
-    "ailake.centroid": "<base64-encoded f32 array>"
-    "ailake.radius": "0.342"
-    "ailake.hnsw_offset": "12582912"
-    "ailake.hnsw_len": "4194304"
-  }
+- **Manifest file** (`{snap_id}-m0.avro`): one `manifest_entry` record per `DataFile`. Carries AI-Lake vector statistics in the `key_metadata` bytes field (JSON-encoded `AilakeEntryExt`).
+- **Manifest list** (`snap-{snap_id}-1.avro`): one `manifest_file` record per manifest file, with row-count statistics.
+
+Both files are written by `avro_raw.rs` — a custom Avro OCF serializer that embeds the schema JSON **verbatim** in the file header. This bypasses `apache-avro 0.16`, which strips unknown schema properties (like `"field-id"`) when serializing schema back to JSON, breaking PyIceberg's `avro_schema_to_iceberg` conversion.
+
+Per-file AI-Lake metadata is encoded as JSON in the `key_metadata` bytes field:
+
+```json
+{
+  "centroid_b64": "<base64-encoded f32 array>",
+  "radius": 0.342,
+  "hnsw_offset": 12582912,
+  "hnsw_len": 4194304,
+  "vector_column": "embedding",
+  "vector_dim": 1536
 }
 ```
 
-**Why this is safe**: `custom-properties` is a `Map<String, String>` field in the Iceberg DataFile Avro schema (Spec v2, line 437 of the spec). Iceberg readers either expose this map verbatim or ignore unknown keys.
-
-The centroid is base64-encoded as a compact f32 array (e.g. for dim=1536: 6144 bytes raw → ~8.2 KB base64). This keeps the Avro manifest text-safe while remaining parseable by the AI-Lake SDK.
+**Why this is safe**: `key_metadata` is a standard `bytes` field in the Iceberg `data_file` Avro schema (Spec v2 §4.1.7, field-id 131). Iceberg readers that don't know AI-Lake pass this field through as opaque bytes or ignore it entirely. The centroid is base64-encoded as a compact f32 array (e.g. for dim=1536: 6144 bytes raw → ~8.2 KB base64).
 
 ### 3. `data/part-NNNNN.parquet`
 
@@ -142,10 +142,12 @@ The `ailake-catalog` crate is responsible for maintaining this list. Every catal
 - [ ] Each `DataFile` entry has `file-path`, `file-format`, `partition`, `record-count`, `file-size-in-bytes`
 - [ ] `file-format` is `PARQUET` (no ORC, no Avro data)
 - [ ] Sequence numbers are monotonically increasing
-- [ ] All `ailake.*` keys in `properties` and `custom-properties` have string values
-- [ ] Centroid value in `custom-properties` is valid base64-encoded f32 array of the expected length
+- [ ] All `ailake.*` keys in `properties` have string values
+- [ ] `key_metadata` bytes in each `DataFile` entry, when non-null, deserialize as valid `AilakeEntryExt` JSON
+- [ ] Centroid value in `key_metadata` is valid base64-encoded f32 array of the expected length
+- [ ] `schemas[0].fields` includes all Parquet columns with correct Iceberg types and field-ids, OR `schema.name-mapping.default` is set in `properties` so PyIceberg can resolve columns without Parquet field-ids
 
-### Validation via PyIceberg (Phase 1 integration test)
+### Validation via PyIceberg (Phase 2 integration test)
 
 ```python
 # tests/compat/test_pyiceberg_read.py
@@ -204,12 +206,13 @@ The Iceberg `format-version` (currently `2`) is NOT our version number and MUST 
 ## Known compatibility notes by framework
 
 ### PyIceberg
-- Reads `FIXED_LEN_BYTE_ARRAY` as `pa.binary(N)` or `pa.large_binary()`.
+- Reads `FIXED_LEN_BYTE_ARRAY` as `pa.fixed_size_binary(N)` or `pa.large_binary()`.
 - Unknown `properties` keys: silently passed through to `table.properties` dict.
 - Unknown field metadata on schema elements: silently ignored.
 - Trailing bytes after `PAR1`: PyArrow (used by PyIceberg) terminates at the final magic marker.
-- `custom-properties` on `DataFile`: exposed via `table.scan().plan_files()` as a dict.
-- **Status**: fully compatible.
+- `key_metadata` on `DataFile`: passed through as bytes; AI-Lake SDK decodes the JSON.
+- Tables require either Parquet field-ids or `schema.name-mapping.default` in `properties` for `StaticTable.scan()`. AI-Lake fixture sets both.
+- **Status**: fully compatible — `StaticTable.from_metadata` + `.scan().to_arrow()` passes with 1 000-row fixture.
 
 ### Apache Spark (iceberg-spark 1.5+)
 - `FIXED_LEN_BYTE_ARRAY` mapped to `BinaryType` in Spark SQL.

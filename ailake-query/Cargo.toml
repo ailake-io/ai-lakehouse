@@ -27,6 +27,7 @@ rayon          = { workspace = true }
 [dev-dependencies]
 tempfile    = { workspace = true }
 rand        = { workspace = true }
+serde_json  = { workspace = true }
 
 [[example]]
 name = "demo"

@@ -5,6 +5,8 @@
 //!
 //! See docs/architecture/CATALOG_BACKENDS.md for backend details.
 
+pub mod avro_manifest;
+pub mod avro_raw;
 pub mod databricks;
 pub mod hadoop;
 pub mod metadata;

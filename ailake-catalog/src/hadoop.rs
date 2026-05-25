@@ -6,12 +6,12 @@ use std::sync::Arc;
 use ailake_core::{AilakeError, AilakeResult};
 use async_trait::async_trait;
 
+use crate::avro_manifest::{read_manifest_file, read_manifest_list, write_manifest_file, write_manifest_list_multi};
 use crate::metadata::{IcebergMetadata, IcebergSnapshot};
 use crate::provider::{
     CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, TableIdent, TableMetadata,
     TableProperties,
 };
-use crate::snapshot::{build_manifest, manifest_path};
 use ailake_store::Store;
 use bytes::Bytes;
 
@@ -36,28 +36,49 @@ impl HadoopCatalog {
         }
     }
 
-    fn current_metadata_path(&self, table: &TableIdent) -> String {
-        format!("{}/metadata/current.json", self.table_root(table))
+    fn version_hint_path(&self, table: &TableIdent) -> String {
+        format!("{}/metadata/version-hint.text", self.table_root(table))
+    }
+
+    fn versioned_metadata_path(&self, table: &TableIdent, version: u32) -> String {
+        format!("{}/metadata/v{}.metadata.json", self.table_root(table), version)
+    }
+
+    async fn current_version(&self, table: &TableIdent) -> AilakeResult<u32> {
+        match self.store.get(&self.version_hint_path(table)).await {
+            Ok(bytes) => Ok(std::str::from_utf8(&bytes)
+                .unwrap_or("1")
+                .trim()
+                .parse::<u32>()
+                .unwrap_or(1)),
+            Err(_) => Ok(0),
+        }
     }
 
     async fn load_raw_metadata(&self, table: &TableIdent) -> AilakeResult<IcebergMetadata> {
-        let path = self.current_metadata_path(table);
+        let version = self.current_version(table).await?;
+        let path = self.versioned_metadata_path(table, version);
         let bytes = self.store.get(&path).await?;
         let json = std::str::from_utf8(&bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
         IcebergMetadata::from_json(json)
     }
 
     async fn save_metadata(&self, table: &TableIdent, meta: &IcebergMetadata) -> AilakeResult<()> {
+        let next = self.current_version(table).await? + 1;
         let json = meta.to_json()?;
-        let path = self.current_metadata_path(table);
-        self.store.put(&path, Bytes::from(json.into_bytes())).await
+        self.store
+            .put(&self.versioned_metadata_path(table, next), Bytes::from(json.into_bytes()))
+            .await?;
+        self.store
+            .put(&self.version_hint_path(table), Bytes::from(next.to_string()))
+            .await
     }
 }
 
 #[async_trait]
 impl CatalogProvider for HadoopCatalog {
     async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
-        let location = format!("{}/{}.db/{}", self.warehouse, name.namespace, name.name);
+        let location = self.table_root(name);
         let mut meta = IcebergMetadata::new(&location, &props.policy);
         for (k, v) in &props.extra {
             meta.properties.insert(k.clone(), v.clone());
@@ -76,17 +97,71 @@ impl CatalogProvider for HadoopCatalog {
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
         let snap_id = snapshot.snapshot_id;
+        let mut meta = self.load_raw_metadata(table).await?;
+        let seq = meta.last_sequence_number + 1;
+        let table_root = self.table_root(table);
 
-        // Write manifest
-        let manifest = build_manifest(&snapshot);
-        let manifest_path = format!("{}/{}", self.table_root(table), manifest_path(snap_id));
-        let manifest_json = manifest.to_json()?;
+        // Minimal Iceberg schema JSON for this table (empty fields; readers get column info from Parquet)
+        let table_schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
+        let partition_spec_json = r#"[{"spec-id":0,"fields":[]}]"#;
+
+        // Write Avro manifest file for the new data files.
+        // Iceberg spec requires absolute file paths in manifests. Prefix relative paths
+        // with the warehouse root only when the warehouse is itself an absolute path
+        // (starts with '/' or contains a URI scheme). Relative warehouse names (e.g. in
+        // unit tests) are left as-is so the store can resolve them normally.
+        let warehouse_prefix: Option<&str> = if self.warehouse.starts_with('/')
+            || self.warehouse.contains("://")
+        {
+            Some(&self.warehouse)
+        } else {
+            None
+        };
+        let abs_files: Vec<DataFileEntry> = snapshot.files.iter().map(|f| {
+            let path = if f.path.starts_with('/') || f.path.contains("://") {
+                f.path.clone()
+            } else if let Some(prefix) = warehouse_prefix {
+                format!("{}/{}", prefix, f.path)
+            } else {
+                f.path.clone()
+            };
+            DataFileEntry { path, ..f.clone() }
+        }).collect();
+        let added_rows: i64 = abs_files.iter().map(|f| f.record_count as i64).sum();
+        let manifest_file_path = format!("{}/metadata/{}-m0.avro", table_root, snap_id);
+        let manifest_bytes = write_manifest_file(
+            &abs_files,
+            snap_id,
+            seq,
+            table_schema_json,
+            partition_spec_json,
+        );
+        let manifest_len = manifest_bytes.len();
+        self.store.put(&manifest_file_path, manifest_bytes).await?;
+
+        // Collect manifest paths from the previous snapshot (if any) for the manifest list
+        let mut all_manifests: Vec<(String, i64)> = Vec::new();
+        if let Some(prev_snap) = meta.snapshots.last() {
+            if let Ok(ml_bytes) = self.store.get(&prev_snap.manifest_list).await {
+                if let Ok(prev_manifests) = read_manifest_list(&ml_bytes) {
+                    for prev_path in prev_manifests {
+                        // Get the file size for the manifest list entry
+                        let len = self.store.file_size(&prev_path).await.unwrap_or(0) as i64;
+                        all_manifests.push((prev_path, len));
+                    }
+                }
+            }
+        }
+        all_manifests.push((manifest_file_path.clone(), manifest_len as i64));
+
+        // Write Avro manifest list for this snapshot
+        let manifest_list_path = format!("{}/metadata/snap-{}-1.avro", table_root, snap_id);
+        // Build manifest list from all manifests
+        let ml_bytes = write_manifest_list_multi(&all_manifests, snap_id, seq, added_rows);
         self.store
-            .put(&manifest_path, Bytes::from(manifest_json.into_bytes()))
+            .put(&manifest_list_path, ml_bytes)
             .await?;
 
-        // Update metadata
-        let mut meta = self.load_raw_metadata(table).await?;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -95,9 +170,9 @@ impl CatalogProvider for HadoopCatalog {
         let iceberg_snap = IcebergSnapshot {
             snapshot_id: snap_id,
             parent_snapshot_id: snapshot.parent_snapshot_id,
-            sequence_number: meta.last_sequence_number + 1,
+            sequence_number: seq,
             timestamp_ms: now_ms,
-            manifest_list: manifest_path,
+            manifest_list: manifest_list_path,
             summary: std::collections::HashMap::from([
                 (
                     "operation".to_string(),
@@ -110,7 +185,7 @@ impl CatalogProvider for HadoopCatalog {
             ]),
             schema_id: Some(0),
         };
-        meta.last_sequence_number += 1;
+        meta.last_sequence_number = seq;
         meta.last_updated_ms = now_ms;
         meta.current_snapshot_id = Some(snap_id);
         meta.snapshots.push(iceberg_snap);
@@ -135,18 +210,33 @@ impl CatalogProvider for HadoopCatalog {
             .find(|s| s.snapshot_id == snap_id)
             .ok_or_else(|| AilakeError::Catalog(format!("snapshot {snap_id} not found")))?;
 
-        let manifest_bytes = self.store.get(&snap.manifest_list).await?;
-        let manifest_json = std::str::from_utf8(&manifest_bytes)
+        // Read Avro manifest list → manifest file paths
+        let ml_bytes = self.store.get(&snap.manifest_list).await?;
+        let manifest_paths = read_manifest_list(&ml_bytes)
             .map_err(|e| AilakeError::Catalog(e.to_string()))?;
-        let manifest = crate::snapshot::Manifest::from_json(manifest_json)?;
-        Ok(manifest.files)
+
+        // Read each manifest file → data file entries (with AI-Lake metadata from key_metadata)
+        let mut entries: Vec<DataFileEntry> = Vec::new();
+        for mpath in manifest_paths {
+            let mf_bytes = self.store.get(&mpath).await?;
+            let file_entries = read_manifest_file(&mf_bytes)
+                .map_err(|e| AilakeError::Catalog(e.to_string()))?;
+            entries.extend(file_entries);
+        }
+        Ok(entries)
     }
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()> {
-        // Phase 1: just remove the metadata file
-        let path = self.current_metadata_path(name);
-        if self.store.exists(&path).await? {
-            self.store.delete(&path).await?;
+        let version = self.current_version(name).await?;
+        if version > 0 {
+            let path = self.versioned_metadata_path(name, version);
+            if self.store.exists(&path).await? {
+                self.store.delete(&path).await?;
+            }
+            let hint = self.version_hint_path(name);
+            if self.store.exists(&hint).await? {
+                self.store.delete(&hint).await?;
+            }
         }
         Ok(())
     }

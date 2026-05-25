@@ -74,8 +74,11 @@ async fn main() {
     std::fs::create_dir_all(&out).expect("create fixture dir");
     println!("writing fixture to: {out}");
 
-    let store: Arc<dyn Store> = Arc::new(LocalStore::new(&out));
-    let catalog = Arc::new(HadoopCatalog::new(Arc::clone(&store), ""));
+    let abs_out = std::fs::canonicalize(&out).unwrap_or_else(|_| std::path::PathBuf::from(&out));
+    let abs_out_str = abs_out.to_string_lossy().to_string();
+
+    let store: Arc<dyn Store> = Arc::new(LocalStore::new(&abs_out_str));
+    let catalog = Arc::new(HadoopCatalog::new(Arc::clone(&store), &abs_out_str));
     let table = TableIdent::new("default", "compat_test");
 
     let policy = VectorStoragePolicy {
@@ -113,6 +116,43 @@ async fn main() {
 
     writer.commit().await.expect("commit");
     println!("committed — {total_rows} rows total");
+
+    // Patch metadata: add schema fields + name-mapping so PyIceberg can scan without field-ids
+    {
+        let meta_dir = format!("{}/default.db/compat_test/metadata", abs_out_str);
+        let hint_path = format!("{}/version-hint.text", meta_dir);
+        let version: u32 = std::fs::read_to_string(&hint_path)
+            .unwrap_or_else(|_| "1".to_string())
+            .trim()
+            .parse()
+            .unwrap_or(1);
+        let meta_path = format!("{}/v{}.metadata.json", meta_dir, version);
+        let raw = std::fs::read_to_string(&meta_path).expect("read metadata");
+        let mut meta: serde_json::Value = serde_json::from_str(&raw).expect("parse metadata");
+
+        let embedding_type = format!("fixed[{}]", DIM * 2); // F16 = 2 bytes/dim
+        meta["schemas"][0]["fields"] = serde_json::json!([
+            {"id": 1, "name": "id",        "required": false, "type": "int"},
+            {"id": 2, "name": "text",      "required": false, "type": "string"},
+            {"id": 3, "name": "embedding", "required": false, "type": embedding_type},
+        ]);
+        meta["last-column-id"] = serde_json::json!(3);
+
+        let name_mapping = serde_json::json!([
+            {"field-id": 1, "names": ["id"]},
+            {"field-id": 2, "names": ["text"]},
+            {"field-id": 3, "names": ["embedding"]},
+        ]);
+        meta["properties"]["schema.name-mapping.default"] =
+            serde_json::json!(name_mapping.to_string());
+
+        let next = version + 1;
+        let new_path = format!("{}/v{}.metadata.json", meta_dir, next);
+        std::fs::write(&new_path, serde_json::to_string_pretty(&meta).unwrap())
+            .expect("write patched metadata");
+        std::fs::write(&hint_path, next.to_string()).expect("update version-hint");
+        println!("patched metadata → v{next} (schema fields + name-mapping)");
+    }
 
     // Print fixture manifest so CI can verify path
     let files = (catalog as Arc<dyn CatalogProvider>)

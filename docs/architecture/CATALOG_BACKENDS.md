@@ -57,16 +57,18 @@ All vector statistics (centroid, radius, HNSW offsets) live in `DataFileEntry` f
 
 ```
 ailake-catalog/src/
-├── lib.rs          # re-exports, module declarations
-├── provider.rs     # CatalogProvider trait, TableIdent, DataFileEntry, NewSnapshot
-├── metadata.rs     # metadata.json read/write (Iceberg Spec v2)
-├── snapshot.rs     # manifest JSON builder (Phase 1/2 — JSON, not Avro)
-├── hadoop.rs       # HadoopCatalog — filesystem / any Store backend
-├── rest.rs         # RestCatalog — Iceberg REST Catalog spec
-├── databricks.rs   # DatabricksAuth + convenience builders for Azure/AWS/GCP
-├── glue.rs         # GlueCatalog — AWS Glue (feature = "catalog-glue")
-├── nessie.rs       # NessieCatalog — Nessie branching extensions (feature = "catalog-nessie")
-└── jdbc.rs         # JdbcCatalog — PostgreSQL/MySQL (feature = "catalog-jdbc")
+├── lib.rs            # re-exports, module declarations
+├── provider.rs       # CatalogProvider trait, TableIdent, DataFileEntry, NewSnapshot
+├── metadata.rs       # metadata.json read/write (Iceberg Spec v2)
+├── snapshot.rs       # snapshot helpers (operation enum, snapshot id generation)
+├── avro_manifest.rs  # Avro OCF manifest file + manifest list writers/readers
+├── avro_raw.rs       # raw Avro OCF serializer (verbatim schema JSON, zigzag/varint)
+├── hadoop.rs         # HadoopCatalog — filesystem / any Store backend
+├── rest.rs           # RestCatalog — Iceberg REST Catalog spec
+├── databricks.rs     # DatabricksAuth + convenience builders for Azure/AWS/GCP
+├── glue.rs           # GlueCatalog — AWS Glue (feature = "catalog-glue")
+├── nessie.rs         # NessieCatalog — Nessie branching extensions (feature = "catalog-nessie")
+└── jdbc.rs           # JdbcCatalog — PostgreSQL/MySQL (feature = "catalog-jdbc")
 ```
 
 ---
@@ -90,13 +92,16 @@ impl HadoopCatalog {
 ```
 {warehouse}/{namespace}.db/{table}/
   metadata/
-    current.json          ← IcebergMetadata (replaces metadata/vN.metadata.json for simplicity)
-    snap-{id}.json        ← manifest JSON (list of DataFileEntry)
+    version-hint.text          ← current version number (e.g. "3")
+    v1.metadata.json           ← IcebergMetadata after table creation
+    vN.metadata.json           ← IcebergMetadata after each commit
+    {snap_id}-m0.avro          ← Iceberg manifest file (Avro OCF, DataFile entries)
+    snap-{snap_id}-1.avro      ← Iceberg manifest list (Avro OCF, ManifestFile entries)
   data/
-    part-NNNNN.parquet    ← Parquet + AILK footer
+    part-NNNNN.parquet         ← Parquet + AILK footer
 ```
 
-**Commit**: overwrites `current.json` atomically per-object (S3 `PUT` semantics). Safe for single-writer workloads.
+**Commit**: writes a new `vN.metadata.json` and updates `version-hint.text` (S3 `PUT` semantics). Manifest files are Avro OCF with verbatim schema JSON so field-ids survive round-trips (apache-avro 0.16 strips unknown schema properties). Safe for single-writer workloads.
 
 ```rust
 // Local dev

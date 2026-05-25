@@ -64,7 +64,7 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Deve terminar com `105 passed` (2 ignored — testes que requerem servidor externo).
+Deve terminar com `112 passed` (3 ignored — testes que requerem servidor externo ou PyArrow instalado).
 
 ### Testes por crate
 
@@ -438,6 +438,35 @@ print(table.to_pandas().head())
 ```
 
 PyArrow deve ler normalmente — colunas `id`, `text`, e `embedding` (como bytes). Sem erros de magic ou footer.
+
+---
+
+## 7B. Verificar compatibilidade PyIceberg (StaticTable scan)
+
+Requer PyIceberg instalado:
+```bash
+pip install "pyiceberg[pyarrow]"
+```
+
+Gerar fixture e rodar verificação:
+```bash
+# Gerar fixture (1000 linhas, dim=8, F16)
+cargo run --example write_fixture -p ailake-query
+
+# Verificar compatibilidade
+python tests/compat/check_pyiceberg.py ./compat-fixture
+```
+
+Saída esperada:
+```
+PASS (StaticTable): PyIceberg read 1000 rows, schema=['id', 'text', 'embedding']
+```
+
+O que o teste valida:
+- `StaticTable.from_metadata` lê `vN.metadata.json` via `version-hint.text`
+- Manifests Avro OCF são lidos corretamente (field-ids preservados pelo `avro_raw.rs`)
+- `table.scan().to_arrow()` retorna 1000 linhas com schema `[id, text, embedding]`
+- Coluna `embedding` lida como `fixed_size_binary[16]` (F16, dim=8)
 
 ---
 

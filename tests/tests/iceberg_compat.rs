@@ -76,21 +76,67 @@ fn find_json_named(root: &std::path::Path, name: &str) -> Vec<std::path::PathBuf
     out
 }
 
+/// Find the current versioned metadata file (vN.metadata.json) by reading version-hint.text,
+/// or fall back to the highest-versioned file if the hint is missing.
+fn find_current_metadata(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    // Walk looking for version-hint.text files
+    fn walk(dir: &std::path::Path, results: &mut Vec<std::path::PathBuf>) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, results);
+                } else if path.file_name().and_then(|n| n.to_str()) == Some("version-hint.text") {
+                    let meta_dir = path.parent().unwrap();
+                    if let Ok(hint) = std::fs::read_to_string(&path) {
+                        let v = hint.trim().to_string();
+                        let meta_path = meta_dir.join(format!("v{v}.metadata.json"));
+                        if meta_path.exists() {
+                            results.push(meta_path);
+                            return;
+                        }
+                    }
+                    // fallback: highest vN.metadata.json
+                    if let Ok(rd2) = std::fs::read_dir(meta_dir) {
+                        let mut candidates: Vec<_> = rd2
+                            .flatten()
+                            .map(|e| e.path())
+                            .filter(|p| {
+                                p.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(|n| n.ends_with(".metadata.json"))
+                                    .unwrap_or(false)
+                            })
+                            .collect();
+                        candidates.sort();
+                        if let Some(last) = candidates.last() {
+                            results.push(last.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    walk(root, &mut out);
+    out
+}
+
 #[tokio::test]
 async fn metadata_json_is_iceberg_spec_v2() {
     let dir = TempDir::new().unwrap();
     write_table(&dir, "compat_meta", 10, 8).await;
 
-    let meta_files = find_json_named(dir.path(), "current.json");
+    let meta_files = find_current_metadata(dir.path());
     assert!(
         !meta_files.is_empty(),
-        "no current.json (Iceberg metadata) found under {:?}",
+        "no vN.metadata.json (Iceberg metadata) found under {:?}",
         dir.path()
     );
 
     let bytes = std::fs::read(&meta_files[0]).unwrap();
     let meta: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("current.json is not valid JSON");
+        serde_json::from_slice(&bytes).expect("metadata file is not valid JSON");
 
     assert_eq!(
         meta["format-version"], 2,
@@ -182,8 +228,8 @@ async fn data_files_referenced_in_metadata() {
     let parquet_files = find_files(dir.path(), "parquet");
     assert!(!parquet_files.is_empty(), "no data files found");
 
-    let meta_files = find_json_named(dir.path(), "current.json");
-    assert!(!meta_files.is_empty(), "no current.json found");
+    let meta_files = find_current_metadata(dir.path());
+    assert!(!meta_files.is_empty(), "no vN.metadata.json found");
 
     let meta_bytes = std::fs::read(&meta_files[0]).unwrap();
     let meta: serde_json::Value = serde_json::from_slice(&meta_bytes).unwrap();
