@@ -479,7 +479,20 @@ mod avx512 {
 
     #[inline(always)]
     unsafe fn hsum512(v: __m512) -> f32 {
-        _mm512_reduce_add_ps(v)
+        // _mm512_reduce_add_ps stabilized Rust 1.89; _mm512_extractf32x8_ps needs avx512dq.
+        // Store all 16 lanes to stack (avx512f), reload as two __m256 (avx), then reduce.
+        let mut buf = [0.0f32; 16];
+        _mm512_storeu_ps(buf.as_mut_ptr(), v);
+        let lo = _mm256_loadu_ps(buf.as_ptr());
+        let hi = _mm256_loadu_ps(buf.as_ptr().add(8));
+        let sum256 = _mm256_add_ps(lo, hi);
+        let hi128 = _mm256_extractf128_ps(sum256, 1);
+        let lo128 = _mm256_castps256_ps128(sum256);
+        let sum128 = _mm_add_ps(lo128, hi128);
+        let shuf = _mm_movehdup_ps(sum128);
+        let sums = _mm_add_ps(sum128, shuf);
+        let shuf2 = _mm_movehl_ps(shuf, sums);
+        _mm_cvtss_f32(_mm_add_ss(sums, shuf2))
     }
 
     #[target_feature(enable = "avx512f,fma")]
