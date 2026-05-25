@@ -34,6 +34,8 @@ pub struct TableWriter {
     /// Arrow schema captured from the first write_batch call; used to populate
     /// Iceberg schema fields and schema.name-mapping.default on commit.
     captured_schema: Option<SchemaRef>,
+    /// Extra vector column policies from write_batch_multi (columns beyond primary).
+    extra_vec_policies: Vec<VectorStoragePolicy>,
 }
 
 impl TableWriter {
@@ -52,6 +54,7 @@ impl TableWriter {
             pending_files: Vec::new(),
             parent_snapshot_id: None,
             captured_schema: None,
+            extra_vec_policies: Vec::new(),
         }
     }
 
@@ -246,6 +249,9 @@ impl TableWriter {
         if self.captured_schema.is_none() {
             self.captured_schema = Some(batch.schema());
         }
+        if self.extra_vec_policies.is_empty() && columns.len() > 1 {
+            self.extra_vec_policies = columns[1..].iter().map(|c| c.policy.clone()).collect();
+        }
 
         if columns.is_empty() {
             return Err(AilakeError::InvalidArgument(
@@ -337,7 +343,7 @@ impl TableWriter {
         let iceberg_schema = self
             .captured_schema
             .as_deref()
-            .map(|s| arrow_schema_to_iceberg_update(s, &self.policy));
+            .map(|s| arrow_schema_to_iceberg_update(s, &self.policy, &self.extra_vec_policies));
         let snapshot = NewSnapshot {
             snapshot_id: new_snapshot_id(),
             parent_snapshot_id: self.parent_snapshot_id,
@@ -373,31 +379,48 @@ impl TableWriter {
 
 /// Convert an Arrow schema to an Iceberg schema update for catalog commits.
 ///
-/// Maps Arrow DataType → Iceberg type string. The vector column uses `fixed[N]`
-/// where N = dim * bytes_per_element based on the policy precision.
+/// Top-level field IDs are assigned sequentially (1-based) and match the
+/// `PARQUET:field_id` stamps written by `ParquetVectorWriter`. Nested element
+/// IDs (inside List/Struct/Map) are assigned after all top-level IDs are
+/// pre-reserved, so they never collide with Parquet column field IDs.
 fn arrow_schema_to_iceberg_update(
     schema: &arrow_schema::Schema,
     policy: &VectorStoragePolicy,
+    extra_vec_policies: &[VectorStoragePolicy],
 ) -> IcebergSchemaUpdate {
-    let bytes_per_dim: u32 = match policy.precision {
-        ailake_core::VectorPrecision::F32 => 4,
-        ailake_core::VectorPrecision::F16 => 2,
-        ailake_core::VectorPrecision::I8 => 1,
-        ailake_core::VectorPrecision::Binary => 1,
-    };
+    let bytes_per_dim = policy.precision.bytes_per_element() as u32;
     let vec_fixed_len = policy.dim * bytes_per_dim;
+
+    // Collect all vector column names that will appear in the final schema.
+    let has_primary_in_batch = schema
+        .fields()
+        .iter()
+        .any(|f| f.name() == &policy.column_name);
+    let vec_cols: Vec<(String, u32)> = {
+        let mut v = Vec::new();
+        if !has_primary_in_batch {
+            v.push((policy.column_name.clone(), vec_fixed_len));
+        }
+        for ep in extra_vec_policies {
+            let ep_fixed_len = ep.dim * ep.precision.bytes_per_element() as u32;
+            if !schema.fields().iter().any(|f| f.name() == &ep.column_name) {
+                v.push((ep.column_name.clone(), ep_fixed_len));
+            }
+        }
+        v
+    };
+
+    // Total top-level columns = batch fields + appended vec columns.
+    let top_level_count = schema.fields().len() + vec_cols.len();
+    // Nested element IDs start after all top-level IDs are pre-reserved.
+    let mut nested_id = top_level_count as i32;
 
     let mut fields: Vec<serde_json::Value> = Vec::new();
     let mut name_mapping: Vec<serde_json::Value> = Vec::new();
 
     for (idx, field) in schema.fields().iter().enumerate() {
         let field_id = (idx + 1) as i32;
-        let iceberg_type = arrow_type_to_iceberg_string(
-            field.data_type(),
-            field.name(),
-            &policy.column_name,
-            vec_fixed_len,
-        );
+        let iceberg_type = arrow_type_to_iceberg(field.data_type(), &mut nested_id);
         fields.push(serde_json::json!({
             "id": field_id,
             "name": field.name(),
@@ -410,20 +433,22 @@ fn arrow_schema_to_iceberg_update(
         }));
     }
 
-    // Append the vector column — it lives outside the RecordBatch schema.
-    let vec_field_id = schema.fields().len() as i32 + 1;
-    fields.push(serde_json::json!({
-        "id": vec_field_id,
-        "name": policy.column_name,
-        "required": false,
-        "type": format!("fixed[{vec_fixed_len}]"),
-    }));
-    name_mapping.push(serde_json::json!({
-        "field-id": vec_field_id,
-        "names": [policy.column_name],
-    }));
+    // Append vector columns that live outside the RecordBatch schema.
+    for (i, (col_name, fixed_len)) in vec_cols.iter().enumerate() {
+        let field_id = (schema.fields().len() + 1 + i) as i32;
+        fields.push(serde_json::json!({
+            "id": field_id,
+            "name": col_name,
+            "required": false,
+            "type": format!("fixed[{fixed_len}]"),
+        }));
+        name_mapping.push(serde_json::json!({
+            "field-id": field_id,
+            "names": [col_name],
+        }));
+    }
 
-    let last_column_id = vec_field_id;
+    let last_column_id = nested_id;
     let name_mapping_json = serde_json::to_string(&name_mapping).unwrap_or_else(|_| "[]".into());
 
     IcebergSchemaUpdate {
@@ -433,33 +458,97 @@ fn arrow_schema_to_iceberg_update(
     }
 }
 
-fn arrow_type_to_iceberg_string(
-    dt: &arrow_schema::DataType,
-    field_name: &str,
-    vec_column: &str,
-    vec_fixed_len: u32,
-) -> String {
+/// Map an Arrow DataType to an Iceberg schema type value (string or JSON object).
+///
+/// `nested_id` is a shared counter for generating unique element/field IDs inside
+/// List, Struct, and Map types. It must start beyond all pre-reserved top-level IDs.
+fn arrow_type_to_iceberg(dt: &arrow_schema::DataType, nested_id: &mut i32) -> serde_json::Value {
     use arrow_schema::DataType;
-    if field_name == vec_column {
-        return format!("fixed[{vec_fixed_len}]");
-    }
     match dt {
-        DataType::Boolean => "boolean".into(),
+        DataType::Boolean => serde_json::json!("boolean"),
         DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::UInt8 | DataType::UInt16 => {
-            "int".into()
+            serde_json::json!("int")
         }
-        DataType::Int64 | DataType::UInt32 | DataType::UInt64 => "long".into(),
-        DataType::Float16 | DataType::Float32 => "float".into(),
-        DataType::Float64 => "double".into(),
-        DataType::Utf8 | DataType::LargeUtf8 => "string".into(),
-        DataType::Binary | DataType::LargeBinary => "binary".into(),
-        DataType::Date32 | DataType::Date64 => "date".into(),
-        DataType::Timestamp(_, _) => "timestamptz".into(),
-        DataType::Time32(_) | DataType::Time64(_) => "time".into(),
-        DataType::FixedSizeBinary(n) => format!("fixed[{n}]"),
-        DataType::Decimal128(p, s) => format!("decimal({p}, {s})"),
-        DataType::Decimal256(p, s) => format!("decimal({p}, {s})"),
-        _ => "binary".into(),
+        DataType::Int64 | DataType::UInt32 | DataType::UInt64 => serde_json::json!("long"),
+        DataType::Float16 | DataType::Float32 => serde_json::json!("float"),
+        DataType::Float64 => serde_json::json!("double"),
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => serde_json::json!("string"),
+        DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
+            serde_json::json!("binary")
+        }
+        DataType::Date32 | DataType::Date64 => serde_json::json!("date"),
+        // Timestamp with timezone → timestamptz; without → timestamp.
+        DataType::Timestamp(_, Some(_)) => serde_json::json!("timestamptz"),
+        DataType::Timestamp(_, None) => serde_json::json!("timestamp"),
+        DataType::Time32(_) | DataType::Time64(_) => serde_json::json!("time"),
+        DataType::FixedSizeBinary(n) => serde_json::json!(format!("fixed[{n}]")),
+        DataType::Decimal128(p, s) | DataType::Decimal256(p, s) => {
+            serde_json::json!(format!("decimal({p}, {s})"))
+        }
+        DataType::List(inner)
+        | DataType::LargeList(inner)
+        | DataType::ListView(inner)
+        | DataType::FixedSizeList(inner, _) => {
+            *nested_id += 1;
+            let element_id = *nested_id;
+            let element_type = arrow_type_to_iceberg(inner.data_type(), nested_id);
+            serde_json::json!({
+                "type": "list",
+                "element-id": element_id,
+                "element": element_type,
+                "element-required": !inner.is_nullable(),
+            })
+        }
+        DataType::Struct(arrow_fields) => {
+            let struct_fields: Vec<serde_json::Value> = arrow_fields
+                .iter()
+                .map(|f| {
+                    *nested_id += 1;
+                    let fid = *nested_id;
+                    let ftype = arrow_type_to_iceberg(f.data_type(), nested_id);
+                    serde_json::json!({
+                        "id": fid,
+                        "name": f.name(),
+                        "required": !f.is_nullable(),
+                        "type": ftype,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "type": "struct", "fields": struct_fields })
+        }
+        DataType::Map(entries, _) => {
+            // Arrow Map is List<Struct<key: K, value: V>>.
+            *nested_id += 1;
+            let key_id = *nested_id;
+            *nested_id += 1;
+            let val_id = *nested_id;
+            if let DataType::Struct(kv_fields) = entries.data_type() {
+                let key_f = kv_fields
+                    .iter()
+                    .find(|f| f.name() == "key" || f.name() == "keys");
+                let val_f = kv_fields
+                    .iter()
+                    .find(|f| f.name() == "value" || f.name() == "values");
+                let key_type = key_f
+                    .map(|f| arrow_type_to_iceberg(f.data_type(), nested_id))
+                    .unwrap_or(serde_json::json!("binary"));
+                let val_type = val_f
+                    .map(|f| arrow_type_to_iceberg(f.data_type(), nested_id))
+                    .unwrap_or(serde_json::json!("binary"));
+                let val_required = val_f.map(|f| !f.is_nullable()).unwrap_or(false);
+                serde_json::json!({
+                    "type": "map",
+                    "key-id": key_id,
+                    "key": key_type,
+                    "value-id": val_id,
+                    "value": val_type,
+                    "value-required": val_required,
+                })
+            } else {
+                serde_json::json!("binary")
+            }
+        }
+        _ => serde_json::json!("binary"),
     }
 }
 
@@ -562,4 +651,183 @@ async fn build_and_patch_index(
         "[ailake] deferred HNSW built for {file_path} (offset={hnsw_abs_offset}, len={hnsw_len})"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ailake_core::{VectorMetric, VectorPrecision};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
+
+    fn policy(col: &str, dim: u32) -> VectorStoragePolicy {
+        VectorStoragePolicy {
+            column_name: col.to_string(),
+            dim,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: false,
+        }
+    }
+
+    fn update_for(schema: &Schema, pol: &VectorStoragePolicy) -> IcebergSchemaUpdate {
+        arrow_schema_to_iceberg_update(schema, pol, &[])
+    }
+
+    #[test]
+    fn simple_schema_produces_correct_fields() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("text", DataType::Utf8, false),
+        ]);
+        let pol = policy("embedding", 8);
+        let upd = update_for(&schema, &pol);
+
+        assert_eq!(upd.fields.len(), 3);
+        assert_eq!(upd.fields[0]["id"], 1);
+        assert_eq!(upd.fields[0]["type"], "int");
+        assert_eq!(upd.fields[1]["id"], 2);
+        assert_eq!(upd.fields[1]["type"], "string");
+        assert_eq!(upd.fields[2]["id"], 3);
+        assert_eq!(upd.fields[2]["type"], "fixed[16]"); // dim=8, F16=2 bytes
+
+        let nm: Vec<serde_json::Value> = serde_json::from_str(&upd.name_mapping_json).unwrap();
+        assert_eq!(nm.len(), 3);
+        assert_eq!(nm[2]["field-id"], 3);
+        assert_eq!(nm[2]["names"][0], "embedding");
+        assert_eq!(upd.last_column_id, 3);
+    }
+
+    #[test]
+    fn timestamp_without_tz_maps_to_timestamp_not_timestamptz() {
+        let schema = Schema::new(vec![
+            Field::new(
+                "created_at",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new(
+                "updated_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                true,
+            ),
+        ]);
+        let pol = policy("vec", 4);
+        let upd = update_for(&schema, &pol);
+
+        assert_eq!(upd.fields[0]["type"], "timestamp");
+        assert_eq!(upd.fields[1]["type"], "timestamptz");
+    }
+
+    #[test]
+    fn list_type_produces_iceberg_list_object() {
+        let schema = Schema::new(vec![Field::new(
+            "tags",
+            DataType::List(std::sync::Arc::new(Field::new(
+                "item",
+                DataType::Utf8,
+                true,
+            ))),
+            true,
+        )]);
+        let pol = policy("vec", 4);
+        let upd = update_for(&schema, &pol);
+
+        let t = &upd.fields[0]["type"];
+        assert_eq!(t["type"], "list");
+        assert_eq!(t["element"], "string");
+        // element-id must be > top-level field count (2: tags + vec)
+        assert!(t["element-id"].as_i64().unwrap() > 2);
+    }
+
+    #[test]
+    fn struct_type_produces_nested_fields() {
+        let schema = Schema::new(vec![Field::new(
+            "meta",
+            DataType::Struct(
+                vec![
+                    Field::new("key", DataType::Utf8, false),
+                    Field::new("val", DataType::Int64, false),
+                ]
+                .into(),
+            ),
+            true,
+        )]);
+        let pol = policy("vec", 4);
+        let upd = update_for(&schema, &pol);
+
+        let t = &upd.fields[0]["type"];
+        assert_eq!(t["type"], "struct");
+        let nested = t["fields"].as_array().unwrap();
+        assert_eq!(nested.len(), 2);
+        assert_eq!(nested[0]["name"], "key");
+        assert_eq!(nested[0]["type"], "string");
+        assert_eq!(nested[1]["name"], "val");
+        assert_eq!(nested[1]["type"], "long");
+        // Nested IDs must be > top-level count (2: meta + vec)
+        assert!(nested[0]["id"].as_i64().unwrap() > 2);
+    }
+
+    #[test]
+    fn no_duplicate_vec_column_when_already_in_batch() {
+        // If for some reason the vec column is in the batch schema, don't add it twice.
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("embedding", DataType::FixedSizeBinary(16), false),
+        ]);
+        let pol = policy("embedding", 8);
+        let upd = update_for(&schema, &pol);
+
+        assert_eq!(upd.fields.len(), 2, "should not add embedding twice");
+        let names: Vec<&str> = upd
+            .fields
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.iter().filter(|&&n| n == "embedding").count(), 1);
+    }
+
+    #[test]
+    fn multi_vec_policies_all_appended() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
+        let primary = policy("embedding", 4);
+        let extra = vec![policy("context_embedding", 4)];
+        let upd = arrow_schema_to_iceberg_update(&schema, &primary, &extra);
+
+        assert_eq!(upd.fields.len(), 3); // id + embedding + context_embedding
+        let names: Vec<&str> = upd
+            .fields
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"embedding"));
+        assert!(names.contains(&"context_embedding"));
+    }
+
+    #[test]
+    fn top_level_field_ids_match_parquet_stamp_sequence() {
+        // Top-level IDs must be 1, 2, ..., N regardless of nested element IDs.
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new(
+                "tags",
+                DataType::List(std::sync::Arc::new(Field::new(
+                    "item",
+                    DataType::Utf8,
+                    true,
+                ))),
+                true,
+            ),
+        ]);
+        let pol = policy("vec", 4);
+        let upd = update_for(&schema, &pol);
+
+        // Top-level: id=1, tags=2, vec=3
+        assert_eq!(upd.fields[0]["id"], 1);
+        assert_eq!(upd.fields[1]["id"], 2);
+        assert_eq!(upd.fields[2]["id"], 3);
+
+        // Nested element ID must be > 3
+        assert!(upd.fields[1]["type"]["element-id"].as_i64().unwrap() > 3);
+    }
 }
