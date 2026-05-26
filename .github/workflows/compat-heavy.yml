@@ -1,10 +1,6 @@
 name: Compat Heavy (Spark + Trino + JVM Plugins)
 
 on:
-  schedule:
-    - cron: '0 3 * * 1'   # every Monday 03:00 UTC
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       fixture_rows:
