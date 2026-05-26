@@ -170,7 +170,8 @@ jobs:
             --network ailake-net \
             -p 8181:8181 \
             -v "/tmp/ailake-fixture:/warehouse" \
-            -e CATALOG_WAREHOUSE="file:///warehouse" \
+            -e CATALOG_WAREHOUSE="/warehouse" \
+            -e CATALOG_CATALOG__IMPL="org.apache.iceberg.hadoop.HadoopCatalog" \
             tabulario/iceberg-rest:0.10.0
 
           # Trino catalog config pointing to the REST catalog.
@@ -200,6 +201,7 @@ jobs:
             sleep 3
           done
 
+          echo "=== REST catalog namespaces ===" && curl -s http://localhost:8181/v1/namespaces || true
           echo "Waiting for Trino..."
           for i in $(seq 1 60); do
             if curl -sf http://localhost:8080/v1/info 2>/dev/null | grep -q '"starting":false'; then
