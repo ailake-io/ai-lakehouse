@@ -285,8 +285,10 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Clear Gradle script compilation cache
-        run: rm -rf ~/.gradle/caches/
+      - name: Stop Gradle daemons and clear caches
+        run: |
+          gradle --stop 2>/dev/null || true
+          rm -rf ~/.gradle/caches/ ~/.gradle/daemon/
 
       - name: Build ailake-jni cdylib
         run: cargo build --release -p ailake-jni
