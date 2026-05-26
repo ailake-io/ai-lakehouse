@@ -16,18 +16,15 @@ jobs:
       - uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
-          OPENSSL_DIR: /usr
-          OPENSSL_LIB_DIR: /usr/lib64
-          OPENSSL_INCLUDE_DIR: /usr/include
-          OPENSSL_STATIC: "1"
         with:
           target: ${{ matrix.target }}
           manylinux: auto
           rust-toolchain: stable
           before-script-linux: |
-            yum install -y openssl-devel openssl-static 2>/dev/null \
-              || dnf install -y openssl-devel openssl-static 2>/dev/null \
-              || apt-get install -y libssl-dev 2>/dev/null \
+            # Ensure build tools for openssl-sys vendored compilation are present
+            yum install -y perl-core make gcc 2>/dev/null \
+              || dnf install -y perl-core make gcc 2>/dev/null \
+              || apt-get install -y perl make gcc 2>/dev/null \
               || true
           command: build
           args: --release --out dist --find-interpreter --manifest-path ailake-py/Cargo.toml
