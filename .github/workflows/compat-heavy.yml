@@ -152,7 +152,8 @@ jobs:
           # where $GITHUB_WORKSPACE may not be accessible to the Docker daemon.
           rm -rf /tmp/ailake-fixture /tmp/ailake-trino-catalog
           cp -r "$GITHUB_WORKSPACE/compat-fixture" /tmp/ailake-fixture
-          chmod -R 755 /tmp/ailake-fixture
+          chmod -R 777 /tmp/ailake-fixture
+          echo "=== fixture tree ===" && find /tmp/ailake-fixture -maxdepth 4 | sort
 
           # Iceberg REST catalog backed by the fixture warehouse.
           # tabulario/iceberg-rest wraps a HadoopCatalog internally when
