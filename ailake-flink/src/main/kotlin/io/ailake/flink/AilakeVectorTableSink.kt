@@ -47,10 +47,9 @@ class AilakeVectorTableSink(
         return object : DataStreamSinkProvider {
             override fun consumeDataStream(
                 context: ProviderContext,
-                dataStream: DataStream<*>,
+                dataStream: DataStream<RowData>,
             ): DataStreamSink<*> {
-                @Suppress("UNCHECKED_CAST")
-                return (dataStream as DataStream<RowData>).addSink(
+                return dataStream.addSink(
                     AilakeSinkFunction(
                         warehouse  = warehouse,
                         namespace  = namespace,
