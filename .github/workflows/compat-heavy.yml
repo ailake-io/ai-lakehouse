@@ -146,6 +146,11 @@ jobs:
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
 
+      - name: Pre-cleanup leftover Docker resources
+        run: |
+          docker rm -f iceberg-rest trino 2>/dev/null || true
+          docker network rm ailake-net 2>/dev/null || true
+
       - name: Start Iceberg REST catalog + Trino
         run: |
           # Copy fixture to /tmp so Docker can access it on self-hosted runners
@@ -154,7 +159,7 @@ jobs:
           cp -r "$GITHUB_WORKSPACE/compat-fixture" /tmp/ailake-fixture
           chmod -R 755 /tmp/ailake-fixture
 
-          docker network create ailake-net || true
+          docker network create ailake-net
 
           # Iceberg REST catalog backed by the fixture warehouse.
           # tabulario/iceberg-rest wraps a HadoopCatalog internally when
