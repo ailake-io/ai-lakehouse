@@ -29,7 +29,7 @@ jobs:
         run: cargo run --example write_fixture -p ailake-query
 
       - name: Install PySpark + PyArrow
-        run: pip install pyspark pyarrow --break-system-packages
+        run: python3 -m pip install pyspark pyarrow --break-system-packages
 
       - name: Check Spark Parquet compatibility (direct read)
         run: |
@@ -199,7 +199,7 @@ jobs:
           done
 
       - name: Install Python deps
-        run: pip install trino "pyiceberg[pyarrow]" pyarrow --break-system-packages
+        run: python3 -m pip install trino "pyiceberg[pyarrow]" pyarrow --break-system-packages
 
       - name: Verify via PyIceberg REST catalog
         run: |
