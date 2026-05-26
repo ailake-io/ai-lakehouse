@@ -312,7 +312,7 @@ jobs:
 
       - name: Flink JNI integration test
         run: |
-          gradle -p ailake-flink test --no-daemon --no-configuration-cache \
+          gradle -p ailake-flink test --no-daemon --no-configuration-cache --info \
             -Dailake.native.lib=$(pwd)/target/release/libailake_jni.so
 
       - name: Spark plugin integration test
