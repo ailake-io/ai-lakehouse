@@ -7,7 +7,6 @@ import io.trino.spi.connector.ConnectorTableHandle
 import io.trino.spi.connector.ConnectorTransactionHandle
 import io.trino.spi.connector.DynamicFilter
 import io.trino.spi.connector.FixedSplitSource
-import io.trino.spi.predicate.Constraint
 
 class VectorScanSplitManager : ConnectorSplitManager {
     override fun getSplits(
@@ -15,7 +14,6 @@ class VectorScanSplitManager : ConnectorSplitManager {
         session: ConnectorSession,
         table: ConnectorTableHandle,
         dynamicFilter: DynamicFilter,
-        constraint: Constraint,
     ): ConnectorSplitSource {
         val handle = table as VectorScanTableHandle
         val queryVector = session.getProperty("query_vector", String::class.java) ?: ""

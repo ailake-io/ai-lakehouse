@@ -32,8 +32,5 @@ data class VectorScanSplit @JsonCreator constructor(
     @JsonProperty("queryVector") val queryVector: String,
     @JsonProperty("topK") val topK: Int,
 ) : ConnectorSplit {
-    override fun getSplitInfo(): Map<String, String> = mapOf(
-        "tableUri" to tableUri,
-        "topK" to topK.toString(),
-    )
+    override fun isRemotelyAccessible(): Boolean = true
 }
