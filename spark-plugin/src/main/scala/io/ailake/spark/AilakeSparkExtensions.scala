@@ -1,7 +1,6 @@
 package io.ailake.spark
 
-import org.apache.spark.sql.{Dataset, DataFrame, Row, SparkSession, SparkSessionExtensions}
-import org.apache.spark.sql.catalyst.encoders.RowEncoder
+import org.apache.spark.sql.{DataFrame, Row, SparkSession, SparkSessionExtensions}
 
 /**
  * Spark extensions entry point. Register via:
@@ -39,7 +38,9 @@ object implicits {
   implicit class AilakeSession(private val spark: SparkSession) extends AnyVal {
     def ailakeSearch(tableUri: String, queryVector: Array[Float], topK: Int): DataFrame = {
       val plan = VectorSearchPlan(tableUri, queryVector, topK)
-      Dataset[Row](spark, plan)(RowEncoder(plan.schema))
+      val rows = AilakeNative.search(tableUri, queryVector, topK)
+      val sparkRows = rows.map(r => Row(r.rowId, r.distance.toDouble, r.filePath))
+      spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), plan.schema)
     }
   }
 }
