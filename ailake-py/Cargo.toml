@@ -20,3 +20,7 @@ pyo3           = { workspace = true }
 tokio          = { workspace = true }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
+# Force vendored OpenSSL on all platforms so wheel builds are hermetic.
+# This compiles OpenSSL from source (cc/make/perl) instead of requiring
+# system headers — necessary in manylinux where openssl-devel is absent.
+openssl        = { version = "0.10", features = ["vendored"] }
