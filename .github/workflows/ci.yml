@@ -66,14 +66,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
-      - name: Set up Python venv
+      - name: Install PyArrow and check
         run: |
+          rm -rf /tmp/pyarrow-venv
           python3 -m venv /tmp/pyarrow-venv
-          echo "/tmp/pyarrow-venv/bin" >> $GITHUB_PATH
-      - name: Install PyArrow
-        run: pip install pyarrow
-      - name: Check PyArrow compatibility
-        run: python3 tests/compat/check_pyarrow.py ./compat-fixture
+          /tmp/pyarrow-venv/bin/pip install pyarrow
+          /tmp/pyarrow-venv/bin/python3 tests/compat/check_pyarrow.py ./compat-fixture
 
   compat-duckdb:
     name: compat-duckdb
@@ -84,14 +82,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
-      - name: Set up Python venv
+      - name: Install DuckDB and check
         run: |
+          rm -rf /tmp/duckdb-venv
           python3 -m venv /tmp/duckdb-venv
-          echo "/tmp/duckdb-venv/bin" >> $GITHUB_PATH
-      - name: Install DuckDB
-        run: pip install duckdb
-      - name: Check DuckDB compatibility
-        run: python3 tests/compat/check_duckdb.py ./compat-fixture
+          /tmp/duckdb-venv/bin/pip install duckdb
+          /tmp/duckdb-venv/bin/python3 tests/compat/check_duckdb.py ./compat-fixture
 
   compat-pyiceberg:
     name: compat-pyiceberg
@@ -102,14 +98,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
-      - name: Set up Python venv
+      - name: Install PyIceberg and check
         run: |
+          rm -rf /tmp/pyiceberg-venv
           python3 -m venv /tmp/pyiceberg-venv
-          echo "/tmp/pyiceberg-venv/bin" >> $GITHUB_PATH
-      - name: Install PyIceberg
-        run: pip install "pyiceberg[pyarrow]"
-      - name: Check PyIceberg compatibility
-        run: python3 tests/compat/check_pyiceberg.py ./compat-fixture
+          /tmp/pyiceberg-venv/bin/pip install "pyiceberg[pyarrow]"
+          /tmp/pyiceberg-venv/bin/python3 tests/compat/check_pyiceberg.py ./compat-fixture
 
   compat-ailake-py:
     name: compat-ailake-py
@@ -121,15 +115,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Set up Python venv
+      - name: Install maturin, build and check
         run: |
+          rm -rf /tmp/ailake-py-venv
           python3 -m venv /tmp/ailake-py-venv
-          echo "/tmp/ailake-py-venv/bin" >> $GITHUB_PATH
-      - name: Install maturin
-        run: pip install maturin
-      - name: Build ailake-py wheel
-        run: cd ailake-py && maturin build --release --out dist --interpreter python3.12
-      - name: Install ailake wheel
-        run: pip install ailake-py/dist/*.whl
-      - name: Check ailake Python SDK
-        run: python3.12 tests/compat/check_ailake_py.py
+          /tmp/ailake-py-venv/bin/pip install maturin
+          cd ailake-py && /tmp/ailake-py-venv/bin/maturin build --release --out dist --interpreter python3.12
+          cd ..
+          /tmp/ailake-py-venv/bin/pip install ailake-py/dist/*.whl
+          /tmp/ailake-py-venv/bin/python3 tests/compat/check_ailake_py.py

@@ -26,15 +26,13 @@ jobs:
 
       - name: Set up Python venv
         run: |
+          rm -rf /tmp/spark-venv
           python3 -m venv /tmp/spark-venv
-          echo "/tmp/spark-venv/bin" >> $GITHUB_PATH
-
-      - name: Install PySpark + PyArrow
-        run: pip install pyspark pyarrow
+          /tmp/spark-venv/bin/pip install pyspark pyarrow
 
       - name: Check Spark Parquet compatibility (direct read)
         run: |
-          python3 - <<'EOF'
+          /tmp/spark-venv/bin/python3 - <<'EOF'
           import sys, pathlib
           from pyspark.sql import SparkSession
 
@@ -78,7 +76,7 @@ jobs:
 
       - name: Check Spark + Iceberg HadoopCatalog (SQL query)
         run: |
-          python3 - <<'EOF'
+          /tmp/spark-venv/bin/python3 - <<'EOF'
           import sys, os, pathlib
           from pyspark.sql import SparkSession
 
@@ -155,7 +153,7 @@ jobs:
           cp -r "$GITHUB_WORKSPACE/compat-fixture" /tmp/ailake-fixture
           chmod -R 755 /tmp/ailake-fixture
 
-          docker network create ailake-net
+          docker network create ailake-net 2>/dev/null || true
 
           # Iceberg REST catalog backed by the fixture warehouse.
           # tabulario/iceberg-rest wraps a HadoopCatalog internally when
@@ -206,15 +204,13 @@ jobs:
 
       - name: Set up Python venv
         run: |
+          rm -rf /tmp/trino-venv
           python3 -m venv /tmp/trino-venv
-          echo "/tmp/trino-venv/bin" >> $GITHUB_PATH
-
-      - name: Install Python deps
-        run: pip install trino "pyiceberg[pyarrow]" pyarrow
+          /tmp/trino-venv/bin/pip install trino "pyiceberg[pyarrow]" pyarrow
 
       - name: Verify via PyIceberg REST catalog
         run: |
-          python3 - <<'EOF'
+          /tmp/trino-venv/bin/python3 - <<'EOF'
           from pyiceberg.catalog.rest import RestCatalog
           import pathlib
 
@@ -239,7 +235,7 @@ jobs:
 
       - name: Verify via Trino
         run: |
-          python3 - <<'EOF'
+          /tmp/trino-venv/bin/python3 - <<'EOF'
           import trino
           import pathlib
 
@@ -304,7 +300,7 @@ jobs:
 
       - name: Flink JNI integration test
         run: |
-          gradle -p ailake-flink test --no-daemon \
+          gradle -p ailake-flink test --no-daemon --no-configuration-cache \
             -Dailake.native.lib=$(pwd)/target/release/libailake_jni.so
 
       - name: Spark plugin integration test
@@ -312,11 +308,11 @@ jobs:
           LD_LIBRARY_PATH=$(pwd)/target/release \
           AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
           AILAKE_LIB_PATH=$(pwd)/target/release \
-            gradle -p spark-plugin test --no-daemon
+            gradle -p spark-plugin test --no-daemon --no-configuration-cache
 
       - name: Trino plugin integration test
         run: |
           LD_LIBRARY_PATH=$(pwd)/target/release \
           AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
           AILAKE_LIB_PATH=$(pwd)/target/release \
-            gradle -p trino-plugin test --no-daemon
+            gradle -p trino-plugin test --no-daemon --no-configuration-cache
