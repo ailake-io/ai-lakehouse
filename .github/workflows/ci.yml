@@ -70,7 +70,7 @@ jobs:
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
       - name: Install PyArrow
-        run: pip install pyarrow --break-system-packages
+        run: python3 -m pip install pyarrow --break-system-packages
       - name: Check PyArrow compatibility
         run: python3 tests/compat/check_pyarrow.py ./compat-fixture
 
@@ -84,7 +84,7 @@ jobs:
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
       - name: Install DuckDB
-        run: pip install duckdb --break-system-packages
+        run: python3 -m pip install duckdb --break-system-packages
       - name: Check DuckDB compatibility
         run: python3 tests/compat/check_duckdb.py ./compat-fixture
 
@@ -98,7 +98,7 @@ jobs:
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
       - name: Install PyIceberg
-        run: pip install "pyiceberg[pyarrow]" --break-system-packages
+        run: python3 -m pip install "pyiceberg[pyarrow]" --break-system-packages
       - name: Check PyIceberg compatibility
         run: python3 tests/compat/check_pyiceberg.py ./compat-fixture
 
@@ -113,10 +113,10 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install maturin
-        run: pip install maturin
+        run: python3 -m pip install maturin
       - name: Build ailake-py wheel
         run: cd ailake-py && maturin build --release --out dist --interpreter python3.12
       - name: Install ailake wheel
-        run: pip install ailake-py/dist/*.whl
+        run: python3 -m pip install ailake-py/dist/*.whl
       - name: Check ailake Python SDK
         run: python3.12 tests/compat/check_ailake_py.py
