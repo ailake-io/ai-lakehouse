@@ -308,7 +308,7 @@ jobs:
 
       - name: Flink JNI integration test
         run: |
-          gradle -p ailake-flink test \
+          gradle -p ailake-flink test --no-daemon \
             -Dailake.native.lib=$(pwd)/target/release/libailake_jni.so
 
       - name: Spark plugin integration test
@@ -316,11 +316,11 @@ jobs:
           LD_LIBRARY_PATH=$(pwd)/target/release \
           AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
           AILAKE_LIB_PATH=$(pwd)/target/release \
-            gradle -p spark-plugin test
+            gradle -p spark-plugin test --no-daemon
 
       - name: Trino plugin integration test
         run: |
           LD_LIBRARY_PATH=$(pwd)/target/release \
           AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
           AILAKE_LIB_PATH=$(pwd)/target/release \
-            gradle -p trino-plugin test
+            gradle -p trino-plugin test --no-daemon
