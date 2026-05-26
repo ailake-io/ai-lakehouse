@@ -285,6 +285,9 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      - name: Clear Gradle script compilation cache
+        run: rm -rf ~/.gradle/caches/
+
       - name: Build ailake-jni cdylib
         run: cargo build --release -p ailake-jni
 
