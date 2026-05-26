@@ -1,5 +1,5 @@
 // HadoopCatalog: stores metadata.json on the local filesystem / any Store backend.
-// Table layout: {warehouse}/{namespace}.db/{table}/metadata/vN.metadata.json
+// Table layout: {warehouse}/{namespace}/{table}/metadata/vN.metadata.json
 
 use std::sync::Arc;
 
@@ -32,9 +32,9 @@ impl HadoopCatalog {
 
     fn table_root(&self, table: &TableIdent) -> String {
         if self.warehouse.is_empty() {
-            format!("{}.db/{}", table.namespace, table.name)
+            format!("{}/{}", table.namespace, table.name)
         } else {
-            format!("{}/{}.db/{}", self.warehouse, table.namespace, table.name)
+            format!("{}/{}/{}", self.warehouse, table.namespace, table.name)
         }
     }
 
