@@ -152,33 +152,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build fixture
-        run: cargo run --example write_fixture -p ailake-query
-
       - name: Pre-cleanup and prepare Docker resources
         run: |
           docker rm -f iceberg-rest trino 2>/dev/null || true
           docker network rm ailake-net 2>/dev/null || true
+          rm -rf /tmp/ailake-fixture /tmp/ailake-trino-catalog
           docker network inspect ailake-net >/dev/null 2>&1 || docker network create ailake-net
+
+      - name: Build fixture
+        # Write fixture directly to /tmp/ailake-fixture so absolute paths embedded
+        # in Iceberg avro manifests match the path Docker containers will see.
+        env:
+          COMPAT_FIXTURE_PATH: /tmp/ailake-fixture
+        run: cargo run --example write_fixture -p ailake-query
 
       - name: Start Iceberg REST catalog + Trino
         run: |
-          # Copy fixture to /tmp so Docker can access it on self-hosted runners
-          # where $GITHUB_WORKSPACE may not be accessible to the Docker daemon.
-          rm -rf /tmp/ailake-fixture /tmp/ailake-trino-catalog
-          cp -r "$GITHUB_WORKSPACE/compat-fixture" /tmp/ailake-fixture
           chmod -R 777 /tmp/ailake-fixture
           echo "=== fixture tree ===" && find /tmp/ailake-fixture -maxdepth 4 | sort
 
-          # Iceberg REST catalog backed by the fixture warehouse.
-          # tabulario/iceberg-rest wraps a HadoopCatalog internally when
-          # CATALOG_WAREHOUSE is a file:// URI, so it discovers the table
-          # that write_fixture already created there.
+          # Mount /tmp/ailake-fixture at the same path inside Docker so that the
+          # absolute paths stored in Iceberg avro manifests resolve correctly.
           docker run -d --name iceberg-rest \
             --network ailake-net \
             -p 8181:8181 \
-            -v "/tmp/ailake-fixture:/warehouse" \
-            -e CATALOG_WAREHOUSE="/warehouse" \
+            -v "/tmp/ailake-fixture:/tmp/ailake-fixture" \
+            -e CATALOG_WAREHOUSE="/tmp/ailake-fixture" \
             -e CATALOG_CATALOG__IMPL="org.apache.iceberg.hadoop.HadoopCatalog" \
             tabulario/iceberg-rest:0.10.0
 
@@ -191,11 +190,13 @@ jobs:
           PROPS
           chmod -R 755 /tmp/ailake-trino-catalog
 
-          # Trino server with custom catalog config mounted.
+          # Trino also needs the fixture mount so it can read parquet files
+          # via the absolute paths stored in manifest entries.
           docker run -d --name trino \
             --network ailake-net \
             -p 8080:8080 \
             -v "/tmp/ailake-trino-catalog:/etc/trino/catalog" \
+            -v "/tmp/ailake-fixture:/tmp/ailake-fixture" \
             trinodb/trino:436
 
       - name: Wait for services
@@ -231,7 +232,7 @@ jobs:
           from pyiceberg.catalog.rest import RestCatalog
           import pathlib
 
-          expected = int(pathlib.Path("compat-fixture/fixture_rows.txt").read_text().strip())
+          expected = int(pathlib.Path("/tmp/ailake-fixture/fixture_rows.txt").read_text().strip())
           catalog = RestCatalog("ailake", uri="http://localhost:8181")
 
           namespaces = catalog.list_namespaces()
@@ -256,7 +257,7 @@ jobs:
           import trino
           import pathlib
 
-          expected = int(pathlib.Path("compat-fixture/fixture_rows.txt").read_text().strip())
+          expected = int(pathlib.Path("/tmp/ailake-fixture/fixture_rows.txt").read_text().strip())
 
           conn = trino.dbapi.connect(
               host="localhost", port=8080, user="ailake",
