@@ -39,6 +39,9 @@ jobs:
 
       - name: Check Spark Parquet compatibility (direct read)
         run: |
+          unset SPARK_HOME
+          export PYSPARK_PYTHON=/tmp/spark-venv/bin/python3
+          export SPARK_LOCAL_IP=127.0.0.1
           /tmp/spark-venv/bin/python3 - <<'EOF'
           import sys, pathlib
           from pyspark.sql import SparkSession
@@ -83,6 +86,9 @@ jobs:
 
       - name: Check Spark + Iceberg HadoopCatalog (SQL query)
         run: |
+          unset SPARK_HOME
+          export PYSPARK_PYTHON=/tmp/spark-venv/bin/python3
+          export SPARK_LOCAL_IP=127.0.0.1
           /tmp/spark-venv/bin/python3 - <<'EOF'
           import sys, os, pathlib
           from pyspark.sql import SparkSession
