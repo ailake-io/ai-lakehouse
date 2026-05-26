@@ -20,6 +20,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
@@ -27,7 +34,7 @@ jobs:
       - name: Set up Python venv
         run: |
           rm -rf /tmp/spark-venv
-          python3 -m venv /tmp/spark-venv
+          python3.12 -m venv /tmp/spark-venv
           /tmp/spark-venv/bin/pip install pyspark pyarrow
 
       - name: Check Spark Parquet compatibility (direct read)
