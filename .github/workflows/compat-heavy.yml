@@ -74,14 +74,12 @@ jobs:
           assert "text" in cols, f"FAIL: 'text' column missing"
           assert "embedding" in cols, f"FAIL: 'embedding' column missing"
 
-          id_range = (
-              df.agg({"id": "min"}).collect()[0][0],
-              df.agg({"id": "max"}).collect()[0][0],
-          )
-          assert id_range[0] == 0, f"FAIL: min id {id_range[0]} != 0"
-          assert id_range[1] == expected - 1, f"FAIL: max id {id_range[1]} != {expected - 1}"
+          ids = [r[0] for r in df.select("id").collect()]
+          id_min, id_max = min(ids), max(ids)
+          assert id_min == 0, f"FAIL: min id {id_min} != 0"
+          assert id_max == expected - 1, f"FAIL: max id {id_max} != {expected - 1}"
 
-          print(f"PASS (Parquet): Spark read {total} rows, schema={cols}, id={id_range}")
+          print(f"PASS (Parquet): Spark read {total} rows, schema={cols}, id=({id_min}, {id_max})")
           spark.stop()
           EOF
 
@@ -125,11 +123,12 @@ jobs:
           ).collect()[0][0]
           assert count == expected, f"FAIL: Iceberg SQL count {count} != {expected}"
 
-          row = spark.sql(
-              "SELECT MIN(id) AS lo, MAX(id) AS hi FROM ailake.default.compat_test"
-          ).collect()[0]
-          assert row["lo"] == 0, f"FAIL: min id {row['lo']}"
-          assert row["hi"] == expected - 1, f"FAIL: max id {row['hi']}"
+          ids = [r[0] for r in spark.sql(
+              "SELECT id FROM ailake.default.compat_test"
+          ).collect()]
+          id_min, id_max = min(ids), max(ids)
+          assert id_min == 0, f"FAIL: min id {id_min}"
+          assert id_max == expected - 1, f"FAIL: max id {id_max}"
 
           # Verify schema via Iceberg catalog
           cols = spark.sql(
@@ -139,7 +138,7 @@ jobs:
               assert c in cols, f"FAIL: column '{c}' missing from schema {cols}"
 
           print(
-              f"PASS (Iceberg SQL): {count} rows, id={row['lo']}..{row['hi']}, schema={cols}"
+              f"PASS (Iceberg SQL): {count} rows, id={id_min}..{id_max}, schema={cols}"
           )
           spark.stop()
           EOF
