@@ -60,6 +60,7 @@ jobs:
               .master("local[2]")
               .config("spark.driver.memory", "1g")
               .config("spark.sql.shuffle.partitions", "2")
+              .config("spark.sql.sources.v2.pushAggregation", "false")
               .getOrCreate()
           )
           spark.sparkContext.setLogLevel("ERROR")
@@ -102,6 +103,7 @@ jobs:
               .master("local[2]")
               .config("spark.driver.memory", "1g")
               .config("spark.sql.shuffle.partitions", "2")
+              .config("spark.sql.sources.v2.pushAggregation", "false")
               # Iceberg Spark extension + HadoopCatalog (no HMS needed)
               .config(
                   "spark.jars.packages",
