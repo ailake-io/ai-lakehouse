@@ -69,8 +69,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
+      - name: Set up Python venv
+        run: |
+          python3 -m venv /tmp/pyarrow-venv
+          echo "/tmp/pyarrow-venv/bin" >> $GITHUB_PATH
       - name: Install PyArrow
-        run: python3 -m pip install pyarrow --break-system-packages
+        run: pip install pyarrow
       - name: Check PyArrow compatibility
         run: python3 tests/compat/check_pyarrow.py ./compat-fixture
 
@@ -83,8 +87,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
+      - name: Set up Python venv
+        run: |
+          python3 -m venv /tmp/duckdb-venv
+          echo "/tmp/duckdb-venv/bin" >> $GITHUB_PATH
       - name: Install DuckDB
-        run: python3 -m pip install duckdb --break-system-packages
+        run: pip install duckdb
       - name: Check DuckDB compatibility
         run: python3 tests/compat/check_duckdb.py ./compat-fixture
 
@@ -97,8 +105,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
+      - name: Set up Python venv
+        run: |
+          python3 -m venv /tmp/pyiceberg-venv
+          echo "/tmp/pyiceberg-venv/bin" >> $GITHUB_PATH
       - name: Install PyIceberg
-        run: python3 -m pip install "pyiceberg[pyarrow]" --break-system-packages
+        run: pip install "pyiceberg[pyarrow]"
       - name: Check PyIceberg compatibility
         run: python3 tests/compat/check_pyiceberg.py ./compat-fixture
 
@@ -112,11 +124,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Set up Python venv
+        run: |
+          python3 -m venv /tmp/ailake-py-venv
+          echo "/tmp/ailake-py-venv/bin" >> $GITHUB_PATH
       - name: Install maturin
-        run: python3 -m pip install maturin
+        run: pip install maturin
       - name: Build ailake-py wheel
         run: cd ailake-py && maturin build --release --out dist --interpreter python3.12
       - name: Install ailake wheel
-        run: python3 -m pip install ailake-py/dist/*.whl
+        run: pip install ailake-py/dist/*.whl
       - name: Check ailake Python SDK
         run: python3.12 tests/compat/check_ailake_py.py

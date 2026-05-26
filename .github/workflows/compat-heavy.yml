@@ -28,8 +28,13 @@ jobs:
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
 
+      - name: Set up Python venv
+        run: |
+          python3 -m venv /tmp/spark-venv
+          echo "/tmp/spark-venv/bin" >> $GITHUB_PATH
+
       - name: Install PySpark + PyArrow
-        run: python3 -m pip install pyspark pyarrow --break-system-packages
+        run: pip install pyspark pyarrow
 
       - name: Check Spark Parquet compatibility (direct read)
         run: |
@@ -198,8 +203,13 @@ jobs:
             sleep 5
           done
 
+      - name: Set up Python venv
+        run: |
+          python3 -m venv /tmp/trino-venv
+          echo "/tmp/trino-venv/bin" >> $GITHUB_PATH
+
       - name: Install Python deps
-        run: python3 -m pip install trino "pyiceberg[pyarrow]" pyarrow --break-system-packages
+        run: pip install trino "pyiceberg[pyarrow]" pyarrow
 
       - name: Verify via PyIceberg REST catalog
         run: |
