@@ -55,7 +55,7 @@ pub struct IcebergMetadata {
 pub struct IcebergSnapshot {
     #[serde(rename = "snapshot-id")]
     pub snapshot_id: SnapshotId,
-    #[serde(rename = "parent-snapshot-id")]
+    #[serde(rename = "parent-snapshot-id", skip_serializing_if = "Option::is_none")]
     pub parent_snapshot_id: Option<SnapshotId>,
     #[serde(rename = "sequence-number")]
     pub sequence_number: i64,
