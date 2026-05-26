@@ -19,7 +19,7 @@ env:
 jobs:
   compat-spark:
     name: compat-spark
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -132,7 +132,7 @@ jobs:
 
   compat-trino:
     name: compat-trino
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -252,7 +252,7 @@ jobs:
 
   compat-jvm-plugins:
     name: compat-jvm-plugins
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -6,7 +6,7 @@ on:
 jobs:
   linux:
     name: Build Linux (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     strategy:
       matrix:
         target: [x86_64, aarch64]
@@ -36,6 +36,7 @@ jobs:
 
   macos:
     name: Build macOS (${{ matrix.target }})
+    if: false
     runs-on: macos-latest
     strategy:
       matrix:
@@ -67,6 +68,7 @@ jobs:
 
   windows:
     name: Build Windows (x86_64)
+    if: false
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,7 +97,7 @@ jobs:
 
   sdist:
     name: Build sdist
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
 
@@ -111,7 +113,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [linux, macos, windows, sdist]
     # TODO: after creating PyPI account, create a "pypi" environment in
     # Settings → Environments with PYPI_API_TOKEN as an environment secret.
