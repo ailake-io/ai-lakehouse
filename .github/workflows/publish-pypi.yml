@@ -86,13 +86,22 @@ jobs:
           rustup toolchain install stable --target x86_64-pc-windows-msvc
           rustup default stable
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+
       - uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
         with:
           target: x86_64
           command: build
-          args: --release --out dist --interpreter python3.9 python3.10 python3.11 python3.12 python3.13 --manifest-path ailake-py/Cargo.toml
+          args: --release --out dist --find-interpreter --manifest-path ailake-py/Cargo.toml
 
       - uses: actions/upload-artifact@v4
         with:
@@ -103,9 +112,6 @@ jobs:
     name: Build sdist
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - name: Clean Docker-owned artifacts
-        run: sudo rm -rf dist/ || true
-
       - uses: actions/checkout@v4
 
       - uses: PyO3/maturin-action@v1
