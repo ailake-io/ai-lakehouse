@@ -68,19 +68,9 @@ jobs:
 
   windows:
     name: Build Windows (x86_64)
-    if: false
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: |
-            3.9
-            3.10
-            3.11
-            3.12
-            3.13
 
       - uses: PyO3/maturin-action@v1
         env:
@@ -114,7 +104,7 @@ jobs:
   publish:
     name: Publish to PyPI
     runs-on: self-hosted
-    needs: [linux, sdist]
+    needs: [linux, windows, sdist]
     # TODO: after creating PyPI account, create a "pypi" environment in
     # Settings → Environments with PYPI_API_TOKEN as an environment secret.
     # This adds a manual approval gate before publish runs.
