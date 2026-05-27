@@ -349,75 +349,37 @@ jobs:
 
       - name: Pre-cleanup
         run: |
-          docker rm -f ailake-fake-gcs ailake-bq-emulator 2>/dev/null || true
+          docker rm -f ailake-bq-emulator 2>/dev/null || true
           docker network rm ailake-bq-net 2>/dev/null || true
-          rm -rf /tmp/ailake-bq-fixture /tmp/ailake-fake-gcs-data
+          rm -rf /tmp/ailake-bq-fixture
 
       - name: Build fixture
         env:
           COMPAT_FIXTURE_PATH: /tmp/ailake-bq-fixture
         run: cargo run --example write_fixture -p ailake-query
 
-      - name: Stage Parquet files in fake-gcs filesystem root
-        run: |
-          mkdir -p /tmp/ailake-fake-gcs-data/ailake-bucket/data
-          while IFS= read -r f; do
-            [ -n "$f" ] && cp "$f" /tmp/ailake-fake-gcs-data/ailake-bucket/data/
-          done < /tmp/ailake-bq-fixture/fixture_files.txt
-          echo "=== staged files ===" && ls -lh /tmp/ailake-fake-gcs-data/ailake-bucket/data/
-
-      - name: Start fake-gcs-server and BigQuery emulator
+      - name: Start BigQuery emulator
         run: |
           docker network inspect ailake-bq-net >/dev/null 2>&1 || \
             docker network create ailake-bq-net
 
-          # fake-gcs-server: random host port avoids conflicts on shared runners.
-          docker run -d --name ailake-fake-gcs \
-            --network ailake-bq-net \
-            -p 127.0.0.1::4443 \
-            -v "/tmp/ailake-fake-gcs-data:/storage" \
-            fsouza/fake-gcs-server:1.47.2 \
-            -scheme http \
-            -port 4443 \
-            -backend filesystem \
-            -filesystem-root /storage \
-            -public-host ailake-fake-gcs:4443
-
-          GCS_PORT=$(docker port ailake-fake-gcs 4443/tcp | grep -oP '(?<=:)\d+$')
-          echo "FAKE_GCS_PORT=$GCS_PORT" >> "$GITHUB_ENV"
-
-          # STORAGE_EMULATOR_HOST redirects the Go GCS client inside the emulator
-          # to fake-gcs so gs:// URIs resolve without real GCP credentials.
-          # Random host port — no conflict with concurrent runs or system services.
+          # Random host port — avoids conflicts on shared runners.
           docker run -d --name ailake-bq-emulator \
             --network ailake-bq-net \
             -p 127.0.0.1::9050 \
-            -e STORAGE_EMULATOR_HOST=http://ailake-fake-gcs:4443 \
             ghcr.io/goccy/bigquery-emulator:0.6.6 \
             --project=ailake-test \
             --port=9050
 
           BQ_PORT=$(docker port ailake-bq-emulator 9050/tcp | grep -oP '(?<=:)\d+$')
           echo "BQ_EMULATOR_PORT=$BQ_PORT" >> "$GITHUB_ENV"
-          echo "Started: fake-gcs=127.0.0.1:${GCS_PORT}  bq=127.0.0.1:${BQ_PORT}"
+          echo "Started: bq=127.0.0.1:${BQ_PORT}"
 
-      - name: Wait for services
+      - name: Wait for BigQuery emulator
         run: |
-          echo "Waiting for fake-gcs on port ${FAKE_GCS_PORT}..."
-          ready=0
-          for i in $(seq 1 20); do
-            if curl -s --connect-timeout 2 \
-               "http://localhost:${FAKE_GCS_PORT}/storage/v1/b" > /dev/null 2>&1; then
-              echo "fake-gcs ready after $((i * 2))s"; ready=1; break
-            fi
-            sleep 2
-          done
-          [ "$ready" -eq 1 ] || { echo "ERROR: fake-gcs did not become ready"; exit 1; }
-
           echo "Waiting for BigQuery emulator on port ${BQ_EMULATOR_PORT}..."
           ready=0
           for i in $(seq 1 30); do
-            # Accept any HTTP response (including 404/405) — just need TCP connection
             if curl -s --connect-timeout 2 \
                "http://localhost:${BQ_EMULATOR_PORT}/" > /dev/null 2>&1; then
               echo "BigQuery emulator ready after $((i * 2))s"; ready=1; break
@@ -433,10 +395,14 @@ jobs:
           /tmp/bq-venv/bin/pip install "google-cloud-bigquery>=3.13" google-auth pyarrow
 
       - name: Verify Parquet compatibility via BigQuery emulator
+        timeout-minutes: 10
         run: |
-          # -u: unbuffered stdout so logs appear immediately even if the step hangs
+          # -u: unbuffered stdout so logs appear immediately.
           /tmp/bq-venv/bin/python3 -u - <<'EOF'
-          import os, pathlib, sys
+          import os, pathlib, socket, sys
+
+          # Hard socket timeout — prevents any HTTP call from hanging indefinitely.
+          socket.setdefaulttimeout(30)
 
           # BIGQUERY_EMULATOR_HOST must be set before importing the client library.
           # Format: host:port (no scheme — the library adds http:// internally).
@@ -449,12 +415,12 @@ jobs:
 
           fixture_dir = pathlib.Path("/tmp/ailake-bq-fixture")
           expected = int((fixture_dir / "fixture_rows.txt").read_text().strip())
-          source_uris = [
-              f"gs://ailake-bucket/data/{pathlib.Path(p.strip()).name}"
+          parquet_files = [
+              p.strip()
               for p in (fixture_dir / "fixture_files.txt").read_text().splitlines()
               if p.strip()
           ]
-          print(f"fixture: {expected} rows, files={source_uris}", flush=True)
+          print(f"fixture: {expected} rows, files={parquet_files}", flush=True)
 
           bq = bigquery.Client(
               project="ailake-test",
@@ -468,18 +434,25 @@ jobs:
           bq.create_dataset("ailake_compat", exists_ok=True)
           print("dataset ready", flush=True)
 
-          # Load Parquet into the emulator (more portable than external tables).
-          # The emulator reads from fake-gcs via STORAGE_EMULATOR_HOST set on the container.
           table_ref = bq.dataset("ailake_compat").table("compat_test")
-          job_config = bigquery.LoadJobConfig(
-              source_format=bigquery.SourceFormat.PARQUET,
-              autodetect=True,
-              write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-          )
-          print(f"starting load job...", flush=True)
-          job = bq.load_table_from_uri(source_uris, table_ref, job_config=job_config)
-          job.result(timeout=120)
-          print(f"load job complete: state={job.state}", flush=True)
+
+          # Upload Parquet files directly from host filesystem — no GCS needed.
+          # First file truncates; subsequent files append so all rows land in one table.
+          for i, path in enumerate(parquet_files):
+              disposition = (
+                  bigquery.WriteDisposition.WRITE_TRUNCATE if i == 0
+                  else bigquery.WriteDisposition.WRITE_APPEND
+              )
+              job_config = bigquery.LoadJobConfig(
+                  source_format=bigquery.SourceFormat.PARQUET,
+                  autodetect=True,
+                  write_disposition=disposition,
+              )
+              print(f"loading file {i+1}/{len(parquet_files)}: {path}", flush=True)
+              with open(path, "rb") as f:
+                  job = bq.load_table_from_file(f, table_ref, job_config=job_config)
+              job.result(timeout=60)
+              print(f"  done: state={job.state}", flush=True)
 
           count = next(
               bq.query(
@@ -510,6 +483,6 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker rm -f ailake-fake-gcs ailake-bq-emulator 2>/dev/null || true
+          docker rm -f ailake-bq-emulator 2>/dev/null || true
           docker network rm ailake-bq-net 2>/dev/null || true
-          rm -rf /tmp/ailake-bq-fixture /tmp/ailake-fake-gcs-data
+          rm -rf /tmp/ailake-bq-fixture
