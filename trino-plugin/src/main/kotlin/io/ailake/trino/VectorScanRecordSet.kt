@@ -50,6 +50,7 @@ internal class VectorScanRecordCursor(
     private var position = -1
 
     override fun getCompletedBytes(): Long = rows.size.toLong() * 64L
+    override fun getReadTimeNanos(): Long = 0L
     override fun advanceNextPosition(): Boolean = ++position < rows.size
     override fun getType(field: Int): Type = when (columns[field].name) {
         "row_id" -> BIGINT

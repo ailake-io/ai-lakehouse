@@ -2,6 +2,7 @@ package io.ailake.trino
 
 import com.fasterxml.jackson.annotation.JsonCreator
 import com.fasterxml.jackson.annotation.JsonProperty
+import io.trino.spi.HostAddress
 import io.trino.spi.connector.ColumnHandle
 import io.trino.spi.connector.ConnectorSplit
 import io.trino.spi.connector.ConnectorTableHandle
@@ -33,4 +34,6 @@ data class VectorScanSplit @JsonCreator constructor(
     @JsonProperty("topK") val topK: Int,
 ) : ConnectorSplit {
     override fun isRemotelyAccessible(): Boolean = true
+    override fun getAddresses(): List<HostAddress> = emptyList()
+    override fun getInfo(): Any? = null
 }
