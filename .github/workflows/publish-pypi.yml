@@ -12,7 +12,7 @@ jobs:
         target: [x86_64, aarch64]
     steps:
       - name: Clean Docker-owned artifacts
-        run: sudo rm -rf dist/ || true
+        run: docker run --rm -v "$PWD:/work" -w /work alpine sh -c "rm -rf dist/" 2>/dev/null || true
 
       - uses: actions/checkout@v4
 
