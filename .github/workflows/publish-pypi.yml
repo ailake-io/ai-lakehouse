@@ -23,6 +23,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+          CARGO_TARGET_DIR: /tmp/ailake-target-${{ matrix.target }}
         with:
           target: ${{ matrix.target }}
           manylinux: auto
