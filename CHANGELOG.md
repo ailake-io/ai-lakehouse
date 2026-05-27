@@ -7,13 +7,58 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [0.0.8] - 2026-05-27
 
 ### Added
+- **`compat-heavy.yml` BigQuery job**: validates that AI-Lake Parquet files are readable by BigQuery without errors from the AILK footer section. Uses `fsouza/fake-gcs-server:1.47.2` to simulate GCS and `ghcr.io/goccy/bigquery-emulator:0.6.6` (Go-based, compliant Parquet reader); `STORAGE_EMULATOR_HOST` wires the emulator's internal GCS client to fake-gcs so no real GCP credentials are required. Test creates a BigQuery external Parquet table pointing to the fixture files and asserts row count, schema (`id`, `text`, `embedding`), and id range.
+
+### Fixed
+- **`AilakeNative.search` double-free fixed**: `ptr` was freed in the success path before `mapper.readValue` ran; if `readValue` threw (e.g., error-response JSON is an object, not an array), the `catch` block freed `ptr` a second time — `free(): double free detected in tcache 2` killed the JVM after the integration test passed. Fixed by moving `ailake_free_string` to a `finally` block so `ptr` is freed exactly once regardless of parse outcome.
+- **`compat-bigquery` drops file upload, uses pyarrow + streaming inserts**: both `load_table_from_file()` (resumable upload — emulator resets connection on chunk PUT with `ConnectionResetError 104`) and `uploadType=multipart` (emulator returns 500) are broken in `goccy/bigquery-emulator` 0.6.6. The verification step now has two explicit stages: (1) **pyarrow reads all AILK Parquet files** — validates that the AILK footer appended after PAR1 does not break a standard Parquet reader (the same guarantee required for BQ compatibility); (2) **BQ emulator streaming inserts** (`insertAll` API) load the rows (id, text, embedding as base64 BYTES), followed by `SELECT COUNT(*)`, schema inspection, and `MIN/MAX(id)` queries — validates BQ SQL and schema compat. The `insertAll` endpoint is the reliably-supported write path in the emulator.
+- **`compat-bigquery` Python verification step fixed**: (1) `python3 -u -` forces unbuffered stdout so logs appear immediately; (2) `BIGQUERY_EMULATOR_HOST` set to `host:port` format (no `http://` scheme — the client adds it) and set before importing the BigQuery library; (3) explicit `ClientOptions(api_endpoint=...)` passed to `bigquery.Client` as belt-and-suspenders; (4) all API calls have explicit `timeout=` parameters; (5) wait loop fails loudly with `exit 1` if a service never becomes ready; (6) BQ emulator health check uses TCP-connect-only curl (accepts any HTTP status, not `-f`) since `/` returns non-200 on a fresh emulator.
+- **`compat-bigquery` uses random host port for BigQuery emulator**: fixed "address already in use" on port 9050 by switching to `127.0.0.1::PORT` (Docker-assigned random host port); actual port captured via `docker port` and exported as `BQ_EMULATOR_PORT`. Eliminates conflicts between concurrent workflow runs and system services on self-hosted runners.
+- **`ailake-jni` global static Tokio runtime**: `rt()` previously created a new multi-threaded Tokio runtime on every JNA call and dropped it on return; repeated creation/destruction of the runtime's OS thread pool conflicted with the JVM's signal handlers on Linux, causing SIGABRT (exit code 134) in `compat-jvm-plugins`. Runtime is now created once via `OnceLock` and reused for the process lifetime; falls back to a single-threaded runtime if multi-thread init fails.
+- **`VectorScanRecordSetTest` uses `getCompletedBytes()` not `getTotalBytes()`**: `RecordCursor.getTotalBytes()` was removed in Trino SPI 430; test call site at line 81 missed in previous fix passes.
+- **`trino-plugin` compiles with Trino SPI 430**: `isRemotelyAccessible()` is now abstract in `ConnectorSplit` — added `override fun isRemotelyAccessible(): Boolean = true` to `VectorScanSplit`; `getSplitInfo()` removed — replaced with no-op; `getTotalBytes()` renamed to `getCompletedBytes()` in `RecordCursor`. Follow-up: `ConnectorSplit` added two more abstract methods in 430 — `getAddresses()` (returns `List<HostAddress>`, returns `emptyList()` since native lib handles file-level parallelism) and `getInfo()` (returns `Any?`, returns `null`); `RecordCursor` added abstract `getReadTimeNanos()` — returns `0L`; `ConnectorSplitManager.getSplits` signature in 430 requires `Constraint` as 5th parameter (previous fix incorrectly removed it) — re-added with `Constraint.alwaysTrue()` in tests.
+- **`spark-plugin` compiles with Scala 2.12 + Spark 3.5**: removed unused `scala.jdk.CollectionConverters` and `scala.util.Using` imports (Scala 2.13-only); replaced `Dataset[Row](spark, plan)(RowEncoder(schema))` with `createDataFrame` (both `Dataset.apply(LogicalPlan)` and `RowEncoder.apply(StructType)` are private/removed in Spark 3.5); test now uses `spark.sessionState.executePlan(plan).executedPlan` instead of private Spark APIs.
+- **`ailake-py` uses `openssl-sys[vendored]` directly**: replaced `openssl = { features = ["vendored"] }` with `openssl-sys = { version = "0.9", features = ["vendored"] }` to target the exact package that was failing in manylinux containers. The indirect path through the `openssl` wrapper crate was not reliably propagating the `vendored` feature to `openssl-sys` during Cargo resolution inside the manylinux Docker container.
+- **`publish-pypi.yml` Linux job removes conflicting `OPENSSL_DIR`/`OPENSSL_LIB_DIR`/`OPENSSL_INCLUDE_DIR`/`OPENSSL_STATIC` env vars**: these vars never reached the manylinux Docker container (confirmed by `OPENSSL_DIR unset` in build log) and would have overridden vendored mode if they had, causing pkg-config lookup against a path with no OpenSSL dev headers.
+- **`publish-pypi.yml` `before-script-linux` installs `perl-core make gcc`**: these are the build tools required for vendored OpenSSL compilation (`openssl-src` runs OpenSSL's configure + make internally). Replaced the previous `openssl-devel openssl-static` install which is only needed for system (non-vendored) OpenSSL.
+
+---
+
+## [0.0.7] - 2026-05-25
+
+### Fixed
+- **`ailake_search_json` / `ailake_vector_search_json` now surfaces errors**: `do_search` previously used `unwrap_or_default()`, silently converting any internal error (Avro parse failure, path resolution issue, HNSW load error) into empty results and `{"ok":true,"results":[]}`. Both C-ABI functions now return `{"ok":false,"error":"..."}` on failure so callers see the actual root cause.
+- **`avx512::hsum512` no longer uses `_mm512_reduce_add_ps`**: that intrinsic was stabilized in Rust 1.89 and caused `exit status: 101` in older manylinux Docker containers used by `maturin-action`. Replaced with a store-and-reload reduction using only `avx512f` + `avx` intrinsics (stable since Rust 1.27/1.72).
+- **`publish-pypi.yml` Linux job now pins `rust-toolchain: stable`**: maturin-action's bundled Rust in the manylinux Docker can lag behind; pinning to stable ensures the same toolchain used in `ci.yml` / `release.yml`.
+- **`publish-pypi.yml` all build jobs set `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`**: macOS runners ship Homebrew Python 3.14 which `--find-interpreter` picks up; PyO3 0.22 caps at 3.13 and fails with "interpreter version newer than maximum supported". The env var builds against the stable ABI (abi3), which is forward-compatible with any 3.x version.
+- **`reqwest` workspace dependency uses `native-tls-vendored`**: the previous `features = ["json"]` without `default-features = false` enabled `default-tls` → system `openssl-sys`, failing in manylinux (no `openssl.pc`). `rustls-tls` was tried next but iceberg-rust 0.3 (transitive dep) re-introduces `native-tls` via feature unification, so system OpenSSL was still required. Final fix: `default-features = false, features = ["json", "native-tls-vendored"]` — compiles OpenSSL from source via `openssl-src` (needs only gcc/make/perl, all present in manylinux containers).
+- **`ailake-vec` AVX-512 kernels gated behind `avx512` Cargo feature**: all `_mm512_*` intrinsics were stabilised in Rust 1.89 and caused `exit status: 101` in the manylinux Docker container whose bundled Rust predates that release. The `avx512` feature is opt-in and disabled by default; manylinux / PyPI builds compile and fall through to the AVX2 kernels. Enable with `--features ailake-vec/avx512` on Rust ≥ 1.89.
+- **`reqwest` removed from workspace dependencies; `ailake-catalog` uses inline `rustls-tls`**: the workspace-level `reqwest = { features = ["native-tls-vendored"] }` definition caused `openssl-sys` to appear in the workspace resolution graph even when `reqwest` was optional and unused in `ailake-py`. Removed `reqwest` from `[workspace.dependencies]` entirely and inlined `reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }` in `ailake-catalog`. `rustls-tls` is pure Rust — zero C/OpenSSL dependencies — eliminating `openssl-sys` from the manylinux build unconditionally.
+- **`ailake-py` adds `openssl = { features = ["vendored"] }` for hermetic wheel builds**: manylinux and CI environments lack system OpenSSL headers; adding `openssl` with `vendored` feature forces `openssl-sys` to compile from source via `openssl-src` (requires only `cc`/`make`/`perl`, all present in manylinux containers). Cargo feature unification ensures any other transitive pull of `openssl-sys` also activates vendored mode, making wheel builds fully hermetic.
+- **`publish-pypi.yml` Linux job sets `OPENSSL_DIR`/`OPENSSL_LIB_DIR`/`OPENSSL_INCLUDE_DIR`/`OPENSSL_STATIC` env vars**: maturin-action passes `env:` variables into the manylinux Docker container; setting these vars makes openssl-sys skip pkg-config lookup and link directly against system OpenSSL. `before-script-linux` installs `openssl-devel openssl-static` to ensure headers and static libs are present.
+
+---
+
+## [0.0.6] - 2026-05-25
+
+### Added
+- **Automatic Iceberg schema propagation on `commit()`**: `TableWriter.commit()` now calls `arrow_schema_to_iceberg_update` internally — no manual metadata patching required. The generated `IcebergSchemaUpdate` carries all Arrow fields (including vector columns) correctly typed as Iceberg types (`"long"`, `"string"`, `"bytes"`, `"timestamptz"`, `List`, `Struct`, `Map`), plus a complete `schema.name-mapping.default` so PyIceberg resolves Parquet columns by name when field-ids are absent.
+- **`write_fixture` example simplified**: removed the 37-line manual metadata patch block; schema propagation is now entirely automatic via `commit()`.
+- **`ailake-py` Python SDK compat test expanded**: `check_ailake_py.py` covers cosine search (self-distance ≈ 0), `top_k` enforcement, euclidean metric, multi-batch before commit, `assemble_context` with chunk presence, token budget enforcement, and `dedup_threshold` parameter acceptance; added error-path coverage (missing table → exception). CI job pins `python-version: '3.12'` and builds the wheel with `--interpreter python3.12`.
 - **`HadoopCatalog` versioned metadata layout**: catalog now writes `vN.metadata.json` + `version-hint.text` instead of `current.json`, matching Iceberg Hadoop catalog spec and enabling `PyIceberg.StaticTable.from_metadata` to locate the current metadata file via the version hint
 - **Absolute table location in metadata**: `create_table` now records the full absolute path as `location` (and `manifest-list` paths) when `write_fixture` passes the absolute warehouse path; PyIceberg and other readers can now resolve data file paths without additional config
 - **Default schema entry in `IcebergMetadata`**: `schemas` array now includes `[{"schema-id": 0, "type": "struct", "fields": []}]` so PyIceberg's `StaticTable` does not fail with `current-schema-id 0 can't be found in the schemas` before reaching the manifest stage
-- **Phase 2 Avro manifests — full PyIceberg `StaticTable.scan()` PASS**: replaced apache-avro 0.16 writer (strips `field-id` from schema JSON) with raw Avro OCF writer (`avro_raw.rs`) that embeds schema verbatim; manifest files now carry `logicalType: "map"` on map-typed fields and correct field-ids per Iceberg spec; `write_fixture` patches metadata after commit to add proper Iceberg schema fields (`id`, `text`, `embedding`) and `schema.name-mapping.default` property so PyIceberg can resolve Parquet columns without embedded field-ids; `check_pyiceberg.py` now reports `PASS (StaticTable)` with full scan of 1000 rows
+- **Phase 2 Avro manifests — full PyIceberg `StaticTable.scan()` PASS**: replaced apache-avro 0.16 writer (strips `field-id` from schema JSON) with raw Avro OCF writer (`avro_raw.rs`) that embeds schema verbatim; manifest files now carry `logicalType: "map"` on map-typed fields and correct field-ids per Iceberg spec; `check_pyiceberg.py` reports `PASS (StaticTable)` with full scan of 1000 rows
+- **PyPI publish workflow** (`.github/workflows/publish-pypi.yml`): builds `ailake` wheels on push of `v*` tags — Linux x86_64 + aarch64 (manylinux), macOS x86_64 + arm64, Windows x86_64, sdist; Python 3.9–3.13; publishes via `PYPI_API_TOKEN` secret
+- **Version bump**: all crates `0.0.5` → `0.0.6`
+- **README**: PyPI badge, `pip install ailake` snippet, `SETUP.md` link, workspace map updated with `databricks.rs`
+- **`tests/tests/iceberg_compat.rs`**: three integration tests — `metadata_json_is_iceberg_spec_v2`, `parquet_files_have_valid_magic_and_ailake_section`, `data_files_referenced_in_metadata`
+- **`ailake-cli` subcommands implemented**: `create`, `insert`, `search`, `compact`, `info` — wired to real engine calls
+- **`ailake-py` re-enabled**: PyO3 bindings compile and pass `check_ailake_py.py` end-to-end
+- **Compatibility test suite** (`tests/compat/`): `check_pyarrow.py`, `check_duckdb.py`, `check_pyiceberg.py`, `check_ailake_py.py`, `check_jni_cabi.py`; `write_fixture` example generates deterministic 1000-row fixture; Flink/Spark/Trino JNA integration tests in Gradle subprojects
 
 ### Fixed
 - `HadoopCatalog::create_table`: `location` field was computed as `/{namespace}.db/{table}` (leading `/` with empty warehouse) instead of using `table_root()` — now consistent
@@ -23,53 +68,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `avro_manifest.rs`: all six map-typed manifest fields (`column_sizes`, `value_counts`, `null_value_counts`, `nan_value_counts`, `lower_bounds`, `upper_bounds`) now carry `"logicalType": "map"` in the Avro schema so PyIceberg resolves them as `MapType` instead of `list`
 - `avro_raw.rs`: removed trailing zero-count block terminator from `write_avro_container`; apache-avro Reader handles EOF at block-count read (clean) but errors on block-byte-count read after count=0 (UnexpectedEof)
 - `HadoopCatalog::commit_snapshot`: data file paths are prefixed with warehouse root only when warehouse is an absolute path (starts with `/` or contains `://`); relative warehouse strings (used in unit tests) keep paths unchanged
-
----
-
-## [0.0.6] - 2026-05-23
-
-### Added
-- **PyPI publish workflow** (`.github/workflows/publish-pypi.yml`): builds `ailake` wheels on push of `v*` tags — Linux x86_64 + aarch64 (manylinux), macOS x86_64 + arm64, Windows x86_64, sdist; Python 3.9–3.13; publishes via `PYPI_API_TOKEN` secret
-- **Version bump**: all crates `0.0.5` → `0.0.6`
-- **README PyPI badge**: `[![PyPI](https://img.shields.io/pypi/v/ailake.svg)]` — links to pypi.org/p/ailake
-- **README workspace map**: added `databricks.rs` entry under `ailake-catalog/src/` (was present in code and `CATALOG_BACKENDS.md` but missing from README tree)
-- **`tests/tests/iceberg_compat.rs`**: three new integration tests verifying Iceberg Spec v2 compliance — `metadata_json_is_iceberg_spec_v2`, `parquet_files_have_valid_magic_and_ailake_section`, `data_files_referenced_in_metadata`
-- **README install section**: `cargo add` snippets for Rust and `pip install ailake` + Python usage example
-- **README quick orientation**: added `SETUP.md` link (local dev + compat test guide)
-- **`ailake-cli` subcommands implemented**: `create`, `insert`, `search`, `compact`, `info` — all wired to real engine calls (no longer stubs)
-  - `create`: calls `catalog.create_table` with `VectorStoragePolicy`
-  - `insert`: reads local Parquet via `ParquetVectorReader`, calls `TableWriter::write_batch` + `commit`
-  - `search`: parses comma-separated query vector, calls `ailake_query::search`, prints ranked results
-  - `compact`: `CompactionPlanner` selects small files, `CompactionExecutor` merges, commits `Replace` snapshot
-  - `info`: aggregates file count, row count, size, indexed shard count from catalog
-- **`ailake-py` re-enabled in workspace**: fixed compilation after PyO3 and API drift
-- **Compatibility test suite**: automated compat checks for PyArrow, DuckDB, PyIceberg, and ailake-py in CI; Spark + Trino + JVM plugins via manual `workflow_dispatch`
-  - `tests/compat/check_pyarrow.py`: verifies AI-Lake Parquet files are readable by standard `pyarrow.parquet`
-  - `tests/compat/check_duckdb.py`: verifies `parquet_scan()` compatibility and id-range integrity
-  - `tests/compat/check_pyiceberg.py`: verifies Iceberg Spec v2 metadata via `StaticTable.from_metadata`; falls back to JSON validation
-  - `tests/compat/check_ailake_py.py`: verifies ailake Python SDK — `TableWriter.write_batch` → `commit` → `search` → `assemble_context`
-  - `tests/compat/check_jni_cabi.py`: verifies ailake-jni C-ABI via ctypes — `ailake_write_batch_json` + `ailake_search_json`; validates the interface used by all JVM connectors (Flink, Spark, Trino) via JNA
-  - `ailake-query/examples/write_fixture`: generates a deterministic 1000-row fixture used by all compat tests
-  - `ailake-flink/src/test/.../AilakeJniIntegrationTest.kt`: Flink JNA integration test via `AilakeNativeLoader.writeBatch` + `search`
-  - `spark-plugin/src/test/.../AilakeNativeIntegrationTest.scala`: Spark `AilakeNative.search` integration test with real native lib
-  - `trino-plugin/src/test/.../AilakeNativeIntegrationTest.kt`: Trino `AilakeNative.search` integration test with real native lib
-  - `.github/workflows/compat-heavy.yml`: Spark (PySpark), Trino (Docker), and JVM plugin integration tests on `workflow_dispatch`
-
-### Fixed
 - `ailake-jni`: `ailake_write_batch_json` used `write_batch_deferred` — background HNSW task raced with immediate search, producing empty results; switched to synchronous `write_batch`
 - `ailake-query`: `scanner::search` now falls back to exact flat scan for `IndexStatus::Indexing` files and Parquet-only files missing the AILK footer, consistent with `SearchSession` behavior
-- `ailake-py`: missing deps (`ailake-catalog`, `ailake-store`, `arrow-array`, `arrow-schema`) added to `Cargo.toml`
-- `ailake-py`: `HadoopCatalog::new(path)` → `HadoopCatalog::new(Arc<dyn Store>, "")` (correct signature)
-- `ailake-py`: upgrade PyO3 0.21 → 0.22 for Python 3.13 support
-- `ailake-py`: `pymodule` fn ported to `Bound<'_, PyModule>` API (PyO3 0.22)
-- `ailake-py`: suppressed `clippy::useless_conversion` (false positive from PyO3 0.22 proc-macros)
-- `ailake-py`: removed nonexistent `python-source` from `pyproject.toml`
-- `ailake-catalog`: `HadoopCatalog::table_root()` with empty warehouse no longer produces absolute path (`/default.db/table`); now uses relative path (`default.db/table`)
-- CI: `maturin develop` replaced with `maturin build` + `pip install` (no editable install in CI)
+- `ailake-py`: missing deps (`ailake-catalog`, `ailake-store`, `arrow-array`, `arrow-schema`) added to `Cargo.toml`; `HadoopCatalog::new` signature corrected; upgraded PyO3 0.21 → 0.22 (`Bound` API, Python 3.13 support); `maturin develop` replaced with `maturin build` + `pip install` in CI
+- `ailake-catalog`: `HadoopCatalog::table_root()` with empty warehouse no longer produces absolute path
 
 ### Changed
+- **`compat-heavy.yml` now triggers on `push: [main]` and weekly schedule** in addition to `workflow_dispatch`. Spark job upgraded to real Spark+Iceberg integration test (`iceberg-spark-runtime-3.5_2.12:1.5.2`). Trino job rewritten to use `tabulario/iceberg-rest:0.10.0` + `trinodb/trino:436` via Docker.
 - `CLAUDE.md` roadmap: Phase 1 all items marked complete; Phase 4 extended with IVF-PQ, GPU, Flink, SIMD, MemTable items
-- CI: added `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg` jobs to `ci.yml`
+- CI: added `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg`, `compat-ailake-py` jobs to `ci.yml`; Python pinned to 3.12 for wheel builds
 
 ---
 
@@ -193,7 +200,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-[Unreleased]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.5...HEAD
+[0.0.8]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.7...v0.0.8
+[0.0.7]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.6...v0.0.7
+[0.0.6]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.2...v0.0.3

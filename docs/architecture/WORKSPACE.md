@@ -185,14 +185,16 @@ Query planning and execution. The integration layer — depends on all data-plan
   - Returns `AssembledContext { text: XML, chunk_count, token_estimate }`
 
 ### `ailake-py`
-PyO3 extension module. Thin — all logic lives in other crates.
+PyO3 extension module (`cdylib`). Thin async-to-sync bridge — all logic lives in other crates. Built with `maturin`; distributed via PyPI as `ailake`.
+
+Deps: `ailake-query`, `ailake-catalog`, `ailake-store`, `ailake-core` + `openssl-sys[vendored]` (forces hermetic OpenSSL compilation in manylinux wheel builds; no system headers required).
 
 Exports:
-- `TableWriter(table_uri: str, policy: StoragePolicy)`
-- `TableWriter.write_batch(record_batch: PyArrow, embeddings: np.ndarray)`
-- `TableWriter.commit() → SnapshotId`
-- `search(table_uri, query_vector, top_k, filter) → PyArrow RecordBatch`
-- `assemble_context(chunks, max_tokens) → str`
+- `TableWriter(path, vector_column, dim, metric)` — open or create table
+- `TableWriter.write_batch(texts, embeddings)` — stage a batch
+- `TableWriter.commit() → int` — flush to Parquet + HNSW, return snapshot id
+- `search(path, query, top_k) → list[dict]` — vector search
+- `assemble_context(chunks, max_tokens, dedup_threshold) → str` — LLM context XML
 
 ### `ailake-jni`
 uniffi bindings for JVM. Exposes only the hot path needed by Spark/Trino connectors.
@@ -217,11 +219,11 @@ members = [
     "ailake-catalog",
     "ailake-store",
     "ailake-query",
+    "ailake-cli",
     "tests",
     "ailake-jni",
     "ailake-bench",
-    # Phase 4 bindings — excluded until PyO3/maturin env is configured
-    # "ailake-py",
+    "ailake-py",
 ]
 
 [workspace.dependencies]
@@ -243,7 +245,12 @@ parquet      = { version = "52", features = ["async"] }
 arrow-array  = "52"
 arrow-schema = "52"
 arrow-select = "52"
-object_store = { version = "0.10" }  # cloud features per-crate via ailake-store flags
+arrow-buffer = "52"
+object_store = { version = "0.10" }  # cloud features added per-crate via ailake-store feature flags
+
+# Iceberg
+iceberg     = "0.3"
+apache-avro = "0.16"
 
 # Vector index
 hnsw_rs     = "0.3"
@@ -258,12 +265,14 @@ libloading  = "0.8"
 lz4_flex    = "0.11"
 zstd        = "0.13"
 
-# Catalog backends (catalog crate adds iceberg/apache-avro directly)
-reqwest     = { version = "0.12", features = ["json"] }  # REST catalog
-
 # Bindings
-pyo3        = { version = "0.21", features = ["extension-module"] }
+# Note: reqwest is NOT in workspace deps — ailake-catalog declares it inline
+# with rustls-tls to keep openssl-sys out of the ailake-py dep tree.
+pyo3        = { version = "0.22", features = ["extension-module"] }
 uniffi      = "0.27"
+
+# CLI
+clap        = { version = "4", features = ["derive", "env"] }
 
 # Observability
 tracing            = "0.1"
@@ -276,12 +285,15 @@ proptest    = "1"
 rand        = "0.8"
 
 [profile.release]
-lto         = "thin"
+lto           = "thin"
 codegen-units = 1
-opt-level   = 3
+opt-level     = 3
+strip         = "symbols"
+panic         = "abort"
 
 [profile.bench]
 inherits    = "release"
+debug       = true
 debug       = true
 ```
 
@@ -338,7 +350,7 @@ Delivered in Phase 3:
 Deferred (external env required):
 - Compatibility tests: Spark, Trino, Beam, DuckDB, PyIceberg (integration tests require Docker/cluster)
 
-### Phase 4 — Production hardening 🔄
+### Phase 4 — Production hardening ✅
 
 Delivered in Phase 4:
 - Reranking after PQ: `SearchConfig.rerank_factor`, `exact_distance()` in `ailake-vec`

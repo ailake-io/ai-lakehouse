@@ -7,10 +7,12 @@
 
 pub mod avro_manifest;
 pub mod avro_raw;
+#[cfg(feature = "rest-catalog")]
 pub mod databricks;
 pub mod hadoop;
 pub mod metadata;
 pub mod provider;
+#[cfg(feature = "rest-catalog")]
 pub mod rest;
 pub mod snapshot;
 
@@ -23,14 +25,16 @@ pub mod nessie;
 #[cfg(feature = "catalog-jdbc")]
 pub mod jdbc;
 
+#[cfg(feature = "rest-catalog")]
 pub use databricks::{databricks_aws, databricks_azure, databricks_gcp, DatabricksAuth};
 pub use hadoop::HadoopCatalog;
 pub use provider::{
     decode_centroid, encode_centroid_b64, make_data_file_entry, make_data_file_entry_indexing,
     make_multi_column_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,
-    ExtraVectorIndex, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation, TableIdent,
-    TableMetadata, TableProperties, VectorIndexInfo,
+    ExtraVectorIndex, IcebergSchemaUpdate, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation,
+    TableIdent, TableMetadata, TableProperties, VectorIndexInfo,
 };
+#[cfg(feature = "rest-catalog")]
 pub use rest::{RestCatalog, RestCatalogAuth, RestCatalogConfig};
 
 #[cfg(feature = "catalog-glue")]

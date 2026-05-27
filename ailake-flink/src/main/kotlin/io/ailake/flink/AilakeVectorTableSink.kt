@@ -1,15 +1,16 @@
 package io.ailake.flink
 
 import io.ailake.flink.internal.AilakeNativeLoader
-import org.apache.flink.api.common.functions.util.ListCollector
+import org.apache.flink.streaming.api.datastream.DataStream
+import org.apache.flink.streaming.api.datastream.DataStreamSink
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction
 import org.apache.flink.streaming.api.functions.sink.SinkFunction
 import org.apache.flink.table.catalog.ResolvedSchema
 import org.apache.flink.table.connector.ChangelogMode
+import org.apache.flink.table.connector.ProviderContext
+import org.apache.flink.table.connector.sink.DataStreamSinkProvider
 import org.apache.flink.table.connector.sink.DynamicTableSink
-import org.apache.flink.table.connector.sink.SinkFunctionProvider
 import org.apache.flink.table.data.RowData
-import org.apache.flink.table.types.logical.LogicalTypeRoot
 
 /**
  * AI-Lake Flink table sink.  Buffers rows in memory and flushes each batch to the
@@ -43,19 +44,26 @@ class AilakeVectorTableSink(
     override fun getSinkRuntimeProvider(context: DynamicTableSink.Context): DynamicTableSink.SinkRuntimeProvider {
         val idIdx = schema.columnNames.indexOfFirst { it == "id" }.takeIf { it >= 0 } ?: 0
         val vecIdx = schema.columnNames.indexOfFirst { it == vecCol }.takeIf { it >= 0 } ?: 1
-        return SinkFunctionProvider.of(
-            AilakeSinkFunction(
-                warehouse  = warehouse,
-                namespace  = namespace,
-                tableName  = tableName,
-                vecCol     = vecCol,
-                dim        = dim,
-                metric     = metric,
-                precision  = precision,
-                idIdx      = idIdx,
-                vecIdx     = vecIdx,
-            )
-        )
+        return object : DataStreamSinkProvider {
+            override fun consumeDataStream(
+                context: ProviderContext,
+                dataStream: DataStream<RowData>,
+            ): DataStreamSink<*> {
+                return dataStream.addSink(
+                    AilakeSinkFunction(
+                        warehouse  = warehouse,
+                        namespace  = namespace,
+                        tableName  = tableName,
+                        vecCol     = vecCol,
+                        dim        = dim,
+                        metric     = metric,
+                        precision  = precision,
+                        idIdx      = idIdx,
+                        vecIdx     = vecIdx,
+                    )
+                )
+            }
+        }
     }
 
     override fun copy(): DynamicTableSink = AilakeVectorTableSink(

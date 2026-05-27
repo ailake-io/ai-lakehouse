@@ -1,5 +1,5 @@
 // HadoopCatalog: stores metadata.json on the local filesystem / any Store backend.
-// Table layout: {warehouse}/{namespace}.db/{table}/metadata/vN.metadata.json
+// Table layout: {warehouse}/{namespace}/{table}/metadata/vN.metadata.json
 
 use std::sync::Arc;
 
@@ -32,9 +32,9 @@ impl HadoopCatalog {
 
     fn table_root(&self, table: &TableIdent) -> String {
         if self.warehouse.is_empty() {
-            format!("{}.db/{}", table.namespace, table.name)
+            format!("{}/{}", table.namespace, table.name)
         } else {
-            format!("{}/{}.db/{}", self.warehouse, table.namespace, table.name)
+            format!("{}/{}/{}", self.warehouse, table.namespace, table.name)
         }
     }
 
@@ -203,6 +203,17 @@ impl CatalogProvider for HadoopCatalog {
         meta.current_snapshot_id = Some(snap_id);
         meta.snapshots.push(iceberg_snap);
 
+        if let Some(schema_update) = snapshot.iceberg_schema {
+            if let Some(schema) = meta.schemas.first_mut() {
+                schema["fields"] = serde_json::Value::Array(schema_update.fields);
+            }
+            meta.last_column_id = schema_update.last_column_id;
+            meta.properties.insert(
+                "schema.name-mapping.default".to_string(),
+                schema_update.name_mapping_json,
+            );
+        }
+
         self.save_metadata(table, &meta).await?;
         Ok(snap_id)
     }
@@ -316,6 +327,7 @@ mod tests {
                 index_status: crate::provider::IndexStatus::Ready,
             }],
             operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
         };
         let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 

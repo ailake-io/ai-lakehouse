@@ -53,8 +53,22 @@ impl From<SearchResult> for RowResultJson {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Runtime::new().expect("tokio runtime")
+fn rt() -> &'static tokio::runtime::Runtime {
+    use std::sync::OnceLock;
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|_| {
+                // Fall back to single-threaded runtime — avoids spawning extra OS
+                // threads that can interfere with the JVM's signal handlers.
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("ailake-jni: tokio runtime unavailable")
+            })
+    })
 }
 
 fn parse_metric(s: &str) -> VectorMetric {
@@ -76,7 +90,7 @@ fn do_search(
     query: Vec<f32>,
     top_k: u32,
     ef_search: u32,
-) -> Vec<SearchResult> {
+) -> ailake_core::AilakeResult<Vec<SearchResult>> {
     let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&warehouse));
     let catalog = Arc::new(HadoopCatalog::new(store.clone(), &warehouse));
     let table = TableIdent::new(namespace, table_name);
@@ -89,7 +103,6 @@ fn do_search(
     rt().block_on(rs_search(
         &table, &query, config, vec_col, dim, catalog, store,
     ))
-    .unwrap_or_default()
 }
 
 // ── uniffi exports ────────────────────────────────────────────────────────────
@@ -119,6 +132,7 @@ pub fn vector_search(table_uri: String, query_bytes: Vec<u8>, top_k: u32) -> Vec
         top_k,
         50,
     )
+    .unwrap_or_default()
     .into_iter()
     .map(|r| RowResult {
         row_id: r.row_id.as_u64(),
@@ -218,10 +232,10 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     let query = std::slice::from_raw_parts(query_ptr, query_len as usize).to_vec();
     let dim = query.len() as u32;
     let results: Vec<RowResultJson> =
-        do_search(uri, "default", "table", "embedding", dim, query, top_k, 50)
-            .into_iter()
-            .map(RowResultJson::from)
-            .collect();
+        match do_search(uri, "default", "table", "embedding", dim, query, top_k, 50) {
+            Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
+            Err(e) => return cstr_err_json(e),
+        };
     let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
     CString::new(json)
         .unwrap_or_else(|_| CString::new("[]").unwrap())
@@ -280,7 +294,7 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         Err(e) => return cstr_err_json(e),
     };
 
-    let results = do_search(
+    let results = match do_search(
         req.warehouse,
         &req.namespace,
         &req.table,
@@ -289,7 +303,10 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         req.query,
         req.top_k,
         req.ef_search,
-    );
+    ) {
+        Ok(v) => v,
+        Err(e) => return cstr_err_json(e),
+    };
     #[derive(serde::Serialize)]
     struct Resp {
         ok: bool,

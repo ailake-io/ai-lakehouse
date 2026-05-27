@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-vec"
-version     = "0.0.6"
+version     = "0.0.8"
 edition     = "2021"
 description = "Vector quantization (F32/F16/I8/PQ) and SIMD distance kernels for AI-Lake"
 license     = "MIT OR Apache-2.0"
@@ -8,8 +8,11 @@ repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
 keywords    = ["vector", "simd", "quantization", "embedding", "distance"]
 categories  = ["algorithms", "data-structures", "science"]
 
+[features]
+avx512 = []  # enable AVX-512 kernels; requires Rust ≥ 1.89 (intrinsics stabilised there)
+
 [dependencies]
-ailake-core = { path = "../ailake-core", version = "0.0.6" }
+ailake-core = { path = "../ailake-core", version     = "0.0.8" }
 half        = { workspace = true }
 lz4_flex    = { workspace = true }
 zstd        = { workspace = true }

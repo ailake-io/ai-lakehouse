@@ -18,6 +18,7 @@ dependencies {
     compileOnly("org.apache.flink:flink-table-api-java:$flinkVersion")
     compileOnly("org.apache.flink:flink-table-common:$flinkVersion")
     compileOnly("org.apache.flink:flink-streaming-java:$flinkVersion")
+    compileOnly("org.apache.flink:flink-table-api-java-bridge:$flinkVersion")
     compileOnly("org.apache.flink:flink-java:$flinkVersion")
 
     // JNA — bundled in the fat-jar (Flink does not provide it)
@@ -48,5 +49,5 @@ tasks.test {
 }
 
 kotlin {
-    jvmToolchain(11)
+    jvmToolchain(17)
 }

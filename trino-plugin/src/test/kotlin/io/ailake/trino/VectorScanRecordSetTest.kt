@@ -78,7 +78,7 @@ class VectorScanRecordSetTest {
     @Test
     fun emptyRowsProducesEmptyCursor() {
         val cursor = VectorScanRecordSet(emptyList(), allColumns).cursor()
-        assertEquals(0L, cursor.getTotalBytes())
+        assertEquals(0L, cursor.getCompletedBytes())
         assertFalse(cursor.advanceNextPosition())
     }
 

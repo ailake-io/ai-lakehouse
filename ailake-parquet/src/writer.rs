@@ -64,19 +64,22 @@ impl ParquetVectorWriter {
         )
         .map_err(|e| AilakeError::Parquet(e.to_string()))?;
 
-        // Extend schema with vector column
+        // Extend schema with vector column; stamp Iceberg-aligned field IDs
+        // so Parquet column metadata matches Iceberg schema (Spark nullability checks).
         let vec_f = vector_field(
             &self.policy.column_name,
             self.policy.dim,
             self.policy.metric,
             self.policy.precision,
         );
+        let vec_field_id = batch.schema().fields().len() + 1;
         let new_fields: Vec<Field> = batch
             .schema()
             .fields()
             .iter()
-            .map(|f| (**f).clone())
-            .chain(std::iter::once(vec_f))
+            .enumerate()
+            .map(|(i, f)| stamp_field_id((**f).clone(), i + 1))
+            .chain(std::iter::once(stamp_field_id(vec_f, vec_field_id)))
             .collect();
         let extended_schema = Arc::new(Schema::new_with_metadata(
             new_fields,
@@ -183,19 +186,21 @@ impl ParquetVectorWriter {
         ));
         let list_array = ListArray::new(inner_field, offsets_buf, Arc::new(values), None);
 
-        // Extend schema with multi-vector column
+        // Extend schema with multi-vector column; stamp Iceberg-aligned field IDs.
         let vec_f = multi_vector_field(
             &self.policy.column_name,
             self.policy.dim,
             self.policy.metric,
             self.policy.precision,
         );
+        let vec_field_id = batch.schema().fields().len() + 1;
         let new_fields: Vec<Field> = batch
             .schema()
             .fields()
             .iter()
-            .map(|f| (**f).clone())
-            .chain(std::iter::once(vec_f))
+            .enumerate()
+            .map(|(i, f)| stamp_field_id((**f).clone(), i + 1))
+            .chain(std::iter::once(stamp_field_id(vec_f, vec_field_id)))
             .collect();
         let extended_schema = Arc::new(Schema::new_with_metadata(
             new_fields,
@@ -246,6 +251,17 @@ impl ParquetVectorWriter {
 
         Ok((Bytes::from(buf), n as u64))
     }
+}
+
+/// Stamp `PARQUET:field_id` on an Arrow field so ArrowWriter embeds the Iceberg-aligned
+/// field ID in the Parquet schema. `id` must be 1-based and match the Iceberg schema.
+fn stamp_field_id(field: Field, id: usize) -> Field {
+    let mut meta = field.metadata().clone();
+    meta.insert(
+        parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
+        id.to_string(),
+    );
+    field.with_metadata(meta)
 }
 
 #[cfg(test)]

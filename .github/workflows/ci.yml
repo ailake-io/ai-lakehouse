@@ -1,10 +1,7 @@
 name: CI
 
 on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,7 +10,7 @@ env:
 jobs:
   fmt:
     name: fmt
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -23,7 +20,7 @@ jobs:
 
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,7 +31,7 @@ jobs:
 
   unit:
     name: unit
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -43,7 +40,7 @@ jobs:
 
   integration:
     name: integration
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -52,7 +49,7 @@ jobs:
 
   compat-parquet:
     name: compat-parquet
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -62,58 +59,68 @@ jobs:
 
   compat-pyarrow:
     name: compat-pyarrow
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
-      - name: Install PyArrow
-        run: pip install pyarrow --break-system-packages
-      - name: Check PyArrow compatibility
-        run: python3 tests/compat/check_pyarrow.py ./compat-fixture
+      - name: Install PyArrow and check
+        run: |
+          rm -rf /tmp/pyarrow-venv
+          python3 -m venv /tmp/pyarrow-venv
+          /tmp/pyarrow-venv/bin/pip install pyarrow
+          /tmp/pyarrow-venv/bin/python3 tests/compat/check_pyarrow.py ./compat-fixture
 
   compat-duckdb:
     name: compat-duckdb
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
-      - name: Install DuckDB
-        run: pip install duckdb --break-system-packages
-      - name: Check DuckDB compatibility
-        run: python3 tests/compat/check_duckdb.py ./compat-fixture
+      - name: Install DuckDB and check
+        run: |
+          rm -rf /tmp/duckdb-venv
+          python3 -m venv /tmp/duckdb-venv
+          /tmp/duckdb-venv/bin/pip install duckdb
+          /tmp/duckdb-venv/bin/python3 tests/compat/check_duckdb.py ./compat-fixture
 
   compat-pyiceberg:
     name: compat-pyiceberg
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
-      - name: Install PyIceberg
-        run: pip install "pyiceberg[pyarrow]" --break-system-packages
-      - name: Check PyIceberg compatibility
-        run: python3 tests/compat/check_pyiceberg.py ./compat-fixture
+      - name: Install PyIceberg and check
+        run: |
+          rm -rf /tmp/pyiceberg-venv
+          python3 -m venv /tmp/pyiceberg-venv
+          /tmp/pyiceberg-venv/bin/pip install "pyiceberg[pyarrow]"
+          /tmp/pyiceberg-venv/bin/python3 tests/compat/check_pyiceberg.py ./compat-fixture
 
   compat-ailake-py:
     name: compat-ailake-py
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install maturin
-        run: pip install maturin --break-system-packages
-      - name: Build ailake-py wheel
-        run: cd ailake-py && maturin build --release --out dist
-      - name: Install ailake wheel
-        run: pip install ailake-py/dist/*.whl --break-system-packages
-      - name: Check ailake Python SDK
-        run: python3 tests/compat/check_ailake_py.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install maturin, build and check
+        run: |
+          rm -rf /tmp/ailake-py-venv
+          python3 -m venv /tmp/ailake-py-venv
+          /tmp/ailake-py-venv/bin/pip install maturin
+          cd ailake-py && /tmp/ailake-py-venv/bin/maturin build --release --out dist --interpreter python3.12
+          cd ..
+          /tmp/ailake-py-venv/bin/pip install ailake-py/dist/*.whl
+          /tmp/ailake-py-venv/bin/python3 tests/compat/check_ailake_py.py

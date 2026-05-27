@@ -53,11 +53,7 @@ class AilakeSparkExtensionsTest extends AnyFunSuite with BeforeAndAfterAll {
 
   test("VectorSearchPlan is converted to VectorScanExec by planner") {
     val plan = VectorSearchPlan("s3://t/", Array(1.0f), topK = 3)
-    import org.apache.spark.sql.{Dataset, Row}
-    import org.apache.spark.sql.catalyst.encoders.RowEncoder
-    val df = Dataset[Row](spark, plan)(RowEncoder(plan.schema))
-    // executedPlan traversal verifies the strategy ran
-    val execPlan = df.queryExecution.executedPlan
+    val execPlan = spark.sessionState.executePlan(plan).executedPlan
     assert(execPlan.toString.contains("VectorScanExec"))
   }
 

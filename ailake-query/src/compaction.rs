@@ -211,6 +211,7 @@ impl CompactionExecutor {
             parent_snapshot_id: None,
             files: vec![merged.clone()],
             operation: SnapshotOperation::Replace,
+            iceberg_schema: None,
         };
         catalog.commit_snapshot(table, snapshot).await?;
 

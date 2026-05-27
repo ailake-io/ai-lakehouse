@@ -89,13 +89,15 @@ The file is a **valid Parquet file** with the AI-Lake footer appended after the 
 
 ```
 message ailake_schema {
-  required int64 chunk_id;
-  required binary chunk_text (STRING);
-  optional binary section_path (STRING);
+  required int64 chunk_id            [field_id=1];
+  required binary chunk_text (STRING) [field_id=2];
+  optional binary section_path (STRING) [field_id=3];
   required fixed_len_byte_array(3072) embedding
-    [field_metadata: ailake.dim=1536, ailake.metric=cosine, ailake.precision=f16];
+    [field_id=4, ailake.dim=1536, ailake.metric=cosine, ailake.precision=f16];
 }
 ```
+
+Every column carries the `PARQUET:field_id` metadata key set to its 1-based Iceberg field ID (batch columns: `1..N`, vector column: `N+1`). This matches the Iceberg schema written in `metadata.json`, enabling strict readers like Spark with `check-nullability` to validate field alignment without relying on name-mapping.
 
 File-level `key_value_metadata`:
 - `ailake.format_version` = `"1"`
@@ -134,18 +136,19 @@ See [`FILE_FORMAT.md`](./FILE_FORMAT.md) for the binary layout.
 
 The `ailake-catalog` crate is responsible for maintaining this list. Every catalog write operation must pass these checks before committing:
 
-- [ ] `format-version` is `2`
-- [ ] `table-uuid` is a valid UUID v4
-- [ ] `current-schema-id` references a valid schema in `schemas`
-- [ ] `current-snapshot-id` references a valid snapshot in `snapshots`
-- [ ] Each snapshot has `manifest-list` pointing to a valid `.avro` file
-- [ ] Each `DataFile` entry has `file-path`, `file-format`, `partition`, `record-count`, `file-size-in-bytes`
-- [ ] `file-format` is `PARQUET` (no ORC, no Avro data)
-- [ ] Sequence numbers are monotonically increasing
-- [ ] All `ailake.*` keys in `properties` have string values
-- [ ] `key_metadata` bytes in each `DataFile` entry, when non-null, deserialize as valid `AilakeEntryExt` JSON
-- [ ] Centroid value in `key_metadata` is valid base64-encoded f32 array of the expected length
-- [ ] `schemas[0].fields` includes all Parquet columns with correct Iceberg types and field-ids, OR `schema.name-mapping.default` is set in `properties` so PyIceberg can resolve columns without Parquet field-ids
+- [x] `format-version` is `2`
+- [x] `table-uuid` is a valid UUID v4
+- [x] `current-schema-id` references a valid schema in `schemas`
+- [x] `current-snapshot-id` references a valid snapshot in `snapshots`
+- [x] Each snapshot has `manifest-list` pointing to a valid `.avro` file
+- [x] Each `DataFile` entry has `file-path`, `file-format`, `partition`, `record-count`, `file-size-in-bytes`
+- [x] `file-format` is `PARQUET` (no ORC, no Avro data)
+- [x] Sequence numbers are monotonically increasing
+- [x] All `ailake.*` keys in `properties` have string values
+- [x] `key_metadata` bytes in each `DataFile` entry, when non-null, deserialize as valid `AilakeEntryExt` JSON
+- [x] Centroid value in `key_metadata` is valid base64-encoded f32 array of the expected length
+- [x] `schemas[0].fields` includes all Parquet columns with correct Iceberg types and field-ids — generated automatically by `TableWriter.commit()` via `arrow_schema_to_iceberg_update`; covers scalar types, `timestamptz`, `List`, `Struct`, `Map`, and `FixedSizeBinary` (vector columns). `schema.name-mapping.default` is also written as a fallback so PyIceberg resolves columns by name even without Parquet field-ids.
+- [x] Each Parquet column carries `PARQUET:field_id` matching its Iceberg schema field-id (1-based; batch fields `1..N`, vector column `N+1`)
 
 ### Validation via PyIceberg (Phase 2 integration test)
 
@@ -218,12 +221,12 @@ The Iceberg `format-version` (currently `2`) is NOT our version number and MUST 
 - `FIXED_LEN_BYTE_ARRAY` mapped to `BinaryType` in Spark SQL.
 - `properties` exposed via `SHOW TBLPROPERTIES`.
 - `custom-properties` accessible via `table.snapshot().allManifests().dataFiles().properties()`.
-- **Status**: compatible. Verify with Spark integration test in Phase 3.
+- **Status**: compatible — tested in CI via `compat-heavy.yml` (manual dispatch). Uses `iceberg-spark-runtime-3.5_2.12:1.5.2` with `HadoopCatalog` (filesystem). Tests verify row count, `MIN`/`MAX` id, and schema columns (`id`, `text`, `embedding`) via Spark SQL.
 
 ### Trino (iceberg connector)
 - `FIXED_LEN_BYTE_ARRAY` mapped to `VARBINARY`.
 - Table properties visible via `SHOW CREATE TABLE`.
-- **Status**: compatible. Verify with Trino integration test in Phase 3.
+- **Status**: compatible — tested in CI via `compat-heavy.yml` (manual dispatch). Uses `tabulario/iceberg-rest:0.10.0` as REST catalog (internally wraps `HadoopCatalog`, discovers tables by filesystem layout) + `trinodb/trino:436`. Tests verify row count, `MIN`/`MAX` id via Trino Python client; cross-verified via PyIceberg REST catalog scan.
 
 ### DuckDB (iceberg extension 0.10+)
 - Full Iceberg Spec v2 support added in 0.10.
@@ -241,20 +244,27 @@ The Iceberg `format-version` (currently `2`) is NOT our version number and MUST 
 - `FIXED_LEN_BYTE_ARRAY` → `BINARY`.
 - **Status**: compatible, no known issues.
 
+### Google BigQuery
+- Reads Parquet files directly when configured as BigQuery external tables or via BigLake.
+- `FIXED_LEN_BYTE_ARRAY` → `BYTES`.
+- **Status**: compatible — tested in CI via `compat-bigquery` job in `compat-heavy.yml`. Uses `goccy/bigquery-emulator:0.6.6` (Go-based compliant Parquet reader) + `fsouza/fake-gcs-server:1.47.2`. Validates that the AILK footer appended after PAR1 does not cause errors; BQ streaming inserts verify row count, schema, and id range via BigQuery SQL.
+
 ---
 
 ## Verifying compatibility in CI
 
-Phase 1 CI must include these tests:
+### Always-on (every PR and push — `ci.yml`)
 
-1. **PyArrow read test**: write a small AI-Lake file, open it with `pyarrow.parquet.read_table`. Verify no errors, correct row count, vector column as binary.
-2. **PyIceberg scan test**: write an AI-Lake table (multiple files + metadata), load with PyIceberg, scan to PyArrow. Verify schema and row counts match.
-3. **Parquet stripped test**: write an AI-Lake file, truncate everything after the final `PAR1`, verify the truncated file is also a valid Parquet file with identical Parquet-level content.
+1. **PyArrow read test** (`compat-pyarrow`): build fixture via `write_fixture`, read all Parquet files with `pyarrow.parquet`. Verify row count, schema columns, vector column as binary.
+2. **DuckDB read test** (`compat-duckdb`): same fixture, read via `duckdb.read_parquet`. Verify row count and id range.
+3. **PyIceberg scan test** (`compat-pyiceberg`): load via `StaticTable.from_metadata` + `.scan().to_arrow()`. Verify 1000 rows, schema `[id, text, embedding]`.
+4. **ailake-py SDK test** (`compat-ailake-py`): build wheel with `maturin` (Python 3.12), run `check_ailake_py.py` covering write→search (cosine + euclidean), multi-batch commit, `assemble_context`, error paths.
 
-Phase 3 CI adds:
+### Heavy engines (`compat-heavy.yml` — manual dispatch)
 
-4. **Spark read test**: same as PyIceberg but via Spark SQL.
-5. **Trino read test**: same via Trino.
-6. **DuckDB read test**: same via DuckDB.
+5. **Spark+Iceberg read test** (`compat-spark`): reads fixture via `iceberg-spark-runtime-3.5_2.12:1.5.2` with `HadoopCatalog`; SQL `COUNT`, `MIN(id)`, `MAX(id)`, schema validation.
+6. **Trino read test** (`compat-trino`): `tabulario/iceberg-rest:0.10.0` REST catalog + `trinodb/trino:436`; verified via PyIceberg REST scan and Trino Python client.
+7. **JVM plugins** (`compat-jvm-plugins`): builds `libailake_jni.so`, runs Flink, Spark, and Trino Gradle integration tests.
+8. **BigQuery compat** (`compat-bigquery`): `fsouza/fake-gcs-server:1.47.2` + `goccy/bigquery-emulator:0.6.6`; pyarrow validates AILK Parquet files, BQ streaming inserts validate row count, schema, `MIN`/`MAX(id)`.
 
-Failure of any of these tests is a release blocker.
+Failure of tests 1–4 is a PR blocker. Failure of 5–8 is a release blocker.

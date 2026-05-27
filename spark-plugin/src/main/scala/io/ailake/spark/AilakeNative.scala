@@ -1,8 +1,7 @@
 package io.ailake.spark
 
 import com.sun.jna.{Library, Native, Pointer}
-import scala.jdk.CollectionConverters._
-import scala.util.{Try, Using}
+import scala.util.Try
 
 /**
  * JNA bridge to libailake_jni.so.

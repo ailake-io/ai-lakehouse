@@ -5,6 +5,7 @@ import org.apache.flink.configuration.ConfigOption
 import org.apache.flink.configuration.ConfigOptions
 import org.apache.flink.table.connector.sink.DynamicTableSink
 import org.apache.flink.table.connector.source.DynamicTableSource
+import org.apache.flink.table.factories.DynamicTableFactory
 import org.apache.flink.table.factories.DynamicTableSinkFactory
 import org.apache.flink.table.factories.DynamicTableSourceFactory
 import org.apache.flink.table.factories.FactoryUtil
@@ -56,7 +57,7 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
     override fun optionalOptions(): Set<ConfigOption<*>> =
         setOf(NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF)
 
-    override fun createDynamicTableSource(context: DynamicTableSourceFactory.Context): DynamicTableSource {
+    override fun createDynamicTableSource(context: DynamicTableFactory.Context): DynamicTableSource {
         val helper = FactoryUtil.createTableFactoryHelper(this, context)
         helper.validate()
         val opts = helper.options
@@ -72,7 +73,7 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
         )
     }
 
-    override fun createDynamicTableSink(context: DynamicTableSinkFactory.Context): DynamicTableSink {
+    override fun createDynamicTableSink(context: DynamicTableFactory.Context): DynamicTableSink {
         val helper = FactoryUtil.createTableFactoryHelper(this, context)
         helper.validate()
         val opts = helper.options

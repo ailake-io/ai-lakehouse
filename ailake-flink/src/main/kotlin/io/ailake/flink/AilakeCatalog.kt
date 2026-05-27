@@ -32,7 +32,7 @@ class AilakeCatalog(
 
     override fun open() {
         if (!databases.containsKey(defaultDatabase)) {
-            databases[defaultDatabase] = CatalogDatabaseImpl(emptyMap(), "default database")
+            databases[defaultDatabase!!] = CatalogDatabaseImpl(emptyMap(), "default database")
         }
     }
 
