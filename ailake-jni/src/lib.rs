@@ -53,8 +53,22 @@ impl From<SearchResult> for RowResultJson {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Runtime::new().expect("tokio runtime")
+fn rt() -> &'static tokio::runtime::Runtime {
+    use std::sync::OnceLock;
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|_| {
+                // Fall back to single-threaded runtime — avoids spawning extra OS
+                // threads that can interfere with the JVM's signal handlers.
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("ailake-jni: tokio runtime unavailable")
+            })
+    })
 }
 
 fn parse_metric(s: &str) -> VectorMetric {
