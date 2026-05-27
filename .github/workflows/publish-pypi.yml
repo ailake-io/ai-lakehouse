@@ -12,7 +12,7 @@ jobs:
         target: [x86_64, aarch64]
     steps:
       - name: Clean Docker-owned artifacts
-        run: sudo rm -rf dist/ target/ || true
+        run: sudo rm -rf dist/ || true
 
       - uses: actions/checkout@v4
 
@@ -104,7 +104,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Clean Docker-owned artifacts
-        run: sudo rm -rf dist/ target/ || true
+        run: sudo rm -rf dist/ || true
 
       - uses: actions/checkout@v4
 
