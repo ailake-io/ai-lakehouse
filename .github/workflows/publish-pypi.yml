@@ -11,6 +11,9 @@ jobs:
       matrix:
         target: [x86_64, aarch64]
     steps:
+      - name: Clean Docker-owned artifacts
+        run: sudo rm -rf dist/ target/ || true
+
       - uses: actions/checkout@v4
 
       - uses: PyO3/maturin-action@v1
@@ -95,6 +98,9 @@ jobs:
     name: Build sdist
     runs-on: [self-hosted, Linux, X64]
     steps:
+      - name: Clean Docker-owned artifacts
+        run: sudo rm -rf dist/ target/ || true
+
       - uses: actions/checkout@v4
 
       - uses: PyO3/maturin-action@v1
