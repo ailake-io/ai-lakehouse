@@ -27,7 +27,7 @@ jobs:
               || apt-get install -y perl make gcc 2>/dev/null \
               || true
           command: build
-          args: --release --out dist --find-interpreter --manifest-path ailake-py/Cargo.toml
+          args: --release --out dist --interpreter python3.9 python3.10 python3.11 python3.12 python3.13 --manifest-path ailake-py/Cargo.toml
 
       - uses: actions/upload-artifact@v4
         with:
@@ -84,7 +84,7 @@ jobs:
         with:
           target: x86_64
           command: build
-          args: --release --out dist --find-interpreter --manifest-path ailake-py/Cargo.toml
+          args: --release --out dist --interpreter python3.9 python3.10 python3.11 python3.12 python3.13 --manifest-path ailake-py/Cargo.toml
 
       - uses: actions/upload-artifact@v4
         with:
