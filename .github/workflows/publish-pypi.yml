@@ -6,7 +6,7 @@ on:
 jobs:
   linux:
     name: Build Linux (${{ matrix.target }})
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
     strategy:
       matrix:
         target: [x86_64, aarch64]
@@ -72,6 +72,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
       - uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
@@ -87,7 +91,7 @@ jobs:
 
   sdist:
     name: Build sdist
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
 
@@ -103,7 +107,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
     needs: [linux, windows, sdist]
     # TODO: after creating PyPI account, create a "pypi" environment in
     # Settings → Environments with PYPI_API_TOKEN as an environment secret.
