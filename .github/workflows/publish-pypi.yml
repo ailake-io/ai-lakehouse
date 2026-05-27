@@ -11,8 +11,10 @@ jobs:
       matrix:
         target: [x86_64, aarch64]
     steps:
-      - name: Clean Docker-owned dist/
-        run: docker run --rm -v "$PWD:/work" -w /work alpine sh -c "rm -rf dist/" 2>/dev/null || true
+      - name: Fix Docker-owned file permissions
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
+            "rm -rf dist/ 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
 
       - uses: actions/checkout@v4
         with:
@@ -106,6 +108,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+          CARGO_TARGET_DIR: C:\t
         with:
           target: x86_64
           command: build
@@ -120,6 +123,11 @@ jobs:
     name: Build sdist
     runs-on: [self-hosted, Linux, X64]
     steps:
+      - name: Fix Docker-owned file permissions
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
+            "rm -rf dist/ 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
+
       - uses: actions/checkout@v4
         with:
           clean: false
