@@ -7,7 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [0.0.8] - 2026-05-27
 
 ### Added
 - **`compat-heavy.yml` BigQuery job**: validates that AI-Lake Parquet files are readable by BigQuery without errors from the AILK footer section. Uses `fsouza/fake-gcs-server:1.47.2` to simulate GCS and `ghcr.io/goccy/bigquery-emulator:0.6.6` (Go-based, compliant Parquet reader); `STORAGE_EMULATOR_HOST` wires the emulator's internal GCS client to fake-gcs so no real GCP credentials are required. Test creates a BigQuery external Parquet table pointing to the fixture files and asserts row count, schema (`id`, `text`, `embedding`), and id range.
@@ -200,7 +200,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-[Unreleased]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.5...HEAD
+[0.0.8]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.7...v0.0.8
+[0.0.7]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.6...v0.0.7
+[0.0.6]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.2...v0.0.3

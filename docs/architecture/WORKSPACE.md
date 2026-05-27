@@ -350,7 +350,7 @@ Delivered in Phase 3:
 Deferred (external env required):
 - Compatibility tests: Spark, Trino, Beam, DuckDB, PyIceberg (integration tests require Docker/cluster)
 
-### Phase 4 — Production hardening 🔄
+### Phase 4 — Production hardening ✅
 
 Delivered in Phase 4:
 - Reranking after PQ: `SearchConfig.rerank_factor`, `exact_distance()` in `ailake-vec`

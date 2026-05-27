@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-file"
-version     = "0.0.7"
+version     = "0.0.8"
 edition     = "2021"
 description = "Self-contained AI-Lake file writer/reader — Parquet extended with HNSW footer"
 license     = "MIT OR Apache-2.0"
@@ -9,10 +9,10 @@ keywords    = ["parquet", "vector", "hnsw", "iceberg", "lakehouse"]
 categories  = ["database", "encoding", "filesystem"]
 
 [dependencies]
-ailake-core    = { path = "../ailake-core", version     = "0.0.7" }
-ailake-parquet = { path = "../ailake-parquet", version     = "0.0.7" }
-ailake-vec     = { path = "../ailake-vec", version     = "0.0.7" }
-ailake-index   = { path = "../ailake-index", version     = "0.0.7" }
+ailake-core    = { path = "../ailake-core", version     = "0.0.8" }
+ailake-parquet = { path = "../ailake-parquet", version     = "0.0.8" }
+ailake-vec     = { path = "../ailake-vec", version     = "0.0.8" }
+ailake-index   = { path = "../ailake-index", version     = "0.0.8" }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
 thiserror      = { workspace = true }

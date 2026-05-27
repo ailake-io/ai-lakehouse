@@ -221,12 +221,12 @@ The Iceberg `format-version` (currently `2`) is NOT our version number and MUST 
 - `FIXED_LEN_BYTE_ARRAY` mapped to `BinaryType` in Spark SQL.
 - `properties` exposed via `SHOW TBLPROPERTIES`.
 - `custom-properties` accessible via `table.snapshot().allManifests().dataFiles().properties()`.
-- **Status**: compatible — tested in CI via `compat-heavy.yml` (runs on every push to `main` and weekly). Uses `iceberg-spark-runtime-3.5_2.12:1.5.2` with `HadoopCatalog` (filesystem). Tests verify row count, `MIN`/`MAX` id, and schema columns (`id`, `text`, `embedding`) via Spark SQL.
+- **Status**: compatible — tested in CI via `compat-heavy.yml` (manual dispatch). Uses `iceberg-spark-runtime-3.5_2.12:1.5.2` with `HadoopCatalog` (filesystem). Tests verify row count, `MIN`/`MAX` id, and schema columns (`id`, `text`, `embedding`) via Spark SQL.
 
 ### Trino (iceberg connector)
 - `FIXED_LEN_BYTE_ARRAY` mapped to `VARBINARY`.
 - Table properties visible via `SHOW CREATE TABLE`.
-- **Status**: compatible — tested in CI via `compat-heavy.yml`. Uses `tabulario/iceberg-rest:0.10.0` as REST catalog (internally wraps `HadoopCatalog`, discovers tables by filesystem layout) + `trinodb/trino:436`. Tests verify row count, `MIN`/`MAX` id via Trino Python client; cross-verified via PyIceberg REST catalog scan.
+- **Status**: compatible — tested in CI via `compat-heavy.yml` (manual dispatch). Uses `tabulario/iceberg-rest:0.10.0` as REST catalog (internally wraps `HadoopCatalog`, discovers tables by filesystem layout) + `trinodb/trino:436`. Tests verify row count, `MIN`/`MAX` id via Trino Python client; cross-verified via PyIceberg REST catalog scan.
 
 ### DuckDB (iceberg extension 0.10+)
 - Full Iceberg Spec v2 support added in 0.10.
@@ -244,6 +244,11 @@ The Iceberg `format-version` (currently `2`) is NOT our version number and MUST 
 - `FIXED_LEN_BYTE_ARRAY` → `BINARY`.
 - **Status**: compatible, no known issues.
 
+### Google BigQuery
+- Reads Parquet files directly when configured as BigQuery external tables or via BigLake.
+- `FIXED_LEN_BYTE_ARRAY` → `BYTES`.
+- **Status**: compatible — tested in CI via `compat-bigquery` job in `compat-heavy.yml`. Uses `goccy/bigquery-emulator:0.6.6` (Go-based compliant Parquet reader) + `fsouza/fake-gcs-server:1.47.2`. Validates that the AILK footer appended after PAR1 does not cause errors; BQ streaming inserts verify row count, schema, and id range via BigQuery SQL.
+
 ---
 
 ## Verifying compatibility in CI
@@ -255,10 +260,11 @@ The Iceberg `format-version` (currently `2`) is NOT our version number and MUST 
 3. **PyIceberg scan test** (`compat-pyiceberg`): load via `StaticTable.from_metadata` + `.scan().to_arrow()`. Verify 1000 rows, schema `[id, text, embedding]`.
 4. **ailake-py SDK test** (`compat-ailake-py`): build wheel with `maturin` (Python 3.12), run `check_ailake_py.py` covering write→search (cosine + euclidean), multi-batch commit, `assemble_context`, error paths.
 
-### Heavy engines (`compat-heavy.yml` — push to `main` + weekly schedule)
+### Heavy engines (`compat-heavy.yml` — manual dispatch)
 
 5. **Spark+Iceberg read test** (`compat-spark`): reads fixture via `iceberg-spark-runtime-3.5_2.12:1.5.2` with `HadoopCatalog`; SQL `COUNT`, `MIN(id)`, `MAX(id)`, schema validation.
 6. **Trino read test** (`compat-trino`): `tabulario/iceberg-rest:0.10.0` REST catalog + `trinodb/trino:436`; verified via PyIceberg REST scan and Trino Python client.
 7. **JVM plugins** (`compat-jvm-plugins`): builds `libailake_jni.so`, runs Flink, Spark, and Trino Gradle integration tests.
+8. **BigQuery compat** (`compat-bigquery`): `fsouza/fake-gcs-server:1.47.2` + `goccy/bigquery-emulator:0.6.6`; pyarrow validates AILK Parquet files, BQ streaming inserts validate row count, schema, `MIN`/`MAX(id)`.
 
-Failure of tests 1–4 is a PR blocker. Failure of 5–7 is a release blocker.
+Failure of tests 1–4 is a PR blocker. Failure of 5–8 is a release blocker.

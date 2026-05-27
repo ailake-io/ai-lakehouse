@@ -595,7 +595,7 @@ BigLake Metastore provides the REST catalog API — use `catalog_type=rest` with
 
 | Service | Config |
 |---|---|
-| **BigQuery (Iceberg tables)** | Native Iceberg read via BigLake Metastore. Vector column as bytes. |
+| **BigQuery (Iceberg tables)** | Native Iceberg read via BigLake Metastore. Vector column as bytes. AILK footer compat validated in CI (`compat-bigquery`). |
 | **Dataproc (Spark)** | Spark 3.3–3.5, standard Iceberg runtime jar. |
 | **Dataproc (Trino)** | Standard Iceberg connector. |
 | **Cloud Dataflow** | Beam `Managed.ICEBERG` for tabular. `ailake-py` DoFn for vector search. |
@@ -839,7 +839,7 @@ Services spun up:
 - **Project Nessie** (`localhost:19120`) — REST catalog
 - **Localstack** (`localhost:4566`) — mock AWS Glue + S3
 
-### Phase 3 tests (requires Docker + JVM)
+### Phase 3+ tests (requires Docker + JVM — triggered via `compat-heavy.yml` manual dispatch)
 
 ```bash
 docker compose -f tests/docker/compose-engines.yml up -d  # Spark, Trino

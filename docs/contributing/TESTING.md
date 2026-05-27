@@ -641,13 +641,14 @@ cargo bench --workspace
 | `compat-pyiceberg` | `write_fixture` + `pip install pyiceberg[pyarrow]` + `check_pyiceberg.py` | PyIceberg `StaticTable.scan()` |
 | `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context |
 
-### `compat-heavy.yml` — push to `main` and weekly (Monday 03:00 UTC)
+### `compat-heavy.yml` — manual dispatch (`workflow_dispatch`)
 
 | Job | What it covers |
 |---|---|
 | `compat-spark` | PySpark: direct Parquet read + Spark+Iceberg HadoopCatalog SQL (`COUNT`, `MIN`/`MAX`, schema) |
 | `compat-trino` | Trino: `tabulario/iceberg-rest` REST catalog + `trinodb/trino:436`; PyIceberg REST scan + Trino Python client |
 | `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests |
+| `compat-bigquery` | BigQuery: `fsouza/fake-gcs-server` + `goccy/bigquery-emulator:0.6.6`; pyarrow reads AILK Parquet + BQ streaming inserts (`insertAll`); validates row count, schema, `MIN`/`MAX(id)` |
 
 ### Failure policy
 
@@ -656,4 +657,4 @@ cargo bench --workspace
 | `fmt`, `clippy` | Every PR |
 | `unit`, `integration`, `compat-parquet` | Every PR |
 | `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg`, `compat-ailake-py` | Every PR |
-| `compat-spark`, `compat-trino`, `compat-jvm-plugins` | Release (runs on every main merge + weekly) |
+| `compat-spark`, `compat-trino`, `compat-jvm-plugins`, `compat-bigquery` | Release (manual dispatch before publish) |
