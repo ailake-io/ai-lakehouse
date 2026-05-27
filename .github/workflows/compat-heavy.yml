@@ -392,22 +392,23 @@ jobs:
         run: |
           rm -rf /tmp/bq-venv
           python3 -m venv /tmp/bq-venv
-          /tmp/bq-venv/bin/pip install "google-cloud-bigquery>=3.13" google-auth pyarrow
+          /tmp/bq-venv/bin/pip install "google-cloud-bigquery>=3.13" google-auth pyarrow requests
 
       - name: Verify Parquet compatibility via BigQuery emulator
         timeout-minutes: 10
         run: |
           # -u: unbuffered stdout so logs appear immediately.
           /tmp/bq-venv/bin/python3 -u - <<'EOF'
-          import os, pathlib, socket, sys
+          import json, os, pathlib, socket, sys, time, uuid
+          import requests as http
 
-          # Hard socket timeout — prevents any HTTP call from hanging indefinitely.
+          # Hard socket timeout — any hung socket call aborts in ≤30 s.
           socket.setdefaulttimeout(30)
 
           # BIGQUERY_EMULATOR_HOST must be set before importing the client library.
-          # Format: host:port (no scheme — the library adds http:// internally).
           bq_port = os.environ["BQ_EMULATOR_PORT"]
           os.environ["BIGQUERY_EMULATOR_HOST"] = f"localhost:{bq_port}"
+          base_url = f"http://localhost:{bq_port}"
 
           from google.auth.credentials import AnonymousCredentials
           from google.api_core.client_options import ClientOptions
@@ -425,9 +426,7 @@ jobs:
           bq = bigquery.Client(
               project="ailake-test",
               credentials=AnonymousCredentials(),
-              client_options=ClientOptions(
-                  api_endpoint=f"http://localhost:{bq_port}"
-              ),
+              client_options=ClientOptions(api_endpoint=base_url),
           )
           print("client created", flush=True)
 
@@ -436,23 +435,70 @@ jobs:
 
           table_ref = bq.dataset("ailake_compat").table("compat_test")
 
-          # Upload Parquet files directly from host filesystem — no GCS needed.
-          # First file truncates; subsequent files append so all rows land in one table.
+          def load_parquet_multipart(path, write_disposition):
+              """
+              Upload Parquet to BQ emulator via multipart HTTP POST.
+              Bypasses google-resumable-media (resumable upload) which the emulator
+              does not implement correctly — the chunk PUT resets the connection.
+              The BQ API's uploadType=multipart sends job config + file in a single
+              request with no chunking, which the emulator handles correctly.
+              """
+              with open(path, "rb") as fh:
+                  file_bytes = fh.read()
+
+              boundary = f"ailake_{uuid.uuid4().hex}"
+              job_resource = {
+                  "configuration": {
+                      "load": {
+                          "destinationTable": {
+                              "projectId": "ailake-test",
+                              "datasetId": "ailake_compat",
+                              "tableId": "compat_test",
+                          },
+                          "sourceFormat": "PARQUET",
+                          "autodetect": True,
+                          "writeDisposition": write_disposition,
+                      }
+                  }
+              }
+              body = (
+                  f"--{boundary}\r\n"
+                  f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+                  f"{json.dumps(job_resource)}\r\n"
+                  f"--{boundary}\r\n"
+                  f"Content-Type: application/octet-stream\r\n\r\n"
+              ).encode() + file_bytes + f"\r\n--{boundary}--".encode()
+
+              resp = http.post(
+                  f"{base_url}/upload/bigquery/v2/projects/ailake-test/jobs",
+                  params={"uploadType": "multipart"},
+                  data=body,
+                  headers={"Content-Type": f"multipart/related; boundary={boundary}"},
+                  timeout=30,
+              )
+              resp.raise_for_status()
+              job_id = resp.json()["jobReference"]["jobId"]
+              print(f"  load job {job_id} created", flush=True)
+
+              for _ in range(60):
+                  status = http.get(
+                      f"{base_url}/bigquery/v2/projects/ailake-test/jobs/{job_id}",
+                      timeout=10,
+                  ).json()
+                  if status["status"]["state"] == "DONE":
+                      break
+                  time.sleep(1)
+              else:
+                  raise TimeoutError(f"load job {job_id} did not finish in 60 s")
+
+              if "errorResult" in status["status"]:
+                  raise RuntimeError(f"load job failed: {status['status']['errorResult']}")
+              print(f"  done", flush=True)
+
           for i, path in enumerate(parquet_files):
-              disposition = (
-                  bigquery.WriteDisposition.WRITE_TRUNCATE if i == 0
-                  else bigquery.WriteDisposition.WRITE_APPEND
-              )
-              job_config = bigquery.LoadJobConfig(
-                  source_format=bigquery.SourceFormat.PARQUET,
-                  autodetect=True,
-                  write_disposition=disposition,
-              )
+              disp = "WRITE_TRUNCATE" if i == 0 else "WRITE_APPEND"
               print(f"loading file {i+1}/{len(parquet_files)}: {path}", flush=True)
-              with open(path, "rb") as f:
-                  job = bq.load_table_from_file(f, table_ref, job_config=job_config)
-              job.result(timeout=60)
-              print(f"  done: state={job.state}", flush=True)
+              load_parquet_multipart(path, disp)
 
           count = next(
               bq.query(
