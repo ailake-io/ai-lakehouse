@@ -56,7 +56,6 @@ object AilakeNative {
 
         return try {
             val json = ptr.getString(0)
-            native.ailake_free_string(ptr)
             mapper.readValue<List<Map<String, Any>>>(json).map { m ->
                 SearchRow(
                     rowId = (m["row_id"] as Number).toLong(),
@@ -65,8 +64,9 @@ object AilakeNative {
                 )
             }
         } catch (e: Exception) {
-            runCatching { native.ailake_free_string(ptr) }
             emptyList()
+        } finally {
+            runCatching { native.ailake_free_string(ptr) }
         }
     }
 }
