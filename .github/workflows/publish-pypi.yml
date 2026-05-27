@@ -72,9 +72,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
+      - name: Install Rust stable
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --target x86_64-pc-windows-msvc
+          rustup default stable
 
       - uses: PyO3/maturin-action@v1
         env:
