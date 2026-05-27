@@ -1,4 +1,4 @@
-name: Compat Heavy (Spark + Trino + JVM Plugins)
+name: Compat Heavy (Spark + Trino + JVM Plugins + BigQuery)
 
 on:
   workflow_dispatch:
@@ -338,3 +338,146 @@ jobs:
           AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
           AILAKE_LIB_PATH=$(pwd)/target/release \
             gradle -p trino-plugin test --no-daemon --no-configuration-cache
+
+  compat-bigquery:
+    name: compat-bigquery
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Pre-cleanup
+        run: |
+          docker rm -f ailake-fake-gcs ailake-bq-emulator 2>/dev/null || true
+          docker network rm ailake-bq-net 2>/dev/null || true
+          rm -rf /tmp/ailake-bq-fixture /tmp/ailake-fake-gcs-data
+
+      - name: Build fixture
+        env:
+          COMPAT_FIXTURE_PATH: /tmp/ailake-bq-fixture
+        run: cargo run --example write_fixture -p ailake-query
+
+      - name: Stage Parquet files in fake-gcs filesystem root
+        run: |
+          mkdir -p /tmp/ailake-fake-gcs-data/ailake-bucket/data
+          while IFS= read -r f; do
+            [ -n "$f" ] && cp "$f" /tmp/ailake-fake-gcs-data/ailake-bucket/data/
+          done < /tmp/ailake-bq-fixture/fixture_files.txt
+          echo "=== staged files ===" && ls -lh /tmp/ailake-fake-gcs-data/ailake-bucket/data/
+
+      - name: Start fake-gcs-server and BigQuery emulator
+        run: |
+          docker network inspect ailake-bq-net >/dev/null 2>&1 || \
+            docker network create ailake-bq-net
+
+          # fake-gcs-server serves objects from filesystem: /storage/<bucket>/<key>
+          docker run -d --name ailake-fake-gcs \
+            --network ailake-bq-net \
+            -p 4443:4443 \
+            -v "/tmp/ailake-fake-gcs-data:/storage" \
+            fsouza/fake-gcs-server:1.47.2 \
+            -scheme http \
+            -port 4443 \
+            -backend filesystem \
+            -filesystem-root /storage \
+            -public-host ailake-fake-gcs:4443
+
+          # STORAGE_EMULATOR_HOST redirects the Go GCS client inside the emulator
+          # to fake-gcs so gs:// URIs resolve without real GCP credentials.
+          docker run -d --name ailake-bq-emulator \
+            --network ailake-bq-net \
+            -p 9050:9050 \
+            -e STORAGE_EMULATOR_HOST=http://ailake-fake-gcs:4443 \
+            ghcr.io/goccy/bigquery-emulator:0.6.6 \
+            --project=ailake-test \
+            --port=9050
+
+      - name: Wait for services
+        run: |
+          echo "Waiting for fake-gcs..."
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:4443/storage/v1/b > /dev/null 2>&1; then
+              echo "fake-gcs ready after $((i * 2))s"; break
+            fi
+            sleep 2
+          done
+
+          echo "Waiting for BigQuery emulator..."
+          for i in $(seq 1 20); do
+            if curl -sf "http://localhost:9050/bigquery/v2/projects/ailake-test/datasets" \
+               > /dev/null 2>&1; then
+              echo "BigQuery emulator ready after $((i * 2))s"; break
+            fi
+            sleep 2
+          done
+
+      - name: Set up Python venv
+        run: |
+          rm -rf /tmp/bq-venv
+          python3 -m venv /tmp/bq-venv
+          /tmp/bq-venv/bin/pip install "google-cloud-bigquery>=3.13" google-auth pyarrow
+
+      - name: Verify Parquet compatibility via BigQuery emulator
+        run: |
+          /tmp/bq-venv/bin/python3 - <<'EOF'
+          import os, pathlib
+          from google.auth.credentials import AnonymousCredentials
+          from google.cloud import bigquery
+
+          fixture_dir = pathlib.Path("/tmp/ailake-bq-fixture")
+          expected = int((fixture_dir / "fixture_rows.txt").read_text().strip())
+          source_uris = [
+              f"gs://ailake-bucket/data/{pathlib.Path(p.strip()).name}"
+              for p in (fixture_dir / "fixture_files.txt").read_text().splitlines()
+              if p.strip()
+          ]
+
+          os.environ["BIGQUERY_EMULATOR_HOST"] = "http://localhost:9050"
+
+          bq = bigquery.Client(
+              project="ailake-test",
+              credentials=AnonymousCredentials(),
+          )
+
+          bq.create_dataset("ailake_compat", exists_ok=True)
+
+          table_ref = bq.dataset("ailake_compat").table("compat_test")
+          ext_config = bigquery.ExternalConfig("PARQUET")
+          ext_config.source_uris = source_uris
+          ext_config.autodetect = True
+          table = bigquery.Table(table_ref)
+          table.external_data_configuration = ext_config
+          bq.create_table(table, exists_ok=True)
+
+          count = next(
+              bq.query(
+                  "SELECT COUNT(*) FROM `ailake-test.ailake_compat.compat_test`"
+              ).result()
+          )[0]
+          assert count == expected, f"FAIL: BigQuery count {count} != {expected}"
+
+          schema = [f.name for f in bq.get_table(table_ref).schema]
+          for col in ("id", "text", "embedding"):
+              assert col in schema, f"FAIL: column '{col}' missing from schema {schema}"
+
+          row = list(
+              bq.query(
+                  "SELECT MIN(id), MAX(id) FROM `ailake-test.ailake_compat.compat_test`"
+              ).result()
+          )[0]
+          assert row[0] == 0, f"FAIL: min id {row[0]}"
+          assert row[1] == expected - 1, f"FAIL: max id {row[1]}"
+
+          print(
+              f"PASS (BigQuery emulator): {count} rows, schema={schema},"
+              f" id={row[0]}..{row[1]}"
+          )
+          EOF
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f ailake-fake-gcs ailake-bq-emulator 2>/dev/null || true
+          docker network rm ailake-bq-net 2>/dev/null || true
+          rm -rf /tmp/ailake-bq-fixture /tmp/ailake-fake-gcs-data
