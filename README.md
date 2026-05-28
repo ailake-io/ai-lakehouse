@@ -11,6 +11,34 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 
 ---
 
+## Why AI-Lake?
+
+**No second system.** Traditional stacks split tabular data (Parquet/Iceberg) from vectors (Pinecone, Milvus, Weaviate). Two systems to operate, two consistency models, two billing lines, and a join across a network boundary at query time. AI-Lake collapses both into a single `.parquet` file — one source of truth, one transaction log, one S3 prefix.
+
+**ACID vectors.** Iceberg snapshot isolation applies to vector search the same way it applies to SQL queries. Time-travel, rollback, and concurrent writers work out of the box. No eventual consistency or index rebuild windows.
+
+**Iceberg-compatible by spec, not by convention.** Standard Parquet readers (Spark, Trino, DuckDB, Athena, Snowflake) read AI-Lake tables without any plugin. The HNSW index lives in the file footer past the final `PAR1` magic — invisible to readers that follow the Parquet spec. The vector scan is an additive capability, not a format fork.
+
+**Geometric pruning cuts S3 costs before any I/O.** Each file records its vector centroid and radius in the Iceberg manifest. A query eliminates files whose centroid is geometrically too far — without opening a single Parquet file. On tables with thousands of files, 95–99% of objects are never fetched.
+
+**One binary, zero GPU build flags.** NVIDIA cuBLAS and AMD hipBLAS are loaded at runtime via `libloading`. The same release binary auto-selects GPU on CUDA/ROCm machines and falls back to AVX-512/AVX2/NEON SIMD on CPU-only machines. No recompilation, no feature flags, no driver headers required.
+
+**Rust core, first-class Python and JVM.** The write/search path is pure Rust (zero GC pauses, no JVM heap pressure). Python gets zero-copy PyArrow `RecordBatch` results. Spark, Trino, and Flink get a JNA C-ABI bridge — four exported functions shared across all three JVM plugins.
+
+**Storage-efficient at scale.** F16 quantization halves vector storage vs. F32. Product Quantization (IVF-PQ) reduces the index footprint 10–100× for S3-resident workloads where sequential reads are cheap. PQ reranking recovers precision with a second pass over the raw F16 column.
+
+| | Iceberg alone | External vector DB | **AI-Lake** |
+|---|---|---|---|
+| ACID transactions | ✅ | ❌ | ✅ |
+| SQL via Spark / Trino | ✅ | ❌ | ✅ |
+| Native vector search | ❌ | ✅ | ✅ |
+| Single file / single system | ✅ | ❌ | ✅ |
+| Geometric file pruning | ❌ | ❌ | ✅ |
+| GPU search (NVIDIA + AMD) | ❌ | Vendor-specific | ✅ |
+| Time-travel on vectors | ❌ | ❌ | ✅ |
+
+---
+
 ## Quick orientation
 
 | Document | What it answers |
