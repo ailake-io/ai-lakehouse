@@ -1852,7 +1852,7 @@ ailake-query/     TableWriter (write_batch, write_batch_ivf_pq, write_batch_mult
                   search() com pruning geométrico, ContextAssembler, CompactionExecutor
 ailake-bench/     benchmark SIFT-1M: HNSW, IVF-PQ (--engine ailake-ivf-pq), LanceDB, pgvector
 ailake-py/        bindings PyO3 (fora do workspace — compilar com maturin)
-ailake-jni/       bindings uniffi C-ABI para Spark, Trino e Flink
+ailake-jni/       C-ABI cdylib via JNA para Spark, Trino e Flink
 spark-plugin/     Spark 3.5 Catalyst strategy (Kotlin/Gradle)
 trino-plugin/     Trino connector (Java/Gradle)
 ailake-flink/     Flink Table API connector (Kotlin/Gradle)

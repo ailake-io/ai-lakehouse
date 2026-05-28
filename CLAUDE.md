@@ -408,7 +408,7 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] Testes de compatibilidade: PyArrow, DuckDB, PyIceberg metadata JSON — validados localmente; Spark + Trino via `compat-heavy.yml` (workflow_dispatch)
 
 ### Fase 3 — Integração com Motores de Query
-- [x] `ailake-jni`: bindings uniffi para Spark/Trino
+- [x] `ailake-jni`: C-ABI cdylib via JNA para Spark/Trino/Flink
 - [x] Plugin Trino: `VectorScanConnector`
 - [x] Plugin Spark: `VectorScanStrategy`
 - [x] Suporte a múltiplas colunas vetoriais (`embedding` + `context_embedding`)
@@ -441,7 +441,7 @@ ailake/
 ├── ailake-store/         # Abstração de object storage via object_store
 ├── ailake-query/         # Pruning, scan, ContextAssembler
 ├── ailake-py/            # Bindings Python via PyO3
-└── ailake-jni/           # Bindings JVM via uniffi
+└── ailake-jni/           # C-ABI cdylib via JNA para Spark/Trino/Flink
 ```
 
 ### Dependências Principais
@@ -478,8 +478,8 @@ tokio          = { version = "1", features = ["full"] }
 futures        = "0.3"
 
 # Bindings
-pyo3           = { version = "0.21", features = ["extension-module"] }
-uniffi         = "0.27"
+pyo3           = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+# uniffi removed — JVM bindings use C-ABI + JNA (ailake-jni)
 
 # Half-precision
 half           = "2"                 # f16 type
@@ -506,7 +506,7 @@ tracing        = "0.1"
 A decisão consciente é **não usar DataFusion como motor de query**. Razões:
 
 - **Foco no formato**: o projeto é um formato de arquivo, não um SQL engine. Adicionar DataFusion expandiria o escopo significativamente.
-- **Bindings limpos**: PyO3/uniffi expõem operações específicas (`search`, `write_batch`) sem o overhead de um planner SQL completo.
+- **Bindings limpos**: PyO3 (Python) e JNA C-ABI (JVM) expõem operações específicas (`search`, `write_batch`) sem o overhead de um planner SQL completo.
 - **Performance previsível**: SDK direto evita custos de planning para queries simples (busca vetorial pura).
 - **Integração com Spark/Trino**: esses motores fazem o planning SQL deles; o AI-Lake só precisa fornecer scan eficiente.
 

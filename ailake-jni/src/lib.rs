@@ -74,7 +74,7 @@ fn parse_metric(s: &str) -> VectorMetric {
     }
 }
 
-/// Core search logic shared by both uniffi and C-ABI surfaces.
+/// Core search logic called by C-ABI exports.
 #[allow(clippy::too_many_arguments)]
 fn do_search(
     warehouse: String,

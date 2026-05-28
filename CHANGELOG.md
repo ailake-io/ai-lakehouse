@@ -7,6 +7,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Changed
+- **`ailake-jni` dead uniffi code removed**: `uniffi::setup_scaffolding!()`, `#[uniffi::export]` on `vector_search`/`assemble_context`, `#[derive(uniffi::Record)]` on `RowResult`, and `uniffi = "0.27"` workspace dep all removed. All JVM plugins use `ailake_search_json` C-ABI via JNA — uniffi was declared but generated no bindings and no plugin consumed it.
+- **Workspace `Cargo.toml`**: `uniffi = "0.27"` removed from `[workspace.dependencies]` (no crate depends on it).
+- **Trino plugin**: `VectorScanSplit` field `queryVector` (CSV String) → `queryBytes` (Base64 LE f32); CSV→Base64 conversion moved to planning phase (`VectorScanSplitManager.csvFloatsToBase64`) to eliminate 1536-element string split on every worker execution.
+- **Spark plugin**: `AilakeNative` now uses direct `import com.fasterxml.jackson.databind.ObjectMapper` instead of `Class.forName(...)` reflection; single shared `ObjectMapper` instance (thread-safe); `jackson-databind` added as `compileOnly` dep in `build.gradle.kts`.
+
+### Added
+- **`ailake-jni/README.md`**: crates.io page with all 4 C-ABI exports, request/response JSON schemas, Kotlin + Scala JNA usage examples, library path setup.
+- **`ailake-py/README.md`**: PyPI page with install, `TableWriter`, `search`, `assemble_context`, Iceberg compatibility matrix.
+- **GitHub repository topics**: `lakehouse`, `iceberg`, `vector-search`, `rust`, `embeddings`, `rag`, `hnsw`, `parquet`.
+
+---
+
 ## [0.0.8] - 2026-05-27
 
 ### Added
@@ -146,7 +161,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Trino `VectorScanConnector`**: full Trino plugin with `VectorScanMetadata`, `VectorScanSplitManager`, and `VectorScanRecordSetProvider` (`ailake-jni`)
 - **Spark `VectorScanStrategy`**: custom `SparkStrategy` that injects a `VectorScanExec` physical node into the query plan
 - **Multi-column vector support**: tables can declare multiple vector columns (e.g. `embedding` + `context_embedding`); each generates its own HNSW in the file footer
-- **`ailake-jni` uniffi bindings**: full C-ABI layer exposing `write_batch`, `search`, `compact`, `assemble_context` to JVM/Kotlin/Swift callers
+- **`ailake-jni` C-ABI layer**: `ailake_search_json`, `ailake_write_batch_json`, `ailake_free_string` — JSON-envelope API consumed by all JVM plugins via JNA
 - **`RestCatalog`**: Iceberg REST Catalog client for multi-cloud catalog federation (`ailake-catalog`)
 - **`DatabricksAuth`** + config builders for `databricks_azure`, `databricks_aws`, `databricks_gcp` — Unity Catalog integration
 - **`NessieCatalog`**, **`JdbcCatalog`**, **`GlueCatalog`**: three additional catalog backends (`ailake-catalog`)

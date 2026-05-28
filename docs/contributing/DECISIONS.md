@@ -11,12 +11,12 @@ Decisions are numbered and immutable once merged. To change a decision, add a ne
 
 **Context**: The core operations — reading/writing files, HNSW index construction, quantization, centroid computation — are I/O and CPU-bound at petabyte scale. Language choice directly impacts throughput and operational cost.
 
-**Decision**: Rust for all `ailake-*` crates. Python and JVM bindings are thin wrappers (PyO3, uniffi) that call into Rust. No business logic in binding layers.
+**Decision**: Rust for all `ailake-*` crates. Python bindings via PyO3; JVM bindings via JNA + C-ABI (`ailake-jni` exports `#[no_mangle]` functions). No business logic in binding layers.
 
 **Consequences**:
 - Zero GC pauses during index traversal (critical for p99 latency).
 - `cargo build --target` enables cross-compilation without complex toolchains.
-- Binding maintenance cost: PyO3 and uniffi are mature and well-documented.
+- Binding maintenance cost: PyO3 (Python) and JNA (JVM) are mature. C-ABI surface is minimal — 4 exported functions.
 - Contributors need Rust experience. Offset by clear crate boundaries and thorough docs.
 
 **Rejected alternatives**:

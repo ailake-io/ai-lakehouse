@@ -197,11 +197,13 @@ Exports:
 - `assemble_context(chunks, max_tokens, dedup_threshold) → str` — LLM context XML
 
 ### `ailake-jni`
-uniffi bindings for JVM. Exposes only the hot path needed by Spark/Trino connectors.
+C-ABI cdylib loaded by Spark, Trino, and Flink plugins via JNA. Single JSON-envelope API shared across all three JVM languages (Scala, Kotlin, Java).
 
-Exports (UDL interface):
-- `vector_search(table_uri, query_bytes, top_k, filter_sql) → Vec<RowResult>`
-- `assemble_context(chunk_jsons, max_tokens) → String`
+Exports (`#[no_mangle]` C-ABI):
+- `ailake_search_json(request_json) → *mut c_char` — vector search, JSON in/out
+- `ailake_write_batch_json(request_json) → *mut c_char` — write batch, JSON in/out
+- `ailake_free_string(ptr)` — free any returned pointer
+- `ailake_version() → *const c_char` — static version string
 
 ---
 
@@ -269,7 +271,7 @@ zstd        = "0.13"
 # Note: reqwest is NOT in workspace deps — ailake-catalog declares it inline
 # with rustls-tls to keep openssl-sys out of the ailake-py dep tree.
 pyo3        = { version = "0.22", features = ["extension-module"] }
-uniffi      = "0.27"
+# uniffi removed — all JVM bindings use C-ABI + JNA
 
 # CLI
 clap        = { version = "4", features = ["derive", "env"] }
@@ -305,7 +307,7 @@ debug       = true
 |---|---|---|
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
-| **Phase 3** | ✅ Complete | Catalog backends (NessieCatalog, JdbcCatalog, GlueCatalog), uniffi JVM bindings, multi-column vectors |
+| **Phase 3** | ✅ Complete | Catalog backends (NessieCatalog, JdbcCatalog, GlueCatalog), JNA C-ABI bindings (`ailake-jni`), multi-column vectors |
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS runtime-only), HNSW perf optimizations, IVF-PQ native index, GPU k-means, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog, JNA bridge) |
 
 ### Phase 1 — Local MVP ✅
@@ -342,7 +344,7 @@ Delivered in Phase 3:
 - `ailake-catalog`: `NessieCatalog` — wraps `RestCatalog` + Nessie v2 branching API (`list_branches`, `create_branch`, `merge_branch`, `delete_branch`)
 - `ailake-catalog`: `JdbcCatalog` — PostgreSQL/MySQL/SQLite via `sqlx 0.7` `AnyPool`; schema auto-created; versioned metadata.json via UUID paths
 - `ailake-catalog`: `GlueCatalog` — AWS Glue Data Catalog via `aws-sdk-glue 1.x`; Iceberg-standard `metadata_location` parameter; tables visible in Athena/EMR
-- `ailake-jni`: uniffi exports (`vector_search`, `assemble_context`)
+- `ailake-jni`: C-ABI exports (`ailake_search_json`, `ailake_write_batch_json`, `ailake_free_string`)
 - Multi-column vector tables (`embedding` + `context_embedding`)
 - `ailake-spark-runtime` (separate Scala repo): Spark `VectorScanStrategy`, `ailake_search` UDF
 - `ailake-trino-plugin` (separate Java repo): Trino `ConnectorTableFunction`
