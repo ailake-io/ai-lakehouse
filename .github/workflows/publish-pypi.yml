@@ -156,6 +156,11 @@ jobs:
     #   name: pypi
     #   url: https://pypi.org/p/ailake
     steps:
+      - name: Clean stale root-owned dist/
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
+            "rm -rf dist dist-raw 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
+
       - name: Download wheels
         run: gh run download ${{ github.run_id }} --pattern "wheels-*" --dir dist-raw
         env:
