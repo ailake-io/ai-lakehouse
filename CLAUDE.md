@@ -18,7 +18,7 @@
 | **Object storage** | **`object_store`** | Abstração unificada S3 / Azure Blob / GCS em Rust |
 | **Async runtime** | **`tokio`** | Leitura concorrente de múltiplos arquivos no S3 |
 | **Binding Python** | **PyO3** | Expõe o core Rust como módulo Python nativo (`import ailake`) |
-| **Binding JVM** | **uniffi** | Permite integração com Spark e Trino sem reescrever lógica |
+| **Binding JVM** | **JNA + C-ABI** | `ailake-jni` exporta `ailake_search_json` / `ailake_write_batch_json` como C-ABI (`#[no_mangle]`); plugins Trino/Spark/Flink carregam via JNA. Sem geração de código — API única compartilhada por todos os plugins JVM. |
 
 ---
 
