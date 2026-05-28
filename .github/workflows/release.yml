@@ -10,7 +10,7 @@ env:
 jobs:
   publish:
     name: Publish to crates.io
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
 
