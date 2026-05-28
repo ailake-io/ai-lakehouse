@@ -15,7 +15,7 @@ env:
 jobs:
   compat-spark:
     name: compat-spark
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -145,7 +145,7 @@ jobs:
 
   compat-trino:
     name: compat-trino
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -290,7 +290,7 @@ jobs:
 
   compat-jvm-plugins:
     name: compat-jvm-plugins
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -341,7 +341,7 @@ jobs:
 
   compat-bigquery:
     name: compat-bigquery
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
