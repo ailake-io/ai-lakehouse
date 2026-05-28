@@ -154,11 +154,16 @@ jobs:
     #   name: pypi
     #   url: https://pypi.org/p/ailake
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: wheels-*
-          merge-multiple: true
-          path: dist
+      - name: Download wheels
+        run: gh run download ${{ github.run_id }} --pattern "wheels-*" --dir dist-raw
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Flatten artifacts into dist/
+        run: |
+          mkdir -p dist
+          find dist-raw -name "*.whl" -o -name "*.tar.gz" | xargs -I{} cp {} dist/
+          rm -rf dist-raw
 
       - uses: actions/setup-python@v5
         with:
