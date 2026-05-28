@@ -1,5 +1,6 @@
 package io.ailake.spark
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.sun.jna.{Library, Native, Pointer}
 import scala.util.Try
 
@@ -27,6 +28,9 @@ object AilakeNative {
         System.err.println("[ailake] Native library not found — vector search disabled")
         None
       }
+
+  // Single shared mapper; ObjectMapper is thread-safe after configuration.
+  private val mapper = new ObjectMapper()
 
   /**
    * Run a vector search via the native library.
@@ -62,11 +66,7 @@ object AilakeNative {
     "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
   private def parseResponse(json: String): Seq[SearchRow] = {
-    // Parse {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
     Try {
-      val jackson = Class.forName("com.fasterxml.jackson.databind.ObjectMapper")
-        .getDeclaredConstructor().newInstance()
-      val mapper = jackson.asInstanceOf[com.fasterxml.jackson.databind.ObjectMapper]
       val root = mapper.readTree(json)
       if (!root.path("ok").asBoolean(false)) return Seq.empty
       val nodes = root.path("results")
