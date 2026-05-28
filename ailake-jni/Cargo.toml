@@ -3,6 +3,7 @@ name        = "ailake-jni"
 version     = "0.0.8"
 edition     = "2021"
 description = "C-ABI cdylib for AI-Lake — Spark, Trino, and Flink connectors via JNA"
+readme      = "README.md"
 license     = "MIT OR Apache-2.0"
 repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
 keywords    = ["jni", "spark", "trino", "vector-search", "lakehouse"]
