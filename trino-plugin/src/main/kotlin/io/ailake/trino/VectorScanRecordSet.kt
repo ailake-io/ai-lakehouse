@@ -23,7 +23,7 @@ class VectorScanRecordSetProvider : ConnectorRecordSetProvider {
         columns: List<ColumnHandle>,
     ): RecordSet {
         val s = split as VectorScanSplit
-        val rows = AilakeNative.search(s.tableUri, s.queryVector, s.topK)
+        val rows = AilakeNative.search(s.tableUri, s.queryBytes, s.topK)
         val cols = columns.map { it as VectorScanColumnHandle }
         return VectorScanRecordSet(rows, cols)
     }

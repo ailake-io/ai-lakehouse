@@ -26,11 +26,13 @@ data class VectorScanColumnHandle @JsonCreator constructor(
  * parallelised at the split level — the native library handles file-level
  * parallelism internally via Tokio.
  *
- * `queryVector` is a comma-separated list of f32 values, e.g. "0.1,-0.2,0.3"
+ * `queryBytes` is Base64-encoded little-endian f32 array (4 bytes per dimension).
+ * CSV→bytes conversion happens once in VectorScanSplitManager (planning phase),
+ * not on every worker execution.
  */
 data class VectorScanSplit @JsonCreator constructor(
     @JsonProperty("tableUri") val tableUri: String,
-    @JsonProperty("queryVector") val queryVector: String,
+    @JsonProperty("queryBytes") val queryBytes: String,
     @JsonProperty("topK") val topK: Int,
 ) : ConnectorSplit {
     override fun isRemotelyAccessible(): Boolean = true

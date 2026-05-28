@@ -1,11 +1,9 @@
-//! ailake-jni — uniffi JVM bindings + C-ABI for Trino/Spark plugins
+//! ailake-jni — C-ABI cdylib for Trino / Spark / Flink plugins via JNA.
 //!
-//! Exports two surfaces:
-//!   1. uniffi exports: `vector_search`, `assemble_context` — used by generated Kotlin bindings.
-//!   2. C-ABI exports: `ailake_vector_search_json`, `ailake_free_string` — used directly via JNA.
+//! All three plugins call the same `ailake_search_json` / `ailake_write_batch_json` surface.
 //!
 //! Build: cargo build --release -p ailake-jni
-//! The cdylib is loaded by the Spark/Trino connector via System.loadLibrary / JNA.
+//! The cdylib is loaded by the connector via JNA (System.loadLibrary is not required).
 
 use std::{
     ffi::{c_char, CStr, CString},
@@ -21,12 +19,9 @@ use ailake_query::{
 use ailake_store::LocalStore;
 use serde::Serialize;
 
-uniffi::setup_scaffolding!();
-
 // ── Shared types ──────────────────────────────────────────────────────────────
 
-/// Single vector search result (uniffi-exported record).
-#[derive(uniffi::Record)]
+#[derive(Clone)]
 pub struct RowResult {
     pub row_id: u64,
     pub distance: f32,
@@ -79,7 +74,7 @@ fn parse_metric(s: &str) -> VectorMetric {
     }
 }
 
-/// Core search logic shared by both uniffi and C-ABI surfaces.
+/// Core search logic called by C-ABI exports.
 #[allow(clippy::too_many_arguments)]
 fn do_search(
     warehouse: String,
@@ -105,52 +100,10 @@ fn do_search(
     ))
 }
 
-// ── uniffi exports ────────────────────────────────────────────────────────────
+// ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Search a local AI-Lake table for the top-k nearest vectors.
-///
-/// `table_uri`   — local filesystem path to the table root
-/// `query_bytes` — raw f32 values as little-endian bytes (4 bytes per dimension)
-/// `top_k`       — number of nearest neighbors to return
-///
-/// Returns results sorted by ascending distance.
-#[uniffi::export]
-pub fn vector_search(table_uri: String, query_bytes: Vec<u8>, top_k: u32) -> Vec<RowResult> {
-    let query: Vec<f32> = query_bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-        .collect();
-
-    // uniffi surface: warehouse = table_uri, namespace/table read from catalog metadata
-    do_search(
-        table_uri,
-        "default",
-        "table",
-        "embedding",
-        0,
-        query,
-        top_k,
-        50,
-    )
-    .unwrap_or_default()
-    .into_iter()
-    .map(|r| RowResult {
-        row_id: r.row_id.as_u64(),
-        distance: r.distance,
-        file_path: r.file_path,
-    })
-    .collect()
-}
-
-/// Assemble JSON-serialized chunks into structured XML context for LLM input.
-///
-/// Each element of `chunk_jsons` must be a JSON object with at minimum:
-///   `document_id` (str), `chunk_index` (int), `chunk_text` (str)
-/// Optional: `document_title`, `section_path`, `source_uri`, `distance` (float)
-///
-/// Returns XML string ready for insertion into an LLM prompt.
-#[uniffi::export]
-pub fn assemble_context(chunk_jsons: Vec<String>, max_tokens: u64) -> String {
+#[allow(dead_code)]
+fn assemble_context(chunk_jsons: Vec<String>, max_tokens: u64) -> String {
     let config = ContextAssemblerConfig {
         max_tokens: max_tokens as usize,
         ..Default::default()

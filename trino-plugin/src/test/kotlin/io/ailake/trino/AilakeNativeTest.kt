@@ -5,21 +5,24 @@ import org.junit.jupiter.api.Test
 
 class AilakeNativeTest {
 
+    private fun base64Of(vararg floats: Float): String =
+        VectorScanSplitManager.csvFloatsToBase64(floats.joinToString(","))
+
     @Test
     fun searchReturnsEmptyWhenNativeLibAbsent() {
         // Native lib is not available in test environment — graceful degradation.
-        val results = AilakeNative.search("s3://bucket/table/", "0.1,0.2,0.3", topK = 5)
+        val results = AilakeNative.search("s3://bucket/table/", base64Of(0.1f, 0.2f, 0.3f), topK = 5)
         assertTrue(results.isEmpty())
     }
 
     @Test
-    fun searchReturnsEmptyForBlankQueryVector() {
+    fun searchReturnsEmptyForBlankQueryBytes() {
         val results = AilakeNative.search("s3://bucket/table/", "  ", topK = 5)
         assertTrue(results.isEmpty())
     }
 
     @Test
-    fun searchReturnsEmptyForEmptyQueryVector() {
+    fun searchReturnsEmptyForEmptyQueryBytes() {
         val results = AilakeNative.search("s3://bucket/table/", "", topK = 10)
         assertTrue(results.isEmpty())
     }

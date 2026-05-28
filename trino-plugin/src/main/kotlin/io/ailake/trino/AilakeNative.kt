@@ -5,6 +5,9 @@ import com.fasterxml.jackson.module.kotlin.readValue
 import com.sun.jna.Library
 import com.sun.jna.Native
 import com.sun.jna.Pointer
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.Base64
 
 /**
  * JNA bridge to libailake_jni.so.
@@ -34,16 +37,18 @@ object AilakeNative {
     /**
      * Run a vector search via the native library.
      *
-     * @param tableUri        path/URI of the AI-Lake table root
-     * @param queryVectorCsv  comma-separated f32 values, e.g. "0.1,-0.2,0.3"
-     * @param topK            number of nearest neighbors
+     * @param tableUri    path/URI of the AI-Lake table root
+     * @param queryBytes  Base64-encoded little-endian f32 array
+     * @param topK        number of nearest neighbors
      */
-    fun search(tableUri: String, queryVectorCsv: String, topK: Int): List<SearchRow> {
+    fun search(tableUri: String, queryBytes: String, topK: Int): List<SearchRow> {
         val native = lib ?: return emptyList()
-        if (queryVectorCsv.isBlank()) return emptyList()
+        if (queryBytes.isBlank()) return emptyList()
 
         val floats = runCatching {
-            queryVectorCsv.split(',').map { it.trim().toFloat() }
+            val bytes = Base64.getDecoder().decode(queryBytes)
+            val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            (0 until bytes.size / 4).map { buf.getFloat() }
         }.getOrElse { return emptyList() }
         if (floats.isEmpty()) return emptyList()
 

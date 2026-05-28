@@ -7,6 +7,9 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.mock
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.Base64
 
 class VectorScanSplitManagerTest {
 
@@ -42,13 +45,16 @@ class VectorScanSplitManagerTest {
     }
 
     @Test
-    fun splitCarriesQueryVectorFromSession() {
+    fun splitCarriesQueryBytesDecodableToExpectedFloats() {
         val source = splitManager.getSplits(
             VectorScanTransactionHandle, session(queryVector = "1.0,2.0,3.0"), tableHandle,
             dynamicFilter, constraint,
         )
         val split = source.getNextBatch(1).get().splits.first() as VectorScanSplit
-        assertEquals("1.0,2.0,3.0", split.queryVector)
+        val bytes = Base64.getDecoder().decode(split.queryBytes)
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val floats = FloatArray(bytes.size / 4) { buf.getFloat() }
+        assertArrayEquals(floatArrayOf(1.0f, 2.0f, 3.0f), floats, 1e-6f)
     }
 
     @Test
@@ -63,7 +69,22 @@ class VectorScanSplitManagerTest {
 
     @Test
     fun splitIsRemotelyAccessible() {
-        val split = VectorScanSplit("s3://t/", "0.1,0.2", 10)
+        val split = VectorScanSplit("s3://t/", VectorScanSplitManager.csvFloatsToBase64("0.1,0.2"), 10)
         assertTrue(split.isRemotelyAccessible())
+    }
+
+    @Test
+    fun csvFloatsToBase64RoundTrip() {
+        val base64 = VectorScanSplitManager.csvFloatsToBase64("0.5,1.5,-0.5")
+        val bytes = Base64.getDecoder().decode(base64)
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val floats = FloatArray(bytes.size / 4) { buf.getFloat() }
+        assertArrayEquals(floatArrayOf(0.5f, 1.5f, -0.5f), floats, 1e-6f)
+    }
+
+    @Test
+    fun csvFloatsToBase64ReturnsEmptyForBlankInput() {
+        assertEquals("", VectorScanSplitManager.csvFloatsToBase64(""))
+        assertEquals("", VectorScanSplitManager.csvFloatsToBase64("   "))
     }
 }

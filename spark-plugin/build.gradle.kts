@@ -22,6 +22,10 @@ dependencies {
     // JNA — bundled in the plugin jar (Spark does not provide it)
     implementation("net.java.dev.jna:jna:5.14.0")
 
+    // Jackson — provided by Spark at runtime; compileOnly avoids bundling it.
+    // Using direct import instead of Class.forName to fail fast if unavailable.
+    compileOnly("com.fasterxml.jackson.core:jackson-databind:2.15.2")
+
     testImplementation("org.apache.spark:spark-sql_$scalaVersion:$sparkVersion")
     testImplementation("org.scalatest:scalatest_$scalaVersion:3.2.17")
     testImplementation("org.scalatestplus:junit-4-13_$scalaVersion:3.2.17.0")

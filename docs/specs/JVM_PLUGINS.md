@@ -26,7 +26,8 @@ Reference guide for the two JVM query-engine plugins that expose AI-Lake vector 
              │  libailake_jni.so      │
              │  (Rust cdylib)         │
              │                        │
-             │  ailake_vector_search_json()  ← C-ABI
+             │  ailake_search_json()         ← C-ABI (JSON in/out)
+             │  ailake_write_batch_json()    ← C-ABI (JSON in/out)
              │  ailake_free_string()         ← C-ABI
              │         │              │
              │  do_search()  ←  ailake-query │
@@ -66,19 +67,24 @@ cargo build --release -p ailake-jni
 NATIVE_LIB_DIR=$(pwd)/target/release
 ```
 
-The library exports two C-ABI symbols consumed by JNA:
+The library exports C-ABI symbols consumed by JNA. All three plugins use the JSON-envelope API:
 
 ```c
-// Returns null-terminated JSON: [{"row_id":N,"distance":F,"file_path":"..."}]
+// request_json: {"warehouse":"...","namespace":"default","table":"...","vec_col":"embedding",
+//                "dim":1536,"query":[...],"top_k":10}
+// Returns: {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
 // Caller must free with ailake_free_string.
-char* ailake_vector_search_json(
-    const char* table_uri,
-    const float* query_ptr,
-    uint32_t    query_len,
-    uint32_t    top_k
-);
+char* ailake_search_json(const char* request_json);
+
+// request_json: {"warehouse":"...","namespace":"default","table":"...",
+//                "dim":1536,"ids":[...],"embeddings":[[...],...]}
+// Returns: {"ok":true,"snapshot_id":N}
+char* ailake_write_batch_json(const char* request_json);
 
 void ailake_free_string(char* ptr);
+
+// Static version string — do NOT free.
+const char* ailake_version();
 ```
 
 ---
