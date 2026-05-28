@@ -24,10 +24,12 @@ jobs:
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
           CARGO_TARGET_DIR: /tmp/ailake-target-${{ matrix.target }}
+          # Skip sudo on self-hosted runner: chown runs without sudo, fails silently
+          # (ignoreReturnCode: true in action source), dist/ world-readable so upload works
+          RUNNER_ALLOW_RUNASROOT: "1"
         with:
           target: ${{ matrix.target }}
           manylinux: auto
-          rust-toolchain: stable
           before-script-linux: |
             # Ensure build tools for openssl-sys vendored compilation are present
             yum install -y perl-core make gcc 2>/dev/null \
@@ -126,6 +128,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           clean: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
 
       - uses: PyO3/maturin-action@v1
         with:
