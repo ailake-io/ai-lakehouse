@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.9] - 2026-05-28
+
 ### Changed
 - **`ailake-jni` dead uniffi code removed**: `uniffi::setup_scaffolding!()`, `#[uniffi::export]` on `vector_search`/`assemble_context`, `#[derive(uniffi::Record)]` on `RowResult`, and `uniffi = "0.27"` workspace dep all removed. All JVM plugins use `ailake_search_json` C-ABI via JNA — uniffi was declared but generated no bindings and no plugin consumed it.
 - **Workspace `Cargo.toml`**: `uniffi = "0.27"` removed from `[workspace.dependencies]` (no crate depends on it).
@@ -215,6 +219,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+[0.0.9]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.5...v0.0.6
