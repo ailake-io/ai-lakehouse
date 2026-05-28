@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Verifies row N in Parquet == HNSW node N.
 
 mod fixtures;

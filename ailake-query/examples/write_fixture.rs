@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Writes a reference AI-Lake table to disk for external compatibility tests.
 //!
 //! Output path: $COMPAT_FIXTURE_PATH or ./compat-fixture/

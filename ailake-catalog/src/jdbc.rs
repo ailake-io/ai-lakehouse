@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // JdbcCatalog: stores Iceberg metadata pointers in PostgreSQL or MySQL.
 //
 // The catalog stores ONE row per table pointing to the current metadata.json.

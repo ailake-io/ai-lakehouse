@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Integration test: write a table, read it back, verify results.
 
 mod fixtures;

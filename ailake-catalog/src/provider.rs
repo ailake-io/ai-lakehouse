@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_core::{AilakeResult, Centroid, VectorStoragePolicy};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

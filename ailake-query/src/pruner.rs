@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_catalog::{decode_centroid, DataFileEntry};
 use ailake_core::VectorMetric;
 use ailake_vec::{cosine_distance, dot_product, euclidean_distance};

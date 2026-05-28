@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // NessieCatalog — Project Nessie catalog with branching extensions.
 //
 // Requires Nessie 0.60+ (REST API v2 + Iceberg REST Catalog spec).

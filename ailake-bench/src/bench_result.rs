@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 /// Results from one benchmark engine run.
 pub struct BenchResult {
     pub engine: String,

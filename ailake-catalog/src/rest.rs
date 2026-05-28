@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Iceberg REST Catalog (https://iceberg.apache.org/spec/#rest-catalog).
 // Covers: Apache Polaris, Azure Databricks Unity Catalog, GCP BigLake Metastore,
 // AWS S3 Tables, Project Nessie (REST mode), and any spec-compliant server.

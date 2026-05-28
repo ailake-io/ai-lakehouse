@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ailake-index — HNSW and IVF-PQ index lifecycle
 //!
 //! Search backend priority (all detected at runtime, no build-time GPU SDK required):

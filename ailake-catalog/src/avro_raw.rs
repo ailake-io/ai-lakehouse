@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Minimal Avro Object Container File writer that preserves custom schema
 // properties (like "field-id") needed by PyIceberg.
 //

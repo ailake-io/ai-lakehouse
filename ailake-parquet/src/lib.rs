@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ailake-parquet — Parquet I/O with VECTOR column type
 //!
 //! Reads and writes the Parquet section of AI-Lake files.

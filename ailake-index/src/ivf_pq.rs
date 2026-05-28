@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // IVF-PQ index: Inverted File Index with Product Quantization.
 //
 // vs HNSW tradeoffs:

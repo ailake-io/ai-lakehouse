@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Databricks Unity Catalog — configuration helpers for RestCatalog.
 //
 // Unity Catalog exposes an Iceberg REST Catalog endpoint, so RestCatalog

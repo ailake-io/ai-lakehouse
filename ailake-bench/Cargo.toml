@@ -3,6 +3,7 @@ name = "ailake-bench"
 version     = "0.0.9"
 edition = "2021"
 publish = false
+license     = "MIT OR Apache-2.0"
 description = "Public benchmark: AI-Lake vs. LanceDB on SIFT-1M"
 
 [[bin]]

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Recall@k and latency statistics.
 
 use std::collections::HashSet;

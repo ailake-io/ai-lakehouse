@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Hardware capability detection for adaptive index selection.
 //!
 //! Detection priority: AMD ROCm → NVIDIA CUDA → CPU SIMD.

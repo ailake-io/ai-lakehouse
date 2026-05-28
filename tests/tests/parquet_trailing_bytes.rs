@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Verifies standard Parquet readers ignore the AI-Lake footer.
 
 mod fixtures;

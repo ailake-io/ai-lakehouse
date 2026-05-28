@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
 #!/usr/bin/env python3
 """
 Verifies the ailake Python SDK: TableWriter.write_batch → commit → search → assemble_context.

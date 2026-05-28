@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // GlueCatalog: AWS Glue Data Catalog backend.
 //
 // Glue stores a pointer (metadata_location) to the current Iceberg metadata.json

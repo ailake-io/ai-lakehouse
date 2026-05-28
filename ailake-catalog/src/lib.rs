@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ailake-catalog — Iceberg catalog operations
 //!
 //! Implements CatalogProvider for all supported backends.

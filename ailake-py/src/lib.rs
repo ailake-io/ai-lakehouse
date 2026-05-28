@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ailake-py — PyO3 Python bindings
 //!
 //! Thin async-to-sync bridge. All logic lives in ailake-query and friends.

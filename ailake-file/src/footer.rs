@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Binary layout for the AI-Lake footer extension.
 // See docs/specs/FILE_FORMAT.md for field-by-field spec.
 

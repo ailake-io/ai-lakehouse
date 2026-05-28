@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Integration tests for ContextAssembler dedup and document ordering.
 
 use ailake_query::{Chunk, ContextAssembler, ContextAssemblerConfig};

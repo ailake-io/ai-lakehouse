@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Snapshot manifest builder.
 // Phase 1: writes a simple JSON manifest (not Avro) to keep deps minimal.
 // Phase 2: replace with apache-avro for Iceberg spec compliance.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
 #!/usr/bin/env python3
 """Deep Lake SIFT-1M benchmark.
 

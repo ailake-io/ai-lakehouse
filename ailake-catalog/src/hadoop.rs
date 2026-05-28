@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // HadoopCatalog: stores metadata.json on the local filesystem / any Store backend.
 // Table layout: {warehouse}/{namespace}/{table}/metadata/vN.metadata.json
 

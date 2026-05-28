@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Iceberg Spec v2 Avro manifest writer and reader.
 //
 // Iceberg uses two layers of Avro files:

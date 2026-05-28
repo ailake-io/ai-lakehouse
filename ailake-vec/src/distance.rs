@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_core::{Centroid, VectorMetric};
 use half::f16;
 

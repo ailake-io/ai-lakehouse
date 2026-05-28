@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_core::{AilakeError, AilakeResult, Centroid, VectorMetric};
 use ailake_index::{AnyIndex, HnswIndex, IvfPqSerializer, MmapLoader};
 use ailake_parquet::ParquetVectorReader;
