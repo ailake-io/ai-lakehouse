@@ -160,6 +160,10 @@ jobs:
           merge-multiple: true
           path: dist
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
       - uses: PyO3/maturin-action@v1
         env:
           MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
