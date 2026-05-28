@@ -87,13 +87,6 @@ ailake/
 │       ├── distance.rs         # Cosine, Euclidean, DotProduct, centroid computation
 │       ├── compress.rs         # BlockCompressor (zstd / lz4 / none)
 │       └── pq.rs               # Product Quantization — PQCodebook, ADC distance
-├── ailake-index/
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       ├── hnsw.rs             # hnsw_rs wrapper
-│       ├── serialize.rs        # bincode serialization
-│       └── mmap_loader.rs      # memmap2 loading
 ├── ailake-file/
 │   ├── Cargo.toml
 │   └── src/
@@ -140,15 +133,39 @@ ailake/
 │       ├── pruner.rs           # VectorPruner — centroid-based file pruning
 │       ├── compaction.rs       # CompactionPlanner + CompactionExecutor (async)
 │       └── context_assembler.rs # ContextAssembler — dedup, XML, token budget
+├── ailake-cli/
+│   ├── Cargo.toml
+│   └── src/
+│       └── main.rs             # CLI: ailake create / insert / search / compact / info
+├── ailake-bench/
+│   ├── Cargo.toml
+│   └── src/
+│       └── main.rs             # SIFT-1M benchmark vs. LanceDB / pgvector (--engine flag)
 ├── ailake-py/
 │   ├── Cargo.toml
 │   ├── pyproject.toml
 │   └── src/
-│       └── lib.rs              # PyO3 bindings
+│       └── lib.rs              # PyO3 bindings (abi3-py39 wheel)
 ├── ailake-jni/
 │   ├── Cargo.toml
 │   └── src/
 │       └── lib.rs              # C-ABI cdylib for Spark/Trino/Flink via JNA
+├── spark-plugin/               # Scala — Spark 3.5 Catalyst strategy (Gradle)
+│   ├── build.gradle.kts
+│   └── src/main/scala/io/ailake/spark/
+│       ├── AilakeSparkExtensions.scala
+│       ├── AilakeNative.scala
+│       ├── VectorSearchPlan.scala
+│       ├── VectorScanExec.scala
+│       └── VectorScanStrategy.scala
+├── trino-plugin/               # Kotlin — Trino SPI connector (Gradle)
+│   ├── build.gradle.kts
+│   └── src/main/kotlin/io/ailake/trino/
+│       ├── VectorScanConnector.kt
+│       ├── VectorScanMetadata.kt
+│       ├── VectorScanSplitManager.kt
+│       ├── VectorScanRecordSet.kt
+│       └── AilakeNative.kt
 └── ailake-flink/               # Kotlin — Flink Table API connector (Gradle)
     ├── build.gradle.kts
     └── src/main/kotlin/io/ailake/flink/
