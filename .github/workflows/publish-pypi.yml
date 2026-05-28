@@ -147,6 +147,8 @@ jobs:
     name: Publish to PyPI
     runs-on: [self-hosted, Linux, X64]
     needs: [linux, windows, sdist]
+    permissions:
+      actions: read
     # TODO: after creating PyPI account, create a "pypi" environment in
     # Settings → Environments with PYPI_API_TOKEN as an environment secret.
     # This adds a manual approval gate before publish runs.
