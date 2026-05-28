@@ -119,7 +119,7 @@ async fn main() {
 
     // Patch metadata: add schema fields + name-mapping so PyIceberg can scan without field-ids
     {
-        let meta_dir = format!("{}/default.db/compat_test/metadata", abs_out_str);
+        let meta_dir = format!("{}/default/compat_test/metadata", abs_out_str);
         let hint_path = format!("{}/version-hint.text", meta_dir);
         let version: u32 = std::fs::read_to_string(&hint_path)
             .unwrap_or_else(|_| "1".to_string())
