@@ -17,13 +17,8 @@ object AilakeNative {
     data class SearchRow(val rowId: Long, val distance: Float, val filePath: String)
 
     private interface Lib : Library {
-        /** Returns a null-terminated JSON string. Caller must free with ailake_free_string. */
-        fun ailake_vector_search_json(
-            tableUri: String,
-            queryPtr: FloatArray,
-            queryLen: Int,
-            topK: Int,
-        ): Pointer?
+        /** JSON-envelope search. Returns `{"ok":true,"results":[...]}`. Caller must free. */
+        fun ailake_search_json(requestJson: String): Pointer?
 
         fun ailake_free_string(ptr: Pointer)
     }
@@ -48,15 +43,29 @@ object AilakeNative {
         if (queryVectorCsv.isBlank()) return emptyList()
 
         val floats = runCatching {
-            queryVectorCsv.split(',').map { it.trim().toFloat() }.toFloatArray()
+            queryVectorCsv.split(',').map { it.trim().toFloat() }
         }.getOrElse { return emptyList() }
+        if (floats.isEmpty()) return emptyList()
 
-        val ptr = native.ailake_vector_search_json(tableUri, floats, floats.size, topK)
-            ?: return emptyList()
+        val requestJson = mapper.writeValueAsString(
+            mapOf(
+                "warehouse" to tableUri,
+                "namespace" to "default",
+                "table" to "table",
+                "query" to floats,
+                "dim" to floats.size,
+                "top_k" to topK,
+            )
+        )
+
+        val ptr = native.ailake_search_json(requestJson) ?: return emptyList()
 
         return try {
             val json = ptr.getString(0)
-            mapper.readValue<List<Map<String, Any>>>(json).map { m ->
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) return emptyList()
+            @Suppress("UNCHECKED_CAST")
+            (resp["results"] as? List<Map<String, Any>> ?: emptyList()).map { m ->
                 SearchRow(
                     rowId = (m["row_id"] as Number).toLong(),
                     distance = (m["distance"] as Number).toFloat(),

@@ -14,13 +14,8 @@ object AilakeNative {
   case class SearchRow(rowId: Long, distance: Float, filePath: String)
 
   private trait Lib extends Library {
-    /** Returns a null-terminated JSON string. Caller must free with ailake_free_string. */
-    def ailake_vector_search_json(
-      tableUri: String,
-      queryPtr: Array[Float],
-      queryLen: Int,
-      topK: Int,
-    ): Pointer
+    /** JSON-envelope search. Returns `{"ok":true,"results":[...]}`. Caller must free. */
+    def ailake_search_json(requestJson: String): Pointer
 
     def ailake_free_string(ptr: Pointer): Unit
   }
@@ -41,15 +36,20 @@ object AilakeNative {
    * @param topK      number of nearest neighbors
    */
   def search(tableUri: String, query: Array[Float], topK: Int): Seq[SearchRow] = {
+    if (query.isEmpty) return Seq.empty
     lib match {
       case None => Seq.empty
       case Some(native) =>
-        val ptr = native.ailake_vector_search_json(tableUri, query, query.length, topK)
+        val queryJson = query.mkString("[", ",", "]")
+        val requestJson =
+          s"""{"warehouse":${jsonStr(tableUri)},"namespace":"default","table":"table",""" +
+          s""""query":$queryJson,"dim":${query.length},"top_k":$topK}"""
+        val ptr = native.ailake_search_json(requestJson)
         if (ptr == null) return Seq.empty
         try {
           val json = ptr.getString(0)
           native.ailake_free_string(ptr)
-          parseJson(json)
+          parseResponse(json)
         } catch {
           case _: Exception =>
             Try(native.ailake_free_string(ptr))
@@ -58,14 +58,18 @@ object AilakeNative {
     }
   }
 
-  private def parseJson(json: String): Seq[SearchRow] = {
-    // Minimal JSON array parser — avoids pulling in Jackson as a required dep.
-    // Parses: [{"row_id":N,"distance":F,"file_path":"..."}]
+  private def jsonStr(s: String): String =
+    "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+  private def parseResponse(json: String): Seq[SearchRow] = {
+    // Parse {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
     Try {
       val jackson = Class.forName("com.fasterxml.jackson.databind.ObjectMapper")
         .getDeclaredConstructor().newInstance()
       val mapper = jackson.asInstanceOf[com.fasterxml.jackson.databind.ObjectMapper]
-      val nodes = mapper.readTree(json)
+      val root = mapper.readTree(json)
+      if (!root.path("ok").asBoolean(false)) return Seq.empty
+      val nodes = root.path("results")
       (0 until nodes.size()).map { i =>
         val n = nodes.get(i)
         SearchRow(
