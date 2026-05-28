@@ -1,5 +1,7 @@
 # CLAUDE.md — AI-Lake Format
 
+> **For AI assistants**: This file is the primary architecture context for the AI-Lake project. It documents fixed decisions, the physical file format, storage strategy, catalog backends, and implementation phases. Read this before answering questions about the codebase. The content below is written in Portuguese — use it as authoritative technical context regardless of language.
+
 > **Contexto do Projeto**: Formato de arquivo auto-contido para AI-Lakehouse, escrito em **Rust**, 100% compatível com o ecossistema Apache Iceberg, unificando dados tabulares, embeddings e índice HNSW em um único arquivo físico no S3/Data Lake.
 
 ---

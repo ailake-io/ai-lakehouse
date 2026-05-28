@@ -1,19 +1,19 @@
-# SETUP.md — Testando o AI-Lake Format localmente
+# SETUP.md — Testing AI-Lake Format Locally
 
-Guia para rodar o formato de arquivo localmente: escrever batches, busca vetorial com pruning geométrico, compaction, ContextAssembler, bindings Python, inspeção de layout e verificação de compatibilidade Parquet.
+Guide for running the file format locally: writing batches, vector search with geometric pruning, compaction, ContextAssembler, Python bindings, layout inspection, and Parquet compatibility verification.
 
 ---
 
-## Pré-requisitos
+## Prerequisites
 
-| Ferramenta | Versão mínima | Instalação |
+| Tool | Minimum version | Installation |
 |---|---|---|
 | Rust + Cargo | 1.75+ (stable) | `curl https://sh.rustup.rs -sSf \| sh` |
-| Python 3 | 3.9+ | sistema / conda |
-| PyArrow | qualquer | `pip install pyarrow` |
-| maturin | 1.4+ | `pip install maturin` *(só para testar bindings Python)* |
+| Python 3 | 3.9+ | system / conda |
+| PyArrow | any | `pip install pyarrow` |
+| maturin | 1.4+ | `pip install maturin` *(only for Python bindings testing)* |
 
-Verificar:
+Verify:
 
 ```bash
 rustc --version   # rustc 1.75+
@@ -23,19 +23,19 @@ python3 -c "import pyarrow; print(pyarrow.__version__)"
 
 ---
 
-## 1. Clone e build
+## 1. Clone and build
 
 ```bash
 git clone https://github.com/ThiagoLange/iceberg-ai-deltalakehouse.git
 cd iceberg-ai-deltalakehouse
 
-# Build padrão — CPU paralelo (rayon), sem dependência de CUDA
+# Default build — parallel CPU (rayon), no CUDA dependency
 cargo build --workspace
 ```
 
-Primeira compilação leva ~2-3 min (baixa dependências Arrow/Parquet).
+First compilation takes ~2-3 min (downloads Arrow/Parquet dependencies).
 
-### Variantes de build
+### Build variants
 
 ```bash
 # Cloud storage
@@ -44,42 +44,41 @@ cargo build --workspace --features store-gcs     # Google Cloud Storage
 cargo build --workspace --features store-azure   # Azure Blob
 ```
 
-**Regra de ouro**: o build padrão (`cargo build`) compila e roda em qualquer
-máquina — CPU-only, NVIDIA ou AMD. Não existe mais flag `ailake-index/gpu`.
-Ambas as GPUs são detectadas em runtime via `libloading` sem dependência de
-compilação.
+**Golden rule**: the default build (`cargo build`) compiles and runs on any
+machine — CPU-only, NVIDIA, or AMD. There is no `ailake-index/gpu` flag anymore.
+Both GPUs are detected at runtime via `libloading` with no build dependency.
 
 ---
 
-## 2. Suite de testes completa
+## 2. Full test suite
 
 ```bash
-# Testes unitários de todos os crates
+# Unit tests for all crates
 cargo test --workspace --lib
 
-# Testes de integração (write + read + search end-to-end)
+# Integration tests (write + read + search end-to-end)
 cargo test -p tests
 
-# Todos de uma vez
+# All at once
 cargo test --workspace
 ```
 
-Deve terminar com `119 passed` (3 ignored — testes que requerem servidor externo ou PyArrow instalado).
+Should finish with `119 passed` (3 ignored — tests requiring an external server or PyArrow installed).
 
-### Testes por crate
+### Tests by crate
 
-| Crate | O que cobre |
+| Crate | What it covers |
 |---|---|
-| `ailake-vec` | Quantização F32→F16, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centróides, `exact_distance`, SIMD (AVX2/NEON) |
-| `ailake-index` | HNSW build/search, IVF-PQ (train/search/serialize), GPU k-means dispatch, serialização bincode, MmapLoader round-trip |
-| `ailake-file` | Escrita/leitura do arquivo unificado, layout AILK (HNSW e IVF-PQ), integridade |
-| `ailake-query` | ContextAssembler, pruning geométrico, reranking pós-PQ, MemTableWriter, write_batch_ivf_pq; `arrow_schema_to_iceberg_update` (propagação automática de schema no commit) |
+| `ailake-vec` | F32→F16 quantization, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centroids, `exact_distance`, SIMD (AVX2/NEON) |
+| `ailake-index` | HNSW build/search, IVF-PQ (train/search/serialize), GPU k-means dispatch, bincode serialization, MmapLoader round-trip |
+| `ailake-file` | Unified file write/read, AILK layout (HNSW and IVF-PQ), integrity |
+| `ailake-query` | ContextAssembler, geometric pruning, post-PQ reranking, MemTableWriter, write_batch_ivf_pq; `arrow_schema_to_iceberg_update` (automatic schema propagation on commit) |
 | `ailake-parquet` | write_batch_multi_vec / read_all_multi_vec (multi-vector columns) |
-| `tests` (integração) | write→read→search end-to-end, invariante posicional, compatibilidade PyArrow, pruning, context assembler |
+| `tests` (integration) | write→read→search end-to-end, positional invariant, PyArrow compatibility, pruning, context assembler |
 
 ---
 
-## 3. Testes de Fase 2 em detalhe
+## 3. Phase 2 tests in detail
 
 ### 3A. Product Quantization (PQ)
 
@@ -87,11 +86,11 @@ Deve terminar com `119 passed` (3 ignored — testes que requerem servidor exter
 cargo test -p ailake-vec -- pq
 ```
 
-Testa:
-- `encode_decode_roundtrip_approx` — encode + decode preserva dimensão
-- `adc_distance_non_negative` — distância ADC ≥ 0 sempre
-- `nearest_neighbor_rank_preserved` — q1 mais próximo do cluster 1 do que do cluster 2
-- `dim_not_divisible_errors` — erro se `dim % M != 0`
+Tests:
+- `encode_decode_roundtrip_approx` — encode + decode preserves dimension
+- `adc_distance_non_negative` — ADC distance ≥ 0 always
+- `nearest_neighbor_rank_preserved` — q1 closer to cluster 1 than cluster 2
+- `dim_not_divisible_errors` — error if `dim % M != 0`
 
 ### 3B. BlockCompressor (zstd/lz4)
 
@@ -99,7 +98,7 @@ Testa:
 cargo test -p ailake-vec -- compress
 ```
 
-Testa round-trip de compressão/decompressão para codecs `None`, `Lz4` e `Zstd`.
+Tests compression/decompression round-trip for `None`, `Lz4`, and `Zstd` codecs.
 
 ### 3C. MmapLoader
 
@@ -107,39 +106,39 @@ Testa round-trip de compressão/decompressão para codecs `None`, `Lz4` e `Zstd`
 cargo test -p ailake-index -- mmap
 ```
 
-Testa que bytes HNSW escritos em tempfile e abertos via mmap desserializam corretamente.
+Tests that HNSW bytes written to tempfile and opened via mmap deserialize correctly.
 
-### 3D. Pruning geométrico (integração)
+### 3D. Geometric pruning (integration)
 
 ```bash
 cargo test -p tests --test vector_pruning
 ```
 
-Cria dois arquivos:
-- **File A**: vetores próximos de `[1, 0, 0, 0]`
-- **File B**: vetores próximos de `[0, 0, 0, 1]`
+Creates two files:
+- **File A**: vectors near `[1, 0, 0, 0]`
+- **File B**: vectors near `[0, 0, 0, 1]`
 
-Busca com query `[1, 0, 0, 0]` e `pruning_threshold = 0.5`. File B deve ser eliminado — todos os resultados vêm de `part-00000.parquet`.
+Search with query `[1, 0, 0, 0]` and `pruning_threshold = 0.5`. File B should be eliminated — all results come from `part-00000.parquet`.
 
-### 3E. ContextAssembler (integração)
+### 3E. ContextAssembler (integration)
 
 ```bash
 cargo test -p tests --test context_assembler
 ```
 
-- `dedup_removes_near_identical_chunks` — embeddings idênticos → só 1 chunk sobrevive
-- `grouping_restores_chunk_order` — chunks fora de ordem → XML com `chunk_index` crescente
+- `dedup_removes_near_identical_chunks` — identical embeddings → only 1 chunk survives
+- `grouping_restores_chunk_order` — out-of-order chunks → XML with ascending `chunk_index`
 
 ### 3F. Cloud storage — credential builders
 
-`ailake-store` expõe builders tipados por cloud para configurar credenciais explicitamente. Para uso rápido via env, `store_from_url` usa a cadeia padrão de cada cloud.
+`ailake-store` exposes typed per-cloud builders to configure credentials explicitly. For quick use via env, `store_from_url` uses each cloud's default credential chain.
 
-#### S3 — variantes de credencial
+#### S3 — credential variants
 
 ```rust
 use ailake_store::{s3_store, S3Config, S3Credentials};
 
-// Desenvolvimento / MinIO / LocalStack — key explícita
+// Development / MinIO / LocalStack — explicit key
 let store = s3_store(S3Config {
     bucket: "my-bucket".into(),
     region: "us-east-1".into(),
@@ -152,7 +151,7 @@ let store = s3_store(S3Config {
     },
 }, "warehouse/")?;
 
-// EC2 com IAM Instance Profile (IMDSv2)
+// EC2 with IAM Instance Profile (IMDSv2)
 let store = s3_store(S3Config {
     bucket: "prod-bucket".into(),
     region: "us-east-1".into(),
@@ -161,7 +160,7 @@ let store = s3_store(S3Config {
     credentials: S3Credentials::InstanceProfile,
 }, "warehouse/")?;
 
-// EKS com IRSA (AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN injetados pelo EKS controller)
+// EKS with IRSA (AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN injected by EKS controller)
 let store = s3_store(S3Config {
     bucket: "prod-bucket".into(),
     region: "us-east-1".into(),
@@ -170,7 +169,7 @@ let store = s3_store(S3Config {
     credentials: S3Credentials::WebIdentity,
 }, "warehouse/")?;
 
-// Cadeia completa automática: env vars → ~/.aws → WebIdentity → IMDSv2
+// Full automatic chain: env vars → ~/.aws → WebIdentity → IMDSv2
 let store = s3_store(S3Config {
     bucket: "prod-bucket".into(),
     region: "us-east-1".into(),
@@ -179,27 +178,27 @@ let store = s3_store(S3Config {
     credentials: S3Credentials::Default,
 }, "warehouse/")?;
 
-// URL-based — usa S3Credentials::Default, region lida de AWS_DEFAULT_REGION
+// URL-based — uses S3Credentials::Default, region read from AWS_DEFAULT_REGION
 let store = ailake_store::store_from_url("s3://prod-bucket/warehouse")?;
 ```
 
-Requer feature `store-s3`:
+Requires feature `store-s3`:
 ```bash
 cargo build --features ailake-store/store-s3
 ```
 
-#### GCS — variantes de credencial
+#### GCS — credential variants
 
 ```rust
 use ailake_store::{gcs_store, GcsConfig, GcsCredentials};
 
-// Arquivo JSON de service account
+// Service account JSON file
 let store = gcs_store(GcsConfig {
     bucket: "my-gcs-bucket".into(),
     credentials: GcsCredentials::ServiceAccountFile("/secrets/sa.json".into()),
 }, "warehouse/")?;
 
-// JSON inline (do secrets manager / env var)
+// Inline JSON (from secrets manager / env var)
 let store = gcs_store(GcsConfig {
     bucket: "my-gcs-bucket".into(),
     credentials: GcsCredentials::ServiceAccountJson(
@@ -208,27 +207,27 @@ let store = gcs_store(GcsConfig {
 }, "warehouse/")?;
 
 // GKE Workload Identity / Cloud Run / GOOGLE_APPLICATION_CREDENTIALS
-// → metadata server usado automaticamente quando env var ausente
+// → metadata server used automatically when env var absent
 let store = gcs_store(GcsConfig {
     bucket: "my-gcs-bucket".into(),
     credentials: GcsCredentials::ApplicationDefault,
 }, "warehouse/")?;
 
-// URL-based — usa ApplicationDefault
+// URL-based — uses ApplicationDefault
 let store = ailake_store::store_from_url("gs://my-gcs-bucket/warehouse")?;
 ```
 
-Requer feature `store-gcs`:
+Requires feature `store-gcs`:
 ```bash
 cargo build --features ailake-store/store-gcs
 ```
 
-#### Azure Blob / ADLS Gen2 — variantes de credencial
+#### Azure Blob / ADLS Gen2 — credential variants
 
 ```rust
 use ailake_store::{azure_store, AzureConfig, AzureCredentials};
 
-// Service principal (Entra app registration) — produção
+// Service principal (Entra app registration) — production
 let store = azure_store(AzureConfig {
     account_name: "mystorageaccount".into(),
     container: "my-container".into(),
@@ -239,7 +238,7 @@ let store = azure_store(AzureConfig {
     },
 }, "warehouse/")?;
 
-// Managed Identity — system-assigned (sem client_id)
+// Managed Identity — system-assigned (no client_id)
 let store = azure_store(AzureConfig {
     account_name: "mystorageaccount".into(),
     container: "my-container".into(),
@@ -264,16 +263,16 @@ let store = azure_store(AzureConfig {
     ),
 }, "warehouse/")?;
 
-// URL-based — usa ManagedIdentity, account lida de AZURE_STORAGE_ACCOUNT_NAME
+// URL-based — uses ManagedIdentity, account read from AZURE_STORAGE_ACCOUNT_NAME
 let store = ailake_store::store_from_url("az://my-container/warehouse")?;
 ```
 
-Requer feature `store-azure`:
+Requires feature `store-azure`:
 ```bash
 cargo build --features ailake-store/store-azure
 ```
 
-#### MinIO local para testes S3
+#### Local MinIO for S3 testing
 
 ```bash
 docker run -p 9000:9000 -p 9001:9001 \
@@ -281,28 +280,28 @@ docker run -p 9000:9000 -p 9001:9001 \
   -e MINIO_ROOT_PASSWORD=minioadmin \
   minio/minio server /data --console-address ":9001"
 
-# Criar bucket via console em http://localhost:9001
+# Create bucket via console at http://localhost:9001
 ```
 
-Use `S3Credentials::Static` com `endpoint: Some("http://localhost:9000")` e `allow_http: true` como mostrado acima.
+Use `S3Credentials::Static` with `endpoint: Some("http://localhost:9000")` and `allow_http: true` as shown above.
 
 ---
 
-## 4. Demo completo — escrever, buscar, inspecionar
+## 4. Full demo — write, search, inspect
 
-O exemplo `demo` (em `ailake-query/examples/demo.rs`) faz o fluxo completo em filesystem local:
+The `demo` example (in `ailake-query/examples/demo.rs`) runs the complete flow on the local filesystem:
 
-1. Cria tabela AI-Lake com 2 arquivos (500 linhas cada)
-2. Imprime layout binário do arquivo (offsets de PAR1, AILK, HNSW)
-3. Busca top-5 por similaridade cosine (sem pruning — `pruning_threshold = f32::INFINITY`)
-4. Verifica integridade dos dois arquivos
-5. Lista o catálogo Iceberg
+1. Creates an AI-Lake table with 2 files (500 rows each)
+2. Prints the binary layout of the file (offsets of PAR1, AILK, HNSW)
+3. Searches top-5 by cosine similarity (no pruning — `pruning_threshold = f32::INFINITY`)
+4. Verifies integrity of both files
+5. Lists the Iceberg catalog
 
 ```bash
 cargo run --example demo -p ailake-query
 ```
 
-Saída esperada:
+Expected output:
 
 ```
 Workspace: /tmp/ailakeXXXXXX
@@ -339,52 +338,52 @@ PASS: top result distance = X.XXe-XX < 0.01
   data/part-00000.parquet — 500 rows, hnsw_offset=XXXXX, hnsw_len=XXXXX
   data/part-00001.parquet — 500 rows, hnsw_offset=XXXXX, hnsw_len=XXXXX
 
-Fase 1 demo concluída com sucesso.
+Phase 1 demo completed successfully.
 ```
 
 ---
 
-## 5. Testar pruning geométrico no demo
+## 5. Testing geometric pruning in the demo
 
-Para ver pruning em ação, crie dois arquivos com vetores em direções opostas e busque com threshold baixo:
+To see pruning in action, create two files with vectors in opposite directions and search with a low threshold:
 
 ```rust
-// SearchConfig com pruning ativo
+// SearchConfig with active pruning
 let results = search(
     &table, &query,
     SearchConfig {
         top_k: 5,
         ef_search: 50,
-        pruning_threshold: 0.5,  // f32::INFINITY = sem pruning
+        pruning_threshold: 0.5,  // f32::INFINITY = no pruning
     },
     "embedding", dim, catalog, store,
 ).await?;
 ```
 
-`pruning_threshold` controla agressividade: menor = mais arquivos eliminados = mais rápido, potencialmente menor recall.
+`pruning_threshold` controls aggressiveness: lower = more files eliminated = faster, potentially lower recall.
 
 ---
 
-## 6. Testar bindings Python (ailake-py)
+## 6. Testing Python bindings (ailake-py)
 
 ```bash
 cd ailake-py
 pip install maturin pyarrow numpy
 
-# Compilar e instalar no env Python atual
+# Compile and install in current Python env
 maturin develop
 
-# Verificar importação
+# Verify import
 python3 -c "import ailake; print(dir(ailake))"
 ```
 
-Usar o SDK Python:
+Using the Python SDK:
 
 ```python
 import ailake
 import numpy as np
 
-# Escrever
+# Write
 writer = ailake.TableWriter(
     path="/tmp/ailake-test",
     vector_column="embedding",
@@ -392,13 +391,13 @@ writer = ailake.TableWriter(
     metric="cosine",
 )
 writer.write_batch(
-    texts=["chunk de texto 1", "chunk de texto 2"],
+    texts=["text chunk 1", "text chunk 2"],
     embeddings=np.random.rand(2, 64).astype(np.float32),
 )
 snapshot_id = writer.commit()
 print(f"Snapshot: {snapshot_id}")
 
-# Buscar
+# Search
 query = np.random.rand(64).astype(np.float32)
 results = ailake.search(path="/tmp/ailake-test", query=query.tolist(), top_k=5)
 print(results)
@@ -406,7 +405,7 @@ print(results)
 # ContextAssembler
 ctx = ailake.assemble_context(
     chunks=[
-        {"document_id": "doc-1", "chunk_index": 0, "chunk_text": "Texto...", "distance": 0.1},
+        {"document_id": "doc-1", "chunk_index": 0, "chunk_text": "Text...", "distance": 0.1},
     ],
     max_tokens=4096,
     dedup_threshold=0.05,
@@ -416,19 +415,19 @@ print(ctx)
 
 ---
 
-## 7. Verificar compatibilidade PyArrow manualmente
+## 7. Verify PyArrow compatibility manually
 
 ```bash
-# Gerar arquivo temporário via teste
+# Generate temporary file via test
 cargo test -p tests --test parquet_trailing_bytes -- --ignored --nocapture 2>&1 | grep -i "path\|file\|ok\|FAILED"
 ```
 
-Ou apontar para arquivo gerado pelo demo:
+Or point to a file generated by the demo:
 
 ```python
 import pyarrow.parquet as pq
 
-# Substituir pelo caminho impresso pelo demo ("Workspace: ...")
+# Replace with path printed by demo ("Workspace: ...")
 path = "/tmp/ailakeXXXXXX/warehouse/default/demo_table/data/part-00000.parquet"
 
 table = pq.read_table(path)
@@ -437,57 +436,57 @@ print(f"Schema: {table.schema}")
 print(table.to_pandas().head())
 ```
 
-PyArrow deve ler normalmente — colunas `id`, `text`, e `embedding` (como bytes). Sem erros de magic ou footer.
+PyArrow should read normally — columns `id`, `text`, and `embedding` (as bytes). No magic or footer errors.
 
 ---
 
-## 7B. Verificar compatibilidade PyIceberg (StaticTable scan)
+## 7B. Verify PyIceberg compatibility (StaticTable scan)
 
-Requer PyIceberg instalado:
+Requires PyIceberg installed:
 ```bash
 pip install "pyiceberg[pyarrow]"
 ```
 
-Gerar fixture e rodar verificação:
+Generate fixture and run verification:
 ```bash
-# Gerar fixture (1000 linhas, dim=8, F16)
+# Generate fixture (1000 rows, dim=8, F16)
 cargo run --example write_fixture -p ailake-query
 
-# Verificar compatibilidade
+# Verify compatibility
 python tests/compat/check_pyiceberg.py ./compat-fixture
 ```
 
-Saída esperada:
+Expected output:
 ```
 PASS (StaticTable): PyIceberg read 1000 rows, schema=['id', 'text', 'embedding']
 ```
 
-O que o teste valida:
-- `StaticTable.from_metadata` lê `vN.metadata.json` via `version-hint.text`
-- Manifests Avro OCF são lidos corretamente (field-ids preservados pelo `avro_raw.rs`)
-- `table.scan().to_arrow()` retorna 1000 linhas com schema `[id, text, embedding]`
-- Coluna `embedding` lida como `fixed_size_binary[16]` (F16, dim=8)
+What the test validates:
+- `StaticTable.from_metadata` reads `vN.metadata.json` via `version-hint.text`
+- Avro OCF manifests are read correctly (field-ids preserved by `avro_raw.rs`)
+- `table.scan().to_arrow()` returns 1000 rows with schema `[id, text, embedding]`
+- `embedding` column read as `fixed_size_binary[16]` (F16, dim=8)
 
 ---
 
-## 8. Rodar benchmarks
+## 8. Running benchmarks
 
 ### 8A. SIFT-1M benchmark (ailake-bench)
 
-Benchmark público com o dataset SIFT-1M (1M vetores 128-dim Euclidean).
+Public benchmark with the SIFT-1M dataset (1M vectors, 128-dim Euclidean).
 
-**Download do dataset** (~164 MB):
+**Dataset download** (~164 MB):
 ```bash
 bash ailake-bench/scripts/download_sift1m.sh
-# Baixa em data/sift1m/
+# Downloads to data/sift1m/
 ```
 
-**Rodar:**
+**Run:**
 ```bash
 cargo run --release -p ailake-bench -- --dataset-dir data/sift1m
 ```
 
-Resultado esperado (CPU com AVX2, parallel HNSW build):
+Expected result (CPU with AVX2, parallel HNSW build):
 ```
 Write phase
   Throughput    : ~2400 vec/s
@@ -502,34 +501,34 @@ Search phase  (top_k=10, ef=50)  [indexes pre-loaded]
   Latency p99   : ~4.5 ms
 ```
 
-Opções:
+Options:
 ```bash
-# Limitar base a 10k vetores para smoke-test rápido
+# Limit base to 10k vectors for quick smoke-test
 cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --limit 10000
 
-# Ajustar ef e top_k
+# Adjust ef and top_k
 cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --top-k 10 --ef 100
 ```
 
-### 8B. Benchmark LanceDB (comparação)
+### 8B. LanceDB benchmark (comparison)
 
 ```bash
 cargo run --release -p ailake-bench --features lancedb-bench -- \
     --dataset-dir data/sift1m --engine lancedb
 ```
 
-Para comparar AI-Lake vs LanceDB side-by-side:
+To compare AI-Lake vs LanceDB side-by-side:
 
 ```bash
 cargo run --release -p ailake-bench --features lancedb-bench -- \
     --dataset-dir data/sift1m --engine all
 ```
 
-### 8C. Benchmark pgvector (comparação)
+### 8C. pgvector benchmark (comparison)
 
-Requer PostgreSQL com a extensão `pgvector ≥ 0.5.0` (HNSW support).
+Requires PostgreSQL with `pgvector ≥ 0.5.0` extension (HNSW support).
 
-**Subir PostgreSQL + pgvector via Docker:**
+**Start PostgreSQL + pgvector via Docker:**
 ```bash
 docker run -d --name pg-ailake \
   -e POSTGRES_PASSWORD=postgres \
@@ -537,7 +536,7 @@ docker run -d --name pg-ailake \
   pgvector/pgvector:pg16
 ```
 
-**Rodar benchmark pgvector sozinho:**
+**Run pgvector benchmark alone:**
 ```bash
 cargo run --release -p ailake-bench --features pgvector-bench -- \
     --dataset-dir data/sift1m \
@@ -545,7 +544,7 @@ cargo run --release -p ailake-bench --features pgvector-bench -- \
     --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
 ```
 
-**Comparação completa AI-Lake + LanceDB + pgvector:**
+**Full comparison AI-Lake + LanceDB + pgvector:**
 ```bash
 cargo run --release -p ailake-bench --features lancedb-bench,pgvector-bench -- \
     --dataset-dir data/sift1m \
@@ -553,16 +552,16 @@ cargo run --release -p ailake-bench --features lancedb-bench,pgvector-bench -- \
     --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
 ```
 
-Parâmetros pgvector opcionais:
+Optional pgvector parameters:
 ```bash
 --pgvector-m 16              # HNSW m (default: 16)
 --pgvector-ef-construction 64 # ef_construction (default: 64)
 --pgvector-ef-search 50      # ef_search at query time (default: 50)
 ```
 
-### 8D. Benchmark Deep Lake (Python, opcional)
+### 8D. Deep Lake benchmark (Python, optional)
 
-Deep Lake free tier suporta apenas busca exata (brute-force). O script abaixo mede throughput de escrita e busca exata em um subconjunto:
+Deep Lake free tier only supports exact search (brute-force). The script below measures write and exact search throughput on a subset:
 
 ```bash
 pip install deeplake numpy
@@ -571,9 +570,9 @@ python3 ailake-bench/scripts/deeplake_bench.py \
     --limit 10000
 ```
 
-> **Nota**: ANN aproximado (Deep Memory) requer plano pago da Activeloop. A comparação de recall com AI-Lake/pgvector/LanceDB não é direta.
+> **Note**: Approximate ANN (Deep Memory) requires a paid Activeloop plan. Recall comparison with AI-Lake/pgvector/LanceDB is not direct.
 
-### 8E. Microbenchmarks criterion
+### 8E. Criterion microbenchmarks
 
 ```bash
 # HNSW search benchmark (ailake-index)
@@ -585,47 +584,47 @@ cargo bench -p ailake-file
 
 ---
 
-## 8F. GPU search — NVIDIA CUDA e AMD ROCm
+## 8F. GPU search — NVIDIA CUDA and AMD ROCm
 
-Dois backends GPU independentes. Ambos usam `libloading` dlopen em runtime —
-**zero dependência de build** para qualquer GPU. O mesmo binário roda em
-CPU-only, NVIDIA e AMD sem recompilação.
+Two independent GPU backends. Both use `libloading` dlopen at runtime —
+**zero build dependency** for any GPU. The same binary runs on
+CPU-only, NVIDIA, and AMD without recompilation.
 
-| Backend | Detecção | Compute | Requisito de build |
+| Backend | Detection | Compute | Build requirement |
 |---------|----------|---------|-------------------|
-| **NVIDIA CUDA** | `libcuda.so.1` + `cuDeviceGetCount` | cuBLAS SGEMM via libloading | **nenhum** — runtime only |
-| **AMD ROCm** | `libamdhip64.so` + `hipGetDeviceCount` | hipBLAS SGEMM via libloading | **nenhum** — runtime only |
-| **CPU** | fallback | rayon paralelo | nenhum |
+| **NVIDIA CUDA** | `libcuda.so.1` + `cuDeviceGetCount` | cuBLAS SGEMM via libloading | **none** — runtime only |
+| **AMD ROCm** | `libamdhip64.so` + `hipGetDeviceCount` | hipBLAS SGEMM via libloading | **none** — runtime only |
+| **CPU** | fallback | parallel rayon | none |
 
-**Prioridade de detecção**: AMD ROCm → NVIDIA CUDA → CPU SIMD.
-AMD é verificado primeiro pois sistemas ROCm frequentemente expõem uma camada de compatibilidade CUDA (`libcuda.so.1`), o que identificaria incorretamente como NVIDIA sem essa prioridade.
+**Detection priority**: AMD ROCm → NVIDIA CUDA → CPU SIMD.
+AMD is checked first because ROCm systems often expose a CUDA compatibility layer (`libcuda.so.1`), which would incorrectly identify as NVIDIA without this priority.
 
 ---
 
 ### 8F-1. NVIDIA CUDA
 
-#### Pré-requisitos de runtime (nenhum de build)
+#### Runtime prerequisites (none at build time)
 
-| Requisito | Versão mínima |
+| Requirement | Minimum version |
 |-----------|---------------|
-| GPU NVIDIA | Arquitetura Maxwell+ (sm_50) |
-| Driver NVIDIA | ≥ 450 |
-| `libcudart.so` | CUDA 11.x ou 12.x em `LD_LIBRARY_PATH` |
-| `libcublas.so` | CUDA 11.x ou 12.x em `LD_LIBRARY_PATH` |
+| NVIDIA GPU | Maxwell+ architecture (sm_50) |
+| NVIDIA Driver | ≥ 450 |
+| `libcudart.so` | CUDA 11.x or 12.x in `LD_LIBRARY_PATH` |
+| `libcublas.so` | CUDA 11.x or 12.x in `LD_LIBRARY_PATH` |
 
-Não é necessário CUDA Toolkit, `nvcc` ou headers — apenas as bibliotecas de runtime.
+CUDA Toolkit, `nvcc`, or headers are not required — only the runtime libraries.
 
-#### Build — nenhuma flag adicional necessária
+#### Build — no additional flags needed
 
 ```bash
-# Build padrão — NVIDIA detectado e usado em runtime automaticamente
+# Default build — NVIDIA detected and used at runtime automatically
 cargo build --release
 ```
 
-O binário detecta CUDA via `libloading` (dlopen de `libcuda.so.1`,
-`libcudart.so`, `libcublas.so`). Sem GPU: cai silenciosamente para AMD ROCm ou CPU.
+The binary detects CUDA via `libloading` (dlopen of `libcuda.so.1`,
+`libcudart.so`, `libcublas.so`). Without GPU: silently falls back to AMD ROCm or CPU.
 
-#### Verificar detecção CUDA
+#### Verify CUDA detection
 
 ```rust
 use ailake_index::{detect_backend, HardwareBackend};
@@ -636,27 +635,27 @@ assert_eq!(detect_backend(), HardwareBackend::NvidiaCuda);
 
 ### 8F-2. AMD ROCm
 
-#### Pré-requisitos
+#### Prerequisites
 
-| Requisito | Versão mínima |
+| Requirement | Minimum version |
 |-----------|---------------|
-| GPU AMD | GCN4+ (Polaris) ou RDNA1+ recomendado |
+| AMD GPU | GCN4+ (Polaris) or RDNA1+ recommended |
 | ROCm | 5.0+ (`libamdhip64.so` + `libhipblas.so`) |
-| Driver amdgpu | incluído no ROCm |
+| amdgpu driver | included in ROCm |
 
-#### Build — nenhuma flag adicional necessária
+#### Build — no additional flags needed
 
 ```bash
-# Build padrão — ROCm detectado e usado em runtime automaticamente
+# Default build — ROCm detected and used at runtime automatically
 cargo build --release
 
-# ROCm + CUDA ao mesmo tempo (ROCm tem prioridade por ser detectado primeiro)
+# ROCm + CUDA at the same time (ROCm takes priority as it is detected first)
 cargo build --release --features ailake-index/gpu
 ```
 
-O backend ROCm usa `libhipblas.so` via `libloading` — sem dependência de compilação. O binário roda em qualquer máquina e apenas usa ROCm quando `libamdhip64.so` + `libhipblas.so` estiverem instalados.
+The ROCm backend uses `libhipblas.so` via `libloading` — no build dependency. The binary runs on any machine and only uses ROCm when `libamdhip64.so` + `libhipblas.so` are installed.
 
-#### Verificar detecção ROCm
+#### Verify ROCm detection
 
 ```bash
 # Via HardwareProfile::detect()
@@ -667,16 +666,16 @@ assert_eq!(detect_backend(), HardwareBackend::AmdRocm);
 
 ---
 
-### 8F-3. Verificar detecção via benchmark
+### 8F-3. Verify detection via benchmark
 
-O engine `ailake-auto` imprime o perfil de hardware antes de rodar:
+The `ailake-auto` engine prints the hardware profile before running:
 
 ```bash
 cargo run --release -p ailake-bench -- \
     --dataset-dir data/sift1m --engine ailake-auto --limit 50000
 ```
 
-Saída esperada em máquina NVIDIA:
+Expected output on NVIDIA machine:
 ```
 Hardware detection:
   Backend      : NVIDIA CUDA
@@ -688,7 +687,7 @@ Hardware detection:
   Index chosen : IVF-PQ  (shard_size=100000)
 ```
 
-Saída esperada em máquina AMD ROCm:
+Expected output on AMD ROCm machine:
 ```
 Hardware detection:
   Backend      : AMD ROCm
@@ -700,7 +699,7 @@ Hardware detection:
   Index chosen : IVF-PQ  (shard_size=100000)
 ```
 
-Saída esperada em CPU-only:
+Expected output on CPU-only:
 ```
 Hardware detection:
   Backend      : CPU (no GPU)
@@ -714,60 +713,60 @@ Hardware detection:
 
 ---
 
-### 8F-4. Quando GPU bate CPU
+### 8F-4. When GPU beats CPU
 
-| Arquivo (vetores) | dim | CPU rayon | NVIDIA/AMD GPU |
-|-------------------|-----|-----------|----------------|
-| 10k | 1536 | ~2 ms | ~3 ms (overhead domina) |
+| File (vectors) | dim | CPU rayon | NVIDIA/AMD GPU |
+|----------------|-----|-----------|----------------|
+| 10k | 1536 | ~2 ms | ~3 ms (overhead dominates) |
 | 100k | 1536 | ~20 ms | ~2 ms |
 | 500k | 1536 | ~100 ms | ~4 ms |
 
-GPU vence a partir de ~50k vetores/arquivo para dim=1536. Aplicável para ambos os vendors.
+GPU wins from ~50k vectors/file for dim=1536. Applies to both vendors.
 
 ---
 
-### 8F-5. Métricas suportadas em GPU
+### 8F-5. Supported metrics on GPU
 
-| Métrica | NVIDIA (cuBLAS SGEMM) | AMD (hipBLAS SGEMM) |
+| Metric | NVIDIA (cuBLAS SGEMM) | AMD (hipBLAS SGEMM) |
 |---------|-----------------------|---------------------|
-| **Cosine** | normalizar CPU → SGEMM → `1 + raw` | normalizar CPU → SGEMM → `1 + raw` |
+| **Cosine** | normalize CPU → SGEMM → `1 + raw` | normalize CPU → SGEMM → `1 + raw` |
 | **Euclidean** | SGEMM (−2·q·d) + norms CPU → sqrt | SGEMM (−2·q·d) + norms CPU → sqrt |
-| **DotProduct** | SGEMM com alpha=−1 | SGEMM com alpha=−1 |
+| **DotProduct** | SGEMM with alpha=−1 | SGEMM with alpha=−1 |
 
-Ambos os backends usam formulação SGEMM idêntica (`C[N×Q col-major] = alpha · db^T · queries`); diferem apenas nas constantes de operação (`CUBLAS_OP_T=1` vs `HIPBLAS_OP_T=112`) e nos nomes das bibliotecas.
+Both backends use identical SGEMM formulation (`C[N×Q col-major] = alpha · db^T · queries`); they differ only in operation constants (`CUBLAS_OP_T=1` vs `HIPBLAS_OP_T=112`) and library names.
 
 ---
 
-### 8F-6. GPU k-means para IVF-PQ
+### 8F-6. GPU k-means for IVF-PQ
 
-O treinamento do `IvfPqIndex` (k-means para centróides grosseiros e `PQCodebook`) usa GPU via `kmeans_dispatch` com prioridade NVIDIA → AMD → CPU:
+`IvfPqIndex` training (k-means for coarse centroids and `PQCodebook`) uses GPU via `kmeans_dispatch` with NVIDIA → AMD → CPU priority:
 
 ```
 NVIDIA (runtime)  →  try_nvidia_kmeans (cuBLAS SGEMM via libloading)
 AMD ROCm (runtime)  →  try_rocm_kmeans (hipBLAS SGEMM via libloading)
-CPU fallback        →  kmeans_centroids (rayon paralelo)
+CPU fallback        →  kmeans_centroids (parallel rayon)
 ```
 
-- **Sem GPU em runtime**: `kmeans_dispatch` cai silenciosamente para CPU.
-- **NVIDIA sem libcublas instalado**: mesmo que `libcuda.so.1` exista, `try_nvidia_kmeans` retorna `None` se `libcublas.so` não for encontrado → tenta AMD → CPU.
-- **AMD sem hipBLAS instalado**: mesmo que `libamdhip64.so` exista, `try_rocm_kmeans` retorna `None` se `libhipblas.so` não for encontrado → CPU fallback.
+- **No GPU at runtime**: `kmeans_dispatch` silently falls back to CPU.
+- **NVIDIA without libcublas installed**: even if `libcuda.so.1` exists, `try_nvidia_kmeans` returns `None` if `libcublas.so` is not found → tries AMD → CPU.
+- **AMD without hipBLAS installed**: even if `libamdhip64.so` exists, `try_rocm_kmeans` returns `None` if `libhipblas.so` is not found → CPU fallback.
 
 ```bash
-# Build padrão — GPU acelerado automaticamente se disponível (NVIDIA ou AMD)
+# Default build — GPU accelerated automatically if available (NVIDIA or AMD)
 cargo build --release
 ```
 
 ---
 
-## 8G. Benchmark IVF-PQ (`--engine ailake-ivf-pq`)
+## 8G. IVF-PQ benchmark (`--engine ailake-ivf-pq`)
 
-IVF-PQ usa índice com inverted lists codificadas por Product Quantization, em vez do grafo HNSW. Índice 10-100× menor — boa escolha para S3 onde acesso sequencial é mais barato.
+IVF-PQ uses an index with inverted lists encoded by Product Quantization, instead of the HNSW graph. Index is 10-100× smaller — a good choice for S3 where sequential access is cheaper.
 
 ```bash
-# Benchmark básico (SIFT-1M, defaults: nlist=256, nprobe=8, pq_m=8)
+# Basic benchmark (SIFT-1M, defaults: nlist=256, nprobe=8, pq_m=8)
 cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --engine ailake-ivf-pq
 
-# Ajustar parâmetros
+# Adjust parameters
 cargo run --release -p ailake-bench -- \
     --dataset-dir data/sift1m \
     --engine ailake-ivf-pq \
@@ -775,57 +774,57 @@ cargo run --release -p ailake-bench -- \
     --ivf-nprobe 16 \
     --ivf-pq-m 16
 
-# Comparação completa AI-Lake HNSW + IVF-PQ + LanceDB + pgvector
+# Full comparison AI-Lake HNSW + IVF-PQ + LanceDB + pgvector
 cargo run --release -p ailake-bench --features lancedb-bench,pgvector-bench -- \
     --dataset-dir data/sift1m \
     --engine all \
     --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
 ```
 
-Parâmetros IVF-PQ:
+IVF-PQ parameters:
 
-| Flag | Default | Descrição |
+| Flag | Default | Description |
 |---|---|---|
-| `--ivf-nlist` | 256 | Células Voronoi (inverted lists). Regra: `sqrt(n)` |
-| `--ivf-nprobe` | 8 | Células consultadas por query. Maior = melhor recall |
-| `--ivf-pq-m` | 8 | Sub-vetores PQ. Deve dividir 128 para SIFT |
+| `--ivf-nlist` | 256 | Voronoi cells (inverted lists). Rule: `sqrt(n)` |
+| `--ivf-nprobe` | 8 | Cells queried per query. Higher = better recall |
+| `--ivf-pq-m` | 8 | PQ sub-vectors. Must divide 128 for SIFT |
 
-Resultado esperado (SIFT-1M, CPU, nlist=256, nprobe=8):
+Expected result (SIFT-1M, CPU, nlist=256, nprobe=8):
 ```
 AI-Lake IVF-PQ write phase (nlist=256, nprobe=8, pq_m=8) …
-  Throughput    : ~1800 vec/s  (k-means mais lento que HNSW insert)
+  Throughput    : ~1800 vec/s  (k-means slower than HNSW insert)
 
 Search phase  (top_k=10)
   Recall@10     : ~0.94
   QPS           : ~2100
-  Index size    : ~5 MB  (vs ~80 MB HNSW para 1M vetores dim=128)
+  Index size    : ~5 MB  (vs ~80 MB HNSW for 1M vectors dim=128)
 ```
 
 ---
 
-## 9. Testar RestCatalog — multi-cloud
+## 9. Testing RestCatalog — multi-cloud
 
-O `RestCatalog` implementa o [Iceberg REST Catalog spec](https://iceberg.apache.org/spec/#rest-catalog) e funciona com Polaris, Nessie, S3 Tables, AWS BigLake e Unity Catalog.
+`RestCatalog` implements the [Iceberg REST Catalog spec](https://iceberg.apache.org/spec/#rest-catalog) and works with Polaris, Nessie, S3 Tables, AWS BigLake, and Unity Catalog.
 
-### 9A. Testes unitários (sem servidor externo)
+### 9A. Unit tests (no external server)
 
 ```bash
 cargo test -p ailake-catalog
 ```
 
-Cobre URL building, serialização do `CommitTableRequest`, storage root derivation e configs Databricks.
+Covers URL building, `CommitTableRequest` serialization, storage root derivation, and Databricks configs.
 
-### 9B. RestCatalog local com Nessie
+### 9B. RestCatalog locally with Nessie
 
 ```bash
-# Subir Nessie (Project Nessie — catálogo com branching)
+# Start Nessie (Project Nessie — catalog with branching)
 docker run -p 19120:19120 ghcr.io/projectnessie/nessie:latest
 
-# Rodar teste de integração (necessita servidor)
+# Run integration test (requires server)
 cargo test -p tests --test rest_nessie -- --ignored
 ```
 
-Configuração manual em Rust:
+Manual Rust configuration:
 
 ```rust
 use ailake_catalog::{RestCatalog, RestCatalogAuth, RestCatalogConfig};
@@ -844,7 +843,7 @@ let catalog = RestCatalog::new(
 );
 ```
 
-### 9C. RestCatalog local com Apache Polaris
+### 9C. RestCatalog locally with Apache Polaris
 
 ```bash
 docker run -p 8181:8181 apache/polaris:latest
@@ -852,7 +851,7 @@ docker run -p 8181:8181 apache/polaris:latest
 cargo test -p tests --test rest_polaris -- --ignored
 ```
 
-Configuração:
+Configuration:
 
 ```rust
 let catalog = RestCatalog::new(
@@ -866,7 +865,7 @@ let catalog = RestCatalog::new(
 );
 ```
 
-### 9D. AWS S3 Tables (REST nativo na AWS)
+### 9D. AWS S3 Tables (native REST on AWS)
 
 ```rust
 let catalog = RestCatalog::new(
@@ -894,7 +893,7 @@ let catalog = RestCatalog::new(
 );
 ```
 
-### 9F. Azure Blob + Apache Polaris (produção Azure)
+### 9F. Azure Blob + Apache Polaris (production Azure)
 
 ```rust
 use ailake_store::{azure_store, AzureConfig, AzureCredentials};
@@ -923,9 +922,9 @@ let catalog = RestCatalog::new(
 
 ---
 
-## 10. Testar Databricks Unity Catalog
+## 10. Testing Databricks Unity Catalog
 
-Os helpers `databricks_azure` / `databricks_aws` / `databricks_gcp` constroem o `RestCatalogConfig` correto para cada cloud. Requerem workspace Databricks real — não tem emulador local.
+The `databricks_azure` / `databricks_aws` / `databricks_gcp` helpers build the correct `RestCatalogConfig` for each cloud. They require a real Databricks workspace — there is no local emulator.
 
 ### 10A. Azure (service principal)
 
@@ -959,14 +958,14 @@ let catalog = RestCatalog::new(
 );
 ```
 
-Para dev/CI com PAT:
+For dev/CI with PAT:
 
 ```rust
 DatabricksAuth::Pat(std::env::var("DATABRICKS_TOKEN")?)
 ```
 
-Token endpoint usado: `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
-Scope: `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default` (recurso Databricks no Azure AD)
+Token endpoint used: `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
+Scope: `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default` (Databricks resource in Azure AD)
 
 ### 10B. AWS (M2M OAuth2)
 
@@ -996,13 +995,13 @@ let catalog = RestCatalog::new(
 );
 ```
 
-Token endpoint usado: `https://myworkspace.cloud.databricks.com/oidc/v1/token`
+Token endpoint used: `https://myworkspace.cloud.databricks.com/oidc/v1/token`
 Scope: `all-apis`
 
 ### 10C. GCP (Bearer token)
 
 ```bash
-# Obter token via gcloud
+# Get token via gcloud
 export GCP_TOKEN=$(gcloud auth print-access-token)
 ```
 
@@ -1026,33 +1025,33 @@ let catalog = RestCatalog::new(
 );
 ```
 
-### 10D. Hierarquia Unity Catalog
+### 10D. Unity Catalog hierarchy
 
-Unity Catalog usa 3 níveis: `catalog.schema.table`.
+Unity Catalog uses 3 levels: `catalog.schema.table`.
 
 ```rust
-// Tabela: my_unity_catalog.prod_schema.embeddings
+// Table: my_unity_catalog.prod_schema.embeddings
 let table = TableIdent::new("prod_schema", "embeddings");
-// catalog = prefixo do RestCatalogConfig (definido no databricks_*)
+// catalog = prefix from RestCatalogConfig (defined in databricks_*)
 // schema  = TableIdent.namespace
 // table   = TableIdent.name
 ```
 
-URL resultante:
+Resulting URL:
 ```
 GET https://myworkspace.azuredatabricks.net/api/2.1/unity-catalog/iceberg
     /v1/my_unity_catalog/namespaces/prod_schema/tables/embeddings
 ```
 
-### 10E. Fluxo de busca multi-cloud (mesmo código para todos os backends)
+### 10E. Multi-cloud search flow (same code for all backends)
 
 ```rust
 use ailake_query::{search, SearchConfig};
 use ailake_catalog::{TableIdent, CatalogProvider};
 use std::sync::Arc;
 
-// catalog pode ser HadoopCatalog, RestCatalog, ou qualquer backend
-let catalog: Arc<dyn CatalogProvider> = Arc::new(/* qualquer backend */);
+// catalog can be HadoopCatalog, RestCatalog, or any backend
+let catalog: Arc<dyn CatalogProvider> = Arc::new(/* any backend */);
 
 let table = TableIdent::new("prod_schema", "embeddings");
 let query = vec![0.1_f32; 1536];
@@ -1064,23 +1063,23 @@ let results = search(
 ).await?;
 ```
 
-Pruning geométrico funciona identicamente para todos os backends — centróide e raio ficam no manifesto, não no servidor de catálogo.
+Geometric pruning works identically for all backends — centroid and radius are in the manifest, not on the catalog server.
 
 ---
 
 ## 11. NessieCatalog — branching operations
 
-`NessieCatalog` wraps `RestCatalog` para todas as operações `CatalogProvider` e adiciona a API de branching do Nessie v2.
+`NessieCatalog` wraps `RestCatalog` for all `CatalogProvider` operations and adds the Nessie v2 branching API.
 
-### 11A. Testes unitários (sem servidor externo)
+### 11A. Unit tests (no external server)
 
 ```bash
 cargo test -p ailake-catalog --features catalog-nessie
 ```
 
-Cobre URL construction (`trees_url`, `ref_url`, `merge_url`) e desserialização JSON da API Nessie.
+Covers URL construction (`trees_url`, `ref_url`, `merge_url`) and JSON deserialization of the Nessie API.
 
-### 11B. Testes de integração (requer servidor Nessie)
+### 11B. Integration tests (requires Nessie server)
 
 ```bash
 docker run -p 19120:19120 ghcr.io/projectnessie/nessie:latest
@@ -1088,7 +1087,7 @@ docker run -p 19120:19120 ghcr.io/projectnessie/nessie:latest
 cargo test -p tests --test rest_nessie -- --ignored
 ```
 
-### 11C. Configuração e uso
+### 11C. Configuration and usage
 
 ```rust
 use ailake_catalog::{NessieCatalog, NessieCatalogConfig, RestCatalogAuth};
@@ -1106,14 +1105,14 @@ let catalog = NessieCatalog::new(
     store,
 );
 
-// CatalogProvider → delega para inner RestCatalog (branch "main")
+// CatalogProvider → delegates to inner RestCatalog (branch "main")
 catalog.create_table(&table, &props).await?;
 
-// Branching operations — específicas do Nessie
+// Branching operations — Nessie-specific
 let branches = catalog.list_branches().await?;
 catalog.create_branch("feature-rag-v2", "main").await?;
 
-// trabalhar na branch feature...
+// work on feature branch...
 
 catalog.merge_branch("feature-rag-v2", "main").await?;
 catalog.delete_branch("feature-rag-v2").await?;
@@ -1124,7 +1123,7 @@ Auth via PAT:
 auth: RestCatalogAuth::Bearer("my-nessie-token".into())
 ```
 
-Auth via OAuth2 (Nessie com OIDC):
+Auth via OAuth2 (Nessie with OIDC):
 ```rust
 auth: RestCatalogAuth::OAuth2 {
     token_endpoint: "https://my-oidc/token".into(),
@@ -1138,15 +1137,15 @@ auth: RestCatalogAuth::OAuth2 {
 
 ## 12. JdbcCatalog — PostgreSQL / MySQL
 
-Armazena o ponteiro `metadata_location` em banco de dados relacional. Ideal para deploys self-hosted sem AWS Glue.
+Stores the `metadata_location` pointer in a relational database. Ideal for self-hosted deployments without AWS Glue.
 
-### 12A. Testes unitários + SQLite e2e (sem DB externo)
+### 12A. Unit tests + SQLite e2e (no external DB)
 
 ```bash
 cargo test -p ailake-catalog --features catalog-jdbc
 ```
 
-Inclui teste end-to-end completo com SQLite in-process (`catalog-jdbc` feature ativa o driver SQLite via sqlx).
+Includes a complete end-to-end test with in-process SQLite (`catalog-jdbc` feature enables the SQLite driver via sqlx).
 
 ### 12B. PostgreSQL via Docker
 
@@ -1167,7 +1166,7 @@ let catalog = JdbcCatalog::connect(
     store,
 ).await?;
 
-// Schema criado automaticamente (CREATE TABLE IF NOT EXISTS iceberg_tables)
+// Schema created automatically (CREATE TABLE IF NOT EXISTS iceberg_tables)
 catalog.create_table(&table, &props).await?;
 let snap_id = catalog.commit_snapshot(&table, snapshot).await?;
 let files = catalog.list_files(&table, Some(snap_id)).await?;
@@ -1190,7 +1189,7 @@ let catalog = JdbcCatalog::connect(
 ).await?;
 ```
 
-### 12D. SQLite local (dev / testes)
+### 12D. SQLite local (dev / tests)
 
 ```rust
 let catalog = JdbcCatalog::connect(
@@ -1201,9 +1200,9 @@ let catalog = JdbcCatalog::connect(
 ).await?;
 ```
 
-Nota: `sqlite::memory:` não funciona com pool (cada conexão tem DB separado). Use arquivo.
+Note: `sqlite::memory:` does not work with pools (each connection has a separate DB). Use a file.
 
-### 12E. Schema criado automaticamente
+### 12E. Schema created automatically
 
 ```sql
 CREATE TABLE IF NOT EXISTS iceberg_tables (
@@ -1215,30 +1214,30 @@ CREATE TABLE IF NOT EXISTS iceberg_tables (
 );
 ```
 
-Cada `commit_snapshot` escreve novo `{uuid}.metadata.json` no Store e faz `UPDATE` do ponteiro no banco. Assumption: single-writer.
+Each `commit_snapshot` writes a new `{uuid}.metadata.json` to the Store and `UPDATE`s the pointer in the database. Assumption: single-writer.
 
 ---
 
 ## 13. GlueCatalog — AWS Glue Data Catalog
 
-Armazena `metadata_location` no Glue. Tabelas ficam visíveis no Athena, EMR, Glue ETL e Redshift Spectrum.
+Stores `metadata_location` in Glue. Tables become visible in Athena, EMR, Glue ETL, and Redshift Spectrum.
 
-### 13A. Testes unitários (sem AWS)
+### 13A. Unit tests (no AWS)
 
 ```bash
 cargo test -p ailake-catalog --features catalog-glue
 ```
 
-Cobre encoding dos parâmetros Glue e formato dos paths.
+Covers Glue parameter encoding and path format.
 
-### 13B. Configuração
+### 13B. Configuration
 
 ```rust
 use ailake_catalog::{GlueCatalog, GlueCatalogConfig};
 use ailake_store::{s3_store, S3Config, S3Credentials};
 use std::sync::Arc;
 
-// Cadeia automática: env vars → ~/.aws → IMDSv2 → WebIdentity (IRSA)
+// Automatic chain: env vars → ~/.aws → IMDSv2 → WebIdentity (IRSA)
 let store = Arc::new(s3_store(S3Config {
     bucket: "my-bucket".into(),
     region: "us-east-1".into(),
@@ -1259,7 +1258,7 @@ let catalog = GlueCatalog::from_env(
 catalog.create_table(&table, &props).await?;
 ```
 
-Client explícito (quando você já tem um `aws_sdk_glue::Client`):
+Explicit client (when you already have an `aws_sdk_glue::Client`):
 
 ```rust
 use aws_config::BehaviorVersion;
@@ -1273,25 +1272,25 @@ let client = aws_sdk_glue::Client::new(&sdk_config);
 let catalog = GlueCatalog::from_client(client, config, store);
 ```
 
-### 13C. Parâmetros criados no Glue
+### 13C. Parameters created in Glue
 
 ```
 table_type        = "ICEBERG"
 metadata_location = "s3://bucket/warehouse/ns/table/metadata/{uuid}.metadata.json"
 ```
 
-Compatível com `SHOW TBLPROPERTIES` no Athena e com o conector Iceberg do AWS Glue ETL.
+Compatible with `SHOW TBLPROPERTIES` in Athena and with the Iceberg connector in AWS Glue ETL.
 
-### 13D. Testar com Localstack (opcional)
+### 13D. Test with Localstack (optional)
 
 ```bash
 pip install localstack awscli-local
 localstack start -d
 
-# criar database no Glue local
+# create database in local Glue
 awslocal glue create-database --database-input '{"Name": "test_db"}'
 
-# testar
+# test
 AWS_ENDPOINT_URL=http://localhost:4566 \
 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
   cargo test -p tests --test glue_localstack -- --ignored
@@ -1299,33 +1298,33 @@ AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
 
 ---
 
-## 14. Clippy e formatação
+## 14. Clippy and formatting
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Ambos devem terminar sem erros ou warnings.
+Both should finish without errors or warnings.
 
 ---
 
-## 15. Plugin Trino — VectorScanConnector
+## 15. Trino plugin — VectorScanConnector
 
-O `trino-plugin` expõe tabelas AI-Lake como um conector Trino nativo. Requer a biblioteca nativa `libailake_jni.so` (construída pelo Cargo) e o fat-jar do plugin (construído pelo Gradle).
+The `trino-plugin` exposes AI-Lake tables as a native Trino connector. Requires the native library `libailake_jni.so` (built by Cargo) and the plugin fat-jar (built by Gradle).
 
-### 15A. Pré-requisitos adicionais
+### 15A. Additional prerequisites
 
-| Ferramenta | Versão | Instalação |
+| Tool | Version | Installation |
 |---|---|---|
 | JDK | 17+ | `sudo apt install openjdk-17-jdk` |
-| Gradle | 8+ | `sdk install gradle` (ou usar wrapper) |
+| Gradle | 8+ | `sdk install gradle` (or use wrapper) |
 | Trino server | 430+ | [trino.io/download](https://trino.io/download.html) |
 
-### 15B. Passo 1 — Compilar a biblioteca nativa
+### 15B. Step 1 — Compile the native library
 
 ```bash
-# Na raiz do projeto
+# From the project root
 cargo build --release -p ailake-jni
 
 # Linux:
@@ -1335,80 +1334,80 @@ ls -lh target/release/libailake_jni.so
 ls -lh target/release/libailake_jni.dylib
 ```
 
-### 15C. Passo 2 — Compilar o fat-jar do plugin
+### 15C. Step 2 — Compile the plugin fat-jar
 
 ```bash
 cd trino-plugin
 
-# Criar wrapper Gradle (só na primeira vez)
+# Create Gradle wrapper (first time only)
 gradle wrapper
 
-# Compilar
+# Compile
 ./gradlew shadowJar
 
-# Saída:
+# Output:
 ls build/libs/trino-plugin-0.1.0-plugin.jar
 ```
 
-### 15D. Passo 3 — Instalar no Trino
+### 15D. Step 3 — Install in Trino
 
 ```bash
-# Diretório de instalação do Trino (ajuste conforme seu ambiente)
+# Trino installation directory (adjust for your environment)
 TRINO_HOME=/opt/trino
 
-# Criar diretório do plugin e copiar jar
+# Create plugin directory and copy jar
 mkdir -p $TRINO_HOME/plugin/ailake
 cp build/libs/trino-plugin-0.1.0-plugin.jar $TRINO_HOME/plugin/ailake/
 
-# Colocar a biblioteca nativa no library path do Trino
-# Opção A: copiar para lib/ do Trino
+# Place native library in Trino's library path
+# Option A: copy to Trino's lib/
 cp ../target/release/libailake_jni.so $TRINO_HOME/lib/
 
-# Opção B: definir no jvm.config do Trino
+# Option B: define in Trino's jvm.config
 echo "-Djava.library.path=/path/to/target/release" >> $TRINO_HOME/etc/jvm.config
 ```
 
-### 15E. Passo 4 — Configurar o catálogo
+### 15E. Step 4 — Configure the catalog
 
-Criar o arquivo `$TRINO_HOME/etc/catalog/ailake.properties`:
+Create the file `$TRINO_HOME/etc/catalog/ailake.properties`:
 
 ```properties
-# Conector AI-Lake
+# AI-Lake connector
 connector.name=ailake
 
-# URI da tabela AI-Lake (filesystem local ou s3://)
+# AI-Lake table URI (local filesystem or s3://)
 ailake.table-uri=/tmp/ailake-demo
 
-# Coluna vetorial e dimensão (devem bater com a tabela)
+# Vector column and dimension (must match the table)
 ailake.vector-column=embedding
 ailake.vector-dim=64
 ```
 
-Para usar com tabela gerada pelo demo (seção 4):
+To use with the table generated by the demo (section 4):
 
 ```bash
-# Gerar tabela de demo primeiro
+# Generate demo table first
 cargo run --example demo -p ailake-query 2>&1 | grep "Workspace:"
 # Workspace: /tmp/ailakeXXXXXX
 
-# Usar o caminho impresso acima no properties:
+# Use the path printed above in properties:
 # ailake.table-uri=/tmp/ailakeXXXXXX/warehouse/default/demo_table
 ```
 
-### 15F. Passo 5 — Iniciar o Trino e fazer a primeira busca
+### 15F. Step 5 — Start Trino and run the first search
 
 ```bash
-# Iniciar o servidor
+# Start the server
 $TRINO_HOME/bin/launcher start
 
-# Conectar via CLI
+# Connect via CLI
 $TRINO_HOME/bin/trino
 ```
 
-No prompt do Trino:
+At the Trino prompt:
 
 ```sql
--- 1. Verificar que o conector está ativo
+-- 1. Verify the connector is active
 SHOW SCHEMAS FROM ailake;
 -- default
 
@@ -1420,7 +1419,7 @@ DESCRIBE ailake.default.search;
 -- distance  | double  | ...
 -- file_path | varchar | ...
 
--- 2. Definir o vetor de consulta (valores separados por vírgula, 64 dims para o demo)
+-- 2. Set the query vector (comma-separated values, 64 dims for demo)
 SET SESSION ailake.query_vector = '0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,
   0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,
   0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,
@@ -1431,20 +1430,20 @@ SET SESSION ailake.query_vector = '0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,
 
 SET SESSION ailake.top_k = 5;
 
--- 3. Executar busca vetorial
+-- 3. Execute vector search
 SELECT row_id, distance, file_path
 FROM ailake.default.search
 ORDER BY distance;
 
--- Resultado esperado:
+-- Expected result:
 --  row_id | distance  | file_path
 -- --------+-----------+------------------------------
 --       0 | 0.000000  | data/part-00000.parquet
 --      12 | 0.031456  | data/part-00000.parquet
 --     ...
 
--- 4. Combinar com Iceberg (JOIN com dados tabulares via conector Iceberg padrão)
--- A tabela AI-Lake retorna row_ids; faça JOIN com a tabela Iceberg para obter o texto
+-- 4. Combine with Iceberg (JOIN with tabular data via standard Iceberg connector)
+-- The AI-Lake table returns row_ids; JOIN with the Iceberg table to get text
 SELECT s.row_id, s.distance, i.chunk_text
 FROM ailake.default.search s
 JOIN iceberg.default.demo_table i ON s.row_id = i.id
@@ -1452,13 +1451,13 @@ ORDER BY s.distance
 LIMIT 5;
 ```
 
-### 15G. Testes do plugin Trino
+### 15G. Trino plugin tests
 
 ```bash
 cd trino-plugin
 ./gradlew test
 
-# Saída esperada:
+# Expected output:
 # VectorScanMetadataTest: 7 tests passed
 # VectorScanConnectorTest: 7 tests passed
 # VectorScanSplitManagerTest: 5 tests passed
@@ -1466,55 +1465,55 @@ cd trino-plugin
 # AilakeNativeTest: 5 tests passed
 ```
 
-Os testes rodam sem Trino server e sem biblioteca nativa — degradação graciosa garantida.
+Tests run without a Trino server or native library — graceful degradation guaranteed.
 
 ---
 
-## 16. Plugin Spark — VectorScanStrategy
+## 16. Spark plugin — VectorScanStrategy
 
-O `spark-plugin` registra uma `SparkStrategy` customizada no planner Catalyst do Spark 3.5. Converte planos `VectorSearchPlan` em `VectorScanExec` que chama a biblioteca nativa via JNA.
+The `spark-plugin` registers a custom `SparkStrategy` in the Spark 3.5 Catalyst planner. It converts `VectorSearchPlan` plans into `VectorScanExec` that calls the native library via JNA.
 
-### 16A. Pré-requisitos adicionais
+### 16A. Additional prerequisites
 
-Mesmo JDK 17+ e Gradle do item 15A. Spark 3.5 local (para testes), ou cluster Spark já configurado.
+Same JDK 17+ and Gradle from section 15A. Local Spark 3.5 (for testing), or a pre-configured Spark cluster.
 
 ```bash
-# Spark local (opcional — para testar)
+# Local Spark (optional — for testing)
 curl -LO https://archive.apache.org/dist/spark/spark-3.5.0/spark-3.5.0-bin-hadoop3.tgz
 tar xf spark-3.5.0-bin-hadoop3.tgz
 export SPARK_HOME=$(pwd)/spark-3.5.0-bin-hadoop3
 ```
 
-### 16B. Passo 1 — Biblioteca nativa (mesma da seção 15B)
+### 16B. Step 1 — Native library (same as section 15B)
 
 ```bash
 cargo build --release -p ailake-jni
 # target/release/libailake_jni.so  (Linux)
 ```
 
-### 16C. Passo 2 — Compilar o fat-jar do plugin
+### 16C. Step 2 — Compile the plugin fat-jar
 
 ```bash
 cd spark-plugin
-gradle wrapper   # só na primeira vez
+gradle wrapper   # first time only
 ./gradlew shadowJar
 
 ls build/libs/spark-plugin-0.1.0-plugin.jar
 ```
 
-### 16D. Passo 3 — Gerar tabela de demo
+### 16D. Step 3 — Generate demo table
 
-Usar a tabela gerada pelo demo da seção 4:
+Use the table generated by the demo in section 4:
 
 ```bash
-# Gerar tabela e anotar o path
+# Generate table and note the path
 cargo run --example demo -p ailake-query 2>&1 | grep "Workspace:"
 # Workspace: /tmp/ailakeXXXXXX
 
 export AILAKE_TABLE=/tmp/ailakeXXXXXX/warehouse/default/demo_table
 ```
 
-### 16E. Passo 4 — spark-shell (Scala interativo)
+### 16E. Step 4 — spark-shell (interactive Scala)
 
 ```bash
 $SPARK_HOME/bin/spark-shell \
@@ -1524,18 +1523,18 @@ $SPARK_HOME/bin/spark-shell \
   --conf spark.ui.enabled=false
 ```
 
-No prompt `scala>`:
+At the `scala>` prompt:
 
 ```scala
 import io.ailake.spark.implicits._
 
-// Tabela gerada pelo demo (dim=64, 1000 linhas)
+// Table generated by demo (dim=64, 1000 rows)
 val tableUri = sys.env("AILAKE_TABLE")
 
-// Vetor de consulta — igual ao primeiro embedding do demo
+// Query vector — same as the first embedding in the demo
 val query: Array[Float] = Array.fill(64)(0.5f)
 
-// Busca vetorial — retorna DataFrame com (row_id, distance, file_path)
+// Vector search — returns DataFrame with (row_id, distance, file_path)
 val results = spark.ailakeSearch(
   tableUri    = tableUri,
   queryVector = query,
@@ -1551,10 +1550,10 @@ results.show(10, truncate = false)
 // |87    |0.044123   |data/part-00001.parquet     |
 // ...
 
-// Ordenar por distância e mostrar top-5
+// Sort by distance and show top-5
 results.orderBy("distance").limit(5).show()
 
-// Schema retornado
+// Returned schema
 results.printSchema()
 // root
 //  |-- row_id: long (nullable = false)
@@ -1562,7 +1561,7 @@ results.printSchema()
 //  |-- file_path: string (nullable = false)
 ```
 
-### 16F. Passo 4 alternativo — PySpark
+### 16F. Step 4 alternative — PySpark
 
 ```bash
 $SPARK_HOME/bin/pyspark \
@@ -1572,21 +1571,21 @@ $SPARK_HOME/bin/pyspark \
 ```
 
 ```python
-# PySpark — chamar lógica Scala via py4j
+# PySpark — call Scala logic via py4j
 jvm = spark._jvm
 
-# Instanciar o VectorSearchPlan diretamente via py4j
+# Instantiate VectorSearchPlan directly via py4j
 float_array = jvm.Array(jvm.Float.TYPE, 64)
 for i in range(64):
     float_array[i] = 0.5
 
 table_uri = "/tmp/ailakeXXXXXX/warehouse/default/demo_table"
 
-# Chamar AilakeNative diretamente (sem passar pelo planner Spark)
+# Call AilakeNative directly (bypassing Spark planner)
 native = jvm.io.ailake.spark.AilakeNative
 results_java = native.search(table_uri, float_array, 10)
 
-# Converter para Python
+# Convert to Python
 results = [
     {"row_id": r.rowId(), "distance": r.distance(), "file_path": r.filePath()}
     for r in results_java
@@ -1594,13 +1593,13 @@ results = [
 for r in results:
     print(f"row_id={r['row_id']}  distance={r['distance']:.6f}  file={r['file_path']}")
 
-# Ou usar ailake-py (recomendado para Python):
+# Or use ailake-py (recommended for Python):
 import ailake
 query = [0.5] * 64
 results = ailake.search(path=table_uri, query=query, top_k=10)
 ```
 
-### 16G. Passo 5 — submeter job Spark (cluster)
+### 16G. Step 5 — submit Spark job (cluster)
 
 ```scala
 // MyVectorSearchJob.scala
@@ -1637,71 +1636,71 @@ spark-submit \
   "s3://my-lake/docs/" 100 "[0.021, -0.043, ...]" "s3://results/out/"
 ```
 
-**Importante**: `libailake_jni.so` precisa estar disponível em todos os executores. Adicionar ao `--files` do spark-submit ou instalar via bootstrap script.
+**Important**: `libailake_jni.so` must be available on all executors. Add it to spark-submit's `--files` or install via a bootstrap script.
 
-### 16H. Testes do plugin Spark
+### 16H. Spark plugin tests
 
 ```bash
 cd spark-plugin
 ./gradlew test
 
-# Saída esperada:
+# Expected output:
 # VectorSearchPlanTest: 8 tests passed
 # VectorScanStrategyTest: 6 tests passed
 # AilakeNativeTest: 4 tests passed
-# AilakeSparkExtensionsTest: 5 tests passed  (requer SparkSession local)
+# AilakeSparkExtensionsTest: 5 tests passed  (requires local SparkSession)
 ```
 
-Os testes de integração (`AilakeSparkExtensionsTest`) iniciam um SparkSession local — levam ~15s na primeira execução.
+Integration tests (`AilakeSparkExtensionsTest`) start a local SparkSession — takes ~15s on first run.
 
 ---
 
-## 17. Plugin Flink — AilakeVectorConnector
+## 17. Flink plugin — AilakeVectorConnector
 
-O `ailake-flink` é um conector Flink Table API (Kotlin/Gradle) que usa a biblioteca nativa `libailake_jni.so` via JNA para leitura e escrita vetorial em tabelas AI-Lake.
+`ailake-flink` is a Flink Table API connector (Kotlin/Gradle) that uses the native library `libailake_jni.so` via JNA for vector read and write operations on AI-Lake tables.
 
-### 17A. Pré-requisitos adicionais
+### 17A. Additional prerequisites
 
-| Ferramenta | Versão | Instalação |
+| Tool | Version | Installation |
 |---|---|---|
 | JDK | 17+ | `sudo apt install openjdk-17-jdk` |
-| Gradle | 8+ | `sdk install gradle` (ou usar wrapper) |
+| Gradle | 8+ | `sdk install gradle` (or use wrapper) |
 | Apache Flink | 1.18+ | [flink.apache.org](https://flink.apache.org/downloads/) |
 
-### 17B. Passo 1 — Compilar a biblioteca nativa
+### 17B. Step 1 — Compile the native library
 
 ```bash
-# Na raiz do projeto (mesma lib do plugin Trino/Spark)
+# From the project root (same lib as Trino/Spark plugin)
 cargo build --release -p ailake-jni
 
 # Linux:
 ls -lh target/release/libailake_jni.so
 ```
 
-### 17C. Passo 2 — Compilar o fat-jar
+### 17C. Step 2 — Compile the fat-jar
 
 ```bash
 cd ailake-flink
-gradle wrapper   # só na primeira vez
+gradle wrapper   # first time only
 ./gradlew shadowJar
 
 ls build/libs/ailake-flink-0.1.0-plugin.jar
 ```
 
-O shadow jar (`-plugin`) inclui JNA e Jackson. Dependências Flink ficam fora (são `compileOnly`).
+The shadow jar (`-plugin`) includes JNA and Jackson. Flink dependencies are outside (`compileOnly`).
 
-### 17D. Registrar o conector no Flink (SQL Client ou DataStream)
+### 17D. Register the connector in Flink (SQL Client or DataStream)
 
 ```sql
 -- Flink SQL Client
 ADD JAR '/path/to/ailake-flink-0.1.0-plugin.jar';
 
--- Tabela source + sink
+-- Source + sink table
 CREATE TABLE docs (
   id        BIGINT,
   text      STRING,
   embedding BYTES,
-  _distance FLOAT   -- preenchido pelo vector search, ignorado em writes
+  _distance FLOAT   -- filled by vector search, ignored on writes
 ) WITH (
   'connector'        = 'ailake',
   'warehouse'        = 's3://my-lake/',
@@ -1718,7 +1717,7 @@ CREATE TABLE docs (
 SELECT id, text, _distance FROM docs;
 ```
 
-O vetor de consulta é passado como parâmetro do job (`ailake.query.vector` — floats separados por vírgula):
+The query vector is passed as a job parameter (`ailake.query.vector` — floats separated by commas):
 
 ```bash
 flink run \
@@ -1726,39 +1725,39 @@ flink run \
   my-pipeline.jar
 ```
 
-Para streaming ingestion (sink):
+For streaming ingestion (sink):
 
 ```sql
 INSERT INTO docs
 SELECT id, chunk_text, embedding FROM kafka_source;
 ```
 
-O sink (`AilakeSinkFunction`) acumula 10.000 linhas e chama `AilakeNativeLoader.writeBatch()` ao fazer flush.
+The sink (`AilakeSinkFunction`) accumulates 10,000 rows and calls `AilakeNativeLoader.writeBatch()` on flush.
 
-### 17E. Testes do plugin Flink
+### 17E. Flink plugin tests
 
 ```bash
 cd ailake-flink
 ./gradlew test
 
-# Saída esperada:
+# Expected output:
 # AilakeVectorConnectorFactoryTest: tests passed
 ```
 
-Testes rodam sem servidor Flink nem biblioteca nativa — degradação graciosa via mock JNA.
+Tests run without a Flink server or native library — graceful degradation via mock JNA.
 
 ---
 
 ## 18. Multi-vector columns (`write_batch_multi_vec`)
 
-Armazena múltiplos embeddings por linha como `List<FixedSizeBinary>` — útil quando um documento tem vários chunks e você quer evitar explosão de linhas.
+Stores multiple embeddings per row as `List<FixedSizeBinary>` — useful when a document has multiple chunks and you want to avoid row explosion.
 
-### 18A. Escrever com múltiplos vetores por linha
+### 18A. Write with multiple vectors per row
 
 ```rust
 use ailake_parquet::writer::write_batch_multi_vec;
 
-// 3 documentos, cada um com 2 embeddings de dim=64
+// 3 documents, each with 2 embeddings of dim=64
 let texts = vec!["doc A".to_string(), "doc B".to_string(), "doc C".to_string()];
 let multi_embeddings: Vec<Vec<Vec<f32>>> = vec![
     vec![vec![0.1_f32; 64], vec![0.2_f32; 64]],  // doc A: 2 vecs
@@ -1769,65 +1768,65 @@ let multi_embeddings: Vec<Vec<Vec<f32>>> = vec![
 let batch = write_batch_multi_vec(&texts, &multi_embeddings, "embedding", 64)?;
 ```
 
-### 18B. Ler de volta
+### 18B. Read back
 
 ```rust
 use ailake_parquet::reader::read_all_multi_vec;
 
 let (texts, multi_vecs) = read_all_multi_vec(&parquet_bytes, "embedding", 64)?;
-// multi_vecs[i] = Vec<Vec<f32>> para o documento i
+// multi_vecs[i] = Vec<Vec<f32>> for document i
 ```
 
-### 18C. O que leitores Parquet padrão veem
+### 18C. What standard Parquet readers see
 
-Leitores sem plugin AI-Lake (Spark, Trino, DuckDB) leem a coluna como `List<BINARY>` — bytes opacos, sem erro. A semântica de vetor só é ativada pelo SDK.
+Readers without the AI-Lake plugin (Spark, Trino, DuckDB) read the column as `List<BINARY>` — opaque bytes, no error. Vector semantics are only activated by the SDK.
 
 ---
 
-## 19. MemTableWriter — buffer para streaming ingestion
+## 19. MemTableWriter — buffer for streaming ingestion
 
-`MemTableWriter` acumula micro-batches em RAM e faz flush para um único shard Parquet quando os thresholds de tamanho/linhas/tempo são atingidos. Reduz a frequência de builds HNSW em pipelines Flink/Spark Streaming.
+`MemTableWriter` accumulates micro-batches in RAM and flushes to a single Parquet shard when size/row/time thresholds are reached. Reduces HNSW build frequency in Flink/Spark Streaming pipelines.
 
-### 19A. Uso básico
+### 19A. Basic usage
 
 ```rust
 use ailake_query::mem_table::{MemTableWriter, MemTableConfig};
 use std::time::Duration;
 
 let config = MemTableConfig {
-    flush_size_bytes: 128 * 1024 * 1024,  // flush após 128 MiB
-    flush_max_rows:   200_000,             // flush após 200k linhas
-    flush_interval:   Duration::from_secs(60), // flush após 60s inativo
+    flush_size_bytes: 128 * 1024 * 1024,  // flush after 128 MiB
+    flush_max_rows:   200_000,             // flush after 200k rows
+    flush_interval:   Duration::from_secs(60), // flush after 60s idle
 };
 
 let mut mt = MemTableWriter::new(catalog, store, policy, table, config);
 
-// Loop de ingestão streaming
+// Streaming ingestion loop
 loop {
     let (batch, embeddings) = receive_micro_batch().await;
     mt.insert(&batch, &embeddings).await?;
 
-    // Flush automático se threshold atingido
+    // Automatic flush if threshold reached
     if let Some(snap_id) = mt.flush_if_due().await? {
         println!("Flushed snapshot {snap_id}");
     }
 }
 
-// Flush final ao encerrar o job
+// Final flush when shutting down the job
 let snap_id = mt.flush().await?;
 ```
 
-### 19B. Thresholds padrão
+### 19B. Default thresholds
 
 | Threshold | Default | Trigger |
 |---|---|---|
-| `flush_size_bytes` | 64 MiB | Bytes acumulados de embeddings |
-| `flush_max_rows` | 100,000 | Linhas acumuladas |
-| `flush_interval` | 30s | Tempo desde último flush |
+| `flush_size_bytes` | 64 MiB | Accumulated embedding bytes |
+| `flush_max_rows` | 100,000 | Accumulated rows |
+| `flush_interval` | 30s | Time since last flush |
 
-`flush_if_due()` verifica os três. `flush()` força independente dos thresholds.
+`flush_if_due()` checks all three. `flush()` forces regardless of thresholds.
 
-### 19C. Inspecionar estado do buffer
+### 19C. Inspect buffer state
 
 ```rust
 println!("Buffered: {} rows, {} bytes", mt.buffered_rows(), mt.buffered_bytes());
@@ -1836,27 +1835,27 @@ if mt.is_full() { mt.flush().await?; }
 
 ---
 
-## Estrutura dos crates
+## Crate structure
 
 ```
-ailake-core/      tipos base: VectorMetric, VectorPrecision, RowId, AilakeError
-ailake-parquet/   leitura/escrita Parquet com coluna VECTOR; write_batch_multi_vec / read_all_multi_vec
-ailake-vec/       quantização F32→F16, PQ (PQCodebook), BlockCompressor, SIMD distances (AVX2/NEON), centróides
+ailake-core/      base types: VectorMetric, VectorPrecision, RowId, AilakeError
+ailake-parquet/   Parquet read/write with VECTOR column; write_batch_multi_vec / read_all_multi_vec
+ailake-vec/       F32→F16 quantization, PQ (PQCodebook), BlockCompressor, SIMD distances (AVX2/NEON), centroids
 ailake-index/     HNSW + IVF-PQ (AnyIndex enum); hardware detection (HardwareBackend: NvidiaCuda/AmdRocm/CpuSimd);
                   NVIDIA via cuBLAS libloading (runtime, no build flag); AMD ROCm via hipBLAS libloading (runtime, no build flag);
                   kmeans_dispatch: NVIDIA → ROCm → CPU; bincode, MmapLoader (memmap2)
-ailake-file/      arquivo unificado: AILK suporta IndexType::Hnsw e IndexType::IvfPq
-ailake-catalog/   catálogo Iceberg: HadoopCatalog, RestCatalog, NessieCatalog, JdbcCatalog, GlueCatalog
-ailake-store/     abstração de storage: LocalStore + ObjectStoreBackend (S3/GCS/Azure via object_store)
+ailake-file/      unified file: AILK supports IndexType::Hnsw and IndexType::IvfPq
+ailake-catalog/   Iceberg catalog: HadoopCatalog, RestCatalog, NessieCatalog, JdbcCatalog, GlueCatalog
+ailake-store/     storage abstraction: LocalStore + ObjectStoreBackend (S3/GCS/Azure via object_store)
 ailake-query/     TableWriter (write_batch, write_batch_ivf_pq, write_batch_multi), MemTableWriter,
-                  search() com pruning geométrico, ContextAssembler, CompactionExecutor
-ailake-bench/     benchmark SIFT-1M: HNSW, IVF-PQ (--engine ailake-ivf-pq), LanceDB, pgvector
-ailake-py/        bindings PyO3 (fora do workspace — compilar com maturin)
-ailake-jni/       C-ABI cdylib via JNA para Spark, Trino e Flink
+                  search() with geometric pruning, ContextAssembler, CompactionExecutor
+ailake-bench/     SIFT-1M benchmark: HNSW, IVF-PQ (--engine ailake-ivf-pq), LanceDB, pgvector
+ailake-py/        PyO3 bindings (outside workspace — compile with maturin)
+ailake-jni/       C-ABI cdylib via JNA for Spark, Trino, and Flink
 spark-plugin/     Spark 3.5 Catalyst strategy (Kotlin/Gradle)
 trino-plugin/     Trino connector (Java/Gradle)
 ailake-flink/     Flink Table API connector (Kotlin/Gradle)
-tests/            testes de integração e compatibilidade
+tests/            integration and compatibility tests
 ```
 
 ---
@@ -1869,172 +1868,172 @@ tests/            testes de integração e compatibilidade
 sudo apt install build-essential
 ```
 
-**`import pyarrow` falha**
+**`import pyarrow` fails**
 ```bash
 pip install pyarrow
-# ou com conda:
+# or with conda:
 conda install pyarrow
 ```
 
-**`import ailake` falha após `maturin develop`**
+**`import ailake` fails after `maturin develop`**
 ```bash
-# Verificar que está no diretório ailake-py e no venv correto
+# Verify you are in the ailake-py directory and the correct venv
 cd ailake-py
 maturin develop --release
 python3 -c "import ailake"
 ```
 
-**`cargo test` falha em `pyarrow_ignores_ailake_footer`**
-Esse teste requer `python3` + `pyarrow`. Execute com `--ignored`:
+**`cargo test` fails on `pyarrow_ignores_ailake_footer`**
+This test requires `python3` + `pyarrow`. Run with `--ignored`:
 ```bash
 cargo test -p tests --test parquet_trailing_bytes -- --ignored
 ```
 
-**Benchmark falha com `E0601`**
-Certifique-se de estar na branch `main` ou `develop` (benches vazios foram corrigidos em `e382e83`).
+**Benchmark fails with `E0601`**
+Make sure you are on the `main` or `develop` branch (empty benches were fixed in `e382e83`).
 
-**`pruning_threshold` remove todos os resultados**
-Threshold muito baixo corta arquivos legítimos. Use `f32::INFINITY` para desativar pruning e debugar:
+**`pruning_threshold` removes all results**
+Threshold too low cuts legitimate files. Use `f32::INFINITY` to disable pruning and debug:
 ```rust
 SearchConfig { top_k: 10, ef_search: 50, pruning_threshold: f32::INFINITY }
 ```
 
-**Plugin Trino: `UnsatisfiedLinkError: libailake_jni.so`**
-A biblioteca nativa não está no `java.library.path` do Trino.
+**Trino plugin: `UnsatisfiedLinkError: libailake_jni.so`**
+The native library is not in Trino's `java.library.path`.
 ```bash
-# Verificar onde o Trino procura
+# Check where Trino looks
 grep "java.library.path" $TRINO_HOME/etc/jvm.config
 
-# Adicionar o caminho
+# Add the path
 echo "-Djava.library.path=/path/to/target/release" >> $TRINO_HOME/etc/jvm.config
 
-# Reiniciar o Trino
+# Restart Trino
 $TRINO_HOME/bin/launcher restart
 ```
 
-**Plugin Trino: `ailake.table-uri is required`**
-A propriedade não foi definida no arquivo de catálogo.
+**Trino plugin: `ailake.table-uri is required`**
+The property was not defined in the catalog file.
 ```bash
 cat $TRINO_HOME/etc/catalog/ailake.properties
-# Verificar que contém: ailake.table-uri=...
+# Verify it contains: ailake.table-uri=...
 ```
 
-**Plugin Trino: `SELECT` retorna 0 linhas**
-Session property `query_vector` está vazia. Verificar:
+**Trino plugin: `SELECT` returns 0 rows**
+Session property `query_vector` is empty. Verify:
 ```sql
 SHOW SESSION LIKE 'ailake%';
 SET SESSION ailake.query_vector = '0.1,0.2,0.3,...';
 ```
 
-**Plugin Spark: `ClassNotFoundException: io.ailake.spark.AilakeSparkExtensions`**
-O jar do plugin não foi passado para o Spark.
+**Spark plugin: `ClassNotFoundException: io.ailake.spark.AilakeSparkExtensions`**
+The plugin jar was not passed to Spark.
 ```bash
-# Verificar que --jars inclui o plugin
-spark-shell --jars /caminho/spark-plugin-0.1.0-plugin.jar \
+# Verify --jars includes the plugin
+spark-shell --jars /path/to/spark-plugin-0.1.0-plugin.jar \
   --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions
 ```
 
-**Plugin Spark: `ailakeSearch` não encontrado**
-O import dos implicits está faltando.
+**Spark plugin: `ailakeSearch` not found**
+The implicits import is missing.
 ```scala
-// Adicionar no início do script
+// Add at the beginning of the script
 import io.ailake.spark.implicits._
 ```
 
-**Plugin Spark: VectorScanExec retorna DataFrame vazio**
-Comportamento esperado em ambiente sem `libailake_jni.so` — degradação graciosa.
-Para habilitar busca real, garantir que a lib está no `java.library.path`:
+**Spark plugin: VectorScanExec returns empty DataFrame**
+Expected behavior in an environment without `libailake_jni.so` — graceful degradation.
+To enable real search, ensure the lib is in `java.library.path`:
 ```bash
 spark-shell \
   --conf "spark.driver.extraJavaOptions=-Djava.library.path=/path/to/target/release" \
   --conf "spark.executor.extraJavaOptions=-Djava.library.path=/path/to/target/release"
 ```
 
-**`SearchConfig` falha compilação com `missing field rerank_factor`**
-Adicione o campo faltante (introduzido na Phase 4):
+**`SearchConfig` compilation fails with `missing field rerank_factor`**
+Add the missing field (introduced in Phase 4):
 ```rust
 SearchConfig {
     top_k: 10,
     ef_search: 50,
     pruning_threshold: 0.8,
-    rerank_factor: None,  // Some(3) para habilitar reranking
+    rerank_factor: None,  // Some(3) to enable reranking
 }
 ```
 
-**NVIDIA GPU disponível mas busca usa CPU (`try_nvidia_search_batch` retorna `None`)**
-Runtime libraries ausentes ou fora do `LD_LIBRARY_PATH`. Não é necessário CUDA Toolkit — apenas as libs de runtime:
+**NVIDIA GPU available but search uses CPU (`try_nvidia_search_batch` returns `None`)**
+Runtime libraries missing or not in `LD_LIBRARY_PATH`. CUDA Toolkit is not required — only runtime libs:
 ```bash
-# Ubuntu — instalar apenas runtime (sem nvcc/headers)
+# Ubuntu — install runtime only (no nvcc/headers)
 sudo apt install libcuda1 libcublas-12-x
 
-# Ou via CUDA keyring (canonical)
+# Or via CUDA keyring (canonical)
 sudo apt install cuda-libraries-12-x
 
-# Verificar presença
+# Verify presence
 ldconfig -p | grep -E "libcuda|libcublas"
 ls /usr/local/cuda/lib64/libcudart.so*
 
-# Exportar se não estiver no path padrão
+# Export if not in default path
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
 
-**GPU build compila mas busca usa CPU (log não mostra "NVIDIA" ou "AMD")**
-`detect_backend()` retornou `CpuSimd`. Verificar:
+**GPU build compiles but search uses CPU (log does not show "NVIDIA" or "AMD")**
+`detect_backend()` returned `CpuSimd`. Verify:
 ```bash
-nvidia-smi                        # GPU NVIDIA visível?
-rocm-smi                          # GPU AMD visível?
-ls /dev/nvidia*                   # Dispositivos NVIDIA presentes?
-ls /dev/kfd                       # Dispositivo AMD KFD presente?
-echo $CUDA_VISIBLE_DEVICES        # Não deve ser "NoDevFiles"
+nvidia-smi                        # NVIDIA GPU visible?
+rocm-smi                          # AMD GPU visible?
+ls /dev/nvidia*                   # NVIDIA devices present?
+ls /dev/kfd                       # AMD KFD device present?
+echo $CUDA_VISIBLE_DEVICES        # Must not be "NoDevFiles"
 ```
-Para NVIDIA: `libcuda.so.1` deve existir (`ldconfig -p | grep libcuda`).
-Para AMD: `libamdhip64.so` e `libhipblas.so` devem existir (`ldconfig -p | grep -E "hip|hsa"`).
+For NVIDIA: `libcuda.so.1` must exist (`ldconfig -p | grep libcuda`).
+For AMD: `libamdhip64.so` and `libhipblas.so` must exist (`ldconfig -p | grep -E "hip|hsa"`).
 
-**AMD ROCm detectado mas busca usa CPU**
-`detect_rocm()` retorna `true` (HIP runtime ok) mas `try_rocm_search_batch` retorna `None`.
-Causa mais comum: `libhipblas.so` não instalado (ROCm Math Libraries são opcionais).
+**AMD ROCm detected but search uses CPU**
+`detect_rocm()` returns `true` (HIP runtime ok) but `try_rocm_search_batch` returns `None`.
+Most common cause: `libhipblas.so` not installed (ROCm Math Libraries are optional).
 ```bash
-# Verificar presença do hipBLAS
+# Verify hipBLAS presence
 ldconfig -p | grep hipblas
 
-# Instalar hipBLAS (Ubuntu/ROCm PPA)
+# Install hipBLAS (Ubuntu/ROCm PPA)
 sudo apt install hipblas
-# ou
+# or
 sudo apt install rocm-libs
 ```
 
-**`ailake-auto` mostra `Backend: NVIDIA CUDA` em máquina AMD**
-ROCm com camada de compatibilidade CUDA instalada — `libcuda.so.1` existe (fornecida pelo pacote `hip-runtime-amd`). Neste caso, se `libamdhip64.so` também existe, o backend correto `AmdRocm` já é escolhido (AMD é verificado primeiro). Se ainda aparece NVIDIA, verificar:
+**`ailake-auto` shows `Backend: NVIDIA CUDA` on an AMD machine**
+ROCm with CUDA compatibility layer installed — `libcuda.so.1` exists (provided by `hip-runtime-amd`). In this case, if `libamdhip64.so` also exists, the correct `AmdRocm` backend is already chosen (AMD is checked first). If NVIDIA still appears, verify:
 ```bash
 ldconfig -p | grep -E "libamdhip|libcuda"
-# libamdhip64.so deve aparecer para ROCm ser detectado como AmdRocm
+# libamdhip64.so must appear for ROCm to be detected as AmdRocm
 ```
 
-**Plugin Flink: `ClassNotFoundException: io.ailake.flink.AilakeVectorConnectorFactory`**
-O jar do plugin não foi adicionado ao Flink.
+**Flink plugin: `ClassNotFoundException: io.ailake.flink.AilakeVectorConnectorFactory`**
+The plugin jar was not added to Flink.
 ```bash
-# SQL Client — adicionar antes de CREATE TABLE
+# SQL Client — add before CREATE TABLE
 ADD JAR '/path/to/ailake-flink-0.1.0-plugin.jar';
 
-# ou via flink-conf.yaml
+# or via flink-conf.yaml
 classloader.parent-first-patterns.additional: io.ailake
 ```
 
-**Plugin Flink: conector registrado mas sink não persiste**
-`libailake_jni.so` não está no `java.library.path` do TaskManager:
+**Flink plugin: connector registered but sink does not persist**
+`libailake_jni.so` is not in the TaskManager's `java.library.path`:
 ```bash
-# Adicionar em flink-conf.yaml
+# Add in flink-conf.yaml
 env.java.opts.taskmanager: -Djava.library.path=/opt/ailake/lib
 ```
 
-**`IvfPqConfig` — `pq_m` deve dividir `dim`**
-Build falha com `"pq_m X does not divide dim Y"`. Usar `IvfPqConfig::for_dim(dim)` para derivar valores válidos automaticamente:
+**`IvfPqConfig` — `pq_m` must divide `dim`**
+Build fails with `"pq_m X does not divide dim Y"`. Use `IvfPqConfig::for_dim(dim)` to derive valid values automatically:
 ```rust
 let cfg = IvfPqConfig::for_dim(1536);  // pq_m=96, nlist=256, nprobe=8
 ```
 
-**`MemTableWriter::flush()` retorna erro após `insert` vazio**
-Chamar `flush()` sem nenhum `insert` prévio retorna `Err(EmptyBatch)`. Verificar `buffered_rows() > 0` antes:
+**`MemTableWriter::flush()` returns error after empty `insert`**
+Calling `flush()` without any prior `insert` returns `Err(EmptyBatch)`. Check `buffered_rows() > 0` first:
 ```rust
 if mt.buffered_rows() > 0 {
     mt.flush().await?;

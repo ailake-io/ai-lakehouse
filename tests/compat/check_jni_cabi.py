@@ -143,7 +143,7 @@ spark_trino_fixture = os.environ.get("AILAKE_SPARK_TRINO_FIXTURE")
 if spark_trino_fixture:
     pathlib.Path(spark_trino_fixture).mkdir(parents=True, exist_ok=True)
     write_fixture(spark_trino_fixture, "default", "table")
-    print(f"PASS (spark/trino fixture): written to {spark_trino_fixture}/default.db/table")
+    print(f"PASS (spark/trino fixture): written to {spark_trino_fixture}/default/table")
 
 print()
 print("PASS: ailake-jni C-ABI (write + search) — JNA bridge interface validated.")

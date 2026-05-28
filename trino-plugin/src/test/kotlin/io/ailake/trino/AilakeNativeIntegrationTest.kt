@@ -33,8 +33,9 @@ class AilakeNativeIntegrationTest {
         val v = FloatArray(dim) { j -> (queryIdx * dim + j + 1).toFloat() }
         val norm = sqrt(v.fold(0f) { acc, x -> acc + x * x }.toDouble()).toFloat()
         val queryCsv = v.joinToString(",") { (it / norm).toString() }
+        val queryBytes = VectorScanSplitManager.csvFloatsToBase64(queryCsv)
 
-        val results = AilakeNative.search(fixturePath!!, queryCsv, topK = 5)
+        val results = AilakeNative.search(fixturePath!!, queryBytes, topK = 5)
         check(results.isNotEmpty()) { "search returned empty results — check fixture and native lib" }
 
         val best = results.minByOrNull { it.distance }!!

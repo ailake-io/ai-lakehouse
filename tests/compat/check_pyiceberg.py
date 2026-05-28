@@ -26,7 +26,7 @@ if not files_txt.exists():
     sys.exit(1)
 
 expected_rows = int(rows_txt.read_text().strip())
-table_root = fixture_dir / "default.db" / "compat_test"
+table_root = fixture_dir / "default" / "compat_test"
 metadata_dir = table_root / "metadata"
 version_hint = metadata_dir / "version-hint.text"
 
