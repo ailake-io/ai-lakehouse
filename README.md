@@ -148,7 +148,7 @@ ailake/
 ├── ailake-jni/
 │   ├── Cargo.toml
 │   └── src/
-│       └── lib.rs              # uniffi bindings for Spark/Trino/Flink
+│       └── lib.rs              # C-ABI cdylib for Spark/Trino/Flink via JNA
 └── ailake-flink/               # Kotlin — Flink Table API connector (Gradle)
     ├── build.gradle.kts
     └── src/main/kotlin/io/ailake/flink/
@@ -184,7 +184,7 @@ cargo check --workspace
 |---|---|---|
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW loading, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
-| **Phase 3** | ✅ Complete | Catalog backends (Nessie/JDBC/Glue), uniffi JVM bindings, multi-column vectors, Spark/Trino/Flink plugins |
+| **Phase 3** | ✅ Complete | Catalog backends (Nessie/JDBC/Glue), JNA C-ABI bindings, multi-column vectors, Spark/Trino/Flink plugins |
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog) |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.
