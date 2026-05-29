@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::sync::Arc;
+use tracing::{debug, error, info};
 
 use ailake_catalog::{
     make_data_file_entry, CatalogProvider, DataFileEntry, NewSnapshot, SnapshotOperation,
@@ -70,8 +71,19 @@ impl CompactionPlanner {
             .cloned()
             .collect();
         if candidates.len() < self.config.min_files_to_compact {
+            debug!(
+                "ailake: compaction skipped — {} eligible files < min_files_to_compact={}",
+                candidates.len(),
+                self.config.min_files_to_compact
+            );
             return vec![];
         }
+        let total_bytes: u64 = candidates.iter().map(|f| f.file_size_bytes).sum();
+        info!(
+            "ailake: compaction plan — {} files ({} bytes) → 1 merged file",
+            candidates.len(),
+            total_bytes
+        );
         candidates
     }
 }
@@ -124,6 +136,10 @@ impl CompactionExecutor {
             let bytes: Bytes = self.store.get(&entry.path).await?;
             let reader = AilakeFileReader::new(bytes, &self.policy.column_name, self.policy.dim);
             if !reader.is_ailake_file() {
+                debug!(
+                    "ailake: compaction skipping {} — not an AI-Lake file",
+                    entry.path
+                );
                 continue;
             }
             let (batch, embs) = reader.read_parquet()?;
@@ -216,9 +232,22 @@ impl CompactionExecutor {
         };
         catalog.commit_snapshot(table, snapshot).await?;
 
+        info!(
+            "ailake: compaction committed — merged {} files into {}",
+            to_compact.len(),
+            output_path
+        );
+
         // Delete old files from store
         for entry in &to_compact {
-            let _ = self.store.delete(&entry.path).await;
+            if let Err(e) = self.store.delete(&entry.path).await {
+                error!(
+                    "ailake: compaction cleanup failed — could not delete {}: {} \
+                     (orphan file in object store after successful catalog commit; \
+                     delete manually to reclaim storage)",
+                    entry.path, e
+                );
+            }
         }
 
         Ok(Some(merged))

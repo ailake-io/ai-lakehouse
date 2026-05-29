@@ -2,6 +2,7 @@
 use ailake_catalog::{decode_centroid, DataFileEntry};
 use ailake_core::VectorMetric;
 use ailake_vec::{cosine_distance, dot_product, euclidean_distance};
+use tracing::debug;
 
 pub struct VectorPruner;
 
@@ -23,10 +24,25 @@ impl VectorPruner {
                 match decode_centroid(entry, metric) {
                     Some(centroid) => {
                         let dist = compute_distance(query, &centroid.values, metric);
-                        // Keep file if any of its vectors could be within threshold
-                        dist - centroid.radius <= threshold
+                        let keep = dist - centroid.radius <= threshold;
+                        debug!(
+                            "ailake: pruner {} — dist={:.4} radius={:.4} edge={:.4} threshold={:.4} → {}",
+                            entry.path,
+                            dist,
+                            centroid.radius,
+                            dist - centroid.radius,
+                            threshold,
+                            if keep { "KEEP" } else { "PRUNE" }
+                        );
+                        keep
                     }
-                    None => true, // no centroid → keep (safe fallback)
+                    None => {
+                        debug!(
+                            "ailake: pruner {} — no centroid metadata, keeping (conservative fallback)",
+                            entry.path
+                        );
+                        true // no centroid → keep (safe fallback)
+                    }
                 }
             })
             .collect()

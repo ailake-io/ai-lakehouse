@@ -27,6 +27,22 @@
 #include <optional>
 #include <thread>
 
+// ---------------------------------------------------------------------------
+// Configurable logging macro.
+//
+// By default, ailake is silent (header-only library — no logging system assumed).
+// Define AILAKE_LOG before including this header to route messages:
+//
+//   #define AILAKE_LOG(level, msg) spdlog::level(msg)
+//   #define AILAKE_LOG(level, msg) std::clog << "[ailake][" #level "] " << msg << "\n"
+//   #define AILAKE_LOG(level, msg) MY_LOGGER->level(msg)
+//
+// Levels used: info, warn, debug
+// ---------------------------------------------------------------------------
+#ifndef AILAKE_LOG
+#  define AILAKE_LOG(level, msg) ((void)0)
+#endif
+
 namespace ailake {
 
 // ---------------------------------------------------------------------------
@@ -200,9 +216,16 @@ inline const HardwareProfile& detect_hardware() {
         if (detail::probe_rocm()) {
             profile.backend  = Backend::AmdRocm;
             profile.has_rocm = true;
+            AILAKE_LOG(info, "ailake: GPU backend selected — AMD ROCm (hipBLAS via dlopen)");
         } else if (detail::probe_cuda()) {
             profile.backend  = Backend::NvidiaCuda;
             profile.has_cuda = true;
+            AILAKE_LOG(info, "ailake: GPU backend selected — NVIDIA CUDA (cuBLAS via dlopen)");
+        } else {
+            AILAKE_LOG(info,
+                "ailake: no GPU detected — using CPU SIMD backend; "
+                "install NVIDIA CUDA runtime (libcuda.so.1 + libcublas.so) "
+                "or AMD ROCm (libamdhip64.so + libhipblas.so) to enable GPU acceleration");
         }
         profile.cpu_cores = std::thread::hardware_concurrency();
         detail::detect_simd(profile.has_avx2, profile.has_avx512);

@@ -1,0 +1,87 @@
+# AI-Lake onboarding demo — single-command environment
+#
+# Usage (from repo root):
+#   docker compose -f tests/docker/compose-demo.yml up -d
+#
+# Then open: http://localhost:8888
+#
+# Services:
+#   minio    — local S3 (console: http://localhost:9001, user/pass: minioadmin)
+#   nessie   — Iceberg REST catalog (http://localhost:19120)
+#   jupyter  — JupyterLab with ailake + pyiceberg pre-loaded and demo data ready
+#
+# First run builds the ailake-py wheel via maturin (~3-5 min).
+# Subsequent runs are instant (Docker layer cache).
+
+services:
+
+  minio:
+    image: minio/minio:latest
+    container_name: ailake-demo-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: ailake-demo-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin;
+        mc mb local/demo-bucket --ignore-existing;
+        echo 'MinIO bucket ready.';
+      "
+
+  nessie:
+    image: projectnessie/nessie:latest
+    container_name: ailake-demo-nessie
+    ports:
+      - "19120:19120"
+    environment:
+      QUARKUS_HTTP_PORT: 19120
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:19120/api/v1/config || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  jupyter:
+    build:
+      # Context is the repo root so maturin can build the full Rust workspace.
+      context: ../..
+      dockerfile: tests/docker/demo/Dockerfile
+    container_name: ailake-demo-jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - demo-data:/data
+    environment:
+      MINIO_ENDPOINT: "http://minio:9000"
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      NESSIE_URI: "http://nessie:19120/api/v1"
+      DEMO_TABLE_PATH: /data/ailake_demo
+      DEMO_DIM: "16"
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      nessie:
+        condition: service_healthy
+
+volumes:
+  minio-data:
+  demo-data:

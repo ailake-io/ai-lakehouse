@@ -59,6 +59,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p ailake-tests -- --test-threads=1
 
+  # Runs ailake-index unit tests on a CPU-only Linux runner.
+  # Verifies that hardware::detect_backend() falls back to CpuSimd when no
+  # CUDA/ROCm libraries are present and that all index tests pass on that path.
+  # GPU tests live in ci-gpu.yml (Windows self-hosted runner with CUDA).
+  index-cpu-fallback:
+    name: index — cpu fallback (no GPU)
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify no GPU libraries on runner
+        run: |
+          if ldconfig -p 2>/dev/null | grep -qE "libcuda\.so\.1|libamdhip64\.so"; then
+            echo "WARNING: GPU library found on CPU-only runner — fallback path may not be exercised"
+          else
+            echo "PASS: no CUDA/ROCm libraries detected — CpuSimd fallback will be active"
+          fi
+      - name: Run ailake-index tests (CPU fallback path)
+        run: cargo test -p ailake-index -- --nocapture
+
   compat-parquet:
     name: compat-parquet
     runs-on: [self-hosted, Linux, X64]

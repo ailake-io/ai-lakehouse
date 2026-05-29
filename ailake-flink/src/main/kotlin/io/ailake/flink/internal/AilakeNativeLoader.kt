@@ -5,6 +5,7 @@ import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
+import org.slf4j.LoggerFactory
 import java.io.File
 import java.nio.file.Files
 
@@ -19,6 +20,7 @@ import java.nio.file.Files
  */
 object AilakeNativeLoader {
 
+    private val log = LoggerFactory.getLogger(AilakeNativeLoader::class.java)
     private val mapper = jacksonObjectMapper()
 
     val lib: AilakeNativeLib by lazy {
@@ -26,11 +28,24 @@ object AilakeNativeLoader {
             System.getProperty("ailake.native.lib")
                 ?: System.getenv("AILAKE_NATIVE_LIB")
 
-        if (explicitPath != null) {
-            Native.load(explicitPath, AilakeNativeLib::class.java)
-        } else {
-            Native.load("ailake_jni", AilakeNativeLib::class.java)
-        }
+        val loaded = runCatching {
+            if (explicitPath != null) {
+                Native.load(explicitPath, AilakeNativeLib::class.java)
+            } else {
+                Native.load("ailake_jni", AilakeNativeLib::class.java)
+            }
+        }.onSuccess {
+            log.info("[ailake] Native library libailake_jni loaded (path={})",
+                explicitPath ?: "JNA default search path")
+        }.onFailure {
+            log.error(
+                "[ailake] Failed to load native library libailake_jni (path={}). " +
+                "Set ailake.native.lib system property or AILAKE_NATIVE_LIB env var. Error: {}",
+                explicitPath ?: "JNA default search path", it.message
+            )
+        }.getOrThrow()
+
+        loaded
     }
 
     val version: String by lazy { lib.ailake_version() }
@@ -75,7 +90,11 @@ object AilakeNativeLoader {
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<SearchResponse>(json)
-            if (!resp.ok) throw RuntimeException("ailake_search_json error: ${resp.error}")
+            if (!resp.ok) {
+                log.error("[ailake] ailake_search_json returned error for table={}.{}: {}", namespace, table, resp.error)
+                throw RuntimeException("ailake_search_json error: ${resp.error}")
+            }
+            log.debug("[ailake] search OK table={}.{} top_k={} results={}", namespace, table, topK, resp.results.size)
             resp.results
         } finally {
             lib.ailake_free_string(ptr)
@@ -119,7 +138,11 @@ object AilakeNativeLoader {
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<WriteResponse>(json)
-            if (!resp.ok) throw RuntimeException("ailake_write_batch_json error: ${resp.error}")
+            if (!resp.ok) {
+                log.error("[ailake] ailake_write_batch_json returned error for table={}.{}: {}", namespace, table, resp.error)
+                throw RuntimeException("ailake_write_batch_json error: ${resp.error}")
+            }
+            log.info("[ailake] write OK table={}.{} rows={} snapshot_id={}", namespace, table, ids.size, resp.snapshot_id)
             resp.snapshot_id
         } finally {
             lib.ailake_free_string(ptr)

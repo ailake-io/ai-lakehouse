@@ -1,72 +1,365 @@
 # Contributing to AI-Lake
 
-Thanks for your interest. This guide gets you from zero to a merged PR.
+Thank you for your interest in contributing. This guide covers everything needed to go from zero to a merged pull request.
+
+---
+
+## Table of contents
+
+1. [Prerequisites](#prerequisites)
+2. [Development environment setup](#development-environment-setup)
+3. [Building the project](#building-the-project)
+4. [Running tests](#running-tests)
+5. [Code style and quality gates](#code-style-and-quality-gates)
+6. [Branch and commit strategy](#branch-and-commit-strategy)
+7. [Pull request workflow](#pull-request-workflow)
+8. [Reporting issues](#reporting-issues)
 
 ---
 
 ## Prerequisites
 
-- Rust stable (≥ 1.78) — `rustup update stable`
-- Python 3.10+ (for compat tests)
-- `cargo`, `clippy`, `rustfmt` (included with Rust toolchain)
+| Tool | Minimum version | Install |
+|---|---|---|
+| **Rust** (stable) | 1.78+ | `curl https://sh.rustup.rs -sSf \| sh` |
+| **JDK** | 17+ | `sudo apt install openjdk-17-jdk` or [Adoptium](https://adoptium.net) |
+| **Gradle** | 8.7+ | Included as wrapper (`./gradlew`) in each JVM subproject |
+| **Python** | 3.10+ | System Python or [pyenv](https://github.com/pyenv/pyenv) |
+| **maturin** | 1.4+ | `pip install maturin` — required to build `ailake-py` |
+| **cargo-deny** | latest | `cargo install cargo-deny` — license and advisory audits |
+
+Optional (for full compat-heavy tests):
+
+| Tool | Purpose |
+|---|---|
+| **Docker** | Runs Spark, Trino, and BigQuery emulator in `compat-heavy.yml` |
+| **NVIDIA CUDA runtime** | Enables GPU search (`libcudart.so` + `libcublas.so`) |
+| **AMD ROCm runtime** | Enables GPU search (`libamdhip64.so` + `libhipblas.so`) |
 
 ---
 
-## Build
+## Development environment setup
+
+### 1. Clone and enter the repository
 
 ```bash
+git clone https://github.com/ThiagoLange/iceberg-ai-deltalakehouse.git
+cd iceberg-ai-deltalakehouse
+git checkout develop   # all work goes here first
+```
+
+### 2. Rust workspace
+
+```bash
+# Install or update Rust stable
+rustup update stable
+
+# Install required components
+rustup component add rustfmt clippy
+
+# Install cargo-deny (license + advisory audit)
+cargo install cargo-deny
+
+# Build the entire workspace (debug)
 cargo build --workspace
+
+# Build release (required before JVM plugin tests)
+cargo build --workspace --release
 ```
 
-For the Python extension:
+### 3. Python extension (ailake-py)
 
 ```bash
-cd ailake-py
 pip install maturin
-maturin build --release
-pip install target/wheels/*.whl
+
+# Build and install the wheel into the active Python environment
+cd ailake-py
+maturin develop --release
+cd ..
+
+# Verify
+python -c "import ailake; print(ailake.__doc__)"
+```
+
+### 4. JVM plugins (Spark / Trino / Flink)
+
+Each JVM subproject includes a Gradle wrapper. No system-wide Gradle installation is required.
+
+```bash
+# Native library (required by all JVM tests)
+cargo build --release -p ailake-jni
+
+# Flink connector
+cd ailake-flink
+./gradlew test -Dailake.native.lib=$(pwd)/../target/release/libailake_jni.so
+cd ..
+
+# Spark plugin
+cd spark-plugin
+LD_LIBRARY_PATH=$(pwd)/../target/release \
+AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/../spark-trino-fixture \
+./gradlew test
+cd ..
+
+# Trino plugin
+cd trino-plugin
+LD_LIBRARY_PATH=$(pwd)/../target/release \
+AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/../spark-trino-fixture \
+./gradlew test
+cd ..
+```
+
+### 5. Go SDK (ailake-go)
+
+```bash
+cd ailake-go
+go build ./...
+go vet ./...
+go test ./...
+cd ..
+```
+
+### 6. C++ SDK (ailake-cpp)
+
+```bash
+cmake -S ailake-cpp -B ailake-cpp/build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DAILAKE_CUDA=OFF \
+  -DAILAKE_TESTS=OFF \
+  -DAILAKE_EXAMPLES=ON
+cmake --build ailake-cpp/build --parallel
 ```
 
 ---
 
-## Tests
+## Building the project
 
 ```bash
-# All unit + integration tests
-cargo test --workspace
+# All Rust crates (debug)
+cargo build --workspace
 
-# Compat tests (require Python deps)
-pip install pyarrow duckdb pyiceberg
+# All Rust crates (release — needed for JVM tests)
+cargo build --workspace --release
+
+# Single crate
+cargo build -p ailake-query
+
+# Check without producing artifacts (faster)
+cargo check --workspace
+```
+
+---
+
+## Running tests
+
+### Rust — unit and integration
+
+```bash
+# All unit tests
+cargo test --workspace --lib --bins
+
+# Full integration suite (local FS, no Docker required)
+cargo test -p ailake-tests -- --test-threads=1
+
+# Parquet spec compliance
+cargo test -p ailake-tests --test parquet_trailing_bytes --test positional_invariant
+```
+
+### Python compat (requires PyArrow, DuckDB, PyIceberg)
+
+```bash
+pip install pyarrow duckdb "pyiceberg[pyarrow]"
+cargo run --example write_fixture -p ailake-query
 python tests/compat/check_pyarrow.py
 python tests/compat/check_duckdb.py
 python tests/compat/check_pyiceberg.py
-python tests/compat/check_ailake_py.py
+```
 
-# JNI C-ABI test (requires release build)
+### ailake-py SDK
+
+```bash
+cd ailake-py && maturin develop --release && cd ..
+python tests/compat/check_ailake_py.py
+```
+
+### Airflow provider
+
+```bash
+cd airflow-providers-ailake
+pip install "apache-airflow>=2.6" pytest
+pytest tests/
+cd ..
+```
+
+### JNI C-ABI
+
+```bash
 cargo build --release -p ailake-jni
-AILAKE_NATIVE_LIB=target/release/libailake_jni.so \
+AILAKE_NATIVE_LIB=$(pwd)/target/release/libailake_jni.so \
   python tests/compat/check_jni_cabi.py
 ```
 
+### Compat Heavy (Docker required — Spark, Trino, BigQuery)
+
+Trigger via GitHub Actions UI: **Actions → Compat Heavy → Run workflow**.
+See [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md) for the full manual Actions trigger order.
+
 ---
 
-## Before opening a PR
+## Code style and quality gates
+
+All of the following must pass before opening a PR. CI runs them automatically on every push.
+
+### Rust
 
 ```bash
-cargo fmt --all              # format
-cargo clippy --workspace     # lint (zero warnings policy)
-cargo test --workspace       # all tests green
+# Formatting — zero tolerance for diffs
+cargo fmt --all -- --check
+
+# Lints — zero warnings policy (-D warnings)
+cargo clippy --workspace --all-targets -- -D warnings
+
+# License and advisory audit
+cargo deny check licenses advisories sources
 ```
+
+To auto-fix formatting:
+```bash
+cargo fmt --all
+```
+
+Key linting rules enforced by clippy:
+- No `unwrap()` in production code without a comment explaining why it cannot fail
+- No `eprintln!` — use `tracing::{error!, warn!, info!, debug!}` instead
+- No dead code exported from library crates
+
+### JVM (Kotlin / Scala)
+
+```bash
+# Flink — format + compile check
+cd ailake-flink && ./gradlew build --no-daemon && cd ..
+
+# Spark — format + compile check
+cd spark-plugin && ./gradlew build --no-daemon && cd ..
+
+# Trino — format + compile check
+cd trino-plugin && ./gradlew build --no-daemon && cd ..
+```
+
+### Go
+
+```bash
+cd ailake-go
+go vet ./...
+cd ..
+```
+
+### General
+
+- No `System.err.println` in JVM production code — use SLF4J logger
+- No `fmt.Println` in Go library code — use `log/slog.Debug` at most
+- All new public Rust functions must have at least one unit test
+- All new Python-facing APIs must have at least one test in `ailake-py/tests/` or `tests/compat/`
 
 ---
 
-## PR guidelines
+## Branch and commit strategy
 
-- One logical change per PR.
-- Branch off `develop`; target `develop` (not `main`).
-- PR title follows [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `chore:`, `docs:`, `perf:`, `ci:`.
-- Tests required for new public APIs and bug fixes.
-- Update `CHANGELOG.md` under `[Unreleased]` for user-visible changes.
+### Branches
+
+| Branch | Purpose |
+|---|---|
+| `develop` | Integration branch — all PRs target here |
+| `main` | Stable / released — only receives merges from `develop` after CI passes |
+
+**Never commit directly to `main`.** All changes go to `develop` first.
+
+### Commit messages
+
+Follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<scope>): <short description>
+
+[optional body — explain WHY, not WHAT]
+```
+
+Types: `feat`, `fix`, `chore`, `docs`, `ci`, `perf`, `refactor`, `test`
+
+Scopes (optional): crate name (`ailake-query`, `ailake-py`, `spark-plugin`, etc.)
+
+Examples:
+```
+feat(ailake-query): add reranking after PQ with configurable factor
+fix(ailake-jni): prevent double-free of JNA pointer on parse error
+docs: update JVM_PLUGINS.md with pre-built JAR download links
+ci: add publish-jvm workflow for GitHub Release artifacts
+```
+
+Subject line: ≤ 72 characters, imperative mood, no trailing period.
+
+### CHANGELOG
+
+Update `CHANGELOG.md` under `[Unreleased]` for every user-visible change before pushing. Defer nothing — the changelog entry is part of the commit.
+
+---
+
+## Pull request workflow
+
+### Before opening a PR
+
+```bash
+# 1. Ensure you're on develop and up to date
+git checkout develop && git pull origin develop
+
+# 2. Run the quality gates
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check licenses advisories sources
+cargo test --workspace --lib --bins
+cargo test -p ailake-tests -- --test-threads=1
+
+# 3. Update CHANGELOG.md under [Unreleased]
+
+# 4. Push to develop
+git push origin develop
+```
+
+### PR title
+
+Use the same Conventional Commits format as commit messages:
+```
+feat(ailake-index): add IVF-PQ adaptive nlist selection
+```
+
+### PR description checklist
+
+- [ ] What changed and why (not just what)
+- [ ] Test coverage added or existing tests updated
+- [ ] `CHANGELOG.md` updated under `[Unreleased]`
+- [ ] No `unwrap()` without justification comment
+- [ ] No `eprintln!` / `System.err.println` / `fmt.Println` in production code
+
+### Review process
+
+1. One approval required from a maintainer.
+2. CI must be green (fmt + clippy + deny + unit + integration + compat-python).
+3. Compat Heavy (`compat-heavy.yml`) is run manually by maintainers before merging significant changes to storage, catalog, or index code.
+4. Maintainer merges to `develop`. Periodic batches are merged `develop → main` as releases.
+
+### What happens after merge
+
+- `develop` receives the PR.
+- When ready for release, maintainers bump versions, update CHANGELOG, merge to `main`, and run the release workflows in order (see [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md#manual-actions-trigger-order-pre-release)).
+
+---
+
+## Reporting issues
+
+- **Bug**: use the [Bug Report](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/issues/new?template=bug_report.yml) template.
+- **Feature request**: use the [Feature Request](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/issues/new?template=feature_request.yml) template.
+- **Security vulnerability**: follow [`SECURITY.md`](./SECURITY.md) — do not open a public issue.
+- **Questions and design discussions**: use [GitHub Discussions](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/discussions).
 
 ---
 
@@ -74,21 +367,14 @@ cargo test --workspace       # all tests green
 
 | Document | What it covers |
 |---|---|
+| [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md) | Test categories, fixtures, CI matrix, manual Actions trigger order |
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Rust conventions, error handling, unsafe policy |
-| [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md) | Test categories, fixtures, CI matrix |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | ADR log — why key architectural choices were made |
-| [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) | Crate map, dependency graph, build instructions |
+| [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) | Crate map, dependency graph, build phases |
 | [`docs/specs/FILE_FORMAT.md`](./docs/specs/FILE_FORMAT.md) | Binary spec of the AI-Lake `.parquet` file |
-
----
-
-## Reporting issues
-
-Open a [GitHub Issue](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/issues).
-For security vulnerabilities, see [`SECURITY.md`](./SECURITY.md).
 
 ---
 
 ## License
 
-By contributing, you agree your changes are licensed under [MIT OR Apache-2.0](./LICENSE-MIT).
+By contributing, you agree that your changes are licensed under [MIT OR Apache-2.0](./LICENSE-MIT).

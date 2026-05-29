@@ -16,6 +16,7 @@ package ailake
 import (
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -92,13 +93,19 @@ func Search(
 	for _, e := range entries {
 		if len(e.Centroid) == 0 {
 			survivors = append(survivors, e) // no centroid → can't prune
+			slog.Debug("ailake: pruner keep (no centroid)", "file", e.Path)
 			continue
 		}
 		d := distanceByMetric(metric, query, e.Centroid)
-		if d-e.Radius <= opts.PruningThreshold {
+		edge := d - e.Radius
+		if edge <= opts.PruningThreshold {
 			survivors = append(survivors, e)
+			slog.Debug("ailake: pruner KEEP", "file", e.Path, "dist", d, "radius", e.Radius, "edge", edge, "threshold", opts.PruningThreshold)
+		} else {
+			slog.Debug("ailake: pruner PRUNE", "file", e.Path, "dist", d, "radius", e.Radius, "edge", edge, "threshold", opts.PruningThreshold)
 		}
 	}
+	slog.Debug("ailake: geometric pruning complete", "total", len(entries), "survivors", len(survivors))
 
 	// Probe hardware once for all survivor files
 	hw := opts.hw()
@@ -135,6 +142,7 @@ func searchFile(
 	}
 
 	if entry.HnswOffset == nil || entry.HnswLen == nil {
+		slog.Debug("ailake: skipping file — index not ready (HnswOffset/HnswLen nil)", "file", entry.Path)
 		return nil, nil // indexing not complete
 	}
 

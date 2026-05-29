@@ -10,6 +10,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`README.md`**: added "Interactive demo" section with `docker compose up -d` quick start, notebook table, and engines overlay command; updated repository layout to include all `tests/docker/demo/` files
+- **`SETUP.md`**: added "Fastest path — Docker demo" section at the top pointing to `compose-demo.yml` and engines overlay
+- **`docs/contributing/TESTING.md`**: added `index-cpu-fallback` job to `ci.yml` matrix; added `ci-gpu.yml` workflow section (Windows self-hosted GPU runner); updated `secret-scan.yml` note to document that automatic triggers are disabled while repo is private
+- **`tests/docker/compose-demo-engines.yml`**: optional engines overlay — adds Trino (port 8080) and BigQuery emulator (port 9050); activated with `docker compose -f compose-demo.yml -f compose-demo-engines.yml up -d`
+- **`tests/docker/demo/trino-catalog/ailake.properties`**: Trino Iceberg HadoopCatalog config pointing at the demo-data volume (`file:///data/ailake_demo`)
+- **`tests/docker/demo/notebooks/02_duckdb.ipynb`**: DuckDB demo — direct Parquet glob scan, filtered queries, aggregations, embedding as BLOB, optional Iceberg extension
+- **`tests/docker/demo/notebooks/03_spark.ipynb`**: Spark demo — PySpark local[*] mode (no cluster), direct Parquet read, Iceberg HadoopCatalog SQL, snapshot history
+- **`tests/docker/demo/notebooks/04_trino.ipynb`**: Trino demo — connection via `trino` Python driver, schema/catalog discovery, SQL queries, `$snapshots` and `$files` Iceberg system tables
+- **`tests/docker/demo/notebooks/05_bigquery.ipynb`**: BigQuery demo — PyArrow reads AI-Lake Parquet, streaming inserts to BQ emulator, SQL queries and schema inspection
+- **`tests/docker/demo/Dockerfile`**: added `pyspark`, `trino`, `google-cloud-bigquery`, and `google-auth` packages
+- **`tests/docker/compose-demo.yml`**: single-command onboarding demo (`docker compose up -d`) — starts MinIO, Nessie, and a JupyterLab container pre-loaded with 500 synthetic documents; `ailake-py` wheel is built from source via maturin on first run and cached by Docker layer cache
+- **`tests/docker/demo/Dockerfile`**: two-stage build — stage 1 compiles the ailake-py wheel with Rust + maturin; stage 2 installs JupyterLab, pyiceberg, DuckDB, and the wheel
+- **`tests/docker/demo/init_demo.py`**: fixture generator run at container startup; writes 500 documents (dim=16, cosine, F16) using `ailake.TableWriter` and persists a demo query vector; idempotent (skips if table already present)
+- **`tests/docker/demo/notebooks/01_ailake_demo.ipynb`**: interactive demo notebook covering vector search, PyIceberg compatibility, DuckDB SQL scan, RAG context assembly, and optional MinIO S3 upload/read
+- **`CONTRIBUTING.md`**: expanded from minimal stub to full contributor guide — prerequisites table (Rust/JDK/Gradle/Python/maturin/cargo-deny), per-component setup steps (Rust workspace, ailake-py, JVM plugins, Go, C++), test commands per language, code style gates, branch/commit/CHANGELOG strategy, PR workflow, and issue reporting
+- **`.github/ISSUE_TEMPLATE/bug_report.yml`**: added `engine_versions` field for exact Spark/Trino/Flink/Python/Java versions; made `logs` field required; added per-engine instructions for capturing backtraces and stack traces (`RUST_BACKTRACE=1`, `RUST_LOG=debug`, JVM full stack trace, Python traceback)
+- **`ci.yml`**: added `index-cpu-fallback` job — runs `ailake-index` tests on a CPU-only Linux runner, verifying that `hardware::detect_backend()` returns `CpuSimd` and all index tests pass without CUDA/ROCm libraries present
+- **`ci-gpu.yml`**: new workflow (`workflow_dispatch`) — runs `ailake-index` GPU tests on `[self-hosted, Windows, X64]` runner; detects CUDA (`cudart64_*.dll` + `cublas64_*.dll`) or ROCm (`amdhip64.dll` + `hipblas.dll`) at runtime and reports backend selected
+- **`publish-pypi.yml`**: added `workflow_run` trigger so PyPI publish runs automatically after the `Release` workflow succeeds on `main`; added `guard` job that aborts the pipeline when triggered by a failed release; all build jobs (`linux`, `windows`, `sdist`) now depend on `guard`
 - **CI**: `publish-jvm.yml` — manual workflow that builds Spark/Trino/Flink fat-JARs + `libailake_jni.so` and uploads them to an existing GitHub Release
 - **`airflow-providers-ailake/README.md`**: PyPI package page with install instructions, hook/operator/sensor usage, and requirements
 - **`docs/contributing/TESTING.md`**: manual Actions trigger order table (pre-release checklist, steps 1–8)

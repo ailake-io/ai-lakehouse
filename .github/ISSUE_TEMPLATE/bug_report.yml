@@ -26,6 +26,21 @@ body:
       required: true
 
   - type: input
+    id: engine_versions
+    attributes:
+      label: Engine / integration versions (if applicable)
+      description: |
+        Fill in only the engines involved in the bug. Leave blank if not applicable.
+        - Spark: output of `spark-submit --version`
+        - Trino: output of `trino --version` or the server version from the UI
+        - Flink: output of `flink --version`
+        - Python (ailake-py): output of `python --version`
+        - Java (JVM plugins): output of `java -version`
+      placeholder: "Spark 3.5.1 / Trino 446 / Python 3.11.9 / Java 17.0.11"
+    validations:
+      required: false
+
+  - type: input
     id: os
     attributes:
       label: OS / Platform
@@ -61,5 +76,11 @@ body:
     id: logs
     attributes:
       label: Error output / logs
-      description: Full error message, panic backtrace, or relevant log lines.
+      description: |
+        Full error message, panic backtrace, or relevant log lines.
+        For Rust: set `RUST_BACKTRACE=1` and `RUST_LOG=debug` before reproducing.
+        For JVM plugins: include the full stack trace from the Spark/Trino/Flink logs.
+        For ailake-py: include the full Python traceback.
       render: text
+    validations:
+      required: true

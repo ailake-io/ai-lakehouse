@@ -18,6 +18,7 @@ ailake-catalog = { path = "../ailake-catalog" }
 ailake-store   = { path = "../ailake-store" }
 pyo3           = { workspace = true }
 tokio          = { workspace = true }
+tracing        = { workspace = true }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
 # Force vendored OpenSSL: targets openssl-sys directly so Cargo feature

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::info;
 
 use ailake_catalog::{CatalogProvider, SnapshotId, TableIdent};
 use ailake_core::{AilakeResult, VectorStoragePolicy};
@@ -107,6 +108,11 @@ impl MemTableWriter {
         if self.buffered_bytes >= self.config.flush_size_bytes
             || self.pending_embeddings.len() >= self.config.flush_max_rows
         {
+            info!(
+                "ailake: MemTable auto-flush triggered — {} rows / {} bytes buffered",
+                self.pending_embeddings.len(),
+                self.buffered_bytes
+            );
             Ok(Some(self.flush().await?))
         } else {
             Ok(None)
@@ -121,6 +127,12 @@ impl MemTableWriter {
             return Ok(None);
         }
         if self.last_flush.elapsed() >= self.config.flush_interval {
+            info!(
+                "ailake: MemTable time-based flush — {} rows / {} bytes buffered (interval={}s)",
+                self.pending_embeddings.len(),
+                self.buffered_bytes,
+                self.config.flush_interval.as_secs()
+            );
             Ok(Some(self.flush().await?))
         } else {
             Ok(None)

@@ -4,6 +4,29 @@ Guide for running the file format locally: writing batches, vector search with g
 
 ---
 
+## Fastest path — Docker demo (no Rust toolchain required)
+
+```bash
+# From the repository root — builds ailake-py wheel on first run (~3-5 min, cached after)
+docker compose -f tests/docker/compose-demo.yml up -d
+```
+
+Open **http://localhost:8888** — JupyterLab starts with 500 synthetic documents
+already indexed and ready for vector search.
+
+For engine demos (Trino + BigQuery emulator):
+
+```bash
+docker compose \
+  -f tests/docker/compose-demo.yml \
+  -f tests/docker/compose-demo-engines.yml \
+  up -d
+```
+
+See [`tests/docker/`](./tests/docker/) for full details.
+
+---
+
 ## Prerequisites
 
 | Tool | Minimum version | Installation |

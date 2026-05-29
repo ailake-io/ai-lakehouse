@@ -39,6 +39,38 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 
 ---
 
+## Interactive demo (single command)
+
+Spin up a local environment with MinIO, Nessie, and JupyterLab pre-loaded with 500 synthetic documents and an HNSW index — no cloud account, no credentials:
+
+```bash
+# From the repository root — builds ailake-py wheel on first run (~3-5 min, cached after)
+docker compose -f tests/docker/compose-demo.yml up -d
+```
+
+Then open **http://localhost:8888** and run the notebooks:
+
+| Notebook | What it shows |
+|---|---|
+| `01_ailake_demo.ipynb` | Vector search, Iceberg compat, RAG context assembly, MinIO upload |
+| `02_duckdb.ipynb` | DuckDB direct Parquet scan, filtered queries, aggregations |
+| `03_spark.ipynb` | PySpark local[*], Iceberg HadoopCatalog SQL, snapshot history |
+| `04_trino.ipynb` | Trino SQL via `trino` Python driver, `$snapshots` / `$files` system tables |
+| `05_bigquery.ipynb` | BigQuery emulator streaming inserts, SQL queries |
+
+Notebooks 04 and 05 require the engines overlay (adds Trino + BigQuery emulator):
+
+```bash
+docker compose \
+  -f tests/docker/compose-demo.yml \
+  -f tests/docker/compose-demo-engines.yml \
+  up -d
+```
+
+See [`tests/docker/`](./tests/docker/) for compose file details.
+
+---
+
 ## Quick orientation
 
 | Document | What it answers |
@@ -83,6 +115,31 @@ writer.commit()
 results = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20)
 # returns a PyArrow RecordBatch — zero-copy to pandas / polars
 ```
+
+**Apache Airflow**:
+```bash
+pip install apache-airflow-providers-ailake
+```
+
+**JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases):
+
+```bash
+VERSION=0.0.10
+
+# Spark plugin
+wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
+
+# Trino plugin
+wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/trino-plugin-${VERSION}-plugin.jar
+
+# Flink connector
+wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/ailake-flink-${VERSION}-plugin.jar
+
+# Native library (required by all three — place on java.library.path)
+wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/libailake_jni.so
+```
+
+See [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) for installation and configuration.
 
 ## Repository layout
 
@@ -210,8 +267,22 @@ tests/
 ├── positional_invariant.rs
 ├── context_assembler.rs
 └── docker/
-    ├── compose.yml             # MinIO + Nessie + Localstack
-    └── compose-engines.yml     # + Spark + Trino containers
+    ├── compose.yml              # MinIO + Nessie + Localstack (Phase 2 integration)
+    ├── compose-engines.yml      # + Spark + Trino containers (Phase 3 compat)
+    ├── compose-demo.yml         # Single-command onboarding demo (docker compose up -d)
+    ├── compose-demo-engines.yml # Overlay: + Trino + BigQuery emulator
+    └── demo/
+        ├── Dockerfile           # Two-stage: Rust/maturin → JupyterLab
+        ├── entrypoint.sh        # Init fixture then start Jupyter
+        ├── init_demo.py         # Writes 500-row AI-Lake table at startup
+        ├── trino-catalog/
+        │   └── ailake.properties # Trino Iceberg HadoopCatalog config
+        └── notebooks/
+            ├── 01_ailake_demo.ipynb  # Vector search + Iceberg + RAG + MinIO
+            ├── 02_duckdb.ipynb       # DuckDB direct Parquet scan
+            ├── 03_spark.ipynb        # PySpark local[*] + Iceberg SQL
+            ├── 04_trino.ipynb        # Trino SQL (engines overlay required)
+            └── 05_bigquery.ipynb     # BigQuery emulator (engines overlay required)
 ```
 
 ## Build
@@ -232,5 +303,7 @@ cargo check --workspace
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW loading, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
 | **Phase 3** | ✅ Complete | Catalog backends (Nessie/JDBC/Glue), JNA C-ABI bindings, multi-column vectors, Spark/Trino/Flink plugins |
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog) |
+| **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP REST server, Apache Airflow provider, idempotent writes, Compat Heavy CI (Spark+Iceberg, Trino+REST, BigQuery emulator), TruffleHog secret scanning, cloud deployment guides |
+| **Phase 6** | ✅ Complete | Public distribution pipeline — crates.io, PyPI (manylinux abi3 wheels), Airflow provider on PyPI, pre-built JVM JARs + `libailake_jni.so` on GitHub Releases, dynamic Python versioning |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.

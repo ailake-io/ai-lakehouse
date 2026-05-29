@@ -6,6 +6,7 @@ import com.fasterxml.jackson.module.kotlin.readValue
 import com.sun.jna.Library
 import com.sun.jna.Native
 import com.sun.jna.Pointer
+import org.slf4j.LoggerFactory
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Base64
@@ -18,6 +19,8 @@ import java.util.Base64
  */
 object AilakeNative {
 
+    private val log = LoggerFactory.getLogger(AilakeNative::class.java)
+
     data class SearchRow(val rowId: Long, val distance: Float, val filePath: String)
 
     private interface Lib : Library {
@@ -29,7 +32,14 @@ object AilakeNative {
 
     private val lib: Lib? by lazy {
         runCatching { Native.load("ailake_jni", Lib::class.java) as Lib }
-            .onFailure { System.err.println("[ailake] Native library not found: ${it.message}") }
+            .onSuccess { log.info("[ailake] Native library libailake_jni loaded successfully") }
+            .onFailure {
+                log.warn(
+                    "[ailake] Native library libailake_jni not found — vector search disabled. " +
+                    "Set java.library.path or LD_LIBRARY_PATH to the directory containing libailake_jni.so. " +
+                    "Error: ${it.message}"
+                )
+            }
             .getOrNull()
     }
 
@@ -50,7 +60,10 @@ object AilakeNative {
             val bytes = Base64.getDecoder().decode(queryBytes)
             val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
             (0 until bytes.size / 4).map { buf.getFloat() }
-        }.getOrElse { return emptyList() }
+        }.getOrElse {
+            log.error("[ailake] Failed to decode Base64 query vector for tableUri={}: {}", tableUri, it.message)
+            return emptyList()
+        }
         if (floats.isEmpty()) return emptyList()
 
         val requestJson = mapper.writeValueAsString(
@@ -64,12 +77,18 @@ object AilakeNative {
             )
         )
 
-        val ptr = native.ailake_search_json(requestJson) ?: return emptyList()
+        val ptr = native.ailake_search_json(requestJson) ?: run {
+            log.warn("[ailake] ailake_search_json returned null pointer for tableUri={}", tableUri)
+            return emptyList()
+        }
 
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<Map<String, Any>>(json)
-            if (resp["ok"] != true) return emptyList()
+            if (resp["ok"] != true) {
+                log.warn("[ailake] Native search returned ok=false for tableUri={}: {}", tableUri, resp["error"])
+                return emptyList()
+            }
             @Suppress("UNCHECKED_CAST")
             (resp["results"] as? List<Map<String, Any>> ?: emptyList()).map { m ->
                 SearchRow(
@@ -79,6 +98,7 @@ object AilakeNative {
                 )
             }
         } catch (e: Exception) {
+            log.error("[ailake] Failed to parse native search response for tableUri={}: {}", tableUri, e.message, e)
             emptyList()
         } finally {
             runCatching { native.ailake_free_string(ptr) }
