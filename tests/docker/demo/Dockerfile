@@ -41,6 +41,15 @@ RUN maturin build --release --out /wheels
 # ── Stage 2: JupyterLab runtime ───────────────────────────────────────────────
 FROM python:3.12-slim
 
+# Java is required by PySpark (notebook 03_spark.ipynb uses local[*] mode).
+# default-jre-headless installs OpenJDK 17 and creates /usr/lib/jvm/default-java.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        default-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
 COPY --from=builder /wheels /wheels
 
 RUN pip install --no-cache-dir \
