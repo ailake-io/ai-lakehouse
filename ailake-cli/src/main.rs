@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+mod serve;
+
 use std::sync::Arc;
 
 use ailake_catalog::{
@@ -90,6 +92,17 @@ enum Commands {
         /// Minimum number of small files required to trigger compaction
         #[arg(long, default_value = "4")]
         min_files: usize,
+    },
+    /// Start an HTTP server exposing search, write, compact and info over JSON
+    Serve {
+        /// Table name
+        table: String,
+        /// Port to listen on
+        #[arg(long, default_value = "7700")]
+        port: u16,
+        /// Vector column name
+        #[arg(long, default_value = "embedding")]
+        column: String,
     },
     /// Print table statistics
     Info {
@@ -451,6 +464,41 @@ async fn run(cli: Cli) -> Result<(), String> {
 
             println!("compacted into {output_path}");
             Ok(())
+        }
+
+        Commands::Serve {
+            table,
+            port,
+            column,
+        } => {
+            let ident = parse_table_ident(&table);
+            let meta = catalog
+                .load_table(&ident)
+                .await
+                .map_err(|e| e.to_string())?;
+            let dim = meta
+                .properties
+                .get("ailake.vector-dim")
+                .and_then(|v| v.parse::<u32>().ok())
+                .ok_or("table missing ailake.vector-dim property")?;
+            let metric = meta
+                .properties
+                .get("ailake.vector-metric")
+                .map(|m| match m.as_str() {
+                    "euclidean" => VectorMetric::Euclidean,
+                    "dot" => VectorMetric::DotProduct,
+                    _ => VectorMetric::Cosine,
+                })
+                .unwrap_or(VectorMetric::Cosine);
+            let policy = VectorStoragePolicy {
+                column_name: column,
+                dim,
+                metric,
+                precision: VectorPrecision::F16,
+                pq: None,
+                keep_raw_for_reranking: false,
+            };
+            serve::run(catalog as Arc<dyn CatalogProvider>, store, ident, policy, port).await
         }
 
         Commands::Info { table, format } => {
