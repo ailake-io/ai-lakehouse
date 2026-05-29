@@ -4,6 +4,76 @@
 
 `ailake-catalog` implements `CatalogProvider` for every supported Iceberg catalog. All backend logic is confined to this crate. The rest of the SDK uses only `Arc<dyn CatalogProvider>`.
 
+```mermaid
+flowchart TD
+    Q["ailake-query\nsearch() / TableWriter"]
+    CP["Arc&lt;dyn CatalogProvider&gt;"]
+
+    subgraph backends["ailake-catalog backends"]
+        HC["HadoopCatalog\nFilesystem / S3 / GCS / Azure\n(no external service)"]
+        RC["RestCatalog\nIceberg REST spec\n(Polaris · S3 Tables · BigLake · Gravitino)"]
+        DB["Databricks helpers\ndatabricks_azure/aws/gcp\n→ RestCatalog + OAuth2"]
+        NC["NessieCatalog\nREST + branching API\n(feature = catalog-nessie)"]
+        JC["JdbcCatalog\nPostgreSQL / MySQL / SQLite\n(feature = catalog-jdbc)"]
+        GC["GlueCatalog\nAWS Glue Data Catalog\n(feature = catalog-glue)"]
+    end
+
+    store["Arc&lt;dyn Store&gt;\nobject_store — S3 / GCS / Azure / local"]
+
+    Q --> CP
+    CP --> HC
+    CP --> RC
+    RC --> DB
+    CP --> NC
+    CP --> JC
+    CP --> GC
+
+    HC --> store
+    RC --> store
+    NC --> store
+    JC --> store
+    GC --> store
+```
+
+## JVM plugin integration — Rust core ↔ JVM via JNA
+
+The Trino `VectorScanConnector` and Spark `VectorScanStrategy` are thin JVM
+adapters. All search logic runs inside the Rust `libailake_jni.so` cdylib.
+
+```mermaid
+sequenceDiagram
+    participant E as Query Engine<br/>(Trino / Spark)
+    participant P as JVM Plugin<br/>(AilakeNative / JNA)
+    participant L as libailake_jni.so<br/>(Rust cdylib)
+    participant Q as ailake-query<br/>(Rust)
+    participant C as ailake-catalog<br/>(Rust)
+    participant S as Object Store<br/>(S3 / GCS / local)
+
+    E->>P: execute() / getSplits()
+    P->>L: ailake_search_json(request_json)
+    note over L: C-ABI boundary<br/>JSON in → JSON out
+    L->>Q: do_search()
+    Q->>C: list_files() — reads Avro manifest
+    C->>S: GET metadata/*.avro
+    S-->>C: manifest bytes
+    C-->>Q: Vec&lt;DataFileEntry&gt; with centroid/radius
+    Q->>Q: geometric pruning (centroid distance)
+    loop surviving files (parallel Tokio tasks)
+        Q->>S: GET range [hnsw_offset, +hnsw_len)
+        S-->>Q: AILK index bytes
+        Q->>Q: bincode::deserialize → HnswIndex / IvfPqIndex
+        Q->>Q: index.search(query, top_k)
+    end
+    Q->>Q: global merge + sort
+    Q-->>L: Vec&lt;SearchResult&gt;
+    L-->>P: JSON {"ok":true,"results":[...]}
+    note over L: ailake_free_string() called by JVM<br/>after JSON is consumed
+    P-->>E: rows / DataFrame
+```
+
+See `docs/specs/JVM_PLUGINS.md` for build instructions, catalog configuration,
+and Trino/Spark step-by-step walkthroughs.
+
 ---
 
 ## `CatalogProvider` trait contract

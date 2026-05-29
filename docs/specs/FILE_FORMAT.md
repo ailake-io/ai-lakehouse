@@ -24,6 +24,16 @@ Every AI-Lake file is independently self-contained. It carries:
 
 ## 2. File Layout
 
+```mermaid
+block-beta
+  columns 1
+  A["PAR1 — Parquet magic (4 bytes)"]
+  B["Parquet row groups\n(tabular columns + vector column as FIXED_LEN_BYTE_ARRAY)\n← Parquet footer row-group offsets point here"]
+  C["AILK section — primary vector column\n  64-byte AILK header\n  centroid blob  (dim × 4 bytes F32 + 4-byte radius F32)\n  index blob  (HNSW via bincode  OR  IVF-PQ via bincode)\n  24-byte AILK trailer"]
+  D["AILK section — secondary vector column (optional, repeating)\n  (same structure as above)"]
+  E["Parquet footer\n  KV: ailake.footer_offset = <primary AILK byte offset>\n  KV: ailake.<col>.footer_offset = <secondary AILK byte offset>\n  4-byte footer length (LE u32)\nPAR1 — Parquet magic (4 bytes)  ← EOF"]
+```
+
 ```
 Byte 0
 ┌─────────────────────────────────────────────────────────────────┐
@@ -36,9 +46,9 @@ Byte 0
 │  ← Parquet footer row-group offsets point here                  │
 ├─────────────────────────────────────────────────────────────────┤
 │  AILK section — primary vector column                           │
-│    64-byte AILK header                                          │
+│    64-byte AILK header  (flags bit 0 = 0 → HNSW, = 1 → IVF-PQ)│
 │    centroid blob  (dim × 4 bytes F32 + 4-byte radius F32)       │
-│    HNSW index blob (bincode-serialized hnsw_rs graph)           │
+│    index blob  (HNSW via bincode  OR  IVF-PQ via bincode)       │
 │    24-byte AILK trailer                                         │
 ├─────────────────────────────────────────────────────────────────┤
 │  AILK section — secondary vector column (optional, repeating)   │
@@ -69,7 +79,7 @@ Starts at byte 0 of every AILK section. All integer fields little-endian.
 |--------|------|-------|-------------------|-------------|
 | 0      | 4    | bytes | `magic`           | `AILK` (0x41 0x49 0x4C 0x4B) |
 | 4      | 2    | u16   | `format_version`  | Must be `1` for this spec |
-| 6      | 2    | u16   | `flags`           | Reserved; must be `0` |
+| 6      | 2    | u16   | `flags`           | Bit 0: index type — `0` = HNSW (default), `1` = IVF-PQ. Bits 1–15 reserved, must be `0`. |
 | 8      | 4    | u32   | `dim`             | Vector dimensionality |
 | 12     | 1    | u8    | `precision`       | See §3.1 |
 | 13     | 1    | u8    | `distance_metric` | See §3.2 |
@@ -143,20 +153,40 @@ downloading or opening the file beyond the manifest.
 
 ---
 
-## 6. HNSW Index Blob
+## 6. Index Blob
 
 Starts at `hnsw_offset` relative to AILK section start
 (= `HEADER_SIZE + centroid_len = 64 + dim × 4 + 4`).
 
-The blob is a **bincode v1** serialization of an `hnsw_rs::Hnsw` graph.
+The index type is determined by `header.flags & 0x0001`:
+- `0` → HNSW (§6.1)
+- `1` → IVF-PQ (§6.2)
+
+### 6.1 HNSW Index Blob (`flags & 0x0001 == 0`)
+
+The blob is a **bincode v1** serialization of an `hnsw_rs::Hnsw` graph
+wrapped in `ailake_index::HnswIndex`. Internal layout (opaque to readers
+outside `ailake-index`):
+
+```
+[ bincode header ]
+[ layer_count: u64 ]
+[ for each layer L (top → bottom):
+    [ node_count_in_layer: u64 ]
+    [ for each node: RowId(u64), neighbor_ids: Vec<u64> ]
+]
+[ entry_point: RowId(u64) ]
+[ max_m: u64, ef_construction: u64, m_l: f64 ]
+```
+
 Readers deserialize with:
 
 ```rust
-let hnsw: hnsw_rs::Hnsw<f32, hnsw_rs::dist::DistCosine> =
-    bincode::deserialize(&blob)?;
+use ailake_index::{HnswSerializer, HnswIndex};
+let hnsw: HnswIndex = HnswSerializer::from_bytes(blob)?;
+// or via mmap:
+let hnsw: HnswIndex = MmapLoader::from_bytes(blob)?;
 ```
-
-(Distance type varies with `distance_metric`; see §3.2.)
 
 Key invariants of the serialized graph:
 
@@ -165,6 +195,56 @@ Key invariants of the serialized graph:
   corresponding Parquet row.
 - The graph contains exactly `record_count` nodes (from the AILK header).
 - Readers MUST verify `hnsw_graph.node_count() == header.record_count`.
+
+The mmap loading path (`MmapLoader`) writes the blob to a temp file and
+opens it via `memmap2::Mmap`; only pages touched during search are faulted
+in by the OS — critical for large indexes on S3-backed storage.
+
+### 6.2 IVF-PQ Index Blob (`flags & 0x0001 == 1`)
+
+The blob is a **bincode v1** serialization of `ailake_index::IvfPqIndex`
+via `IvfPqSerializer`. Internal structure (`IvfPqSnapshot`):
+
+```
+[ config: IvfPqConfig
+    nlist: u64        — number of coarse Voronoi cells
+    nprobe: u64       — cells probed per query
+    pq_m: u64         — PQ sub-vector count M
+    pq_k: u64         — PQ centroids per sub-space K (≤ 256)
+    max_iter: u64     — k-means training iterations
+]
+[ metric: u8          — DistanceMetric enum (§3.2) ]
+[ dim: u64            — vector dimensionality ]
+[ coarse_centroids: Vec<Vec<f32>>  — nlist × dim coarse cluster centroids ]
+[ pq_codebook: PQCodebook
+    m: u64                                 — sub-vector count
+    k: u64                                 — centroids per sub-space
+    centroids: Vec<Vec<f32>>               — m × k × (dim/m) entries, F32 LE
+]
+[ inv_row_ids: Vec<Vec<u64>>   — nlist inverted lists of RowId values ]
+[ inv_codes: Vec<Vec<u8>>      — PQ codes, flat per cluster:
+                                  inv_codes[i].len() == inv_row_ids[i].len() × pq_m ]
+```
+
+Readers deserialize with:
+
+```rust
+use ailake_index::IvfPqSerializer;
+let index = IvfPqSerializer::from_bytes(blob)?;
+```
+
+Search algorithm:
+
+1. Compute distance from query to all `nlist` coarse centroids.
+2. Select top `nprobe` closest cells.
+3. For each selected cell: compute Asymmetric Distance Computation (ADC)
+   between query sub-vectors and each vector's PQ codes.
+4. Collect candidates by `RowId`, merge, return global top-k.
+
+**Adaptive index selection**: `AilakeFileWriter` automatically chooses IVF-PQ
+over HNSW when `hardware_profile.recommend_ivf_pq(n_vectors)` returns true
+(currently: dataset ≥ 100 000 vectors on a GPU-capable host, or when the
+caller explicitly calls `writer.with_ivf_pq(IvfPqConfig)`).
 
 ---
 
@@ -220,44 +300,64 @@ Stored in the Iceberg `properties` map:
 
 ### 8.2 File-level manifest entry fields
 
-Each `DataFileEntry` in the manifest carries per-file geometric statistics
-used for pruning.  Current implementation uses JSON manifests
-(`metadata/snap-<id>.json`); a future version will use Avro per Iceberg spec.
+Each `DataFileEntry` is stored as a record in an **Avro OCF manifest file**
+(`metadata/{snap_id}-m0.avro`), with per-file geometric statistics in
+`custom_properties` — an Iceberg Spec v2 extension point that unknown readers
+ignore without error.
 
-| Field                  | Type     | Description |
-|------------------------|----------|-------------|
-| `path`                 | string   | Relative path from warehouse root |
-| `record_count`         | u64      | Number of rows |
-| `file_size_bytes`      | u64      | Total file size in bytes |
-| `centroid_b64`         | string?  | Base64-encoded F32 centroid (primary column) |
-| `radius`               | f32?     | Maximum distance from centroid to any vector |
-| `hnsw_offset`          | u64?     | Absolute byte offset of primary AILK section |
-| `hnsw_len`             | u64?     | Byte length of primary AILK section |
-| `vector_column`        | string?  | Primary vector column name |
-| `vector_dim`           | u32?     | Vector dimensionality |
-| `extra_vector_indexes` | array    | Secondary columns (same fields per entry) |
+A **manifest list** (`metadata/snap-{snap_id}-1.avro`) is a separate Avro OCF
+file listing the manifest file entries for the snapshot, following Iceberg spec.
 
-### 8.3 Manifest example
+Vector statistics live in `DataFile.custom_properties` (string→string map):
+
+| `custom_properties` key  | Example value | Description |
+|--------------------------|---------------|-------------|
+| `ailake.centroid`        | `"AAAA..."`   | Base64-encoded F32 LE centroid vector for the primary vector column |
+| `ailake.radius`          | `"0.342"`     | Max distance from centroid to any vector (same metric as column) |
+| `ailake.hnsw_offset`     | `"12582912"`  | Absolute byte offset of primary AILK section within the file |
+| `ailake.hnsw_len`        | `"4194304"`   | Byte length of primary AILK section |
+| `ailake.vector_column`   | `"embedding"` | Primary vector column name |
+| `ailake.vector_dim`      | `"1536"`      | Vector dimensionality |
+| `ailake.index_type`      | `"hnsw"` or `"ivf_pq"` | Index type in the AILK section |
+| `ailake.<col>.centroid`  | `"BBBB..."`   | Centroid for secondary column `<col>` |
+| `ailake.<col>.radius`    | `"0.289"`     | Radius for secondary column `<col>` |
+| `ailake.<col>.hnsw_offset` | `"..."`     | AILK section offset for secondary column `<col>` |
+| `ailake.<col>.hnsw_len`  | `"..."`       | AILK section length for secondary column `<col>` |
+
+All values are UTF-8 decimal or Base64 strings (no quoting, no JSON encoding).
+
+Standard Iceberg fields (`file_path`, `file_format`, `record_count`,
+`file_size_in_bytes`, `column_sizes`, `value_counts`, `null_value_counts`,
+`lower_bounds`, `upper_bounds`) are populated normally so standard Iceberg
+engines can perform predicate pushdown on non-vector columns.
+
+### 8.3 Manifest example (Avro OCF record, shown as JSON for readability)
 
 ```json
 {
-  "snapshot_id": 1,
-  "files": [
-    {
-      "path": "data/part-00000.parquet",
-      "record_count": 50000,
-      "file_size_bytes": 67108864,
-      "centroid_b64": "AAAA...",
-      "radius": 0.342,
-      "hnsw_offset": 12582912,
-      "hnsw_len": 4194304,
-      "vector_column": "embedding",
-      "vector_dim": 1536,
-      "extra_vector_indexes": []
+  "status": 1,
+  "snapshot_id": 1234567890,
+  "data_file": {
+    "file_path": "data/part-00000.parquet",
+    "file_format": "PARQUET",
+    "record_count": 50000,
+    "file_size_in_bytes": 67108864,
+    "custom_properties": {
+      "ailake.centroid": "AAAA...",
+      "ailake.radius": "0.342",
+      "ailake.hnsw_offset": "12582912",
+      "ailake.hnsw_len": "4194304",
+      "ailake.vector_column": "embedding",
+      "ailake.vector_dim": "1536",
+      "ailake.index_type": "hnsw"
     }
-  ]
+  }
 }
 ```
+
+Actual on-disk encoding is Avro OCF binary (schema embedded in the file header)
+as written by `ailake_catalog::avro_manifest`. Readers that do not understand
+`custom_properties` keys simply skip them — Iceberg spec §3.1.4 guarantees this.
 
 ---
 

@@ -2,6 +2,19 @@
 
 ## Write path
 
+```mermaid
+flowchart TD
+    C["Caller\nwrite_batch(RecordBatch, &[f32])"]
+    TW["ailake-query\nTableWriter"]
+    VEC["ailake-vec\n1. quantize f32→f16\n2. compute centroid + radius"]
+    PQ["ailake-parquet\nParquetVectorWriter\n3. encode FIXED_LEN_BYTE_ARRAY\n4. write Parquet section"]
+    IDX["ailake-index\nHnswBuilder / IvfPqIndex\n5. build index\n6. bincode::serialize → bytes"]
+    FW["ailake-file\nAilakeFileWriter\n7. append AILK header (64 B)\n8. append centroid blob\n9. append index blob\n10. append AILK trailer\n11. rewrite Parquet footer KV"]
+    CAT["ailake-catalog\n12. Avro manifest entry\n    (centroid_b64, radius,\n     hnsw_offset, hnsw_len)\n13. commit vN.metadata.json"]
+
+    C --> TW --> VEC --> PQ --> IDX --> FW --> CAT
+```
+
 ```
 Caller
   │
@@ -72,6 +85,23 @@ Invariant after commit:
 ---
 
 ## Read path — vector search
+
+```mermaid
+flowchart TD
+    C["Caller\nsearch(table_uri, &[f32], top_k)"]
+    CAT["ailake-catalog\n1. read metadata.json → snapshot\n2. read snap-NNN.avro → DataFileEntry list\n3. decode centroid_b64, radius per file"]
+    PRUNE["ailake-query / VectorPruner\n4. dist(query, centroid) - radius > threshold?\n   YES → skip file (zero S3 I/O)"]
+    STORE["ailake-store\n5a. GET range [hnsw_offset, +hnsw_len)"]
+    MMAP["ailake-index / MmapLoader\n5b. write to tempfile\n5c. mmap → bincode::deserialize\n    HnswIndex or IvfPqIndex"]
+    SEARCH["ailake-index\n5d. index.search(query, candidate_k)"]
+    MERGE["merge all per-file results\nglobal top-k sort"]
+    FETCH["ailake-parquet / ParquetVectorReader\n6. read specific row groups for winners\n   with predicate pushdown"]
+    OUT["RecordBatch\n(all columns + _distance: f32)"]
+
+    C --> CAT --> PRUNE
+    PRUNE -->|surviving files, parallel| STORE --> MMAP --> SEARCH --> MERGE
+    MERGE --> FETCH --> OUT
+```
 
 ```
 Caller
@@ -285,3 +315,66 @@ ailake-query / ContextAssembler
   │
   └─► return AssembledContext { text: String, token_estimate: usize, chunk_count: usize }
 ```
+
+---
+
+## JVM plugin flow — Rust core ↔ Trino / Spark via JNA
+
+The JVM plugins (Trino `VectorScanConnector`, Spark `VectorScanStrategy`) are
+thin adapters. No search logic lives in JVM code — everything runs inside the
+Rust `libailake_jni.so` cdylib loaded via JNA at startup.
+
+```mermaid
+sequenceDiagram
+    participant E as Query Engine<br/>(Trino / Spark)
+    participant P as JVM Plugin<br/>(AilakeNative.search)
+    participant L as libailake_jni.so<br/>(Rust #[no_mangle] C-ABI)
+    participant Q as ailake-query<br/>(search + pruning)
+    participant S as Object Store<br/>(S3 / GCS / local)
+
+    E->>P: execute() / VectorScanExec.doExecute()
+    P->>P: serialize query vector to JSON request
+    P->>L: ailake_search_json(const char* request_json)
+    note over P,L: JNA: Java String → C *char<br/>pointer ownership: Rust allocates
+    L->>Q: do_search(warehouse, table, query_vec, top_k)
+    Q->>S: GET metadata/vN.metadata.json
+    Q->>S: GET metadata/snap-N-1.avro (manifest list)
+    Q->>S: GET metadata/{snap_id}-m0.avro (manifest)
+    note over Q: decode DataFileEntry centroid/radius<br/>geometric pruning — zero I/O for pruned files
+    loop surviving files in parallel (Tokio)
+        Q->>S: GET [hnsw_offset, hnsw_offset+hnsw_len)
+        Q->>Q: bincode::deserialize → index<br/>index.search(query, top_k)
+    end
+    Q-->>L: Vec&lt;SearchResult&gt; { row_id, distance, file_path }
+    L-->>P: JSON {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
+    P->>L: ailake_free_string(ptr)
+    note over P,L: Rust frees the CString allocation
+    P-->>E: Iterator&lt;Row&gt; / RDD[InternalRow]
+```
+
+**C-ABI contract** (`ailake-jni/src/lib.rs`):
+
+```c
+// All strings: UTF-8, null-terminated, little-endian platform.
+// Caller MUST call ailake_free_string() on every non-null return value.
+
+char* ailake_search_json(const char* request_json);
+// request:  {"warehouse":"...","namespace":"...","table":"...",
+//            "vec_col":"embedding","dim":1536,"query":[...],"top_k":10}
+// response: {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
+//        or {"ok":false,"error":"..."}
+
+char* ailake_write_batch_json(const char* request_json);
+// request:  {"warehouse":"...","namespace":"...","table":"...",
+//            "dim":1536,"ids":[...],"embeddings":[[...],...]}
+// response: {"ok":true,"snapshot_id":N}
+
+void  ailake_free_string(char* ptr);
+
+const char* ailake_version();   // static string — do NOT free
+```
+
+Library path configuration:
+- **Trino**: add `-Djava.library.path=/opt/ailake/lib` to `etc/jvm.config`
+- **Spark**: `--conf "spark.driver.extraJavaOptions=-Djava.library.path=..."`
+- **Kubernetes**: bake `libailake_jni.so` into the executor Docker image
