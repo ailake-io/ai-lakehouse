@@ -34,6 +34,10 @@ type SearchOptions struct {
 	TopK             int
 	EfSearch         int     // HNSW ef_search (default: TopK*5)
 	PruningThreshold float32 // geometric pruning (default: 0.8)
+
+	// Hardware overrides. When nil, DetectHardware() is called automatically.
+	// Set explicitly to force CPU-only or a specific GPU backend.
+	Hardware *HardwareProfile
 }
 
 func (o *SearchOptions) efSearch() int {
@@ -43,7 +47,18 @@ func (o *SearchOptions) efSearch() int {
 	return o.TopK * 5
 }
 
-// Search runs geometric pruning + HNSW/flat search over an AI-Lake table.
+func (o *SearchOptions) hw() *HardwareProfile {
+	if o.Hardware != nil {
+		return o.Hardware
+	}
+	return DetectHardware()
+}
+
+// Search runs geometric pruning + HNSW/IVF-PQ search over an AI-Lake table.
+//
+// GPU dispatch: when CUDA or ROCm is detected AND the file uses an IVF-PQ
+// index, search uses the HTTP server GPU path (ailake serve) or falls back to
+// CPU IVF-PQ ADC. HNSW graph traversal is always CPU (sequential by nature).
 //
 // query must have the same dimensionality as the table's vector column.
 func Search(
@@ -85,10 +100,13 @@ func Search(
 		}
 	}
 
-	// Per-file HNSW search
+	// Probe hardware once for all survivor files
+	hw := opts.hw()
+
+	// Per-file HNSW/IVF-PQ search
 	var all []FileSearchResult
 	for _, e := range survivors {
-		hits, err := searchFile(catalog.Warehouse, namespace, table, e, query, opts)
+		hits, err := searchFile(catalog.Warehouse, namespace, table, e, query, opts, hw)
 		if err != nil {
 			return nil, fmt.Errorf("ailake: search file %s: %w", e.Path, err)
 		}
@@ -108,6 +126,7 @@ func searchFile(
 	entry DataFileEntry,
 	query []float32,
 	opts SearchOptions,
+	hw *HardwareProfile,
 ) ([]FileSearchResult, error) {
 	// Resolve absolute path
 	filePath := entry.Path
@@ -143,14 +162,30 @@ func searchFile(
 		return nil, fmt.Errorf("read index blob: %w", err)
 	}
 
+	// Select compute backend:
+	// - IVF-PQ + GPU available  → GPU-accelerated ADC (via ailake serve HTTP or CPU fallback)
+	// - IVF-PQ + CPU only       → CPU ADC (pure Go)
+	// - HNSW                    → CPU greedy graph traversal (sequential by nature)
 	var hits []SearchResult
 	if header.IsIvfPq() {
 		idx, err := DeserializeIvfPq(indexBuf)
 		if err != nil {
 			return nil, fmt.Errorf("deserialize IVF-PQ: %w", err)
 		}
+		// GPU IVF-PQ search: Go cannot call CUDA kernels without cgo.
+		// When GPU is present, delegate to `ailake serve` HTTP endpoint if
+		// AILAKE_SERVER_URL env is set; otherwise fall through to CPU ADC.
+		// This preserves zero-cgo design while enabling GPU acceleration.
+		if hw.HasGPU() {
+			serverURL := gpuServerURL()
+			if serverURL != "" {
+				return searchViaHTTP(serverURL, entry.Path, query, opts.TopK)
+			}
+		}
+		// CPU IVF-PQ ADC search
 		hits = idx.Search(query, opts.TopK, int(idx.Config.Nprobe))
 	} else {
+		// HNSW graph traversal — always CPU (graph is inherently sequential)
 		idx, err := DeserializeHnsw(indexBuf)
 		if err != nil {
 			return nil, fmt.Errorf("deserialize HNSW: %w", err)
@@ -171,6 +206,17 @@ func searchFile(
 		}
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// GPU delegation helpers
+// ---------------------------------------------------------------------------
+
+// gpuServerURL returns the AILAKE_SERVER_URL env var when set.
+// When non-empty, IVF-PQ search on GPU-capable hosts is delegated to
+// the running `ailake serve` process (which uses Rust CUDA kernels).
+func gpuServerURL() string {
+	return os.Getenv("AILAKE_SERVER_URL")
 }
 
 // ReadAilakeHeader reads and validates the AILK header from an AI-Lake file.

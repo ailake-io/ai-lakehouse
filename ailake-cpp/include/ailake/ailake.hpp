@@ -17,6 +17,7 @@
 #include "footer.hpp"
 #include "bincode.hpp"
 #include "distance.hpp"
+#include "hardware.hpp"
 #include "hnsw.hpp"
 #include "ivfpq.hpp"
 #include "catalog.hpp"
@@ -38,6 +39,15 @@ struct SearchOptions {
     int   ef_search         = 0;   // 0 → top_k * 5
     float pruning_threshold = 0.8f;
     bool  use_flat_fallback = true; // flat scan when HNSW graph is empty
+
+    // Hardware profile override.
+    // When nullptr (default), detect_hardware() is called automatically.
+    // Pass an explicit profile to force CPU-only or a specific backend.
+    const HardwareProfile* hw = nullptr;
+
+    const HardwareProfile& hardware() const {
+        return hw ? *hw : detect_hardware();
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -52,10 +62,8 @@ search_file(const std::string& abs_path,
 {
     if (!entry.hnsw_offset || !entry.hnsw_len) return {};
 
-    // Memory-map or read the file
     std::ifstream f(abs_path, std::ios::binary | std::ios::ate);
     if (!f) throw std::runtime_error("ailake: cannot open " + abs_path);
-    std::streamsize file_size = f.tellg();
 
     // Read AILK header at hnsw_offset
     uint8_t header_buf[kHeaderSize];
@@ -71,15 +79,66 @@ search_file(const std::string& abs_path,
     f.read(reinterpret_cast<char*>(index_buf.data()), (std::streamsize)hdr.hnsw_len);
     if (!f) throw std::runtime_error("ailake: cannot read index blob in " + abs_path);
 
+    const auto& hw = opts.hardware();
+
     if (hdr.is_ivf_pq()) {
         auto idx = deserialize_ivfpq(index_buf.data(), index_buf.size());
+
+#ifdef AILAKE_CUDA_ENABLED
+        // GPU IVF-PQ search: use CUDA when available.
+        // GpuIvfPqContext is defined in cuda/distance.cuh — only available
+        // when AILAKE_CUDA_ENABLED is defined at build time.
+        if (hw.has_cuda) {
+            // Precompute ADC LUT on CPU (cheap: m × k distance lookups).
+            size_t m = idx.config.pq_m, k = idx.config.pq_k;
+            size_t sub_dim = (size_t)idx.dim / m;
+            std::vector<float> lut(m * k);
+            for (size_t j = 0; j < m; ++j) {
+                const float* q_sub = query + j * sub_dim;
+                for (size_t c = 0; c < k; ++c) {
+                    size_t cb = j * k + c;
+                    float d = 0;
+                    if (cb < idx.pq.centroids.size()) {
+                        const float* cv = idx.pq.centroids[cb].data();
+                        for (size_t s = 0; s < sub_dim; ++s) { float dd = q_sub[s]-cv[s]; d += dd*dd; }
+                    }
+                    lut[j * k + c] = d;
+                }
+            }
+            // Upload codes to GPU and run ADC kernel
+            cuda::GpuIvfPqContext gpu_ctx;
+            gpu_ctx.upload(idx.inv_codes, idx.inv_row_ids, (int)m, (int)k);
+            auto gpu_hits = gpu_ctx.search(lut.data(), opts.top_k, (int)idx.config.nprobe);
+            std::vector<SearchResult> out;
+            out.reserve(gpu_hits.size());
+            for (auto& h : gpu_hits) out.push_back({h.row_id, h.distance});
+            return out;
+        }
+#endif
+        // ROCm or CPU fallback: CPU IVF-PQ ADC
+        // (ROCm HIP kernels would slot in here via hipblas when available)
         return ivfpq_search(idx, query, opts.top_k);
+
     } else {
+        // HNSW graph traversal — always CPU (graph is inherently sequential)
         auto idx = deserialize_hnsw(index_buf.data(), index_buf.size());
         if (idx.entry_point && !idx.neighbors.empty()) {
             int ef = opts.ef_search > 0 ? opts.ef_search : opts.top_k * 5;
             return hnsw_search(idx, query, opts.top_k, ef);
         } else if (opts.use_flat_fallback) {
+#ifdef AILAKE_CUDA_ENABLED
+            // GPU flat scan: faster for large N without graph structure
+            if (hw.has_cuda && !idx.flat_vecs.empty()) {
+                cuda::GpuSearchContext gpu_ctx((int)idx.dim, (int)idx.row_ids.size(),
+                                               (int)idx.metric);
+                gpu_ctx.upload(idx.flat_vecs.data(), idx.row_ids.data());
+                auto gpu_hits = gpu_ctx.search(query, opts.top_k);
+                std::vector<SearchResult> out;
+                out.reserve(gpu_hits.size());
+                for (auto& h : gpu_hits) out.push_back({h.row_id, h.distance});
+                return out;
+            }
+#endif
             return flat_search(idx, query, opts.top_k);
         }
     }
