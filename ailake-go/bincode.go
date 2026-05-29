@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // Minimal bincode v1 (little-endian, fixed-int) decoder.
 //
 // Spec: https://github.com/bincode-org/bincode/blob/trunk/docs/spec.md

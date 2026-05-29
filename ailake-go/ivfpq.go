@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // IVF-PQ index deserialization and search.
 //
 // Wire format: bincode v1 serialization of ailake_index::IvfPqSnapshot:

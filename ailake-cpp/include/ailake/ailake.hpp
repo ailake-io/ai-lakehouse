@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // ailake.hpp — main include. Pulls in all AI-Lake C++ headers.
 //
 // CPU-only:

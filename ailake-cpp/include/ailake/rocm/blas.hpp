@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // AMD ROCm/HIP batch vector search via hipBLAS SGEMM.
 //
 // Mirrors Rust ailake_index::gpu::rocm_impl exactly:

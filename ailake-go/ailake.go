@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // Package ailake provides a Go reader for AI-Lake Format files.
 //
 // AI-Lake files are standard Apache Parquet files extended with an AILK

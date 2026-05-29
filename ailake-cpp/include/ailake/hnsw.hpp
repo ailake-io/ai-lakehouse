@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // HNSW index deserialization and search.
 // Decodes ailake_index::HnswSnapshot (bincode v1).
 #pragma once

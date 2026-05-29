@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // Iceberg catalog reader for AI-Lake tables (HadoopCatalog / local / S3).
 //
 // Reads:

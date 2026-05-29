@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // Bincode v1 little-endian decoder.
 // usize → u64, Vec<T> → length (u64) + elements, Option<T> → tag u8 + value.
 #pragma once
