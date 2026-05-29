@@ -10,17 +10,16 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
+    Router,
 };
 use serde::{Deserialize, Serialize};
 
 use ailake_catalog::provider::{
-    CatalogProvider, IndexStatus, NewSnapshot, SnapshotOperation, TableIdent,
-    new_snapshot_id,
+    new_snapshot_id, CatalogProvider, IndexStatus, NewSnapshot, SnapshotOperation, TableIdent,
 };
 use ailake_core::VectorStoragePolicy;
 use ailake_query::{
@@ -73,8 +72,12 @@ struct SearchRequest {
     pruning_threshold: f32,
 }
 
-fn default_top_k() -> usize { 10 }
-fn default_pruning() -> f32 { 0.8 }
+fn default_top_k() -> usize {
+    10
+}
+fn default_pruning() -> f32 {
+    0.8
+}
 
 #[derive(Serialize)]
 struct SearchResponse {
@@ -110,8 +113,12 @@ struct CompactRequest {
     min_files: usize,
 }
 
-fn default_target_size() -> u64 { 536_870_912 }
-fn default_min_files() -> usize { 4 }
+fn default_target_size() -> u64 {
+    536_870_912
+}
+fn default_min_files() -> usize {
+    4
+}
 
 #[derive(Serialize)]
 struct CompactResponse {
@@ -141,8 +148,8 @@ async fn handle_search(
     State(state): State<Arc<AppState>>,
     body: String,
 ) -> ApiResult<impl IntoResponse> {
-    let req: SearchRequest = serde_json::from_str(&body)
-        .map_err(|e| ApiError(format!("invalid JSON: {e}")))?;
+    let req: SearchRequest =
+        serde_json::from_str(&body).map_err(|e| ApiError(format!("invalid JSON: {e}")))?;
 
     let dim = req.query.len() as u32;
     let config = SearchConfig {
@@ -183,8 +190,8 @@ async fn handle_write(
     State(state): State<Arc<AppState>>,
     body: String,
 ) -> ApiResult<impl IntoResponse> {
-    let req: WriteRequest = serde_json::from_str(&body)
-        .map_err(|e| ApiError(format!("invalid JSON: {e}")))?;
+    let req: WriteRequest =
+        serde_json::from_str(&body).map_err(|e| ApiError(format!("invalid JSON: {e}")))?;
 
     if req.texts.len() != req.embeddings.len() {
         return Err(ApiError(format!(
@@ -194,15 +201,14 @@ async fn handle_write(
         )));
     }
 
-    let schema = std::sync::Arc::new(arrow_schema::Schema::new(vec![
-        arrow_schema::Field::new("text", arrow_schema::DataType::Utf8, false),
-    ]));
+    let schema = std::sync::Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        "text",
+        arrow_schema::DataType::Utf8,
+        false,
+    )]));
     let text_arr = arrow_array::StringArray::from(req.texts.clone());
-    let batch = arrow_array::RecordBatch::try_new(
-        schema,
-        vec![std::sync::Arc::new(text_arr)],
-    )
-    .map_err(|e| ApiError(format!("RecordBatch error: {e}")))?;
+    let batch = arrow_array::RecordBatch::try_new(schema, vec![std::sync::Arc::new(text_arr)])
+        .map_err(|e| ApiError(format!("RecordBatch error: {e}")))?;
 
     let mut writer = TableWriter::create_or_open(
         Arc::clone(&state.catalog),
@@ -311,9 +317,7 @@ async fn handle_compact(
     Ok((StatusCode::OK, serde_json::to_string(&resp).unwrap()))
 }
 
-async fn handle_info(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<impl IntoResponse> {
+async fn handle_info(State(state): State<Arc<AppState>>) -> ApiResult<impl IntoResponse> {
     let meta = state
         .catalog
         .load_table(&state.table)
@@ -383,10 +387,10 @@ pub(crate) async fn run(
     });
 
     let app = Router::new()
-        .route("/search",  post(handle_search))
-        .route("/write",   post(handle_write))
+        .route("/search", post(handle_search))
+        .route("/write", post(handle_write))
         .route("/compact", post(handle_compact))
-        .route("/info",    get(handle_info))
+        .route("/info", get(handle_info))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
@@ -395,7 +399,5 @@ pub(crate) async fn run(
         .map_err(|e| format!("bind {addr}: {e}"))?;
 
     eprintln!("ailake server listening on http://{addr}");
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| e.to_string())
+    axum::serve(listener, app).await.map_err(|e| e.to_string())
 }

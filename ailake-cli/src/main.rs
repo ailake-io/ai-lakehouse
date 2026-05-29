@@ -498,7 +498,14 @@ async fn run(cli: Cli) -> Result<(), String> {
                 pq: None,
                 keep_raw_for_reranking: false,
             };
-            serve::run(catalog as Arc<dyn CatalogProvider>, store, ident, policy, port).await
+            serve::run(
+                catalog as Arc<dyn CatalogProvider>,
+                store,
+                ident,
+                policy,
+                port,
+            )
+            .await
         }
 
         Commands::Info { table, format } => {
@@ -567,7 +574,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                 OutputFormat::Text => {
                     println!("table:       {table}");
                     println!("location:    {location}");
-                    println!("vector:      col={vector_column} dim={vector_dim} metric={vector_metric}");
+                    println!(
+                        "vector:      col={vector_column} dim={vector_dim} metric={vector_metric}"
+                    );
                     println!("files:       {file_count} ({ready} indexed)");
                     println!("rows:        {row_count}");
                     println!("size:        {}", format_bytes(size_bytes));

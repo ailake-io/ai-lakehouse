@@ -429,6 +429,9 @@ mod tests {
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
         let bytes = write_manifest_file(&[file], 42, 1, schema_json, partition_spec);
         let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
-        assert_eq!(entries[0].batch_id.as_deref(), Some("dag_run_2026-05-28_taskA"));
+        assert_eq!(
+            entries[0].batch_id.as_deref(),
+            Some("dag_run_2026-05-28_taskA")
+        );
     }
 }
