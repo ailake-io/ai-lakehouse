@@ -56,6 +56,9 @@ enum Commands {
         /// Name of the embeddings column in the source file
         #[arg(long, default_value = "embedding")]
         embeddings: String,
+        /// Idempotency key — no-op if this batch_id was already committed (safe for Airflow retries)
+        #[arg(long)]
+        batch_id: Option<String>,
     },
     /// Search a table by vector similarity
     Search {
@@ -92,6 +95,9 @@ enum Commands {
     Info {
         /// Table name
         table: String,
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
     },
 }
 
@@ -202,6 +208,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             table,
             file,
             embeddings,
+            batch_id,
         } => {
             let ident = parse_table_ident(&table);
 
@@ -251,10 +258,16 @@ async fn run(cli: Cli) -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
 
             let rows = embs.len();
-            writer
-                .write_batch(&batch, &embs)
-                .await
-                .map_err(|e| e.to_string())?;
+            match batch_id {
+                Some(ref id) => writer
+                    .write_batch_idempotent(&batch, &embs, id)
+                    .await
+                    .map_err(|e| e.to_string())?,
+                None => writer
+                    .write_batch(&batch, &embs)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            }
             writer.commit().await.map_err(|e| e.to_string())?;
 
             println!("inserted {rows} rows into {table}");
@@ -440,7 +453,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
 
-        Commands::Info { table } => {
+        Commands::Info { table, format } => {
             let ident = parse_table_ident(&table);
 
             let meta = catalog
@@ -460,34 +473,60 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Ready)
                 .count();
 
-            println!("table:       {table}");
-            println!(
-                "location:    {}",
-                meta.properties
-                    .get("ailake.location")
-                    .cloned()
-                    .unwrap_or_else(|| meta.location.clone())
-            );
-            println!(
-                "vector:      col={} dim={} metric={}",
-                meta.properties
-                    .get("ailake.vector-column")
-                    .map(String::as_str)
-                    .unwrap_or("-"),
-                meta.properties
-                    .get("ailake.vector-dim")
-                    .map(String::as_str)
-                    .unwrap_or("-"),
-                meta.properties
-                    .get("ailake.vector-metric")
-                    .map(String::as_str)
-                    .unwrap_or("-"),
-            );
-            println!("files:       {file_count} ({ready} indexed)");
-            println!("rows:        {row_count}");
-            println!("size:        {}", format_bytes(size_bytes));
-            if let Some(snap_id) = meta.current_snapshot_id {
-                println!("snapshot:    {snap_id}");
+            let location = meta
+                .properties
+                .get("ailake.location")
+                .cloned()
+                .unwrap_or_else(|| meta.location.clone());
+            let vector_column = meta
+                .properties
+                .get("ailake.vector-column")
+                .map(String::as_str)
+                .unwrap_or("-")
+                .to_string();
+            let vector_dim = meta
+                .properties
+                .get("ailake.vector-dim")
+                .map(String::as_str)
+                .unwrap_or("-")
+                .to_string();
+            let vector_metric = meta
+                .properties
+                .get("ailake.vector-metric")
+                .map(String::as_str)
+                .unwrap_or("-")
+                .to_string();
+
+            match format {
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&serde_json::json!({
+                            "table": table,
+                            "location": location,
+                            "vector_column": vector_column,
+                            "vector_dim": vector_dim,
+                            "vector_metric": vector_metric,
+                            "files": file_count,
+                            "indexed_files": ready,
+                            "rows": row_count,
+                            "size_bytes": size_bytes,
+                            "snapshot_id": meta.current_snapshot_id,
+                        }))
+                        .map_err(|e| e.to_string())?
+                    );
+                }
+                OutputFormat::Text => {
+                    println!("table:       {table}");
+                    println!("location:    {location}");
+                    println!("vector:      col={vector_column} dim={vector_dim} metric={vector_metric}");
+                    println!("files:       {file_count} ({ready} indexed)");
+                    println!("rows:        {row_count}");
+                    println!("size:        {}", format_bytes(size_bytes));
+                    if let Some(snap_id) = meta.current_snapshot_id {
+                        println!("snapshot:    {snap_id}");
+                    }
+                }
             }
             Ok(())
         }
