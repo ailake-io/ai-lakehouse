@@ -189,7 +189,7 @@ jobs:
 
       - name: Upload wheels to GitHub Release
         run: |
-          VERSION=$(grep '^version' ailake-py/pyproject.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION=$(grep '^version' ailake-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           TAG="v$VERSION"
           # Upload each wheel/sdist as a release asset.
           # --clobber replaces existing assets if the step is retried.
