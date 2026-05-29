@@ -2,13 +2,38 @@ name: Publish Python
 
 on:
   workflow_dispatch:
+  # Auto-trigger after the Release workflow creates the tag and GitHub Release.
+  # Only fires on main to prevent accidental publishes from other branches.
+  # Note: workflow_run only triggers when the *source* workflow is on the default
+  # branch (main) — external fork PRs cannot trigger this path.
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+    branches: [main]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  # When triggered by workflow_run, abort if the Release workflow failed.
+  guard:
+    name: Guard — release must have succeeded
+    runs-on: [self-hosted, Linux, X64]
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    steps:
+      - name: Release workflow status
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "Triggered by Release workflow — conclusion: ${{ github.event.workflow_run.conclusion }}"
+          else
+            echo "Triggered manually via workflow_dispatch"
+          fi
+
   linux:
     name: Build Linux (${{ matrix.target }})
+    needs: guard
     runs-on: [self-hosted, Linux, X64]
     strategy:
       matrix:
@@ -81,6 +106,7 @@ jobs:
 
   windows:
     name: Build Windows (x86_64)
+    needs: guard
     runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v4
@@ -121,6 +147,7 @@ jobs:
 
   sdist:
     name: Build sdist
+    needs: guard
     runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Fix Docker-owned file permissions
