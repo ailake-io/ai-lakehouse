@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use std::collections::HashMap;
 
 use ailake_vec::cosine_distance;

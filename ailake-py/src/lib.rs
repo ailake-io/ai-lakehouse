@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ailake-py — PyO3 Python bindings
 //!
 //! Thin async-to-sync bridge. All logic lives in ailake-query and friends.
 //! Build with: maturin develop --release
 
-// PyO3 0.22 proc-macros emit implicit Into<PyErr> conversions that clippy
+// PyO3 proc-macros emit implicit Into<PyErr> conversions that clippy
 // flags as useless_conversion. Suppress it for the whole crate.
 #![allow(clippy::useless_conversion)]
 
@@ -85,6 +86,33 @@ impl TableWriter {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// Idempotent write — no-op if `batch_id` was already committed.
+    ///
+    /// Args:
+    ///   texts: list[str] — text content for each row
+    ///   embeddings: list[list[float]] — one embedding per row
+    ///   batch_id: str — unique key for this batch (e.g. Airflow run_id + task_id)
+    fn write_batch_idempotent(
+        &mut self,
+        texts: Vec<String>,
+        embeddings: Vec<Vec<f32>>,
+        batch_id: String,
+    ) -> PyResult<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let text_arr = StringArray::from(texts);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        let writer = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TableWriter already committed"))?;
+
+        self.runtime
+            .block_on(writer.write_batch_idempotent(&batch, &embeddings, &batch_id))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// Commit all staged batches as a new Iceberg snapshot.
     fn commit(&mut self) -> PyResult<i64> {
         let writer = self
@@ -140,9 +168,9 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
         ))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    let list = PyList::empty_bound(py);
+    let list = PyList::empty(py);
     for r in results {
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         d.set_item("row_id", r.row_id.as_u64())?;
         d.set_item("distance", r.distance)?;
         d.set_item("file", r.file_path)?;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use criterion::{criterion_group, criterion_main, Criterion};
 
 fn bench_hnsw_search(c: &mut Criterion) {

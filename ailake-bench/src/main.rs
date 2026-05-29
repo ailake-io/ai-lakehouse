@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! AI-Lake public benchmark — SIFT-1M
 //!
 //! Measures write throughput, search QPS, and recall@10 on real ANN data.

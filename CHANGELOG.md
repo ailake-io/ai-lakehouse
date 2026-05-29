@@ -11,6 +11,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.10] - 2026-05-29
+
+### Added
+- **CI**: TruffleHog secret scanning on every push and PR (`secret-scan.yml`)
+- **CI**: Go build + vet for `ailake-go` (`ci-go.yml`)
+- **CI**: C++17 cmake build for `ailake-cpp` (`ci-cpp.yml`)
+- **CI**: `bench-build` job validates `ailake-bench` compiles
+- **`ailake-cpp/src`**: `catalog.cpp` and `search.cpp` compilation units
+
+### Changed
+- **pyo3**: upgraded `0.22 → 0.24`; fixes RUSTSEC-2025-0020 (PyString buffer overflow)
+- **sqlx**: upgraded `0.7 → 0.8`; fixes RUSTSEC-2024-0363 (protocol truncation SQL injection); feature `runtime-tokio-rustls` split into `runtime-tokio` + `tls-rustls`
+- **`deny.toml`**: added `0BSD`, `BSL-1.0`, `MPL-2.0`, `CDLA-Permissive-2.0` to license allow-list; skipped unfixable transitive advisories (bincode, encoding, paste, rustls-pemfile, rsa, rustls-webpki)
+- **Airflow provider tests**: removed `hook.log = MagicMock()` — `BaseHook.log` is read-only in Airflow 2.x and 3.x
+
+### Fixed
+- `cargo fmt` violations in `ailake-catalog/src/avro_manifest.rs`, `ailake-cli/src/main.rs`, `ailake-cli/src/serve.rs`
+
+---
+
 ## [0.0.9] - 2026-05-28
 
 ### Changed

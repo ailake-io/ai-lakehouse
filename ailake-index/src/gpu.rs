@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! GPU-accelerated vector search and k-means.
 //!
 //! Two independent GPU backends, both via runtime `libloading` — no compile-time

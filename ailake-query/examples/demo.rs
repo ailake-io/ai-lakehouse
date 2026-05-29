@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Phase 1 local demo — write an AI-Lake table, search it, inspect the file layout.
 //!
 //! Usage:

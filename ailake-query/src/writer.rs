@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -116,11 +117,45 @@ impl TableWriter {
         Ok(())
     }
 
+    /// Idempotent variant of `write_batch`.
+    ///
+    /// Before any I/O, checks if `batch_id` already appears in the current
+    /// snapshot. If it does, this is a no-op — safe for Airflow/Kestra retries.
+    /// If not found, writes the batch and tags the `DataFileEntry` with `batch_id`
+    /// so future retries can detect it.
+    ///
+    /// `commit()` is likewise a no-op when `pending_files` is empty.
+    pub async fn write_batch_idempotent(
+        &mut self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+        batch_id: &str,
+    ) -> AilakeResult<()> {
+        let existing = self.catalog.list_files(&self.table, None).await?;
+        if existing
+            .iter()
+            .any(|f| f.batch_id.as_deref() == Some(batch_id))
+        {
+            return Ok(());
+        }
+        self.write_batch_with_id(batch, embeddings, Some(batch_id.to_string()))
+            .await
+    }
+
     /// Write a batch to a new AI-Lake file and stage it for commit.
     pub async fn write_batch(
         &mut self,
         batch: &RecordBatch,
         embeddings: &[Vec<f32>],
+    ) -> AilakeResult<()> {
+        self.write_batch_with_id(batch, embeddings, None).await
+    }
+
+    async fn write_batch_with_id(
+        &mut self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+        batch_id: Option<String>,
     ) -> AilakeResult<()> {
         if self.captured_schema.is_none() {
             self.captured_schema = Some(batch.schema());
@@ -150,7 +185,7 @@ impl TableWriter {
         let hnsw_abs_offset = ailk_start + header.hnsw_offset;
         let hnsw_len = header.hnsw_len;
 
-        let entry = make_data_file_entry(
+        let mut entry = make_data_file_entry(
             &file_path,
             embeddings.len() as u64,
             file_size,
@@ -162,6 +197,7 @@ impl TableWriter {
                 hnsw_len,
             },
         );
+        entry.batch_id = batch_id;
         self.pending_files.push(entry);
         Ok(())
     }
@@ -339,7 +375,21 @@ impl TableWriter {
     }
 
     /// Commit all staged files as a new Iceberg snapshot.
+    ///
+    /// No-op when `pending_files` is empty (e.g., all `write_batch_idempotent`
+    /// calls were skipped because their `batch_id` was already committed).
+    /// Returns the current snapshot id in that case (or 0 if no snapshot exists yet).
     pub async fn commit(mut self) -> AilakeResult<SnapshotId> {
+        if self.pending_files.is_empty() {
+            let current = self
+                .catalog
+                .load_table(&self.table)
+                .await
+                .ok()
+                .and_then(|m| m.current_snapshot_id)
+                .unwrap_or(0);
+            return Ok(current);
+        }
         let iceberg_schema = self
             .captured_schema
             .as_deref()

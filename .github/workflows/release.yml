@@ -11,8 +11,44 @@ jobs:
   publish:
     name: Publish to crates.io
     runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: write   # needed to create tags and GitHub Releases
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so tag push works
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' ailake-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push git tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "AI-Lake ${{ steps.version.outputs.tag }}" \
+            --notes "## ${{ steps.version.outputs.tag }}
+
+          See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for full release notes.
+
+          ### Rust crates (crates.io)
+          All crates bumped to \`${{ steps.version.outputs.version }}\`.
+
+          ### Python wheel
+          Published separately via the **Publish Python** workflow — wheel artifacts will be attached to this release after that workflow completes.
+          " \
+            --draft=false
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

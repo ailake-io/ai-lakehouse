@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ailake-jni — C-ABI cdylib for Trino / Spark / Flink plugins via JNA.
 //!
 //! All three plugins call the same `ailake_search_json` / `ailake_write_batch_json` surface.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Product Quantization — reduces per-vector storage from dim*4 bytes to num_subvectors bytes.
 // At dim=1536, M=48: 6144 bytes → 48 bytes per vector (128x reduction, ~93-95% recall@10).
 

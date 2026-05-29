@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Verifies that files with distant centroids are pruned before opening.
 
 use std::sync::Arc;

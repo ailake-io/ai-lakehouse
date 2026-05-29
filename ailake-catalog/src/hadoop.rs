@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // HadoopCatalog: stores metadata.json on the local filesystem / any Store backend.
 // Table layout: {warehouse}/{namespace}/{table}/metadata/vN.metadata.json
 
@@ -325,6 +326,7 @@ mod tests {
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
                 index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,

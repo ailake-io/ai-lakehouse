@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_core::{AilakeResult, Centroid, RowId, VectorStoragePolicy};
 use ailake_index::{HnswBuilder, HnswConfig, HnswSerializer, IvfPqConfig, IvfPqSerializer};
 use ailake_parquet::ParquetVectorWriter;

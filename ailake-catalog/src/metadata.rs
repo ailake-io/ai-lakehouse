@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Iceberg Spec v2 metadata.json read/write.
 // Only the fields needed by AI-Lake are modelled — the rest are passed through as JSON.
 

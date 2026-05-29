@@ -627,19 +627,40 @@ cargo bench --workspace
 
 ## CI matrix (GitHub Actions)
 
-### `ci.yml` — every PR and push to `main`/`develop`
+### `ci.yml` — manual dispatch (`workflow_dispatch`)
 
 | Job | Command | What it covers |
 |---|---|---|
 | `fmt` | `cargo fmt --all -- --check` | Formatting |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | Lints |
-| `unit` | `cargo test --workspace --lib --bins` | All unit tests (119 passed, 3 ignored) |
+| `deny` | `cargo deny check licenses advisories sources` | License + advisory audit |
+| `unit` | `cargo test --workspace --lib --bins` | All unit tests |
 | `integration` | `cargo test -p ailake-tests -- --test-threads=1` | End-to-end write/read/search, iceberg_compat |
 | `compat-parquet` | `cargo test -p ailake-tests --test parquet_trailing_bytes --test positional_invariant` | Parquet spec compliance |
 | `compat-pyarrow` | `write_fixture` + `pip install pyarrow` + `check_pyarrow.py` | PyArrow reads AI-Lake Parquet |
 | `compat-duckdb` | `write_fixture` + `pip install duckdb` + `check_duckdb.py` | DuckDB reads via `parquet_scan` |
 | `compat-pyiceberg` | `write_fixture` + `pip install pyiceberg[pyarrow]` + `check_pyiceberg.py` | PyIceberg `StaticTable.scan()` |
+| `test-airflow-provider` | `pip install apache-airflow pytest` + `pytest tests/` | Airflow provider unit tests (2.x/3.x) |
 | `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context |
+| `bench-build` | `cargo build -p ailake-bench` | bench crate compiles |
+
+### `ci-go.yml` — manual dispatch (`workflow_dispatch`)
+
+| Job | Command | What it covers |
+|---|---|---|
+| `build` | `go build ./...` + `go vet ./...` | Go SDK compiles and passes vet |
+
+### `ci-cpp.yml` — manual dispatch (`workflow_dispatch`)
+
+| Job | Command | What it covers |
+|---|---|---|
+| `build` | `cmake -S ailake-cpp -B ailake-cpp/build` + `cmake --build` | C++17 SDK configures and builds (CPU-only, no CUDA) |
+
+### `secret-scan.yml` — automatic (every push + every PR)
+
+| Job | Command | What it covers |
+|---|---|---|
+| `trufflehog` | `trufflesecurity/trufflehog@main --only-verified` | Secret scanning — blocks on verified credential leaks |
 
 ### `compat-heavy.yml` — manual dispatch (`workflow_dispatch`)
 

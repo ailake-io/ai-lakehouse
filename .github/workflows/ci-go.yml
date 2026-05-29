@@ -1,0 +1,24 @@
+name: CI Go
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: go build + vet
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ailake-go/go.mod
+          cache-dependency-path: ailake-go/go.sum
+
+      - name: Build
+        working-directory: ailake-go
+        run: go build ./...
+
+      - name: Vet
+        working-directory: ailake-go
+        run: go vet ./...

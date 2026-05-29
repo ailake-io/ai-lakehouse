@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! SIFT-1M dataset loader.
 //!
 //! Parses the texmex fvecs/ivecs binary format used by the original SIFT-1M

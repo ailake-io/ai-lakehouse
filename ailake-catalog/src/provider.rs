@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_core::{AilakeResult, Centroid, VectorStoragePolicy};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -63,6 +64,10 @@ pub struct DataFileEntry {
     /// Index build status. Defaults to Ready for backward compatibility with old manifests.
     #[serde(default)]
     pub index_status: IndexStatus,
+    /// Caller-supplied idempotency key. When set, `write_batch_idempotent` skips the
+    /// write if a file with the same batch_id is already committed in the snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
 }
 
 /// Iceberg-compatible table metadata read from the catalog.
@@ -188,6 +193,7 @@ pub fn make_multi_column_data_file_entry(
         vector_dim: Some(primary_index.dim),
         extra_vector_indexes: extra.to_vec(),
         index_status: IndexStatus::Ready,
+        batch_id: None,
     }
 }
 
@@ -222,6 +228,7 @@ pub fn make_data_file_entry_indexing(
         vector_dim: Some(dim),
         extra_vector_indexes: vec![],
         index_status: IndexStatus::Indexing,
+        batch_id: None,
     }
 }
 

@@ -29,6 +29,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  deny:
+    name: deny (licenses + advisories)
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories sources
+
   unit:
     name: unit
     runs-on: [self-hosted, Linux, X64]
@@ -104,6 +115,34 @@ jobs:
           python3 -m venv /tmp/pyiceberg-venv
           /tmp/pyiceberg-venv/bin/pip install "pyiceberg[pyarrow]"
           /tmp/pyiceberg-venv/bin/python3 tests/compat/check_pyiceberg.py ./compat-fixture
+
+  test-airflow-provider:
+    name: test-airflow-provider
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          pip install apache-airflow pytest
+
+      - name: Run Airflow provider unit tests
+        run: |
+          cd airflow-providers-ailake
+          python -m pytest tests/ -v
+
+  bench-build:
+    name: bench-build
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p ailake-bench
 
   compat-ailake-py:
     name: compat-ailake-py

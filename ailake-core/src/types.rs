@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use serde::{Deserialize, Serialize};
 
 /// Positional index of a row in a Parquet file and its paired HNSW node.

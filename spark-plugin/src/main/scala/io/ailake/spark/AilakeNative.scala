@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 package io.ailake.spark
 
 import com.fasterxml.jackson.databind.ObjectMapper

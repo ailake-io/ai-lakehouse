@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ailake-vec — vector data transformations
 //!
 //! No I/O. Pure computation: quantization, distance functions, centroid computation, PQ.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ailake-query — query planning and execution
 //!
 //! Integration layer. Depends on all data-plane crates.

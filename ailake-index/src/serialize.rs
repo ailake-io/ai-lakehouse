@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_core::{AilakeError, AilakeResult, VectorMetric};
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Verifies AI-Lake catalog output is compatible with Apache Iceberg Spec v2.
 //!
 //! These tests do NOT use the AI-Lake SDK to read back the files — they inspect

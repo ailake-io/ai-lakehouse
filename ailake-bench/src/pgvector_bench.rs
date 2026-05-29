@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! pgvector HNSW benchmark on SIFT-1M (128D L2).
 //!
 //! Requires PostgreSQL with the pgvector extension (≥ 0.5.0 for HNSW support).

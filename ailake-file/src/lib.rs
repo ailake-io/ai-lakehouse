@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ailake-file — unified file format
 //!
 //! Owns the combined Parquet + AI-Lake footer file.

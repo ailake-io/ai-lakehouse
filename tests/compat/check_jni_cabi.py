@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
 #!/usr/bin/env python3
 """
 Validates the ailake-jni C-ABI: ailake_write_batch_json + ailake_search_json.

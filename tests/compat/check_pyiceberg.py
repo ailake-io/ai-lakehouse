@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
 #!/usr/bin/env python3
 """
 Verifies that AI-Lake Iceberg metadata is loadable by PyIceberg and that

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ailake-store — object storage abstraction
 //!
 //! Thin wrapper over object_store crate.
