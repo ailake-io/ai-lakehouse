@@ -37,7 +37,6 @@ def _make_conn(host="s3://bucket/wh", extra=None):
 def _make_hook(host="s3://bucket/wh", extra=None):
     hook = AilakeHook.__new__(AilakeHook)
     hook.ailake_conn_id = "ailake_test"
-    hook.log = MagicMock()
     hook._conn = _make_conn(host, extra)
     return hook
 
