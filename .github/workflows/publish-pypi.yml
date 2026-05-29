@@ -160,12 +160,12 @@ jobs:
     #   name: pypi
     #   url: https://pypi.org/p/ailake
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Clean stale root-owned dist/
+      - name: Pre-checkout cleanup of root-owned files
         run: |
           docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
             "rm -rf dist dist-raw 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
+
+      - uses: actions/checkout@v4
 
       - name: Download wheels
         run: gh run download ${{ github.run_id }} --pattern "wheels-*" --dir dist-raw
