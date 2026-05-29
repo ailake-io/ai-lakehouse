@@ -116,6 +116,25 @@ jobs:
           /tmp/pyiceberg-venv/bin/pip install "pyiceberg[pyarrow]"
           /tmp/pyiceberg-venv/bin/python3 tests/compat/check_pyiceberg.py ./compat-fixture
 
+  test-airflow-provider:
+    name: test-airflow-provider
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          pip install apache-airflow pytest
+
+      - name: Run Airflow provider unit tests
+        run: |
+          cd airflow-providers-ailake
+          python -m pytest tests/ -v
+
   compat-ailake-py:
     name: compat-ailake-py
     runs-on: [self-hosted, Linux, X64]
