@@ -2,8 +2,9 @@
 set -euo pipefail
 
 TABLE_PATH="${DEMO_TABLE_PATH:-/data/ailake_demo}"
+VERSION_HINT="${TABLE_PATH}/default/table/metadata/version-hint.text"
 
-if [ -f "${TABLE_PATH}/version-hint.text" ]; then
+if [ -f "${VERSION_HINT}" ]; then
     echo "=== Demo data already present — skipping init ==="
 else
     echo "=== AI-Lake Demo: generating fixture data ==="

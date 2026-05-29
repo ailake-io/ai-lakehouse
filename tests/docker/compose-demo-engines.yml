@@ -65,6 +65,5 @@ services:
       bigquery-emulator:
         condition: service_healthy
 
-volumes:
-  demo-data:
-    external: true
+# demo-data is defined in compose-demo.yml; Docker Compose shares it automatically
+# when both files are loaded with -f. No explicit declaration needed here.
