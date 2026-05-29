@@ -21,6 +21,7 @@
 #include "hnsw.hpp"
 #include "ivfpq.hpp"
 #include "catalog.hpp"
+#include "rocm/blas.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -85,11 +86,8 @@ search_file(const std::string& abs_path,
         auto idx = deserialize_ivfpq(index_buf.data(), index_buf.size());
 
 #ifdef AILAKE_CUDA_ENABLED
-        // GPU IVF-PQ search: use CUDA when available.
-        // GpuIvfPqContext is defined in cuda/distance.cuh — only available
-        // when AILAKE_CUDA_ENABLED is defined at build time.
+        // NVIDIA CUDA: GPU IVF-PQ via ADC kernels in cuda/distance.cuh
         if (hw.has_cuda) {
-            // Precompute ADC LUT on CPU (cheap: m × k distance lookups).
             size_t m = idx.config.pq_m, k = idx.config.pq_k;
             size_t sub_dim = (size_t)idx.dim / m;
             std::vector<float> lut(m * k);
@@ -105,7 +103,6 @@ search_file(const std::string& abs_path,
                     lut[j * k + c] = d;
                 }
             }
-            // Upload codes to GPU and run ADC kernel
             cuda::GpuIvfPqContext gpu_ctx;
             gpu_ctx.upload(idx.inv_codes, idx.inv_row_ids, (int)m, (int)k);
             auto gpu_hits = gpu_ctx.search(lut.data(), opts.top_k, (int)idx.config.nprobe);
@@ -115,8 +112,8 @@ search_file(const std::string& abs_path,
             return out;
         }
 #endif
-        // ROCm or CPU fallback: CPU IVF-PQ ADC
-        // (ROCm HIP kernels would slot in here via hipblas when available)
+        // IVF-PQ search: ROCm does not accelerate ADC (PQ codes, not raw vectors).
+        // CPU ADC is used regardless of backend — same as Rust's IVF-PQ search path.
         return ivfpq_search(idx, query, opts.top_k);
 
     } else {
@@ -127,7 +124,7 @@ search_file(const std::string& abs_path,
             return hnsw_search(idx, query, opts.top_k, ef);
         } else if (opts.use_flat_fallback) {
 #ifdef AILAKE_CUDA_ENABLED
-            // GPU flat scan: faster for large N without graph structure
+            // NVIDIA CUDA: GPU batch flat scan
             if (hw.has_cuda && !idx.flat_vecs.empty()) {
                 cuda::GpuSearchContext gpu_ctx((int)idx.dim, (int)idx.row_ids.size(),
                                                (int)idx.metric);
@@ -139,6 +136,23 @@ search_file(const std::string& abs_path,
                 return out;
             }
 #endif
+            // AMD ROCm: flat scan via hipBLAS SGEMM (runtime dlopen — no SDK needed)
+            if (hw.has_rocm && !idx.flat_vecs.empty()) {
+                std::vector<const float*> q_ptrs = {query};
+                auto rocm_hits = rocm::try_rocm_search_batch(
+                    q_ptrs, idx.row_ids, idx.flat_vecs.data(),
+                    idx.dim, idx.metric, opts.top_k);
+                if (!rocm_hits.empty() && !rocm_hits[0].empty()) {
+                    std::vector<SearchResult> out;
+                    out.reserve(rocm_hits[0].size());
+                    for (auto& h : rocm_hits[0]) {
+                        SearchResult r; r.row_id = h.row_id; r.distance = h.distance;
+                        out.push_back(r);
+                    }
+                    return out;
+                }
+                // hipBLAS unavailable or error — fall through to CPU
+            }
             return flat_search(idx, query, opts.top_k);
         }
     }
