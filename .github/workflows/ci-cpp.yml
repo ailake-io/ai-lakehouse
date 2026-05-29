@@ -1,0 +1,22 @@
+name: CI C++
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: cmake build (C++17, CPU only)
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S ailake-cpp -B ailake-cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DAILAKE_CUDA=OFF \
+            -DAILAKE_TESTS=OFF \
+            -DAILAKE_EXAMPLES=ON
+
+      - name: Build
+        run: cmake --build ailake-cpp/build --parallel

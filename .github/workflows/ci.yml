@@ -135,6 +135,15 @@ jobs:
           cd airflow-providers-ailake
           python -m pytest tests/ -v
 
+  bench-build:
+    name: bench-build
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p ailake-bench
+
   compat-ailake-py:
     name: compat-ailake-py
     runs-on: [self-hosted, Linux, X64]
