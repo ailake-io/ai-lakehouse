@@ -48,6 +48,10 @@ RUN pip install --no-cache-dir \
         jupyterlab \
         "pyiceberg[pyarrow,s3fs]" \
         duckdb \
+        "pyspark<4.0" \
+        trino \
+        "google-cloud-bigquery>=3.13" \
+        google-auth \
         pandas \
         numpy \
         pyarrow \
