@@ -26,6 +26,7 @@ mod nvidia_impl {
 
     use ailake_core::{RowId, VectorMetric};
     use libloading::{Library, Symbol};
+    use tracing::warn;
 
     // cudaMemcpyKind constants
     const H2D: i32 = 1; // cudaMemcpyHostToDevice
@@ -132,7 +133,14 @@ mod nvidia_impl {
         if row_ids.is_empty() || q == 0 {
             return Some(vec![vec![]; q]);
         }
-        batch_inner(queries, row_ids, flat_vecs, dim, metric, top_k)
+        let result = batch_inner(queries, row_ids, flat_vecs, dim, metric, top_k);
+        if result.is_none() {
+            warn!(
+                "ailake: NVIDIA GPU search failed at runtime (cuBLAS error or allocation failure); \
+                 falling back to CPU SIMD — check CUDA runtime libraries and available GPU memory"
+            );
+        }
+        result
     }
 
     /// k-means on an NVIDIA GPU via cuBLAS SGEMM.
@@ -156,7 +164,14 @@ mod nvidia_impl {
         let n = vectors.len();
         let dim = vectors[0].len();
         let k = k.min(n);
-        kmeans_inner(vectors, k, max_iter, n, dim)
+        let result = kmeans_inner(vectors, k, max_iter, n, dim);
+        if result.is_none() {
+            warn!(
+                "ailake: NVIDIA GPU k-means failed at runtime (cuBLAS error or allocation failure); \
+                 falling back to CPU k-means — check CUDA runtime libraries and available GPU memory"
+            );
+        }
+        result
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
@@ -520,6 +535,7 @@ mod rocm_impl {
 
     use ailake_core::{RowId, VectorMetric};
     use libloading::{Library, Symbol};
+    use tracing::warn;
 
     // hipMemcpyKind constants
     const H2D: i32 = 1; // hipMemcpyHostToDevice
@@ -621,7 +637,14 @@ mod rocm_impl {
         if n == 0 || q == 0 {
             return Some(vec![vec![]; q]);
         }
-        batch_inner(queries, row_ids, flat_vecs, dim, metric, top_k)
+        let result = batch_inner(queries, row_ids, flat_vecs, dim, metric, top_k);
+        if result.is_none() {
+            warn!(
+                "ailake: AMD ROCm GPU search failed at runtime (hipBLAS error or allocation failure); \
+                 falling back to CPU SIMD — check ROCm runtime libraries and available GPU memory"
+            );
+        }
+        result
     }
 
     /// k-means on an AMD ROCm GPU.
@@ -645,7 +668,14 @@ mod rocm_impl {
         }
         let dim = vectors[0].len();
         let k = k.min(n);
-        kmeans_inner(vectors, k, max_iter, n, dim)
+        let result = kmeans_inner(vectors, k, max_iter, n, dim);
+        if result.is_none() {
+            warn!(
+                "ailake: AMD ROCm GPU k-means failed at runtime (hipBLAS error or allocation failure); \
+                 falling back to CPU k-means — check ROCm runtime libraries and available GPU memory"
+            );
+        }
+        result
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────

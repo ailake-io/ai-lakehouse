@@ -5,6 +5,8 @@
 //! AMD is checked first because ROCm installations often provide a CUDA compatibility
 //! layer (`libcuda.so.1`), which would incorrectly report as NVIDIA without the priority check.
 
+use tracing::{debug, info, warn};
+
 /// Minimum vectors to justify IVF-PQ training (k-means + PQ codebook overhead).
 const MIN_VECTORS_FOR_IVF_PQ: usize = 5_000;
 
@@ -79,13 +81,29 @@ static BACKEND: OnceLock<HardwareBackend> = OnceLock::new();
 /// a CUDA compatibility layer.
 pub fn detect_backend() -> HardwareBackend {
     *BACKEND.get_or_init(|| {
-        if probe_rocm_driver() {
+        let backend = if probe_rocm_driver() {
             HardwareBackend::AmdRocm
         } else if probe_cuda_driver() {
             HardwareBackend::NvidiaCuda
         } else {
             HardwareBackend::CpuSimd
+        };
+        match backend {
+            HardwareBackend::AmdRocm => {
+                info!("ailake: GPU backend selected — AMD ROCm (hipBLAS SGEMM via libloading)");
+            }
+            HardwareBackend::NvidiaCuda => {
+                info!("ailake: GPU backend selected — NVIDIA CUDA (cuBLAS SGEMM via libloading)");
+            }
+            HardwareBackend::CpuSimd => {
+                info!(
+                    "ailake: no GPU detected — using CPU SIMD backend (rayon + AVX2/NEON); \
+                     to enable GPU acceleration install the NVIDIA CUDA runtime \
+                     (libcudart + libcublas) or AMD ROCm (libamdhip64 + libhipblas)"
+                );
+            }
         }
+        backend
     })
 }
 
@@ -127,25 +145,59 @@ fn probe_cuda_driver() -> bool {
     }
     let lib = match unsafe { libloading::Library::new(CUDA_DRIVER_LIB) } {
         Ok(l) => l,
-        Err(_) => return false,
+        Err(e) => {
+            debug!(
+                "ailake: CUDA driver library `{}` not found ({}); \
+                 GPU acceleration unavailable — install the NVIDIA CUDA driver to enable it",
+                CUDA_DRIVER_LIB, e
+            );
+            return false;
+        }
     };
 
     let cu_init: libloading::Symbol<unsafe extern "C" fn(u32) -> GpuResult> =
         match unsafe { lib.get(b"cuInit\0") } {
             Ok(f) => f,
-            Err(_) => return false,
+            Err(e) => {
+                warn!(
+                    "ailake: `{}` loaded but `cuInit` symbol missing ({}); \
+                     CUDA installation may be incomplete — falling back to CPU",
+                    CUDA_DRIVER_LIB, e
+                );
+                return false;
+            }
         };
-    if unsafe { cu_init(0) } != 0 {
+    let rc = unsafe { cu_init(0) };
+    if rc != 0 {
+        warn!(
+            "ailake: cuInit(0) returned error code {} — CUDA driver present but no usable GPU \
+             or driver not initialised; falling back to CPU SIMD",
+            rc
+        );
         return false;
     }
 
     let cu_count: libloading::Symbol<unsafe extern "C" fn(*mut i32) -> GpuResult> =
         match unsafe { lib.get(b"cuDeviceGetCount\0") } {
             Ok(f) => f,
-            Err(_) => return false,
+            Err(e) => {
+                warn!(
+                    "ailake: `cuDeviceGetCount` symbol missing in `{}` ({}); \
+                     falling back to CPU",
+                    CUDA_DRIVER_LIB, e
+                );
+                return false;
+            }
         };
     let mut count = 0i32;
     let rc = unsafe { cu_count(&mut count) };
+    if rc == 0 && count == 0 {
+        warn!(
+            "ailake: CUDA driver initialised but no CUDA-capable devices found (count=0); \
+             falling back to CPU SIMD"
+        );
+        return false;
+    }
     rc == 0 && count > 0
 }
 
@@ -164,26 +216,60 @@ fn probe_rocm_driver() -> bool {
     }
     let lib = match unsafe { libloading::Library::new(ROCM_DRIVER_LIB) } {
         Ok(l) => l,
-        Err(_) => return false,
+        Err(e) => {
+            debug!(
+                "ailake: ROCm library `{}` not found ({}); \
+                 AMD GPU acceleration unavailable — install the ROCm runtime to enable it",
+                ROCM_DRIVER_LIB, e
+            );
+            return false;
+        }
     };
 
     // hipInit(0) must succeed before any other HIP driver call.
     let hip_init: libloading::Symbol<unsafe extern "C" fn(u32) -> GpuResult> =
         match unsafe { lib.get(b"hipInit\0") } {
             Ok(f) => f,
-            Err(_) => return false,
+            Err(e) => {
+                warn!(
+                    "ailake: `{}` loaded but `hipInit` symbol missing ({}); \
+                     ROCm installation may be incomplete — falling back to CPU",
+                    ROCM_DRIVER_LIB, e
+                );
+                return false;
+            }
         };
-    if unsafe { hip_init(0) } != 0 {
+    let rc = unsafe { hip_init(0) };
+    if rc != 0 {
+        warn!(
+            "ailake: hipInit(0) returned error code {} — ROCm driver present but no usable GPU \
+             or driver not initialised; falling back to CPU SIMD",
+            rc
+        );
         return false;
     }
 
     let hip_count: libloading::Symbol<unsafe extern "C" fn(*mut i32) -> GpuResult> =
         match unsafe { lib.get(b"hipGetDeviceCount\0") } {
             Ok(f) => f,
-            Err(_) => return false,
+            Err(e) => {
+                warn!(
+                    "ailake: `hipGetDeviceCount` symbol missing in `{}` ({}); \
+                     falling back to CPU",
+                    ROCM_DRIVER_LIB, e
+                );
+                return false;
+            }
         };
     let mut count = 0i32;
     let rc = unsafe { hip_count(&mut count) };
+    if rc == 0 && count == 0 {
+        warn!(
+            "ailake: ROCm driver initialised but no ROCm-capable devices found (count=0); \
+             falling back to CPU SIMD"
+        );
+        return false;
+    }
     rc == 0 && count > 0
 }
 

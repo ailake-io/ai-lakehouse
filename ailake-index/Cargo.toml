@@ -20,6 +20,7 @@ memmap2      = { workspace = true }
 tempfile     = { workspace = true }
 rayon        = { workspace = true }
 libloading   = { workspace = true }
+tracing      = { workspace = true }
 
 [dev-dependencies]
 rand        = { workspace = true }
