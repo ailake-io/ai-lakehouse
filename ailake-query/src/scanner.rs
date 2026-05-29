@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use tracing::{debug, warn};
+use tracing::{debug, error};
 
 use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
 use ailake_core::{AilakeResult, RowId, VectorMetric};
@@ -137,11 +137,14 @@ pub async fn search(
                 let exact_dist = match raw_vectors.get(idx) {
                     Some(v) => exact_distance(metric, query, v),
                     None => {
-                        warn!(
-                            "ailake: reranking — row_id {} out of bounds (raw_vectors.len={}); \
-                             using INFINITY distance (recall degraded)",
+                        error!(
+                            "ailake: invariant violated — row_id {} out of bounds \
+                             (raw_vectors.len={}, file={}); \
+                             Parquet row count and HNSW node count are out of sync; \
+                             file may be corrupt — run compaction to rebuild",
                             idx,
-                            raw_vectors.len()
+                            raw_vectors.len(),
+                            file_entry.path
                         );
                         f32::INFINITY
                     }

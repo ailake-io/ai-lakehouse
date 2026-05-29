@@ -13,6 +13,7 @@ use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBat
 use ailake_index::IvfPqConfig;
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
+use tracing::{error, info};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
@@ -110,7 +111,11 @@ impl TableWriter {
         let fp = file_path.clone();
         tokio::spawn(async move {
             if let Err(e) = build_and_patch_index(store, catalog, policy, table, fp).await {
-                eprintln!("[ailake] deferred HNSW build failed: {e}");
+                error!(
+                    "ailake: deferred HNSW build failed — file is indexed as Parquet-only until \
+                     next compaction rebuilds the index: {}",
+                    e
+                );
             }
         });
 
@@ -697,8 +702,9 @@ async fn build_and_patch_index(
         // Another task overwrote us — retry.
     }
 
-    eprintln!(
-        "[ailake] deferred HNSW built for {file_path} (offset={hnsw_abs_offset}, len={hnsw_len})"
+    info!(
+        "ailake: deferred HNSW index built for {} (offset={}, len={})",
+        file_path, hnsw_abs_offset, hnsw_len
     );
     Ok(())
 }

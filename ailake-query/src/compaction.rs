@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info};
 
 use ailake_catalog::{
     make_data_file_entry, CatalogProvider, DataFileEntry, NewSnapshot, SnapshotOperation,
@@ -241,9 +241,10 @@ impl CompactionExecutor {
         // Delete old files from store
         for entry in &to_compact {
             if let Err(e) = self.store.delete(&entry.path).await {
-                warn!(
+                error!(
                     "ailake: compaction cleanup failed — could not delete {}: {} \
-                     (file may leak in object store; safe to delete manually)",
+                     (orphan file in object store after successful catalog commit; \
+                     delete manually to reclaim storage)",
                     entry.path, e
                 );
             }
