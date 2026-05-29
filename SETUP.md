@@ -609,6 +609,25 @@ cargo bench -p ailake-file
 
 ## 8F. GPU search — NVIDIA CUDA and AMD ROCm
 
+### Licensing note — third-party GPU SDKs
+
+NVIDIA CUDA Toolkit and AMD ROCm are **proprietary software owned by their respective vendors**.
+The AI-Lake repository (MIT OR Apache-2.0) does not bundle, redistribute, or statically link
+these SDKs in its default configuration.
+
+| SDK | Owner | License | How AI-Lake uses it |
+|---|---|---|---|
+| NVIDIA CUDA Toolkit (`libcudart`, `libcublas`) | NVIDIA Corporation | [CUDA EULA](https://docs.nvidia.com/cuda/eula/) | **Rust/Go**: runtime dlopen via `libloading` — zero build dependency. **C++ SDK**: opt-in static link when `-DAILAKE_CUDA=ON` |
+| AMD ROCm (`libamdhip64`, `libhipblas`) | Advanced Micro Devices | [ROCm License](https://rocm.docs.amd.com/en/latest/about/license.html) | **Rust/Go**: runtime dlopen via `libloading` — zero build dependency |
+
+Binary distributions of this SDK must not bundle NVIDIA or AMD proprietary libraries.
+Vendors distributing `ailake-cpp` compiled with `-DAILAKE_CUDA=ON` are responsible for
+complying with the NVIDIA CUDA EULA.
+
+---
+
+### Rust + Go SDK: runtime detection (no build dependency)
+
 Two independent GPU backends. Both use `libloading` dlopen at runtime —
 **zero build dependency** for any GPU. The same binary runs on
 CPU-only, NVIDIA, and AMD without recompilation.
