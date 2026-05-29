@@ -134,6 +134,7 @@ pub fn write_manifest_file(
             vector_dim: f.vector_dim,
             extra_vector_indexes: f.extra_vector_indexes.clone(),
             index_status: f.index_status.clone(),
+            batch_id: f.batch_id.clone(),
         };
         match serde_json::to_vec(&ext) {
             Ok(bytes) => encode_union_bytes(1, &bytes, &mut rec), // key_metadata=bytes
@@ -313,6 +314,7 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                             .as_ref()
                             .map(|e| e.index_status.clone())
                             .unwrap_or_default(),
+                        batch_id: ext.as_ref().and_then(|e| e.batch_id.clone()),
                     });
                 }
             }
@@ -340,6 +342,8 @@ struct AilakeEntryExt {
     pub extra_vector_indexes: Vec<crate::provider::ExtraVectorIndex>,
     #[serde(default)]
     pub index_status: IndexStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
 }
 
 /// Read manifest file paths from an Iceberg manifest list (Avro).
@@ -393,6 +397,7 @@ mod tests {
             vector_dim: Some(4),
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
+            batch_id: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -402,5 +407,28 @@ mod tests {
         assert_eq!(entries[0].path, "data/part-0.parquet");
         assert_eq!(entries[0].record_count, 5);
         assert_eq!(entries[0].hnsw_offset, Some(100));
+    }
+
+    #[test]
+    fn batch_id_roundtrip() {
+        let file = DataFileEntry {
+            path: "data/part-1.parquet".to_string(),
+            record_count: 100,
+            file_size_bytes: 4096,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: Some(200),
+            hnsw_len: Some(80),
+            vector_column: Some("embedding".to_string()),
+            vector_dim: Some(4),
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            batch_id: Some("dag_run_2026-05-28_taskA".to_string()),
+        };
+        let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
+        let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
+        let bytes = write_manifest_file(&[file], 42, 1, schema_json, partition_spec);
+        let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
+        assert_eq!(entries[0].batch_id.as_deref(), Some("dag_run_2026-05-28_taskA"));
     }
 }
