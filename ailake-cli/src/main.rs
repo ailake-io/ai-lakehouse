@@ -62,14 +62,20 @@ enum Commands {
         /// Table name
         table: String,
         /// Query vector as comma-separated floats (e.g. "0.1,0.2,0.3")
-        #[arg(long)]
-        query: String,
+        #[arg(long, conflicts_with = "query_file")]
+        query: Option<String>,
+        /// Path to a binary file containing the query vector (little-endian f32 array)
+        #[arg(long, conflicts_with = "query")]
+        query_file: Option<String>,
         /// Number of results to return
         #[arg(long, default_value = "10")]
         top_k: usize,
         /// Geometric pruning threshold (0.0–1.0; lower = more aggressive)
         #[arg(long, default_value = "0.8")]
         pruning_threshold: f32,
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
     },
     /// Compact small files in a table into a larger merged file
     Compact {
@@ -121,6 +127,12 @@ impl From<Precision> for VectorPrecision {
             Precision::I8 => VectorPrecision::I8,
         }
     }
+}
+
+#[derive(ValueEnum, Clone)]
+enum OutputFormat {
+    Text,
+    Json,
 }
 
 /// Parse "namespace.table" → (namespace, table).
@@ -252,15 +264,33 @@ async fn run(cli: Cli) -> Result<(), String> {
         Commands::Search {
             table,
             query,
+            query_file,
             top_k,
             pruning_threshold,
+            format,
         } => {
             let ident = parse_table_ident(&table);
 
-            let query_vec: Vec<f32> = query
-                .split(',')
-                .map(|s| s.trim().parse::<f32>().map_err(|e| e.to_string()))
-                .collect::<Result<_, _>>()?;
+            let query_vec: Vec<f32> = if let Some(file) = query_file {
+                let raw = std::fs::read(&file)
+                    .map_err(|e| format!("failed to read query file {file}: {e}"))?;
+                if raw.len() % 4 != 0 {
+                    return Err(format!(
+                        "query file size {} not a multiple of 4 (expected little-endian f32 array)",
+                        raw.len()
+                    ));
+                }
+                raw.chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect()
+            } else if let Some(q) = query {
+                q.split(',')
+                    .map(|s| s.trim().parse::<f32>().map_err(|e| e.to_string()))
+                    .collect::<Result<_, _>>()?
+            } else {
+                return Err("either --query or --query-file is required".into());
+            };
+
             let dim = query_vec.len() as u32;
 
             let config = SearchConfig {
@@ -282,14 +312,36 @@ async fn run(cli: Cli) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
 
-            if results.is_empty() {
-                println!("no results");
-                return Ok(());
-            }
-
-            println!("{:<6} {:<12} file", "rank", "distance");
-            for (i, r) in results.iter().enumerate() {
-                println!("{:<6} {:<12.6} {}", i + 1, r.distance, r.file_path);
+            match format {
+                OutputFormat::Json => {
+                    let json_results: Vec<serde_json::Value> = results
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| {
+                            serde_json::json!({
+                                "rank": i + 1,
+                                "row_id": r.row_id.0,
+                                "distance": r.distance,
+                                "file_path": r.file_path,
+                            })
+                        })
+                        .collect();
+                    println!(
+                        "{}",
+                        serde_json::to_string(&serde_json::json!({ "results": json_results }))
+                            .map_err(|e| e.to_string())?
+                    );
+                }
+                OutputFormat::Text => {
+                    if results.is_empty() {
+                        println!("no results");
+                        return Ok(());
+                    }
+                    println!("{:<6} {:<12} file", "rank", "distance");
+                    for (i, r) in results.iter().enumerate() {
+                        println!("{:<6} {:<12.6} {}", i + 1, r.distance, r.file_path);
+                    }
+                }
             }
             Ok(())
         }
