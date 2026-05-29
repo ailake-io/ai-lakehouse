@@ -200,3 +200,9 @@ jobs:
             echo "Warning: GitHub Release $TAG not found — run the Release workflow first to create the tag."
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Cleanup root-owned dist/
+        if: always()
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
+            "rm -rf dist dist-raw 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
