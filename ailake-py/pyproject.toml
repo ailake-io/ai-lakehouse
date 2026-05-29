@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ailake"
-version     = "0.0.8"
+dynamic     = ["version"]
 description = "Unified tabular + vector storage in a single Iceberg-compatible file"
 readme      = "README.md"
 license     = { text = "MIT OR Apache-2.0" }

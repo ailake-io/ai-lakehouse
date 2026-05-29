@@ -3,6 +3,9 @@ name: Publish Python
 on:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   linux:
     name: Build Linux (${{ matrix.target }})
@@ -157,10 +160,12 @@ jobs:
     #   name: pypi
     #   url: https://pypi.org/p/ailake
     steps:
-      - name: Clean stale root-owned dist/
+      - name: Pre-checkout cleanup of root-owned files
         run: |
           docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
             "rm -rf dist dist-raw 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
+
+      - uses: actions/checkout@v4
 
       - name: Download wheels
         run: gh run download ${{ github.run_id }} --pattern "wheels-*" --dir dist-raw
@@ -177,16 +182,17 @@ jobs:
         with:
           python-version: "3.9"
 
-      - uses: PyO3/maturin-action@v1
+      - name: Publish to PyPI
         env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        with:
-          command: upload
-          args: --non-interactive --skip-existing dist/*
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          pip install twine
+          twine upload --skip-existing dist/*
 
       - name: Upload wheels to GitHub Release
         run: |
-          VERSION=$(grep '^version' ailake-py/pyproject.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION=$(grep '^version' ailake-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           TAG="v$VERSION"
           # Upload each wheel/sdist as a release asset.
           # --clobber replaces existing assets if the step is retried.
@@ -194,3 +200,9 @@ jobs:
             echo "Warning: GitHub Release $TAG not found — run the Release workflow first to create the tag."
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Cleanup root-owned dist/
+        if: always()
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
+            "rm -rf dist dist-raw 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true

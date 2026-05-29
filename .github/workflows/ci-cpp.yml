@@ -3,6 +3,9 @@ name: CI C++
 on:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     name: cmake build (C++17, CPU only)

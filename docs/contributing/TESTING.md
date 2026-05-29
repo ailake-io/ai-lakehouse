@@ -671,6 +671,23 @@ cargo bench --workspace
 | `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests |
 | `compat-bigquery` | BigQuery: `fsouza/fake-gcs-server` + `goccy/bigquery-emulator:0.6.6`; pyarrow reads AILK Parquet + BQ streaming inserts (`insertAll`); validates row count, schema, `MIN`/`MAX(id)` |
 
+### `publish-jvm.yml` — manual dispatch (`workflow_dispatch`)
+
+Builds and uploads JVM plugin fat-JARs + `libailake_jni.so` to an existing GitHub Release.
+
+| Input | Description |
+|---|---|
+| `tag` | Release tag to attach artifacts to (e.g. `v0.1.0`) |
+
+Artifacts uploaded:
+- `spark-plugin-{VERSION}-plugin.jar`
+- `trino-plugin-{VERSION}-plugin.jar`
+- `ailake-flink-{VERSION}-plugin.jar`
+- `libailake_jni.so`
+
+> Run after `compat-heavy.yml` passes and the GitHub Release exists (created by `release.yml`).
+> TODO: switch trigger to `on: release: types: [published]` when repo goes public.
+
 ### Failure policy
 
 | Test suite | Failure blocks |
@@ -679,3 +696,23 @@ cargo bench --workspace
 | `unit`, `integration`, `compat-parquet` | Every PR |
 | `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg`, `compat-ailake-py` | Every PR |
 | `compat-spark`, `compat-trino`, `compat-jvm-plugins`, `compat-bigquery` | Release (manual dispatch before publish) |
+| `publish-jvm` | Release (run after `compat-heavy` passes and GitHub Release exists) |
+
+---
+
+## Manual Actions trigger order (pre-release)
+
+All workflows are `workflow_dispatch`. Trigger in this order — each step must succeed before the next.
+
+| Step | Workflow | What it does | Blocks on |
+|---|---|---|---|
+| 1 | **CI** (`ci.yml`) | Rust fmt/clippy/deny, unit, integration, compat Python/DuckDB/PyIceberg/ailake-py, Airflow provider tests, bench-build | Must pass |
+| 2 | **CI Go** (`ci-go.yml`) | Go SDK build + vet | Must pass |
+| 3 | **CI C++** (`ci-cpp.yml`) | C++17 cmake build | Must pass |
+| 4 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
+| 5 | **Release** (`release.yml`) | Creates git tag + GitHub Release + publishes all Rust crates to crates.io | Steps 1–4 green |
+| 6 | **Publish Python** (`publish-pypi.yml`) | Builds ailake-py wheels (Linux x86_64/aarch64 + sdist), publishes to PyPI, attaches to GitHub Release | Step 5 complete |
+| 7 | **Publish Airflow Provider** (`publish-airflow-provider.yml`) | Builds wheel + sdist, publishes to PyPI, attaches to GitHub Release | Step 5 complete |
+| 8 | **Publish JVM Plugins** (`publish-jvm.yml`) | Builds fat-JARs (Spark/Trino/Flink) + `libailake_jni.so`, uploads to GitHub Release | Step 5 complete |
+
+Steps 6, 7, 8 can run in parallel after step 5 completes.

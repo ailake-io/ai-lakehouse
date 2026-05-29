@@ -3,6 +3,9 @@ name: Publish Airflow Provider
 on:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   publish:
     name: Build and publish apache-airflow-providers-ailake to PyPI
