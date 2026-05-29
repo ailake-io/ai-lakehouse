@@ -1,0 +1,35 @@
+name: Publish Airflow Provider
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Build and publish apache-airflow-providers-ailake to PyPI
+    runs-on: [self-hosted, Linux, X64]
+    # After creating a PyPI account, create a "pypi" environment in
+    # Settings → Environments with PYPI_API_TOKEN as an environment secret.
+    # Uncomment below to add a manual approval gate before publish runs.
+    # environment:
+    #   name: pypi
+    #   url: https://pypi.org/p/apache-airflow-providers-ailake
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Build wheel and sdist
+        run: |
+          pip install hatchling
+          cd airflow-providers-ailake
+          python -m hatchling build --target wheel --target sdist
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          pip install twine
+          twine upload --skip-existing airflow-providers-ailake/dist/*
