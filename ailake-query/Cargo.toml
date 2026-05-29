@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-query"
-version     = "0.0.9"
+version     = "0.0.10"
 edition     = "2021"
 description = "Query planner and executor for AI-Lake — vector search, compaction, ContextAssembler"
 license     = "MIT OR Apache-2.0"
@@ -9,13 +9,13 @@ keywords    = ["vector-search", "iceberg", "lakehouse", "hnsw", "rag"]
 categories  = ["database", "algorithms"]
 
 [dependencies]
-ailake-core    = { path = "../ailake-core", version     = "0.0.9" }
-ailake-file    = { path = "../ailake-file", version     = "0.0.9" }
-ailake-catalog = { path = "../ailake-catalog", version     = "0.0.9" }
-ailake-store   = { path = "../ailake-store", version     = "0.0.9" }
-ailake-index   = { path = "../ailake-index", version     = "0.0.9" }
-ailake-vec     = { path = "../ailake-vec", version     = "0.0.9" }
-ailake-parquet = { path = "../ailake-parquet", version     = "0.0.9" }
+ailake-core    = { path = "../ailake-core", version     = "0.0.10" }
+ailake-file    = { path = "../ailake-file", version     = "0.0.10" }
+ailake-catalog = { path = "../ailake-catalog", version     = "0.0.10" }
+ailake-store   = { path = "../ailake-store", version     = "0.0.10" }
+ailake-index   = { path = "../ailake-index", version     = "0.0.10" }
+ailake-vec     = { path = "../ailake-vec", version     = "0.0.10" }
+ailake-parquet = { path = "../ailake-parquet", version     = "0.0.10" }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
 arrow-select   = { workspace = true }
