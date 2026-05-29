@@ -19,6 +19,7 @@ use ailake_query::{
 };
 use ailake_store::LocalStore;
 use serde::Serialize;
+use tracing::{debug, info, warn};
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -53,17 +54,26 @@ fn rt() -> &'static tokio::runtime::Runtime {
     use std::sync::OnceLock;
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
+        match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .unwrap_or_else(|_| {
-                // Fall back to single-threaded runtime — avoids spawning extra OS
-                // threads that can interfere with the JVM's signal handlers.
+        {
+            Ok(rt) => {
+                info!("ailake-jni: Tokio multi-thread runtime initialised");
+                rt
+            }
+            Err(e) => {
+                warn!(
+                    "ailake-jni: multi-thread Tokio runtime failed ({}); \
+                     falling back to single-threaded runtime to avoid JVM signal handler conflicts",
+                    e
+                );
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("ailake-jni: tokio runtime unavailable")
-            })
+            }
+        }
     })
 }
 
@@ -241,12 +251,23 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
     }
     let json_str = match CStr::from_ptr(request_json).to_str() {
         Ok(s) => s,
-        Err(e) => return cstr_err_json(e),
+        Err(e) => {
+            warn!("ailake_search_json: invalid UTF-8 in request_json: {}", e);
+            return cstr_err_json(e);
+        }
     };
     let req: Req = match serde_json::from_str(json_str) {
         Ok(r) => r,
-        Err(e) => return cstr_err_json(e),
+        Err(e) => {
+            warn!("ailake_search_json: JSON parse error: {}", e);
+            return cstr_err_json(e);
+        }
     };
+
+    debug!(
+        "ailake_search_json: warehouse={} table={}.{} dim={} top_k={}",
+        req.warehouse, req.namespace, req.table, req.dim, req.top_k
+    );
 
     let results = match do_search(
         req.warehouse,
@@ -259,7 +280,10 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         req.ef_search,
     ) {
         Ok(v) => v,
-        Err(e) => return cstr_err_json(e),
+        Err(e) => {
+            warn!("ailake_search_json: search failed: {}", e);
+            return cstr_err_json(e);
+        }
     };
     #[derive(serde::Serialize)]
     struct Resp {
@@ -331,15 +355,33 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     }
     let json_str = match CStr::from_ptr(request_json).to_str() {
         Ok(s) => s,
-        Err(e) => return cstr_err_json(e),
+        Err(e) => {
+            warn!("ailake_write_batch_json: invalid UTF-8 in request_json: {}", e);
+            return cstr_err_json(e);
+        }
     };
     let req: Req = match serde_json::from_str(json_str) {
         Ok(r) => r,
-        Err(e) => return cstr_err_json(e),
+        Err(e) => {
+            warn!("ailake_write_batch_json: JSON parse error: {}", e);
+            return cstr_err_json(e);
+        }
     };
     if req.ids.len() != req.embeddings.len() {
+        warn!(
+            "ailake_write_batch_json: ids.len()={} != embeddings.len()={}",
+            req.ids.len(),
+            req.embeddings.len()
+        );
         return cstr_err_json("ids.len() != embeddings.len()");
     }
+    debug!(
+        "ailake_write_batch_json: warehouse={} table={}.{} rows={}",
+        req.warehouse,
+        req.namespace,
+        req.table,
+        req.ids.len()
+    );
 
     let metric = parse_metric(req.metric.as_deref().unwrap_or("euclidean"));
     let precision = match req.precision.as_deref().unwrap_or("f16") {
@@ -381,6 +423,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     }
     match result {
         Ok(snap) => {
+            info!(
+                "ailake_write_batch_json: committed snapshot_id={} table={}.{}",
+                snap, req.namespace, req.table
+            );
             let json = serde_json::to_string(&Resp {
                 ok: true,
                 snapshot_id: snap,
@@ -388,7 +434,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
             .unwrap_or_default();
             CString::new(json).unwrap_or_default().into_raw()
         }
-        Err(e) => cstr_err_json(e),
+        Err(e) => {
+            warn!("ailake_write_batch_json: write failed: {}", e);
+            cstr_err_json(e)
+        }
     }
 }
 

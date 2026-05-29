@@ -11,6 +11,7 @@
 // Simpler than per-cluster residual PQ, adequate for dim >= 64.
 
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
 
 use ailake_core::{AilakeError, AilakeResult, RowId, VectorMetric};
 use ailake_vec::{kmeans_centroids, PQCodebook};
@@ -18,11 +19,29 @@ use ailake_vec::{kmeans_centroids, PQCodebook};
 /// K-means dispatch: NVIDIA CUDA → AMD ROCm → CPU rayon fallback.
 fn kmeans_dispatch(vecs: &[Vec<f32>], k: usize, max_iter: usize) -> Vec<Vec<f32>> {
     if let Some(result) = crate::gpu::try_nvidia_kmeans(vecs, k, max_iter) {
+        debug!(
+            "ailake: IVF-PQ k-means used NVIDIA CUDA (n={} k={} max_iter={})",
+            vecs.len(),
+            k,
+            max_iter
+        );
         return result;
     }
     if let Some(result) = crate::gpu::try_rocm_kmeans(vecs, k, max_iter) {
+        debug!(
+            "ailake: IVF-PQ k-means used AMD ROCm (n={} k={} max_iter={})",
+            vecs.len(),
+            k,
+            max_iter
+        );
         return result;
     }
+    debug!(
+        "ailake: IVF-PQ k-means using CPU rayon (n={} k={} max_iter={})",
+        vecs.len(),
+        k,
+        max_iter
+    );
     kmeans_centroids(vecs, k, max_iter)
 }
 
@@ -122,8 +141,20 @@ impl IvfPqIndex {
         };
 
         let nlist = config.nlist.min(n);
+        if nlist < config.nlist {
+            warn!(
+                "ailake: IVF-PQ nlist clamped from {} to {} (n={} vectors); \
+                 consider using HNSW for small datasets",
+                config.nlist, nlist, n
+            );
+        }
         let nprobe = config.nprobe.min(nlist);
         let pq_m = find_valid_pq_m(config.pq_m, dim);
+
+        info!(
+            "ailake: training IVF-PQ index — n={} dim={} nlist={} nprobe={} pq_m={}",
+            n, dim, nlist, nprobe, pq_m
+        );
 
         // Train coarse centroids + PQ codebook, using GPU k-means when available.
         let coarse_centroids = kmeans_dispatch(vecs, nlist, config.max_iter);

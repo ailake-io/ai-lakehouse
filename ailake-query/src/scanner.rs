@@ -2,6 +2,7 @@
 use std::sync::Arc;
 
 use rayon::prelude::*;
+use tracing::{debug, warn};
 
 use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
 use ailake_core::{AilakeResult, RowId, VectorMetric};
@@ -88,7 +89,14 @@ pub async fn search(
     );
 
     // Geometric pruning: skip files whose centroid is too far from the query
+    let total_files = all_files.len();
     let surviving_files = VectorPruner::prune(all_files, query, metric, config.pruning_threshold);
+    debug!(
+        "ailake: geometric pruning — {}/{} files survive (threshold={})",
+        surviving_files.len(),
+        total_files,
+        config.pruning_threshold
+    );
 
     let candidate_k = match config.rerank_factor {
         Some(factor) => config.top_k * factor,
@@ -103,6 +111,10 @@ pub async fn search(
 
         if file_entry.index_status == IndexStatus::Indexing || !reader.is_ailake_file() {
             // HNSW not yet built — flat scan over raw vectors.
+            debug!(
+                "ailake: flat scan fallback for {} (index_status={:?})",
+                file_entry.path, file_entry.index_status
+            );
             let (_, raw_vectors) = reader.read_parquet()?;
             for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
                 all_results.push(SearchResult {
@@ -122,10 +134,18 @@ pub async fn search(
             let (_, raw_vectors) = reader.read_parquet()?;
             for (row_id, _approx_dist) in local_results {
                 let idx = row_id.as_u64() as usize;
-                let exact_dist = raw_vectors
-                    .get(idx)
-                    .map(|v| exact_distance(metric, query, v))
-                    .unwrap_or(f32::INFINITY);
+                let exact_dist = match raw_vectors.get(idx) {
+                    Some(v) => exact_distance(metric, query, v),
+                    None => {
+                        warn!(
+                            "ailake: reranking — row_id {} out of bounds (raw_vectors.len={}); \
+                             using INFINITY distance (recall degraded)",
+                            idx,
+                            raw_vectors.len()
+                        );
+                        f32::INFINITY
+                    }
+                };
                 all_results.push(SearchResult {
                     row_id,
                     distance: exact_dist,
