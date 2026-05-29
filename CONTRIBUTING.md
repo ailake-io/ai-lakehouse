@@ -250,14 +250,64 @@ cd trino-plugin && ./gradlew build --no-daemon && cd ..
 
 ```bash
 cd ailake-go
+
+# Formatting — gofmt is the canonical Go formatter (no config file needed)
+gofmt -l .          # list files with formatting issues
+gofmt -w .          # auto-fix all files
+
+# Lints
 go vet ./...
+
 cd ..
 ```
+
+Key rules:
+- All exported symbols must have a doc comment (`// FuncName ...`)
+- No `fmt.Println` in library code — use `log/slog.Debug` at most
+- Error strings must not be capitalized and must not end with punctuation
+
+### C++ (`ailake-cpp`)
+
+```bash
+# Formatting — clang-format 14+ with the project's .clang-format config
+find ailake-cpp -name "*.cpp" -o -name "*.hpp" -o -name "*.h" | \
+  xargs clang-format --dry-run --Werror   # check only
+
+find ailake-cpp -name "*.cpp" -o -name "*.hpp" -o -name "*.h" | \
+  xargs clang-format -i                   # auto-fix
+
+# Build check (CPU-only, no CUDA)
+cmake -S ailake-cpp -B ailake-cpp/build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DAILAKE_CUDA=OFF \
+  -DAILAKE_TESTS=ON
+cmake --build ailake-cpp/build --parallel
+ctest --test-dir ailake-cpp/build --output-on-failure
+```
+
+Key rules:
+- Header-only where possible — implementations in `include/ailake/*.hpp`
+- No exceptions in public API headers (`noexcept` on search + parse functions)
+- SPDX header on every file (see §SPDX)
+
+### Python (`ailake-py` tests + demo scripts)
+
+```bash
+# Formatting — ruff (fast, covers isort + pyflakes + pycodestyle)
+pip install ruff
+ruff check tests/ tests/docker/demo/    # lint
+ruff format --check tests/ tests/docker/demo/   # format check
+ruff format tests/ tests/docker/demo/           # auto-fix
+```
+
+Key rules:
+- No bare `except:` — always catch a specific exception class
+- No `print()` in library code — scripts under `tests/docker/demo/` may use `print` for progress output
+- Type annotations required for all new public Python functions
 
 ### General
 
 - No `System.err.println` in JVM production code — use SLF4J logger
-- No `fmt.Println` in Go library code — use `log/slog.Debug` at most
 - All new public Rust functions must have at least one unit test
 - All new Python-facing APIs must have at least one test in `ailake-py/tests/` or `tests/compat/`
 

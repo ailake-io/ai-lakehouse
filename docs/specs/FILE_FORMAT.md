@@ -479,3 +479,116 @@ Canonical implementation: `ailake-file` Rust crate.
 | `ailake_index`          | `HnswBuilder`, `HnswIndex`, `HnswSerializer` |
 | `ailake_catalog`        | Iceberg catalog metadata |
 | `ailake_query::scanner` | `search()`, `SearchConfig`, pruning + reranking |
+
+---
+
+## 15. Bincode v1 Wire Format (Language-Agnostic)
+
+The index blob (§6) is serialized with **bincode v1, little-endian, fixed-int mode**.
+This is not a general bincode spec — it describes only the rules used by AI-Lake.
+
+### 15.1 Encoding rules
+
+| Rust type   | Wire representation |
+|-------------|---------------------|
+| `u8`        | 1 byte |
+| `u32`       | 4 bytes, LE |
+| `u64`       | 8 bytes, LE |
+| `usize`     | 8 bytes, LE (bincode v1 always serialises `usize` as `u64`) |
+| `f32`       | 4 bytes, IEEE 754 single-precision LE |
+| `Vec<T>`    | `u64` length (8 bytes LE) + `T × length` |
+| `Option<T>` | `0x00` byte (None) or `0x01` byte + `T` (Some) |
+| enum variant| `u32` discriminant LE (not used in index blob — all enums stored as `u8`) |
+
+No alignment padding. No length prefix on the outer blob (length comes from
+`header.hnsw_len` in the AILK header).
+
+### 15.2 HnswSnapshot wire layout (§6.1, `flags & 0x0001 == 0`)
+
+Sequential fields with no gaps:
+
+```
+m                : u64   — max neighbors per node per layer (HNSW M parameter)
+ef_construction  : u64   — size of dynamic candidate list during build
+max_elements     : u64   — capacity hint; readers may skip (not needed for search)
+metric           : u8    — 0=cosine, 1=euclidean, 2=dotproduct
+dim              : u32   — vector dimensionality (must equal header.dim)
+row_ids          : Vec<u64>  — count(u64) + count × u64
+                             row_ids[i] is the Parquet row index for graph node i
+flat_vecs        : Vec<f32>  — count(u64) + count × f32
+                             stride = dim; flat_vecs[i*dim .. (i+1)*dim] = raw F32 vector for node i
+neighbors        : Vec<Vec<Vec<u64>>>
+                  count(u64)               — number of nodes
+                  for each node:
+                    layer_count(u64)       — number of layers this node participates in
+                    for each layer:
+                      neighbor_count(u64)  — number of neighbors
+                      for each neighbor: node_index(u64)
+node_levels      : Vec<u64>  — count(u64) + count × u64; node_levels[i] = max layer for node i
+entry_point      : Option<u64>
+                   0x00                    — no entry point (empty index)
+                   0x01 + u64              — graph entry point node index
+max_layer        : u64   — top layer index (= max(node_levels))
+```
+
+Total blob length must equal `header.hnsw_len`. Implementations MUST verify
+`len(row_ids) == header.record_count` after deserialization.
+
+### 15.3 IvfPqSnapshot wire layout (§6.2, `flags & 0x0001 == 1`)
+
+```
+config.nlist     : u64
+config.nprobe    : u64
+config.pq_m      : u64   — number of PQ sub-vectors (M)
+config.pq_k      : u64   — PQ centroids per sub-space (K ≤ 256)
+config.max_iter  : u64   — k-means training iterations
+metric           : u8    — 0=cosine, 1=euclidean, 2=dotproduct
+dim              : u64   — vector dimensionality
+coarse_centroids : Vec<Vec<f32>>   — nlist coarse cluster centroids, each dim floats
+pq_codebook.m    : u64
+pq_codebook.k    : u64
+pq_codebook.centroids : Vec<Vec<f32>>
+                         count = m × k; each sub-centroid has (dim/m) floats
+                         layout: [sub0_c0, sub0_c1, ..., sub0_cK, sub1_c0, ...]
+inv_row_ids      : Vec<Vec<u64>>   — nlist inverted lists of RowId values
+inv_codes        : Vec<Vec<u8>>
+                   inv_codes[i].len() == inv_row_ids[i].len() × pq_m
+                   flat PQ codes for each vector in cluster i
+```
+
+---
+
+## 16. Cross-Language Implementations
+
+The AI-Lake format is designed so that any language can read and search
+AI-Lake files by implementing §15's bincode decoder and the AILK header parser
+(§3). No dependency on the Rust crate is required.
+
+| Language | Module | AILK header | Bincode decoder | HNSW search | IVF-PQ search |
+|----------|--------|-------------|-----------------|-------------|---------------|
+| **Rust** | `ailake-file`, `ailake-index` | `AilakeHeader::from_bytes` | `HnswSerializer`, `IvfPqSerializer` | `HnswIndex::search` | `IvfPqIndex::search` |
+| **C++17** | `ailake-cpp/include/ailake/` | `footer.hpp` → `AilakeHeader::parse` | `bincode.hpp` → `BincodeReader` | `hnsw.hpp` → `deserialize_hnsw` + `hnsw_search` | `ivfpq.hpp` → `deserialize_ivfpq` + `ivfpq_search` |
+| **Go** | `ailake-go/` | `footer.go` → `ParseHeaderBytes` | `bincode.go` → `bincodeReader` | `hnsw.go` → `DeserializeHnsw` + `(HnswIndex).Search` | `ivfpq.go` → `DeserializeIvfPq` + `(IvfPqIndex).Search` |
+
+All three implementations follow the same read algorithm (§9) and enforce the
+same integrity invariants (§10). The C++ and Go SDKs were independently
+verified against the Rust reference implementation using the shared compat
+fixture (`ailake-query/examples/write_fixture.rs`).
+
+### 16.1 Bootstrap sequence (language-agnostic)
+
+```
+1. Read last 4 bytes of file → verify "PAR1" (Parquet magic)
+2. Read bytes [-8..-4] → u32 LE footer_length
+3. Read Parquet footer at [EOF - 8 - footer_length .. EOF - 8]
+4. Parse KV metadata → find "ailake.footer_offset" → ailk_start (u64)
+5. Read 64 bytes at ailk_start → parse AILK header (§3)
+6. Verify header.magic == "AILK" and header.format_version == 1
+7. Read centroid blob at ailk_start + header.centroid_offset
+   → geometric pruning (optional but recommended)
+8. Read index blob at ailk_start + header.hnsw_offset, length = header.hnsw_len
+9. Decode index blob via §15.2 (HNSW) or §15.3 (IVF-PQ) depending on flags
+10. Search (§9.2)
+```
+
+This sequence does not require the Rust toolchain or any Rust crates.

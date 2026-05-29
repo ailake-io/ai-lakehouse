@@ -1,3 +1,16 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2026 Thiago Egon Lange
+#
+# GPU acceleration note:
+#   Default build (AILAKE_CUDA=OFF, AILAKE_ROCM=OFF): CPU-only, no proprietary SDK required.
+#   -DAILAKE_CUDA=ON: links against NVIDIA CUDA Toolkit (CUDA::cudart) — proprietary NVIDIA software.
+#     CUDA Toolkit license: https://docs.nvidia.com/cuda/eula/
+#   -DAILAKE_ROCM=ON (future): links against AMD ROCm — proprietary AMD software.
+#     ROCm license: https://rocm.docs.amd.com/en/latest/about/license.html
+#   The AI-Lake format itself (this repository) is MIT OR Apache-2.0. The GPU
+#   SDKs are third-party proprietary dependencies loaded only when explicitly
+#   enabled at build time. Binary distributions of this SDK must not bundle
+#   NVIDIA or AMD proprietary libraries.
 cmake_minimum_required(VERSION 3.20)
 project(ailake-cpp VERSION 0.0.10 LANGUAGES CXX)
 
