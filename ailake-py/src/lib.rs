@@ -4,7 +4,7 @@
 //! Thin async-to-sync bridge. All logic lives in ailake-query and friends.
 //! Build with: maturin develop --release
 
-// PyO3 0.22 proc-macros emit implicit Into<PyErr> conversions that clippy
+// PyO3 proc-macros emit implicit Into<PyErr> conversions that clippy
 // flags as useless_conversion. Suppress it for the whole crate.
 #![allow(clippy::useless_conversion)]
 
@@ -168,9 +168,9 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
         ))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    let list = PyList::empty_bound(py);
+    let list = PyList::empty(py);
     for r in results {
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         d.set_item("row_id", r.row_id.as_u64())?;
         d.set_item("distance", r.distance)?;
         d.set_item("file", r.file_path)?;

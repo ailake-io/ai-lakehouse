@@ -33,7 +33,7 @@ aws-sdk-glue = { version = "1", optional = true }
 aws-config   = { version = "1", features = ["behavior-version-latest"], optional = true }
 
 # catalog-jdbc optional deps
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "mysql", "sqlite", "any"], optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite", "any"], optional = true }
 
 [dev-dependencies]
 tempfile    = { workspace = true }

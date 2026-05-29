@@ -68,13 +68,6 @@ ignore = [
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki wildcard name constraint bug, transitive via sqlx 0.7; fix: upgrade sqlx to 0.8" },
     { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL panic, transitive via sqlx 0.7; fix: upgrade sqlx to 0.8" },
 
-    # --- Fix available but requires breaking upgrade — tracked as separate tasks ---
-
-    # pyo3 0.22.6 → >=0.24.1 fixes PyString::from_object buffer overflow
-    { id = "RUSTSEC-2025-0020", reason = "pyo3 buffer overflow in PyString::from_object; upgrade to 0.24.x tracked separately" },
-
-    # sqlx 0.7.4 → >=0.8.1 fixes protocol-level SQL injection via integer overflow
-    { id = "RUSTSEC-2024-0363", reason = "sqlx protocol truncation SQL injection; upgrade to 0.8.x tracked separately" },
 ]
 
 # ---------------------------------------------------------------------------
