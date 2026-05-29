@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // CPU distance functions with optional AVX2/AVX-512 SIMD.
 #pragma once
 

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // searchViaHTTP delegates vector search to a running `ailake serve` instance.
 //
 // Used when GPU is detected but Go cannot call CUDA kernels without cgo.

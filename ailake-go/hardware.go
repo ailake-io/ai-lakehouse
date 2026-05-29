@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // Hardware capability detection — mirrors ailake_index::hardware (Rust).
 //
 // Detection priority: AMD ROCm → NVIDIA CUDA → CPU.

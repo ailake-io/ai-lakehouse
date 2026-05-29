@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // Package ailake implements the AI-Lake file format reader.
 //
 // Binary layout reference: docs/specs/FILE_FORMAT.md

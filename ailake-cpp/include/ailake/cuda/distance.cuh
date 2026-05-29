@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 Thiago Egon Lange
 // CUDA kernels for AI-Lake GPU-accelerated vector search.
 //
 // Build with:   cmake -DAILAKE_CUDA=ON ..
