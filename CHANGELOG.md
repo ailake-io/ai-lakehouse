@@ -10,6 +10,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`README.md`**: added "Interactive demo" section with `docker compose up -d` quick start, notebook table, and engines overlay command; updated repository layout to include all `tests/docker/demo/` files
+- **`SETUP.md`**: added "Fastest path — Docker demo" section at the top pointing to `compose-demo.yml` and engines overlay
+- **`docs/contributing/TESTING.md`**: added `index-cpu-fallback` job to `ci.yml` matrix; added `ci-gpu.yml` workflow section (Windows self-hosted GPU runner); updated `secret-scan.yml` note to document that automatic triggers are disabled while repo is private
 - **`tests/docker/compose-demo-engines.yml`**: optional engines overlay — adds Trino (port 8080) and BigQuery emulator (port 9050); activated with `docker compose -f compose-demo.yml -f compose-demo-engines.yml up -d`
 - **`tests/docker/demo/trino-catalog/ailake.properties`**: Trino Iceberg HadoopCatalog config pointing at the demo-data volume (`file:///data/ailake_demo`)
 - **`tests/docker/demo/notebooks/02_duckdb.ipynb`**: DuckDB demo — direct Parquet glob scan, filtered queries, aggregations, embedding as BLOB, optional Iceberg extension

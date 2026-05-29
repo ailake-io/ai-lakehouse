@@ -636,6 +636,7 @@ cargo bench --workspace
 | `deny` | `cargo deny check licenses advisories sources` | License + advisory audit |
 | `unit` | `cargo test --workspace --lib --bins` | All unit tests |
 | `integration` | `cargo test -p ailake-tests -- --test-threads=1` | End-to-end write/read/search, iceberg_compat |
+| `index-cpu-fallback` | `cargo test -p ailake-index -- --nocapture` | Verifies `hardware::detect_backend()` returns `CpuSimd` and all index tests pass when no CUDA/ROCm libraries are present on the Linux runner |
 | `compat-parquet` | `cargo test -p ailake-tests --test parquet_trailing_bytes --test positional_invariant` | Parquet spec compliance |
 | `compat-pyarrow` | `write_fixture` + `pip install pyarrow` + `check_pyarrow.py` | PyArrow reads AI-Lake Parquet |
 | `compat-duckdb` | `write_fixture` + `pip install duckdb` + `check_duckdb.py` | DuckDB reads via `parquet_scan` |
@@ -643,6 +644,16 @@ cargo bench --workspace
 | `test-airflow-provider` | `pip install apache-airflow pytest` + `pytest tests/` | Airflow provider unit tests (2.x/3.x) |
 | `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context |
 | `bench-build` | `cargo build -p ailake-bench` | bench crate compiles |
+
+### `ci-gpu.yml` — manual dispatch (`workflow_dispatch`)
+
+Runs `ailake-index` tests on a `[self-hosted, Windows, X64]` runner with NVIDIA or AMD GPU drivers installed.
+
+| Job | Runner | What it covers |
+|---|---|---|
+| `index-gpu-windows` | Windows self-hosted | Detects CUDA (`cudart64_*.dll`) or ROCm (`amdhip64.dll`) at runtime; runs the full `ailake-index` test suite via the active GPU backend |
+
+**Runner requirements**: Windows 10/11 or Server 2019+, NVIDIA CUDA Toolkit 11/12 or AMD ROCm for Windows, Rust stable toolchain.
 
 ### `ci-go.yml` — manual dispatch (`workflow_dispatch`)
 
@@ -656,7 +667,9 @@ cargo bench --workspace
 |---|---|---|
 | `build` | `cmake -S ailake-cpp -B ailake-cpp/build` + `cmake --build` | C++17 SDK configures and builds (CPU-only, no CUDA) |
 
-### `secret-scan.yml` — automatic (every push + every PR)
+### `secret-scan.yml` — manual dispatch (`workflow_dispatch`) *(while repository is private)*
+
+> **Note**: automatic `push` and `pull_request` triggers are commented out while the repository is private. Re-enable both in `secret-scan.yml` when the repository goes public so every push and external PR is scanned automatically.
 
 | Job | Command | What it covers |
 |---|---|---|

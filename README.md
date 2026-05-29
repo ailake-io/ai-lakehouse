@@ -39,6 +39,38 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 
 ---
 
+## Interactive demo (single command)
+
+Spin up a local environment with MinIO, Nessie, and JupyterLab pre-loaded with 500 synthetic documents and an HNSW index — no cloud account, no credentials:
+
+```bash
+# From the repository root — builds ailake-py wheel on first run (~3-5 min, cached after)
+docker compose -f tests/docker/compose-demo.yml up -d
+```
+
+Then open **http://localhost:8888** and run the notebooks:
+
+| Notebook | What it shows |
+|---|---|
+| `01_ailake_demo.ipynb` | Vector search, Iceberg compat, RAG context assembly, MinIO upload |
+| `02_duckdb.ipynb` | DuckDB direct Parquet scan, filtered queries, aggregations |
+| `03_spark.ipynb` | PySpark local[*], Iceberg HadoopCatalog SQL, snapshot history |
+| `04_trino.ipynb` | Trino SQL via `trino` Python driver, `$snapshots` / `$files` system tables |
+| `05_bigquery.ipynb` | BigQuery emulator streaming inserts, SQL queries |
+
+Notebooks 04 and 05 require the engines overlay (adds Trino + BigQuery emulator):
+
+```bash
+docker compose \
+  -f tests/docker/compose-demo.yml \
+  -f tests/docker/compose-demo-engines.yml \
+  up -d
+```
+
+See [`tests/docker/`](./tests/docker/) for compose file details.
+
+---
+
 ## Quick orientation
 
 | Document | What it answers |
@@ -235,8 +267,22 @@ tests/
 ├── positional_invariant.rs
 ├── context_assembler.rs
 └── docker/
-    ├── compose.yml             # MinIO + Nessie + Localstack
-    └── compose-engines.yml     # + Spark + Trino containers
+    ├── compose.yml              # MinIO + Nessie + Localstack (Phase 2 integration)
+    ├── compose-engines.yml      # + Spark + Trino containers (Phase 3 compat)
+    ├── compose-demo.yml         # Single-command onboarding demo (docker compose up -d)
+    ├── compose-demo-engines.yml # Overlay: + Trino + BigQuery emulator
+    └── demo/
+        ├── Dockerfile           # Two-stage: Rust/maturin → JupyterLab
+        ├── entrypoint.sh        # Init fixture then start Jupyter
+        ├── init_demo.py         # Writes 500-row AI-Lake table at startup
+        ├── trino-catalog/
+        │   └── ailake.properties # Trino Iceberg HadoopCatalog config
+        └── notebooks/
+            ├── 01_ailake_demo.ipynb  # Vector search + Iceberg + RAG + MinIO
+            ├── 02_duckdb.ipynb       # DuckDB direct Parquet scan
+            ├── 03_spark.ipynb        # PySpark local[*] + Iceberg SQL
+            ├── 04_trino.ipynb        # Trino SQL (engines overlay required)
+            └── 05_bigquery.ipynb     # BigQuery emulator (engines overlay required)
 ```
 
 ## Build
