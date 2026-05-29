@@ -482,7 +482,7 @@ Hash-based optimistic concurrency: `get_branch` fetches the current hash before 
 
 Stores the `metadata_location` pointer in a PostgreSQL or MySQL table. The actual `metadata.json` and manifests are written to object storage via `Store`. Suitable for self-hosted deployments without AWS Glue.
 
-Dependencies: `sqlx 0.7` (runtime-selected driver via `AnyPool`).
+Dependencies: `sqlx 0.8` (runtime-selected driver via `AnyPool`).
 
 ```toml
 ailake-catalog = { path = "...", features = ["catalog-jdbc"] }

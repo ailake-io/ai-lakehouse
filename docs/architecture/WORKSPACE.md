@@ -270,7 +270,7 @@ zstd        = "0.13"
 # Bindings
 # Note: reqwest is NOT in workspace deps — ailake-catalog declares it inline
 # with rustls-tls to keep openssl-sys out of the ailake-py dep tree.
-pyo3        = { version = "0.22", features = ["extension-module"] }
+pyo3        = { version = "0.24", features = ["extension-module"] }
 # uniffi removed — all JVM bindings use C-ABI + JNA
 
 # CLI
@@ -342,7 +342,7 @@ Deferred to Phase 3:
 
 Delivered in Phase 3:
 - `ailake-catalog`: `NessieCatalog` — wraps `RestCatalog` + Nessie v2 branching API (`list_branches`, `create_branch`, `merge_branch`, `delete_branch`)
-- `ailake-catalog`: `JdbcCatalog` — PostgreSQL/MySQL/SQLite via `sqlx 0.7` `AnyPool`; schema auto-created; versioned metadata.json via UUID paths
+- `ailake-catalog`: `JdbcCatalog` — PostgreSQL/MySQL/SQLite via `sqlx 0.8` `AnyPool`; schema auto-created; versioned metadata.json via UUID paths
 - `ailake-catalog`: `GlueCatalog` — AWS Glue Data Catalog via `aws-sdk-glue 1.x`; Iceberg-standard `metadata_location` parameter; tables visible in Athena/EMR
 - `ailake-jni`: C-ABI exports (`ailake_search_json`, `ailake_write_batch_json`, `ailake_free_string`)
 - Multi-column vector tables (`embedding` + `context_embedding`)

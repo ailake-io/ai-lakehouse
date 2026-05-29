@@ -63,9 +63,9 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 **Rust** (add to `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.9"
-ailake-query = "0.0.9"   # search(), TableWriter, ContextAssembler
-ailake-store = "0.0.9"   # S3 / GCS / Azure / local backends
+ailake-core  = "0.0.10"
+ailake-query = "0.0.10"   # search(), TableWriter, ContextAssembler
+ailake-store = "0.0.10"   # S3 / GCS / Azure / local backends
 ```
 
 **Python**:
