@@ -12,9 +12,10 @@ use std::sync::Arc;
 
 use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use tracing::{debug, warn};
 
 use ailake_catalog::{
     hadoop::HadoopCatalog,
@@ -27,8 +28,9 @@ use ailake_query::{
 };
 use ailake_store::{store::Store, LocalStore};
 
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Runtime::new().expect("tokio runtime")
+fn rt() -> PyResult<tokio::runtime::Runtime> {
+    tokio::runtime::Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("ailake: failed to create Tokio runtime: {e}")))
 }
 
 fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>) {
@@ -50,7 +52,8 @@ impl TableWriter {
     #[new]
     #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine"))]
     fn new(path: &str, vector_column: &str, dim: u32, metric: &str) -> PyResult<Self> {
-        let rt = rt();
+        let rt = rt()?;
+        debug!("ailake-py: TableWriter::new path={} dim={} metric={}", path, dim, metric);
         let policy = VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
         let (catalog, store) = local_catalog_store(path);
         let table = TableIdent::new("default", "table");
@@ -83,7 +86,10 @@ impl TableWriter {
 
         self.runtime
             .block_on(writer.write_batch(&batch, &embeddings))
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map_err(|e| {
+                warn!("ailake-py: write_batch failed: {}", e);
+                PyValueError::new_err(e.to_string())
+            })
     }
 
     /// Idempotent write — no-op if `batch_id` was already committed.
@@ -131,7 +137,8 @@ impl TableWriter {
 #[pyfunction]
 #[pyo3(signature = (path, query, top_k=10))]
 fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult<PyObject> {
-    let rt = rt();
+    let rt = rt()?;
+    debug!("ailake-py: search path={} dim={} top_k={}", path, query.len(), top_k);
     let (catalog, store) = local_catalog_store(path);
     let table = TableIdent::new("default", "table");
 

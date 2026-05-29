@@ -9,6 +9,7 @@
 package ailake
 
 import (
+	"log/slog"
 	"os"
 	"runtime"
 	"sync"
@@ -91,15 +92,21 @@ func probeHardware() HardwareProfile {
 	if probeROCm() {
 		p.Backend = BackendAMDROCm
 		p.HasROCm = true
+		slog.Debug("ailake: GPU backend detected", "backend", "amd-rocm")
 	} else if probeCUDA() {
 		p.Backend = BackendNvidiaCUDA
 		p.HasCUDA = true
+		slog.Debug("ailake: GPU backend detected", "backend", "nvidia-cuda")
 	} else {
 		p.Backend = BackendCPU
+		slog.Debug("ailake: no GPU detected, using CPU backend",
+			"cores", runtime.NumCPU(),
+			"hint", "set AILAKE_SERVER_URL to delegate IVF-PQ search to ailake serve")
 	}
 
 	// SIMD detection (x86_64 only via cpuid; arm/other → false)
 	p.HasAVX2, p.HasAVX512 = detectSIMD()
+	slog.Debug("ailake: SIMD capabilities", "avx2", p.HasAVX2, "avx512", p.HasAVX512)
 	return p
 }
 
