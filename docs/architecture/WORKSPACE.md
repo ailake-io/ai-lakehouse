@@ -309,6 +309,8 @@ debug       = true
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
 | **Phase 3** | ✅ Complete | Catalog backends (NessieCatalog, JdbcCatalog, GlueCatalog), JNA C-ABI bindings (`ailake-jni`), multi-column vectors |
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS runtime-only), HNSW perf optimizations, IVF-PQ native index, GPU k-means, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog, JNA bridge) |
+| **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP server, Airflow provider, idempotent writes, Compat Heavy CI, TruffleHog scanning, cloud deployment guides |
+| **Phase 6** | ✅ Complete | Public distribution — crates.io pipeline, PyPI manylinux wheels, Airflow provider on PyPI, pre-built JVM JARs + native lib on GitHub Releases, dynamic Python versioning |
 
 ### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
@@ -378,4 +380,42 @@ Delivered in Phase 4:
   - `bench_result::print_multi_comparison` — N-engine side-by-side table, highlights fastest QPS
   - Deep Lake: `scripts/deeplake_bench.py` (Python) — exact kNN on subset; ANN requires paid Deep Memory plan (no Rust SDK available)
 
-Phase 4 complete. See Phase 5 for next planned work.
+Phase 4 complete.
+
+### Phase 5 — Multi-language SDKs + Ecosystem Integrations ✅
+
+Delivered in Phase 5:
+
+- **`ailake-go`** — Native Go SDK: Iceberg `metadata.json` reading, Parquet scan via `parquet-go`, vector search over pre-built indexes, `SearchSession` multi-query mode
+- **`ailake-cpp`** — C++17 header-only SDK: `AilakeReader`, `AilakeWriter`, `VectorSearch`; hardware detection matching Rust (CUDA → ROCm → CPU SIMD); `ailake-cpp/src/catalog.cpp` + `search.cpp`
+- **`ailake-cli`: `ailake serve`** — HTTP JSON server exposing write/search/catalog over REST; enables universal access from any language without FFI
+- **`apache-airflow-providers-ailake`** — Airflow 2.x/3.x provider package:
+  - `AilakeHook` — connection to AI-Lake table on object storage
+  - `AilakeWriteOperator` — writes batch + embeddings, returns snapshot id via XCom
+  - `AilakeSearchOperator` — vector similarity search, pushes results to XCom
+  - `AilakeSnapshotSensor` — waits for a new Iceberg snapshot (triggers downstream DAGs after a write)
+  - Idempotent writes via `batch_id` (safe Airflow/Kestra task retries — duplicate batches are no-ops)
+- **`MemTableWriter`** — streaming ingestion write buffer in `ailake-query`: buffers rows in-memory, flushes to Parquet + HNSW on `flush()` or size threshold; enables real-time ingest without per-row file I/O
+- **Cloud deployment guides** (`docs/specs/CLOUD_DEPLOY.md`) — step-by-step for AWS EMR, Glue, Lambda, GCP Dataproc, Dataflow, Databricks, Azure HDInsight, AzureML
+- **`compat-heavy.yml`** — full compatibility CI workflow:
+  - `compat-spark`: PySpark direct Parquet read + Spark+Iceberg HadoopCatalog SQL
+  - `compat-trino`: `tabulario/iceberg-rest` REST catalog + `trinodb/trino:436`; PyIceberg REST scan + Trino Python client
+  - `compat-jvm-plugins`: Gradle integration tests for Flink, Spark, Trino plugins + `libailake_jni.so` C-ABI validation
+  - `compat-bigquery`: BigQuery emulator (`goccy/bigquery-emulator:0.6.6`) + pyarrow AILK Parquet footer validation
+- **`secret-scan.yml`** — TruffleHog OSS secret scanning on every push and PR; blocks on verified credential leaks
+
+### Phase 6 — Public Distribution Pipeline ✅
+
+Delivered in Phase 6:
+
+- **`release.yml`** — automated crates.io publish for all 10 workspace crates in dependency order (30 s index wait between tiers) + creates git tag + GitHub Release
+- **`publish-pypi.yml`** — manylinux wheels via `maturin-action` (abi3-py39, Linux x86_64 + aarch64 + Windows x86_64 + sdist); publishes `ailake` to PyPI; attaches `.whl`/`.tar.gz` to GitHub Release
+  - Dynamic versioning: `ailake-py/pyproject.toml` uses `dynamic = ["version"]` — maturin reads version from `Cargo.toml` at build time; no manual sync required
+  - Publish via `twine` (maturin upload/publish deprecated, PyO3/maturin#2334)
+- **`publish-airflow-provider.yml`** — hatchling wheel + sdist; publishes `apache-airflow-providers-ailake` to PyPI; attaches to GitHub Release
+- **`publish-jvm.yml`** — builds Spark/Trino/Flink fat-JARs (via Gradle `shadowJar`) + `libailake_jni.so` (Rust `--release`); uploads all four artifacts to GitHub Release; pre-built JARs downloadable without Rust toolchain or Gradle
+- **CI Go** (`ci-go.yml`) — `go build ./...` + `go vet ./...` for `ailake-go`
+- **CI C++** (`ci-cpp.yml`) — CMake configure + build for `ailake-cpp` (CPU-only, no CUDA)
+- **Node.js 24 opt-in** — `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` across all 9 workflows; eliminates deprecation warnings ahead of GitHub-forced switch
+
+Manual Actions trigger order (pre-release): CI → CI Go → CI C++ → Compat Heavy → Release → Publish Python / Airflow Provider / JVM Plugins (parallel). See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.

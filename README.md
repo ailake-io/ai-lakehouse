@@ -84,6 +84,31 @@ results = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20)
 # returns a PyArrow RecordBatch — zero-copy to pandas / polars
 ```
 
+**Apache Airflow**:
+```bash
+pip install apache-airflow-providers-ailake
+```
+
+**JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases):
+
+```bash
+VERSION=0.0.10
+
+# Spark plugin
+wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
+
+# Trino plugin
+wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/trino-plugin-${VERSION}-plugin.jar
+
+# Flink connector
+wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/ailake-flink-${VERSION}-plugin.jar
+
+# Native library (required by all three — place on java.library.path)
+wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/libailake_jni.so
+```
+
+See [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) for installation and configuration.
+
 ## Repository layout
 
 ```
@@ -232,5 +257,7 @@ cargo check --workspace
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW loading, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
 | **Phase 3** | ✅ Complete | Catalog backends (Nessie/JDBC/Glue), JNA C-ABI bindings, multi-column vectors, Spark/Trino/Flink plugins |
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog) |
+| **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP REST server, Apache Airflow provider, idempotent writes, Compat Heavy CI (Spark+Iceberg, Trino+REST, BigQuery emulator), TruffleHog secret scanning, cloud deployment guides |
+| **Phase 6** | ✅ Complete | Public distribution pipeline — crates.io, PyPI (manylinux abi3 wheels), Airflow provider on PyPI, pre-built JVM JARs + `libailake_jni.so` on GitHub Releases, dynamic Python versioning |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.
