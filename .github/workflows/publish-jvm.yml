@@ -1,0 +1,64 @@
+name: Publish JVM Plugins
+
+# Manual trigger for now.
+# TODO: when repo goes public, replace with:
+#   on:
+#     release:
+#       types: [published]
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach JARs to (e.g. v0.1.0)"
+        required: true
+
+jobs:
+  publish-jvm:
+    name: Build and upload JVM plugin JARs
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag }}
+
+      - name: Read version from tag
+        id: version
+        run: |
+          VERSION=$(grep '^version' ailake-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Build libailake_jni.so
+        run: cargo build --release -p ailake-jni
+
+      - name: Build fat-JARs
+        run: |
+          gradle -p spark-plugin  shadowJar --no-daemon --no-configuration-cache
+          gradle -p trino-plugin  shadowJar --no-daemon --no-configuration-cache
+          gradle -p ailake-flink  shadowJar --no-daemon --no-configuration-cache
+
+      - name: Upload JVM artifacts to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ github.event.inputs.tag }}"
+          gh release upload "$TAG" \
+            "spark-plugin/build/libs/spark-plugin-${VERSION}-plugin.jar" \
+            "trino-plugin/build/libs/trino-plugin-${VERSION}-plugin.jar" \
+            "ailake-flink/build/libs/ailake-flink-${VERSION}-plugin.jar" \
+            "target/release/libailake_jni.so" \
+            --clobber
