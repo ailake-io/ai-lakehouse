@@ -7,6 +7,8 @@ jobs:
   publish:
     name: Build and publish apache-airflow-providers-ailake to PyPI
     runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: write   # needed to upload wheel asset to GitHub Release
     # After creating a PyPI account, create a "pypi" environment in
     # Settings → Environments with PYPI_API_TOKEN as an environment secret.
     # Uncomment below to add a manual approval gate before publish runs.
@@ -33,3 +35,13 @@ jobs:
         run: |
           pip install twine
           twine upload --skip-existing airflow-providers-ailake/dist/*
+
+      - name: Upload wheel to GitHub Release
+        run: |
+          VERSION=$(grep '^version' ailake-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          TAG="v$VERSION"
+          gh release upload "$TAG" airflow-providers-ailake/dist/*.whl \
+            airflow-providers-ailake/dist/*.tar.gz --clobber 2>/dev/null || \
+            echo "Warning: GitHub Release $TAG not found — run the Release workflow first."
+        env:
+          GH_TOKEN: ${{ github.token }}
