@@ -50,10 +50,6 @@ jobs:
           Write-Host "Rust found at: $rustBin"
           "$rustBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Update Rust stable
-        shell: pwsh
-        run: rustup update stable --no-self-update
-
       - uses: Swatinem/rust-cache@v2
 
       - name: Detect GPU backend
