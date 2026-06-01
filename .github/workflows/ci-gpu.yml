@@ -40,15 +40,22 @@ jobs:
       - name: Detect GPU backend
         shell: pwsh
         run: |
-          $cuda = Get-Command "cudart64_12.dll" -ErrorAction SilentlyContinue `
-                  ?? (Get-Command "cudart64_11.dll" -ErrorAction SilentlyContinue)
-          $rocm = Get-Command "amdhip64.dll" -ErrorAction SilentlyContinue
+          function Find-Dll([string]$name) {
+            ($env:PATH -split ';') | ForEach-Object {
+              $p = Join-Path $_ $name
+              if (Test-Path $p) { $p }
+            } | Select-Object -First 1
+          }
+
+          $cuda = Find-Dll "cudart64_12.dll"
+          if (-not $cuda) { $cuda = Find-Dll "cudart64_11.dll" }
+          $rocm = Find-Dll "amdhip64.dll"
 
           if ($cuda) {
-            Write-Host "NVIDIA CUDA runtime found: $($cuda.Source)"
+            Write-Host "NVIDIA CUDA runtime found: $cuda"
             $env:AILAKE_GPU_BACKEND = "cuda"
           } elseif ($rocm) {
-            Write-Host "AMD ROCm runtime found: $($rocm.Source)"
+            Write-Host "AMD ROCm runtime found: $rocm"
             $env:AILAKE_GPU_BACKEND = "rocm"
           } else {
             Write-Host "WARNING: no CUDA or ROCm runtime found — GPU tests will be skipped by libloading fallback"
