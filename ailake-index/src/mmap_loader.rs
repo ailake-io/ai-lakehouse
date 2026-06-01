@@ -15,7 +15,10 @@ impl MmapLoader {
     /// Using mmap lets the OS lazily page in only the graph nodes touched during search —
     /// critical for large indexes (>1 GB) where loading the full file would waste RAM.
     pub fn from_bytes(bytes: &[u8]) -> AilakeResult<HnswIndex> {
-        debug!("ailake: loading HNSW index via mmap ({} bytes)", bytes.len());
+        debug!(
+            "ailake: loading HNSW index via mmap ({} bytes)",
+            bytes.len()
+        );
         let mut tmp = tempfile::tempfile().map_err(|e| {
             AilakeError::Store(format!("failed to create tempfile for HNSW mmap: {e}"))
         })?;

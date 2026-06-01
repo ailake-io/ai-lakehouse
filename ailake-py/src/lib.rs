@@ -29,8 +29,9 @@ use ailake_query::{
 use ailake_store::{store::Store, LocalStore};
 
 fn rt() -> PyResult<tokio::runtime::Runtime> {
-    tokio::runtime::Runtime::new()
-        .map_err(|e| PyRuntimeError::new_err(format!("ailake: failed to create Tokio runtime: {e}")))
+    tokio::runtime::Runtime::new().map_err(|e| {
+        PyRuntimeError::new_err(format!("ailake: failed to create Tokio runtime: {e}"))
+    })
 }
 
 fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>) {
@@ -53,7 +54,10 @@ impl TableWriter {
     #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine"))]
     fn new(path: &str, vector_column: &str, dim: u32, metric: &str) -> PyResult<Self> {
         let rt = rt()?;
-        debug!("ailake-py: TableWriter::new path={} dim={} metric={}", path, dim, metric);
+        debug!(
+            "ailake-py: TableWriter::new path={} dim={} metric={}",
+            path, dim, metric
+        );
         let policy = VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
         let (catalog, store) = local_catalog_store(path);
         let table = TableIdent::new("default", "table");
@@ -138,7 +142,12 @@ impl TableWriter {
 #[pyo3(signature = (path, query, top_k=10))]
 fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult<PyObject> {
     let rt = rt()?;
-    debug!("ailake-py: search path={} dim={} top_k={}", path, query.len(), top_k);
+    debug!(
+        "ailake-py: search path={} dim={} top_k={}",
+        path,
+        query.len(),
+        top_k
+    );
     let (catalog, store) = local_catalog_store(path);
     let table = TableIdent::new("default", "table");
 
