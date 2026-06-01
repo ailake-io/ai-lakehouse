@@ -1,0 +1,69 @@
+name: CI GPU Data (ailake-index — Windows CUDA/ROCm data integration)
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  # Runs GPU data integration tests on a Windows self-hosted runner with a
+  # real NVIDIA or AMD GPU.  Tests fire cuBLAS / hipBLAS SGEMM kernels against
+  # synthetic but realistic datasets (2 000–5 000 vectors, dim 64–128) and
+  # assert ≥99% recall vs CPU brute-force ground truth.
+  #
+  # Runner requirements:
+  #   - Windows 10/11 or Windows Server 2019+
+  #   - NVIDIA: CUDA Toolkit 11 or 12 (cudart64_*.dll + cublas64_*.dll in PATH)
+  #   - AMD:    ROCm for Windows (amdhip64.dll + hipblas.dll in PATH)
+  #   - Rust stable toolchain (rustup)
+  index-gpu-data-windows:
+    name: index — gpu data (Windows)
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Add Cargo to PATH
+        shell: pwsh
+        run: |
+          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install Rust stable
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --target x86_64-pc-windows-msvc
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Detect GPU backend
+        shell: pwsh
+        run: |
+          function Find-Dll([string]$name) {
+            ($env:PATH -split ';') | ForEach-Object {
+              $p = Join-Path $_ $name
+              if (Test-Path $p) { $p }
+            } | Select-Object -First 1
+          }
+
+          $cuda = Find-Dll "cudart64_12.dll"
+          if (-not $cuda) { $cuda = Find-Dll "cudart64_11.dll" }
+          $rocm = Find-Dll "amdhip64.dll"
+
+          if ($cuda) {
+            Write-Host "NVIDIA CUDA runtime found: $cuda"
+            $backend = "cuda"
+          } elseif ($rocm) {
+            Write-Host "AMD ROCm runtime found: $rocm"
+            $backend = "rocm"
+          } else {
+            Write-Host "WARNING: no CUDA or ROCm runtime found — tests will print skip messages"
+            $backend = "none"
+          }
+          echo "AILAKE_GPU_BACKEND=$backend" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run GPU data integration tests
+        shell: pwsh
+        run: cargo test -p ailake-index --test gpu_data -- --nocapture
