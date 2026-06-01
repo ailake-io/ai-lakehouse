@@ -25,16 +25,34 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Add Cargo to PATH
+      - name: Locate and configure Rust
         shell: pwsh
         run: |
-          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # Search common Rust installation paths
+          $candidates = @(
+            "$env:USERPROFILE\.cargo\bin",
+            "C:\Users\$env:USERNAME\.cargo\bin",
+            "C:\Users\runneradmin\.cargo\bin",
+            "C:\Rust\.cargo\bin"
+          )
+          $rustBin = $null
+          foreach ($c in $candidates) {
+            if (Test-Path "$c\cargo.exe") { $rustBin = $c; break }
+          }
+          if (-not $rustBin) {
+            $r = Get-Command cargo -ErrorAction SilentlyContinue
+            if ($r) { $rustBin = Split-Path $r.Source }
+          }
+          if (-not $rustBin) {
+            Write-Error "cargo not found. Searched: $($candidates -join ', '). Install Rust on this runner."
+            exit 1
+          }
+          Write-Host "Rust found at: $rustBin"
+          "$rustBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Install Rust stable
+      - name: Update Rust stable
         shell: pwsh
-        run: |
-          rustup toolchain install stable --target x86_64-pc-windows-msvc
-          rustup default stable
+        run: rustup update stable --no-self-update
 
       - uses: Swatinem/rust-cache@v2
 
