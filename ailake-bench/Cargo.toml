@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 license     = "MIT OR Apache-2.0"
 description = "Public benchmark: AI-Lake vs. LanceDB on SIFT-1M"
+repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
 
 [[bin]]
 name = "ailake-bench"
