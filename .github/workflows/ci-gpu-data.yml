@@ -28,26 +28,40 @@ jobs:
       - name: Locate and configure Rust
         shell: pwsh
         run: |
-          # Search common Rust installation paths
-          $candidates = @(
-            "$env:USERPROFILE\.cargo\bin",
-            "C:\Users\$env:USERNAME\.cargo\bin",
-            "C:\Users\runneradmin\.cargo\bin",
-            "C:\Rust\.cargo\bin"
-          )
+          # Prefer the actual toolchain binary over the rustup shim.
+          # The shim at $USERPROFILE\.cargo\bin\cargo.exe requires rustup in PATH;
+          # the toolchain binary works standalone.
           $rustBin = $null
-          foreach ($c in $candidates) {
-            if (Test-Path "$c\cargo.exe") { $rustBin = $c; break }
+
+          # 1. Look for real cargo inside .rustup toolchains
+          $toolchainCargo = Get-ChildItem `
+            "$env:USERPROFILE\.rustup\toolchains\*\bin\cargo.exe", `
+            "C:\Users\$env:USERNAME\.rustup\toolchains\*\bin\cargo.exe" `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($toolchainCargo) {
+            $rustBin = Split-Path $toolchainCargo.FullName
+            Write-Host "Found toolchain cargo: $rustBin"
           }
+
+          # 2. Fallback: shim path (only works if rustup shim resolves correctly)
+          if (-not $rustBin) {
+            foreach ($c in @("$env:USERPROFILE\.cargo\bin", "C:\Users\$env:USERNAME\.cargo\bin")) {
+              if (Test-Path "$c\cargo.exe") { $rustBin = $c; break }
+            }
+            if ($rustBin) { Write-Host "Found cargo shim: $rustBin" }
+          }
+
+          # 3. Already on PATH
           if (-not $rustBin) {
             $r = Get-Command cargo -ErrorAction SilentlyContinue
-            if ($r) { $rustBin = Split-Path $r.Source }
+            if ($r) { $rustBin = Split-Path $r.Source; Write-Host "cargo already on PATH: $rustBin" }
           }
+
           if (-not $rustBin) {
-            Write-Error "cargo not found. Searched: $($candidates -join ', '). Install Rust on this runner."
+            Write-Error "cargo not found. Install Rust stable on this runner."
             exit 1
           }
-          Write-Host "Rust found at: $rustBin"
+
           "$rustBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - uses: Swatinem/rust-cache@v2
