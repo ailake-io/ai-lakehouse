@@ -72,7 +72,7 @@ object AilakeNative {
           parseResponse(json, tableUri)
         } catch {
           case e: Exception =>
-            log.error("[ailake] Exception reading search result from native library: {}", e.getMessage, e)
+            log.error(s"[ailake] Exception reading search result from native library: ${e.getMessage}", e)
             Try(native.ailake_free_string(ptr))
             Seq.empty
         }
@@ -87,7 +87,7 @@ object AilakeNative {
       val root = mapper.readTree(json)
       if (!root.path("ok").asBoolean(false)) {
         val err = root.path("error").asText("<no error field>")
-        log.warn("[ailake] Native search returned ok=false for tableUri={}: {}", tableUri, err)
+        log.warn(s"[ailake] Native search returned ok=false for tableUri=$tableUri: $err")
         return Seq.empty
       }
       val nodes = root.path("results")
@@ -101,7 +101,7 @@ object AilakeNative {
       }.toSeq
     }.recover {
       case e: Exception =>
-        log.error("[ailake] Failed to parse native search response: {}", e.getMessage, e)
+        log.error(s"[ailake] Failed to parse native search response: ${e.getMessage}", e)
         Seq.empty
     }.getOrElse(Seq.empty)
   }

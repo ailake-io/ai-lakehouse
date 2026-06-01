@@ -13,11 +13,11 @@ use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBat
 use ailake_index::IvfPqConfig;
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
-use tracing::{error, info};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
 use serde_json;
+use tracing::{error, info};
 
 /// One vector column for a multi-column write batch.
 pub struct MultiVectorBatch<'a> {

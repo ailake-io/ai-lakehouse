@@ -647,13 +647,43 @@ cargo bench --workspace
 
 ### `ci-gpu.yml` — manual dispatch (`workflow_dispatch`)
 
-Runs `ailake-index` tests on a `[self-hosted, Windows, X64]` runner with NVIDIA or AMD GPU drivers installed.
+Runs `ailake-index` unit + integration tests on a `[self-hosted, Windows, X64]` runner with NVIDIA or AMD GPU drivers installed.
 
 | Job | Runner | What it covers |
 |---|---|---|
-| `index-gpu-windows` | Windows self-hosted | Detects CUDA (`cudart64_*.dll`) or ROCm (`amdhip64.dll`) at runtime; runs the full `ailake-index` test suite via the active GPU backend |
+| `index-gpu-windows` | Windows self-hosted | Detects CUDA (`cudart64_*.dll`) or ROCm (`amdhip64.dll`) via `Find-Dll` (PATH search); runs the full `ailake-index` test suite including GPU unit tests in `src/gpu.rs` |
+
+**GPU unit tests** (`ailake-index/src/gpu.rs`, gated on `AILAKE_GPU_BACKEND`):
+
+| Test | Dataset | Assert |
+|---|---|---|
+| `gpu_search_batch_cosine_top1_exact` | 64 vecs × dim 16 | top-1 == query at dist ≈ 0 |
+| `gpu_search_batch_euclidean_top1_exact` | 32 vecs × dim 8 | top-1 euclidean == anchor at dist = 0 |
+| `gpu_kmeans_returns_k_centroids` | 4 clusters × 10 vecs, dim 8 | returns exactly k centroids of correct dim |
+
+All three skip (not fail) when `AILAKE_GPU_BACKEND=none`.
 
 **Runner requirements**: Windows 10/11 or Server 2019+, NVIDIA CUDA Toolkit 11/12 or AMD ROCm for Windows, Rust stable toolchain.
+
+### `ci-gpu-data.yml` — manual dispatch (`workflow_dispatch`)
+
+Runs GPU **data integration** tests on a `[self-hosted, Windows, X64]` runner. Fires real cuBLAS / hipBLAS SGEMM kernels against realistic-sized synthetic datasets.
+
+| Job | Runner | What it covers |
+|---|---|---|
+| `index-gpu-data-windows` | Windows self-hosted | `cargo test -p ailake-index --test gpu_data` — 3 tests in `ailake-index/tests/gpu_data.rs` |
+
+**GPU data integration tests** (`ailake-index/tests/gpu_data.rs`, gated on `AILAKE_GPU_BACKEND`):
+
+| Test | Dataset | Assert |
+|---|---|---|
+| `gpu_search_recall_vs_cpu_baseline` | 2 000 vecs × dim 128, 20 queries | GPU recall@10 ≥ 99% vs CPU brute-force |
+| `gpu_search_exact_hit_in_large_db` | 5 000 vecs × dim 64, query == db[1337] | top-1 == row 1337, cosine dist ≈ 0 |
+| `gpu_kmeans_converges_on_clustered_data` | 8 clusters × 50 vecs, dim 32 | each centroid maps unique cluster, dist < 1.0 |
+
+All three skip when `AILAKE_GPU_BACKEND=none`.
+
+**Runner requirements**: same as `ci-gpu.yml`.
 
 ### `ci-go.yml` — manual dispatch (`workflow_dispatch`)
 
@@ -722,10 +752,12 @@ All workflows are `workflow_dispatch`. Trigger in this order — each step must 
 | 1 | **CI** (`ci.yml`) | Rust fmt/clippy/deny, unit, integration, compat Python/DuckDB/PyIceberg/ailake-py, Airflow provider tests, bench-build | Must pass |
 | 2 | **CI Go** (`ci-go.yml`) | Go SDK build + vet | Must pass |
 | 3 | **CI C++** (`ci-cpp.yml`) | C++17 cmake build | Must pass |
-| 4 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
-| 5 | **Release** (`release.yml`) | Creates git tag + GitHub Release + publishes all Rust crates to crates.io | Steps 1–4 green |
-| 6 | **Publish Python** (`publish-pypi.yml`) | Builds ailake-py wheels (Linux x86_64/aarch64 + sdist), publishes to PyPI, attaches to GitHub Release | Step 5 complete |
-| 7 | **Publish Airflow Provider** (`publish-airflow-provider.yml`) | Builds wheel + sdist, publishes to PyPI, attaches to GitHub Release | Step 5 complete |
-| 8 | **Publish JVM Plugins** (`publish-jvm.yml`) | Builds fat-JARs (Spark/Trino/Flink) + `libailake_jni.so`, uploads to GitHub Release | Step 5 complete |
+| 4 | **CI GPU** (`ci-gpu.yml`) | GPU unit tests on Windows self-hosted runner (CUDA/ROCm); skips gracefully if `AILAKE_GPU_BACKEND=none` | Must pass (on GPU runner) |
+| 5 | **CI GPU Data** (`ci-gpu-data.yml`) | GPU data integration tests on Windows self-hosted runner — recall@10 ≥ 99% vs CPU brute-force | Must pass (on GPU runner) |
+| 6 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
+| 7 | **Release** (`release.yml`) | Creates git tag + GitHub Release + publishes all Rust crates to crates.io | Steps 1–6 green |
+| 8 | **Publish Python** (`publish-pypi.yml`) | Builds ailake-py wheels (Linux x86_64/aarch64 + sdist), publishes to PyPI, attaches to GitHub Release | Step 7 complete |
+| 9 | **Publish Airflow Provider** (`publish-airflow-provider.yml`) | Builds wheel + sdist, publishes to PyPI, attaches to GitHub Release | Step 7 complete |
+| 10 | **Publish JVM Plugins** (`publish-jvm.yml`) | Builds fat-JARs (Spark/Trino/Flink) + `libailake_jni.so`, uploads to GitHub Release | Step 7 complete |
 
-Steps 6, 7, 8 can run in parallel after step 5 completes.
+Steps 8, 9, 10 can run in parallel after step 7 completes. Steps 4 and 5 require the Windows self-hosted GPU runner — can run in parallel with steps 2 and 3.

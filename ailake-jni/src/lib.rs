@@ -356,7 +356,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     let json_str = match CStr::from_ptr(request_json).to_str() {
         Ok(s) => s,
         Err(e) => {
-            warn!("ailake_write_batch_json: invalid UTF-8 in request_json: {}", e);
+            warn!(
+                "ailake_write_batch_json: invalid UTF-8 in request_json: {}",
+                e
+            );
             return cstr_err_json(e);
         }
     };

@@ -520,6 +520,110 @@ mod nvidia_impl {
     }
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use ailake_core::{RowId, VectorMetric};
+
+    fn gpu_backend() -> String {
+        std::env::var("AILAKE_GPU_BACKEND").unwrap_or_else(|_| "none".into())
+    }
+
+    // Deterministic synthetic vectors: sin((i*dim + d + 1) as f32)
+    fn make_vecs(n: usize, dim: usize) -> Vec<Vec<f32>> {
+        (0..n)
+            .map(|i| (0..dim).map(|d| ((i * dim + d + 1) as f32).sin()).collect())
+            .collect()
+    }
+
+    // Fire a real SGEMM on whichever GPU backend is present.
+    // Query == vecs[0] → top-1 must be row 0 at distance ≈ 0.
+    #[test]
+    fn gpu_search_batch_cosine_top1_exact() {
+        let backend = gpu_backend();
+        if backend == "none" {
+            println!("AILAKE_GPU_BACKEND=none — skipping gpu_search_batch_cosine_top1_exact");
+            return;
+        }
+        let dim = 16;
+        let vecs = make_vecs(64, dim);
+        let flat: Vec<f32> = vecs.iter().flat_map(|v| v.iter().copied()).collect();
+        let row_ids: Vec<u64> = (0..64).collect();
+        let q = vecs[0].clone();
+        let queries: &[&[f32]] = &[q.as_slice()];
+
+        let got = match backend.as_str() {
+            "cuda" => super::try_nvidia_search_batch(queries, &row_ids, &flat, dim, VectorMetric::Cosine, 5),
+            "rocm" => super::try_rocm_search_batch(queries, &row_ids, &flat, dim, VectorMetric::Cosine, 5),
+            other => panic!("unknown AILAKE_GPU_BACKEND={other}"),
+        };
+
+        let got = got.expect("GPU cosine search returned None — check driver/library installation");
+        assert_eq!(got.len(), 1);
+        let (top_row, top_dist) = got[0][0];
+        assert_eq!(top_row, RowId::new(0), "top-1 must be the query itself");
+        assert!(top_dist < 1e-3, "cosine dist to self must be ≈0, got {top_dist}");
+    }
+
+    // Same but with Euclidean metric and a different anchor vector.
+    #[test]
+    fn gpu_search_batch_euclidean_top1_exact() {
+        let backend = gpu_backend();
+        if backend == "none" {
+            println!("AILAKE_GPU_BACKEND=none — skipping gpu_search_batch_euclidean_top1_exact");
+            return;
+        }
+        let dim = 8;
+        let vecs = make_vecs(32, dim);
+        let flat: Vec<f32> = vecs.iter().flat_map(|v| v.iter().copied()).collect();
+        let row_ids: Vec<u64> = (0..32).collect();
+        let q = vecs[7].clone();
+        let queries: &[&[f32]] = &[q.as_slice()];
+
+        let got = match backend.as_str() {
+            "cuda" => super::try_nvidia_search_batch(queries, &row_ids, &flat, dim, VectorMetric::Euclidean, 3),
+            "rocm" => super::try_rocm_search_batch(queries, &row_ids, &flat, dim, VectorMetric::Euclidean, 3),
+            other => panic!("unknown AILAKE_GPU_BACKEND={other}"),
+        };
+
+        let got = got.expect("GPU euclidean search returned None");
+        let (top_row, top_dist) = got[0][0];
+        assert_eq!(top_row, RowId::new(7), "top-1 must be the query itself");
+        assert!(top_dist < 1e-4, "euclidean dist to self must be 0, got {top_dist}");
+    }
+
+    // k-means on GPU must return exactly k centroids of the right dimension.
+    #[test]
+    fn gpu_kmeans_returns_k_centroids() {
+        let backend = gpu_backend();
+        if backend == "none" {
+            println!("AILAKE_GPU_BACKEND=none — skipping gpu_kmeans_returns_k_centroids");
+            return;
+        }
+        let dim = 8;
+        let k = 4usize;
+        // 4 well-separated clusters × 10 vectors each
+        let vecs: Vec<Vec<f32>> = (0..k)
+            .flat_map(|c| {
+                (0..10).map(move |_| (0..dim).map(|d| c as f32 * 20.0 + d as f32 * 0.01).collect())
+            })
+            .collect();
+
+        let centroids = match backend.as_str() {
+            "cuda" => super::try_nvidia_kmeans(&vecs, k, 20),
+            "rocm" => super::try_rocm_kmeans(&vecs, k, 20),
+            other => panic!("unknown AILAKE_GPU_BACKEND={other}"),
+        };
+
+        let centroids = centroids.expect("GPU k-means returned None — check driver/library installation");
+        assert_eq!(centroids.len(), k, "expected {k} centroids, got {}", centroids.len());
+        for c in &centroids {
+            assert_eq!(c.len(), dim, "centroid dim mismatch: expected {dim}, got {}", c.len());
+        }
+    }
+}
+
 // ── AMD ROCm backend ─────────────────────────────────────────────────────────
 //
 // Always compiled (no feature gate). Returns `None` at runtime when:

@@ -13,7 +13,7 @@ jobs:
     name: fmt
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -23,7 +23,7 @@ jobs:
     name: clippy
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -34,7 +34,7 @@ jobs:
     name: deny (licenses + advisories)
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -45,7 +45,7 @@ jobs:
     name: unit
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --lib --bins
@@ -54,7 +54,7 @@ jobs:
     name: integration
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p ailake-tests -- --test-threads=1
@@ -67,7 +67,7 @@ jobs:
     name: index — cpu fallback (no GPU)
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Verify no GPU libraries on runner
@@ -84,7 +84,7 @@ jobs:
     name: compat-parquet
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p ailake-tests --test parquet_trailing_bytes
@@ -94,7 +94,7 @@ jobs:
     name: compat-pyarrow
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
@@ -110,7 +110,7 @@ jobs:
     name: compat-duckdb
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
@@ -126,7 +126,7 @@ jobs:
     name: compat-pyiceberg
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build fixture
@@ -142,7 +142,7 @@ jobs:
     name: test-airflow-provider
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v5
         with:
@@ -161,7 +161,7 @@ jobs:
     name: bench-build
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p ailake-bench
@@ -170,7 +170,7 @@ jobs:
     name: compat-ailake-py
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5

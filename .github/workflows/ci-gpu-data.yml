@@ -1,4 +1,4 @@
-name: CI GPU (ailake-index — Windows CUDA/ROCm)
+name: CI GPU Data (ailake-index — Windows CUDA/ROCm data integration)
 
 on:
   workflow_dispatch:
@@ -9,17 +9,18 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  # Runs ailake-index tests on a Windows self-hosted runner that has NVIDIA or
-  # AMD GPU drivers installed.  The gpu.rs libloading backend selects CUDA or
-  # ROCm at runtime based on whichever driver is present.
+  # Runs GPU data integration tests on a Windows self-hosted runner with a
+  # real NVIDIA or AMD GPU.  Tests fire cuBLAS / hipBLAS SGEMM kernels against
+  # synthetic but realistic datasets (2 000–5 000 vectors, dim 64–128) and
+  # assert ≥99% recall vs CPU brute-force ground truth.
   #
   # Runner requirements:
   #   - Windows 10/11 or Windows Server 2019+
-  #   - NVIDIA: CUDA Toolkit 11 or 12 installed (cudart64_*.dll + cublas64_*.dll in PATH)
-  #   - AMD:    ROCm for Windows installed (amdhip64.dll + hipblas.dll in PATH)
-  #   - Rust stable toolchain installed (rustup)
-  index-gpu-windows:
-    name: index — gpu (Windows)
+  #   - NVIDIA: CUDA Toolkit 11 or 12 (cudart64_*.dll + cublas64_*.dll in PATH)
+  #   - AMD:    ROCm for Windows (amdhip64.dll + hipblas.dll in PATH)
+  #   - Rust stable toolchain (rustup)
+  index-gpu-data-windows:
+    name: index — gpu data (Windows)
     runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v6
@@ -53,17 +54,16 @@ jobs:
 
           if ($cuda) {
             Write-Host "NVIDIA CUDA runtime found: $cuda"
-            $env:AILAKE_GPU_BACKEND = "cuda"
+            $backend = "cuda"
           } elseif ($rocm) {
             Write-Host "AMD ROCm runtime found: $rocm"
-            $env:AILAKE_GPU_BACKEND = "rocm"
+            $backend = "rocm"
           } else {
-            Write-Host "WARNING: no CUDA or ROCm runtime found — GPU tests will be skipped by libloading fallback"
-            Write-Host "Install CUDA Toolkit 11/12 or ROCm for Windows to enable GPU tests on this runner."
-            $env:AILAKE_GPU_BACKEND = "none"
+            Write-Host "WARNING: no CUDA or ROCm runtime found — tests will print skip messages"
+            $backend = "none"
           }
-          echo "AILAKE_GPU_BACKEND=$env:AILAKE_GPU_BACKEND" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "AILAKE_GPU_BACKEND=$backend" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Run ailake-index tests (GPU path)
+      - name: Run GPU data integration tests
         shell: pwsh
-        run: cargo test -p ailake-index -- --nocapture
+        run: cargo test -p ailake-index --test gpu_data -- --nocapture

@@ -426,6 +426,11 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] AVX-512 + FMA + F16C SIMD para kernels de distância
 - [x] Flink connector (`VectorScanSource` + `VectorScanTableFactory`)
 
+### Fase 5 — Próximos Passos
+
+- [ ] **DuckLake catalog backend** — `DuckLakeCatalog` em `ailake-catalog/` implementando `CatalogProvider` sobre catálogo DuckDB (dep: crate `duckdb`); mapeamento de metadados vetoriais (`centroid`, `radius`, `footer-offset`) para tabelas internas DuckLake; modelo de commit via INSERT no catálogo DuckDB. *Aguardar estabilização da spec DuckLake (anunciada mai/2025) antes de implementar.*
+- [ ] **dbt integration guide** — documentar fluxo `dbt (transform) → AI-Lake SDK (ingest + HNSW)` para dbt-spark e dbt-trino com plugins AI-Lake carregados
+
 ---
 
 ## 11. Stack Técnica — Rust
