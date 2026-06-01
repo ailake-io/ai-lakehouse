@@ -101,7 +101,7 @@ object AilakeNative {
       }.toSeq
     }.recover {
       case e: Exception =>
-        log.error("[ailake] Failed to parse native search response: {}", e.getMessage, e)
+        log.error(s"[ailake] Failed to parse native search response: ${e.getMessage}", e)
         Seq.empty
     }.getOrElse(Seq.empty)
   }
