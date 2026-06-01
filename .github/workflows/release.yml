@@ -15,7 +15,7 @@ jobs:
     permissions:
       contents: write   # needed to create tags and GitHub Releases
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # full history so tag push works
 

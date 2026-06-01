@@ -19,7 +19,7 @@ jobs:
     #   name: pypi
     #   url: https://pypi.org/p/apache-airflow-providers-ailake
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v5
         with:
