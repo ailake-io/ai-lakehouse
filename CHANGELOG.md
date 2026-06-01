@@ -10,6 +10,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`ailake-index/src/gpu.rs`**: 3 GPU unit tests gated on `AILAKE_GPU_BACKEND` env var — `gpu_search_batch_cosine_top1_exact` (cosine SGEMM, top-1 == query), `gpu_search_batch_euclidean_top1_exact` (euclidean SGEMM, dist-to-self ≈ 0), `gpu_kmeans_returns_k_centroids` (k-means produces k centroids of correct dim); skip silently when `AILAKE_GPU_BACKEND=none`
+- **`ailake-index/tests/gpu_data.rs`**: 3 GPU data integration tests fired against realistic synthetic datasets — `gpu_search_recall_vs_cpu_baseline` (2 000 vecs × dim 128, 20 queries, recall@10 ≥ 99% vs CPU brute-force), `gpu_search_exact_hit_in_large_db` (5 000 vecs × dim 64, query == db[1337], top-1 exact match), `gpu_kmeans_converges_on_clustered_data` (8 clusters × 50 vecs × dim 32, each centroid maps unique cluster within ε = 1.0); all skip when `AILAKE_GPU_BACKEND=none`
+- **`ci-gpu-data.yml`**: new `workflow_dispatch` workflow — runs `cargo test -p ailake-index --test gpu_data` on `[self-hosted, Windows, X64]` runner with CUDA or ROCm; same DLL-detection logic as `ci-gpu.yml`
 - **`docs/specs/FILE_FORMAT.md`**: added §15 "Bincode v1 Wire Format (Language-Agnostic)" — encoding rules table + field-by-field byte layout for HnswSnapshot and IvfPqSnapshot so any language can decode the index blob without the Rust crate; added §16 "Cross-Language Implementations" — Rust/C++/Go comparison table and language-agnostic 10-step bootstrap sequence
 - **`ailake-cpp/CMakeLists.txt`**: added `SPDX-License-Identifier: MIT OR Apache-2.0` header and inline licensing note — NVIDIA CUDA Toolkit (`-DAILAKE_CUDA=ON`) and AMD ROCm are third-party proprietary SDKs not bundled by default; binary distributors must comply with vendor EULAs
 - **`SETUP.md`**: added "Licensing note — third-party GPU SDKs" table in section 8F documenting NVIDIA/AMD SDK ownership, licenses, and per-language binding strategy (runtime dlopen vs. opt-in static link for C++)
@@ -38,11 +41,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **CI**: all workflows opt into Node.js 24 via `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` — removes Node.js 20 deprecation warning ahead of forced switch on 2026-06-02
 
 ### Changed
+- **`actions/checkout`**: bumped from `@v4` to `@v6` across all 9 workflows — eliminates Node.js 20 deprecation warning introduced by GitHub's September 2025 runner update
+
+### Changed
 - **`publish-pypi.yml`**: replaced deprecated `maturin upload` with `twine` (`maturin upload/publish` removed per PyO3/maturin#2334)
 - **`publish-pypi.yml`**: release tag now read from `ailake-core/Cargo.toml` (single source of truth); previously read from `ailake-py/pyproject.toml` which caused version drift
 - **`ailake-py/pyproject.toml`**: replaced static `version` field with `dynamic = ["version"]` — maturin reads version from `Cargo.toml` at build time, eliminating manual sync
 
 ### Fixed
+- **`ci-gpu.yml`**: PowerShell DLL detection replaced `Get-Command` (rejects non-executables) with `Find-Dll` helper using `Test-Path` across `$env:PATH` entries — fixes `ArgumentList parameter can be specified only when retrieving a single cmdlet` error on Windows runner
+- **`spark-plugin/src/main/scala/io/ailake/spark/AilakeNative.scala`**: resolved SLF4J overload ambiguity (`error(String, Any, Any)` vs `error(String, Object*)`) in Scala 2.12 by replacing format-string calls with string interpolation (`s"..."`) for all three affected logger statements
+- **`trino-plugin/build.gradle.kts`**: added `compileOnly("org.slf4j:slf4j-api:2.0.9")` — `trino-spi` is `compileOnly` so its transitive SLF4J dependency was absent from the compile classpath, causing `Unresolved reference: LoggerFactory`
+- **`ailake-bench/Cargo.toml`**: added missing `repository` field — was the only crate of 13 without it
+- **Cargo formatting**: applied `cargo fmt --all` across `ailake-index/src/mmap_loader.rs`, `ailake-jni/src/lib.rs`, `ailake-py/src/lib.rs`, `ailake-query/src/writer.rs` to fix CI `fmt` check failures
 - **`ailake-py/pyproject.toml`**: version was stuck at `0.0.8`; bumped to `0.0.10` to match workspace before switching to dynamic version
 - **`publish-pypi.yml`**: `actions/checkout@v4` was placed after `dist/` was populated, causing it to wipe the downloaded wheels; moved checkout before download steps
 - **`publish-pypi.yml`**: Docker pre-checkout cleanup must run before `actions/checkout@v4` to avoid EACCES on root-owned files left by maturin build jobs; added `if: always()` cleanup at end of publish job to prevent workspace pollution for subsequent workflows
