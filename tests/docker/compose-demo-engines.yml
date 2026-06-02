@@ -28,8 +28,9 @@ services:
     volumes:
       # Trino catalog pointing to the local ailake_demo warehouse
       - ./demo/trino-catalog:/etc/trino/catalog:ro
-      # Shared data volume so Trino can read file:///data/ailake_demo
-      - demo-data:/data:ro
+      # Trino needs to write its var/ directory under /data/trino — :ro blocks
+      # that and causes exit code 4. Trino does not modify AI-Lake Parquet files.
+      - demo-data:/data
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/info | grep -q '\"starting\":false'"]
       interval: 10s
@@ -40,12 +41,12 @@ services:
     image: ghcr.io/goccy/bigquery-emulator:0.6.6
     container_name: ailake-demo-bq
     ports:
-      - "9050:9050"
+      - "19050:9050"
     command:
       - "--project=ailake-demo"
       - "--port=9050"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9050/ || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9050'"]
       interval: 5s
       timeout: 3s
       retries: 12

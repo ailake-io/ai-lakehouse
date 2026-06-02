@@ -36,7 +36,13 @@ fn rt() -> PyResult<tokio::runtime::Runtime> {
 
 fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>) {
     let store: Arc<dyn Store> = Arc::new(LocalStore::new(path));
-    let catalog: Arc<dyn CatalogProvider> = Arc::new(HadoopCatalog::new(Arc::clone(&store), ""));
+    // Use a file:// URI as warehouse so that Iceberg metadata.json and manifest
+    // files contain absolute file:// paths. Required for Trino's Iceberg
+    // connector and any reader that resolves location URIs strictly.
+    // LocalStore::full_path strips the file:// prefix before I/O.
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let warehouse_uri = format!("file://{}", canonical.display());
+    let catalog: Arc<dyn CatalogProvider> = Arc::new(HadoopCatalog::new(Arc::clone(&store), &warehouse_uri));
     (catalog, store)
 }
 

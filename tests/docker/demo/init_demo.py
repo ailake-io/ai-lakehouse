@@ -11,6 +11,7 @@ No numpy required — uses stdlib math only.
 import json
 import math
 import os
+import pathlib
 import random
 import sys
 
@@ -83,7 +84,87 @@ def main() -> None:
     with open(query_path, "w") as fh:
         json.dump(query_payload, fh, indent=2)
     print(f"Demo query vector saved to {query_path}")
+
+    _maybe_register_nessie(TABLE_PATH)
     print("Fixture ready.")
+
+
+def _maybe_register_nessie(table_path: str) -> None:
+    """Register the AI-Lake table in the Nessie catalog so Trino can discover it.
+
+    Uses the Nessie REST API v1 directly (stdlib urllib — no extra deps).
+    No-op when NESSIE_URI is unset.
+
+    Trino 400+ dropped hadoop catalog type; Nessie is the catalog backend for
+    the engine overlay (compose-demo-engines.yml).
+    """
+    import urllib.request
+
+    nessie_uri = os.environ.get("NESSIE_URI")
+    if not nessie_uri:
+        return
+
+    meta_dir = pathlib.Path(table_path) / "default" / "table" / "metadata"
+    hint_file = meta_dir / "version-hint.text"
+    if not hint_file.exists():
+        print("WARNING: version-hint.text missing, skipping Nessie registration", file=sys.stderr)
+        return
+
+    hint = hint_file.read_text().strip()
+    meta_location = f"file://{meta_dir}/v{hint}.metadata.json"
+
+    def _nessie(method: str, path: str, body: dict | None = None) -> dict:
+        url = f"{nessie_uri.rstrip('/')}{path}"
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method=method,
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+
+    try:
+        # Create namespace (idempotent — 409 if exists)
+        try:
+            _nessie("PUT", "/namespaces/namespace/main/default", {
+                "type": "NAMESPACE", "elements": ["default"], "properties": {},
+            })
+        except urllib.error.HTTPError as e:
+            if e.code != 409:
+                raise
+
+        # Get current branch hash (required by Nessie optimistic locking)
+        branch = _nessie("GET", "/trees/tree/main")
+        current_hash = branch["hash"]
+
+        # Read actual IDs from metadata — Trino validates these against the file.
+        with open(meta_dir / f"v{hint}.metadata.json") as fh:
+            meta_json = json.load(fh)
+        snapshot_id = meta_json.get("current-snapshot-id", -1) or -1
+        schema_id = meta_json.get("current-schema-id", 0)
+        spec_id = meta_json.get("default-spec-id", 0)
+        sort_order_id = meta_json.get("default-sort-order-id", 0)
+
+        # Register the Iceberg table pointer (idempotent via commit)
+        _nessie("POST", f"/trees/branch/main/commit?expectedHash={current_hash}", {
+            "commitMeta": {"message": "register ailake demo table"},
+            "operations": [{
+                "type": "PUT",
+                "key": {"elements": ["default", "table"]},
+                "content": {
+                    "type": "ICEBERG_TABLE",
+                    "metadataLocation": meta_location,
+                    "snapshotId": snapshot_id,
+                    "schemaId": schema_id,
+                    "specId": spec_id,
+                    "sortOrderId": sort_order_id,
+                },
+            }],
+        })
+        print(f"Table registered in Nessie: {meta_location}")
+    except Exception as e:
+        print(f"WARNING: Nessie registration failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
