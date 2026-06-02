@@ -277,8 +277,8 @@ tests/
             ├── 01_ailake_demo.ipynb  # Vector search + Iceberg + RAG + MinIO
             ├── 02_duckdb.ipynb       # DuckDB direct Parquet scan
             ├── 03_spark.ipynb        # PySpark local[*] + Iceberg SQL
-            ├── 04_trino.ipynb        # Trino SQL (engines overlay required)
-            └── 05_bigquery.ipynb     # BigQuery emulator (engines overlay required)
+            ├── 04_trino.ipynb        # Trino SQL (--profile engines required)
+            └── 05_bigquery.ipynb     # BigQuery emulator (--profile engines required)
 ```
 
 ## Build

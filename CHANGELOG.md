@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`ailake-py/src/lib.rs`**: `local_catalog_store` now passes `file://{canonical_path}` as warehouse to `HadoopCatalog` so Iceberg `metadata.json` writes absolute `file://` URIs for `location` and manifest paths — required by Trino's Iceberg connector
+- **`ailake-store/src/local.rs`**: `LocalStore::full_path` strips `file://` prefix before `PathBuf::join` so absolute `file://` URIs resolve correctly on the local filesystem
+- **`tests/docker/compose-demo.yml`**: 9 DX issues fixed in demo stack — Trino 446 Nessie catalog (hadoop type removed in 400+), correct property names (`default-warehouse-dir`, `ref`), removed `:ro` on Trino volume (blocked `/data/trino/var`), BQ emulator healthcheck uses `bash /dev/tcp` (no curl in image), BQ host port 19050 (avoids Tor default 9050), Nessie registration uses real snapshot/schema IDs, direct Nessie API v1 via `urllib` (pyiceberg dropped nessie catalog in 0.8+), SQL `"table"` quoted in notebook 04 (reserved keyword in Trino)
+- **`tests/parquet_trailing_bytes.rs`**: `pyarrow_ignores_ailake_footer` de-ignored — PyArrow 24.0.0 available
+
+### Changed
+- **`tests/docker/compose-demo.yml`**: Trino and BigQuery emulator moved to `profiles: ["engines"]`; `compose-demo-engines.yml` overlay deleted — single-file command: `docker compose -f compose-demo.yml --profile engines up -d`
+
 ### Added
 - **`ailake-index/src/gpu.rs`**: 3 GPU unit tests gated on `AILAKE_GPU_BACKEND` env var — `gpu_search_batch_cosine_top1_exact` (cosine SGEMM, top-1 == query), `gpu_search_batch_euclidean_top1_exact` (euclidean SGEMM, dist-to-self ≈ 0), `gpu_kmeans_returns_k_centroids` (k-means produces k centroids of correct dim); skip silently when `AILAKE_GPU_BACKEND=none`
 - **`ailake-index/tests/gpu_data.rs`**: 3 GPU data integration tests fired against realistic synthetic datasets — `gpu_search_recall_vs_cpu_baseline` (2 000 vecs × dim 128, 20 queries, recall@10 ≥ 99% vs CPU brute-force), `gpu_search_exact_hit_in_large_db` (5 000 vecs × dim 64, query == db[1337], top-1 exact match), `gpu_kmeans_converges_on_clustered_data` (8 clusters × 50 vecs × dim 32, each centroid maps unique cluster within ε = 1.0); all skip when `AILAKE_GPU_BACKEND=none`
@@ -16,8 +25,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`docs/specs/FILE_FORMAT.md`**: added §15 "Bincode v1 Wire Format (Language-Agnostic)" — encoding rules table + field-by-field byte layout for HnswSnapshot and IvfPqSnapshot so any language can decode the index blob without the Rust crate; added §16 "Cross-Language Implementations" — Rust/C++/Go comparison table and language-agnostic 10-step bootstrap sequence
 - **`ailake-cpp/CMakeLists.txt`**: added `SPDX-License-Identifier: MIT OR Apache-2.0` header and inline licensing note — NVIDIA CUDA Toolkit (`-DAILAKE_CUDA=ON`) and AMD ROCm are third-party proprietary SDKs not bundled by default; binary distributors must comply with vendor EULAs
 - **`SETUP.md`**: added "Licensing note — third-party GPU SDKs" table in section 8F documenting NVIDIA/AMD SDK ownership, licenses, and per-language binding strategy (runtime dlopen vs. opt-in static link for C++)
-- **`README.md`**: added "Interactive demo" section with `docker compose up -d` quick start, notebook table, and engines overlay command; updated repository layout to include all `tests/docker/demo/` files
-- **`SETUP.md`**: added "Fastest path — Docker demo" section at the top pointing to `compose-demo.yml` and engines overlay
+- **`README.md`**: added "Interactive demo" section with `docker compose up -d` quick start, notebook table, and engines profile (`--profile engines`) command; updated repository layout to include all `tests/docker/demo/` files
+- **`SETUP.md`**: added "Fastest path — Docker demo" section at the top pointing to `compose-demo.yml` and engines profile (`--profile engines`)
 - **`docs/contributing/TESTING.md`**: added `index-cpu-fallback` job to `ci.yml` matrix; added `ci-gpu.yml` workflow section (Windows self-hosted GPU runner); updated `secret-scan.yml` note to document that automatic triggers are disabled while repo is private
 - **`tests/docker/compose-demo.yml` `engines` profile**: Trino 446 + BigQuery emulator added as optional services under `--profile engines`; activated with `docker compose -f compose-demo.yml --profile engines up -d`
 - **`tests/docker/demo/trino-catalog/ailake.properties`**: Trino Iceberg HadoopCatalog config pointing at the demo-data volume (`file:///data/ailake_demo`)
