@@ -34,6 +34,12 @@ COPY ailake-catalog   ailake-catalog/
 COPY ailake-store     ailake-store/
 COPY ailake-query     ailake-query/
 COPY ailake-py        ailake-py/
+# Workspace members not needed for the wheel build, but cargo metadata requires
+# all members listed in the root Cargo.toml to exist in the build context.
+COPY ailake-cli       ailake-cli/
+COPY ailake-jni       ailake-jni/
+COPY ailake-bench     ailake-bench/
+COPY tests            tests/
 
 WORKDIR /ailake-py
 RUN maturin build --release --out /wheels
@@ -55,7 +61,7 @@ COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir \
         /wheels/*.whl \
         jupyterlab \
-        "pyiceberg[pyarrow,s3fs]" \
+        "pyiceberg[pyarrow,s3fs,sql-sqlite]" \
         duckdb \
         "pyspark<4.0" \
         trino \
