@@ -10,7 +10,9 @@
 use std::collections::HashSet;
 
 use ailake_core::{RowId, VectorMetric};
-use ailake_index::gpu::{try_nvidia_kmeans, try_nvidia_search_batch, try_rocm_kmeans, try_rocm_search_batch};
+use ailake_index::gpu::{
+    try_nvidia_kmeans, try_nvidia_search_batch, try_rocm_kmeans, try_rocm_search_batch,
+};
 
 fn gpu_backend() -> String {
     std::env::var("AILAKE_GPU_BACKEND").unwrap_or_else(|_| "none".into())
@@ -42,7 +44,11 @@ fn cpu_topk_cosine(query: &[f32], db: &[Vec<f32>], top_k: usize) -> HashSet<u64>
         .map(|(i, v)| {
             let dot: f32 = query.iter().zip(v).map(|(a, b)| a * b).sum();
             let vnorm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let cos = if qnorm > 1e-8 && vnorm > 1e-8 { dot / (qnorm * vnorm) } else { 0.0 };
+            let cos = if qnorm > 1e-8 && vnorm > 1e-8 {
+                dot / (qnorm * vnorm)
+            } else {
+                0.0
+            };
             (i, 1.0 - cos) // cosine distance
         })
         .collect();
@@ -75,8 +81,22 @@ fn gpu_search_recall_vs_cpu_baseline() {
     let query_slices: Vec<&[f32]> = query_vecs.iter().map(|q| q.as_slice()).collect();
 
     let gpu_results = match backend.as_str() {
-        "cuda" => try_nvidia_search_batch(&query_slices, &row_ids, &flat, dim, VectorMetric::Cosine, top_k),
-        "rocm" => try_rocm_search_batch(&query_slices, &row_ids, &flat, dim, VectorMetric::Cosine, top_k),
+        "cuda" => try_nvidia_search_batch(
+            &query_slices,
+            &row_ids,
+            &flat,
+            dim,
+            VectorMetric::Cosine,
+            top_k,
+        ),
+        "rocm" => try_rocm_search_batch(
+            &query_slices,
+            &row_ids,
+            &flat,
+            dim,
+            VectorMetric::Cosine,
+            top_k,
+        ),
         other => panic!("unknown AILAKE_GPU_BACKEND={other}"),
     }
     .expect("GPU search returned None — is the GPU driver running?");
@@ -160,7 +180,11 @@ fn gpu_kmeans_converges_on_clustered_data() {
         .flat_map(|c| {
             (0..per_cluster).map(move |j| {
                 (0..dim)
-                    .map(|d| c as f32 * 100.0 + d as f32 * 0.01 + (c * per_cluster + j + d) as f32 * 0.001)
+                    .map(|d| {
+                        c as f32 * 100.0
+                            + d as f32 * 0.01
+                            + (c * per_cluster + j + d) as f32 * 0.001
+                    })
                     .collect()
             })
         })
@@ -186,7 +210,12 @@ fn gpu_kmeans_converges_on_clustered_data() {
     }
     .expect("GPU k-means returned None");
 
-    assert_eq!(centroids.len(), k, "expected {k} centroids, got {}", centroids.len());
+    assert_eq!(
+        centroids.len(),
+        k,
+        "expected {k} centroids, got {}",
+        centroids.len()
+    );
 
     // Every centroid must uniquely map to a cluster mean within ε.
     let mut matched: HashSet<usize> = HashSet::new();
@@ -195,7 +224,12 @@ fn gpu_kmeans_converges_on_clustered_data() {
             .iter()
             .enumerate()
             .map(|(i, mean)| {
-                let d: f32 = c.iter().zip(mean).map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt();
+                let d: f32 = c
+                    .iter()
+                    .zip(mean)
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f32>()
+                    .sqrt();
                 (i, d)
             })
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())

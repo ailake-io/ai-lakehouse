@@ -42,7 +42,8 @@ fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>)
     // LocalStore::full_path strips the file:// prefix before I/O.
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
     let warehouse_uri = format!("file://{}", canonical.display());
-    let catalog: Arc<dyn CatalogProvider> = Arc::new(HadoopCatalog::new(Arc::clone(&store), &warehouse_uri));
+    let catalog: Arc<dyn CatalogProvider> =
+        Arc::new(HadoopCatalog::new(Arc::clone(&store), &warehouse_uri));
     (catalog, store)
 }
 
