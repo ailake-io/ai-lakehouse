@@ -1,14 +1,23 @@
 # AI-Lake onboarding demo — single-command environment
 #
 # Usage (from repo root):
-#   docker compose -f tests/docker/compose-demo.yml up -d
+#
+#   Basic demo (notebooks 01-03, vector search + Iceberg compat + DuckDB + Spark):
+#     docker compose -f tests/docker/compose-demo.yml up -d
+#
+#   Full demo with engine plugins (notebooks 04-05, adds Trino + BigQuery emulator):
+#     docker compose -f tests/docker/compose-demo.yml --profile engines up -d
 #
 # Then open: http://localhost:8888
 #
-# Services:
+# Services (always-on):
 #   minio    — local S3 (console: http://localhost:9001, user/pass: minioadmin)
 #   nessie   — Iceberg REST catalog (http://localhost:19120)
 #   jupyter  — JupyterLab with ailake + pyiceberg pre-loaded and demo data ready
+#
+# Services (--profile engines):
+#   trino           — Trino 446 with Iceberg/Nessie connector (http://localhost:8080)
+#   bigquery-emulator — goccy BigQuery emulator (http://localhost:19050 on host)
 #
 # First run builds the ailake-py wheel via maturin (~3-5 min).
 # Subsequent runs are instant (Docker layer cache).
@@ -76,11 +85,56 @@ services:
       NESSIE_URI: "http://nessie:19120/api/v1"
       DEMO_TABLE_PATH: /data/ailake_demo
       DEMO_DIM: "16"
+      # Engine endpoints — consumed by notebooks 04/05 when engines profile is active.
+      # Values match container names so they also work without the profile
+      # (notebooks show a clear error if the services are not running).
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      BQ_EMULATOR_HOST: bigquery-emulator
+      BQ_EMULATOR_PORT: "9050"
+      BQ_PROJECT: ailake-demo
     depends_on:
       minio-init:
         condition: service_completed_successfully
       nessie:
         condition: service_healthy
+
+  # ── Engine services (--profile engines) ────────────────────────────────────
+
+  trino:
+    profiles: ["engines"]
+    image: trinodb/trino:446
+    container_name: ailake-demo-trino
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./demo/trino-catalog:/etc/trino/catalog:ro
+      # Trino needs to write its var/ directory under /data/trino.
+      # The volume is not :ro so Trino can initialise its working state.
+      # Trino does not modify AI-Lake Parquet files.
+      - demo-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/info | grep -q '\"starting\":false'"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+
+  bigquery-emulator:
+    profiles: ["engines"]
+    image: ghcr.io/goccy/bigquery-emulator:0.6.6
+    container_name: ailake-demo-bq
+    ports:
+      # Host port 19050 avoids collision with the Tor SOCKS proxy default (9050).
+      - "19050:9050"
+    command:
+      - "--project=ailake-demo"
+      - "--port=9050"
+    healthcheck:
+      # curl and wget are absent in this image; use bash /dev/tcp for TCP check.
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9050'"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
 volumes:
   minio-data:

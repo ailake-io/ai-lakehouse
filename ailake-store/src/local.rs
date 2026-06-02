@@ -21,7 +21,11 @@ impl LocalStore {
     }
 
     fn full_path(&self, path: &str) -> PathBuf {
-        self.root.join(path)
+        // Strip file:// scheme so callers can pass absolute file:// URIs.
+        // PathBuf::join with an absolute path ignores self.root, so
+        // "file:///abs/path" → "/abs/path" resolves correctly.
+        let clean = path.strip_prefix("file://").unwrap_or(path);
+        self.root.join(clean)
     }
 }
 

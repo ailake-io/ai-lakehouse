@@ -50,7 +50,6 @@ fn ailake_file_is_valid_parquet() {
 }
 
 #[test]
-#[ignore = "requires python3 with pyarrow"]
 fn pyarrow_ignores_ailake_footer() {
     let dim = 8u32;
     let (batch, embs) = fixtures::generate_batch(5, dim as usize);

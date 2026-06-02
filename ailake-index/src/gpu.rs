@@ -554,8 +554,17 @@ mod tests {
         let queries: &[&[f32]] = &[q.as_slice()];
 
         let got = match backend.as_str() {
-            "cuda" => super::try_nvidia_search_batch(queries, &row_ids, &flat, dim, VectorMetric::Cosine, 5),
-            "rocm" => super::try_rocm_search_batch(queries, &row_ids, &flat, dim, VectorMetric::Cosine, 5),
+            "cuda" => super::try_nvidia_search_batch(
+                queries,
+                &row_ids,
+                &flat,
+                dim,
+                VectorMetric::Cosine,
+                5,
+            ),
+            "rocm" => {
+                super::try_rocm_search_batch(queries, &row_ids, &flat, dim, VectorMetric::Cosine, 5)
+            }
             other => panic!("unknown AILAKE_GPU_BACKEND={other}"),
         };
 
@@ -563,7 +572,10 @@ mod tests {
         assert_eq!(got.len(), 1);
         let (top_row, top_dist) = got[0][0];
         assert_eq!(top_row, RowId::new(0), "top-1 must be the query itself");
-        assert!(top_dist < 1e-3, "cosine dist to self must be ≈0, got {top_dist}");
+        assert!(
+            top_dist < 1e-3,
+            "cosine dist to self must be ≈0, got {top_dist}"
+        );
     }
 
     // Same but with Euclidean metric and a different anchor vector.
@@ -582,15 +594,32 @@ mod tests {
         let queries: &[&[f32]] = &[q.as_slice()];
 
         let got = match backend.as_str() {
-            "cuda" => super::try_nvidia_search_batch(queries, &row_ids, &flat, dim, VectorMetric::Euclidean, 3),
-            "rocm" => super::try_rocm_search_batch(queries, &row_ids, &flat, dim, VectorMetric::Euclidean, 3),
+            "cuda" => super::try_nvidia_search_batch(
+                queries,
+                &row_ids,
+                &flat,
+                dim,
+                VectorMetric::Euclidean,
+                3,
+            ),
+            "rocm" => super::try_rocm_search_batch(
+                queries,
+                &row_ids,
+                &flat,
+                dim,
+                VectorMetric::Euclidean,
+                3,
+            ),
             other => panic!("unknown AILAKE_GPU_BACKEND={other}"),
         };
 
         let got = got.expect("GPU euclidean search returned None");
         let (top_row, top_dist) = got[0][0];
         assert_eq!(top_row, RowId::new(7), "top-1 must be the query itself");
-        assert!(top_dist < 1e-4, "euclidean dist to self must be 0, got {top_dist}");
+        assert!(
+            top_dist < 1e-4,
+            "euclidean dist to self must be 0, got {top_dist}"
+        );
     }
 
     // k-means on GPU must return exactly k centroids of the right dimension.
@@ -606,7 +635,11 @@ mod tests {
         // 4 well-separated clusters × 10 vectors each
         let vecs: Vec<Vec<f32>> = (0..k)
             .flat_map(|c| {
-                (0..10).map(move |_| (0..dim).map(|d| c as f32 * 20.0 + d as f32 * 0.01).collect())
+                (0..10).map(move |_| {
+                    (0..dim)
+                        .map(|d| c as f32 * 20.0 + d as f32 * 0.01)
+                        .collect()
+                })
             })
             .collect();
 
@@ -616,10 +649,21 @@ mod tests {
             other => panic!("unknown AILAKE_GPU_BACKEND={other}"),
         };
 
-        let centroids = centroids.expect("GPU k-means returned None — check driver/library installation");
-        assert_eq!(centroids.len(), k, "expected {k} centroids, got {}", centroids.len());
+        let centroids =
+            centroids.expect("GPU k-means returned None — check driver/library installation");
+        assert_eq!(
+            centroids.len(),
+            k,
+            "expected {k} centroids, got {}",
+            centroids.len()
+        );
         for c in &centroids {
-            assert_eq!(c.len(), dim, "centroid dim mismatch: expected {dim}, got {}", c.len());
+            assert_eq!(
+                c.len(),
+                dim,
+                "centroid dim mismatch: expected {dim}, got {}",
+                c.len()
+            );
         }
     }
 }

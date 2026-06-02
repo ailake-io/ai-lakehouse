@@ -58,13 +58,10 @@ Then open **http://localhost:8888** and run the notebooks:
 | `04_trino.ipynb` | Trino SQL via `trino` Python driver, `$snapshots` / `$files` system tables |
 | `05_bigquery.ipynb` | BigQuery emulator streaming inserts, SQL queries |
 
-Notebooks 04 and 05 require the engines overlay (adds Trino + BigQuery emulator):
+Notebooks 04 and 05 require the `engines` profile (adds Trino + BigQuery emulator):
 
 ```bash
-docker compose \
-  -f tests/docker/compose-demo.yml \
-  -f tests/docker/compose-demo-engines.yml \
-  up -d
+docker compose -f tests/docker/compose-demo.yml --profile engines up -d
 ```
 
 See [`tests/docker/`](./tests/docker/) for compose file details.
@@ -269,8 +266,7 @@ tests/
 └── docker/
     ├── compose.yml              # MinIO + Nessie + Localstack (Phase 2 integration)
     ├── compose-engines.yml      # + Spark + Trino containers (Phase 3 compat)
-    ├── compose-demo.yml         # Single-command onboarding demo (docker compose up -d)
-    ├── compose-demo-engines.yml # Overlay: + Trino + BigQuery emulator
+    ├── compose-demo.yml         # Single-command onboarding demo; --profile engines adds Trino + BQ
     └── demo/
         ├── Dockerfile           # Two-stage: Rust/maturin → JupyterLab
         ├── entrypoint.sh        # Init fixture then start Jupyter
@@ -281,8 +277,8 @@ tests/
             ├── 01_ailake_demo.ipynb  # Vector search + Iceberg + RAG + MinIO
             ├── 02_duckdb.ipynb       # DuckDB direct Parquet scan
             ├── 03_spark.ipynb        # PySpark local[*] + Iceberg SQL
-            ├── 04_trino.ipynb        # Trino SQL (engines overlay required)
-            └── 05_bigquery.ipynb     # BigQuery emulator (engines overlay required)
+            ├── 04_trino.ipynb        # Trino SQL (--profile engines required)
+            └── 05_bigquery.ipynb     # BigQuery emulator (--profile engines required)
 ```
 
 ## Build
