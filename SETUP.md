@@ -17,10 +17,7 @@ already indexed and ready for vector search.
 For engine demos (Trino + BigQuery emulator):
 
 ```bash
-docker compose \
-  -f tests/docker/compose-demo.yml \
-  -f tests/docker/compose-demo-engines.yml \
-  up -d
+docker compose -f tests/docker/compose-demo.yml --profile engines up -d
 ```
 
 See [`tests/docker/`](./tests/docker/) for full details.
