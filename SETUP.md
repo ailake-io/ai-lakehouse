@@ -83,7 +83,7 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Should finish with `119 passed` (3 ignored — tests requiring an external server or PyArrow installed).
+Should finish with `112 passed` (2 ignored — doctests requiring live credentials or runtime context).
 
 ### Tests by crate
 
