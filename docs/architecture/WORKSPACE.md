@@ -374,8 +374,8 @@ Delivered in Phase 4:
 - Real HNSW graph: custom implementation in `ailake-index` (Malkov & Yashunin 2018); generation bitmap visited tracker; contiguous `flat_vecs` layout
 - SIMD distance functions: AVX2 + NEON in `ailake-vec/src/distance.rs`; runtime detection; 2× unrolled AVX2 for dot/euclidean
 - `SearchSession` in `ailake-query`: pre-loaded multi-query search, eliminates per-query I/O
-- `ailake-bench` crate: SIFT-1M benchmark (128D Euclidean, 1M vectors)
-  - Results: 2394 vec/s write, 453 QPS, Recall@10 = 99.6%, mean latency 2.2 ms
+- [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks) (external repo): SIFT-1M benchmark (128D Euclidean, 1M vectors)
+  - Results: 199k vec/s write (deferred), 1365 QPS, Recall@10 = 99.63%, p99 1.96ms
 - HNSW performance optimizations in `ailake-index`:
   - **Neighbor prefetch**: `_mm_prefetch T0` in `search_layer` hot loop — hides random DRAM latency on x86_64
   - **SELECT-NEIGHBORS-HEURISTIC** (Algorithm 4, Malkov & Yashunin 2018): diversity-enforcing neighbor selection replaces simple nearest-M prune; improves recall@10 by ~2-5% at same throughput
@@ -383,7 +383,7 @@ Delivered in Phase 4:
   - **Metric monomorphization**: `DistFn` trait with `CosineDist`/`EuclideanDist`/`DotProductDist` ZSTs; dispatch on metric once at entry, all inner fns generic `<M: DistFn>` — eliminates per-call `match` from hot loop, allows LLVM to inline distance functions
   - SIFT-1M HNSW build: 218.9 s → 155.8 s (−29%)
 - Multi-engine comparison benchmark (`--engine all`): AI-Lake vs LanceDB vs pgvector
-  - `ailake-bench`: new `pgvector-bench` feature — `pgvector_bench.rs` uses text COPY + HNSW index; `Engine::Pgvector` + `Engine::All` updated
+  - `ailake-benchmarks`: `pgvector-bench` feature — `pgvector_bench.rs` uses text COPY + HNSW index; `Engine::Pgvector` + `Engine::All`
   - `bench_result::print_multi_comparison` — N-engine side-by-side table, highlights fastest QPS
   - Deep Lake: `scripts/deeplake_bench.py` (Python) — exact kNN on subset; ANN requires paid Deep Memory plan (no Rust SDK available)
 
