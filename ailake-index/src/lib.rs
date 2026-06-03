@@ -15,7 +15,7 @@ pub mod serialize;
 
 pub use hardware::{detect_backend, detect_cuda, detect_rocm, HardwareBackend, HardwareProfile};
 pub use hnsw::{HnswBuilder, HnswConfig, HnswIndex};
-pub use ivf_pq::{find_valid_pq_m, IvfPqConfig, IvfPqIndex, IvfPqSerializer};
+pub use ivf_pq::{find_valid_pq_m, IvfPqCodebook, IvfPqConfig, IvfPqIndex, IvfPqSerializer};
 pub use mmap_loader::MmapLoader;
 pub use serialize::HnswSerializer;
 

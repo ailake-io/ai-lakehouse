@@ -10,7 +10,7 @@ use ailake_catalog::{
 };
 use ailake_core::{AilakeResult, VectorStoragePolicy};
 use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBatch};
-use ailake_index::IvfPqConfig;
+use ailake_index::{IvfPqCodebook, IvfPqConfig};
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
 use arrow_array::RecordBatch;
@@ -38,6 +38,9 @@ pub struct TableWriter {
     captured_schema: Option<SchemaRef>,
     /// Extra vector column policies from write_batch_multi (columns beyond primary).
     extra_vec_policies: Vec<VectorStoragePolicy>,
+    /// IVF-PQ codebook trained on the first shard and reused for all subsequent shards.
+    /// Ensures cross-shard ADC distances are comparable — no reranking needed.
+    cached_ivf_codebook: Option<Arc<IvfPqCodebook>>,
 }
 
 impl TableWriter {
@@ -57,6 +60,7 @@ impl TableWriter {
             parent_snapshot_id: None,
             captured_schema: None,
             extra_vec_policies: Vec::new(),
+            cached_ivf_codebook: None,
         }
     }
 
@@ -242,8 +246,25 @@ impl TableWriter {
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = format!("data/part-{:05}.parquet", part_num);
 
+        // Train codebook once on the first shard; all subsequent shards reuse it.
+        // This makes cross-shard ADC distances comparable, eliminating the need
+        // for exact reranking during multi-shard search.
+        if self.cached_ivf_codebook.is_none() {
+            let codebook = tokio::task::spawn_blocking({
+                let embeddings = embeddings.to_vec();
+                let metric = self.policy.metric;
+                let config = ivf_config.clone();
+                move || ailake_index::IvfPqIndex::train_codebook(&embeddings, metric, &config)
+            })
+            .await
+            .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))??;
+            self.cached_ivf_codebook = Some(Arc::new(codebook));
+        }
+        let codebook = self.cached_ivf_codebook.as_ref().unwrap().clone();
+
         let file_writer = AilakeFileWriter::new(self.policy.clone())
-            .with_index_type(IndexType::IvfPq(ivf_config));
+            .with_index_type(IndexType::IvfPq(ivf_config))
+            .with_shared_ivf_codebook(codebook);
         let file_bytes: Bytes = file_writer.write(batch, embeddings)?;
         let file_size = file_bytes.len() as u64;
 
