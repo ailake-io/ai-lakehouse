@@ -491,33 +491,43 @@ What the test validates:
 
 ## 8. Running benchmarks
 
-### 8A. SIFT-1M benchmark (ailake-bench)
+Benchmarks live in a separate repository:
+**https://github.com/ThiagoLange/ailake-benchmarks**
 
-Public benchmark with the SIFT-1M dataset (1M vectors, 128-dim Euclidean).
+### 8A. Setup
 
-**Dataset download** (~164 MB):
 ```bash
-bash ailake-bench/scripts/download_sift1m.sh
-# Downloads to data/sift1m/
+git clone https://github.com/ThiagoLange/ailake-benchmarks.git
+cd ailake-benchmarks
+
+# Dataset download (~164 MB)
+bash scripts/download_sift1m.sh /data/sift1m
 ```
 
-**Run:**
+### 8B. Run
+
 ```bash
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m
+# Default: AI-Lake HNSW deferred
+cargo run --release -- --dataset-dir /data/sift1m
+
+# Smoke-test (10k vectors)
+cargo run --release -- --dataset-dir /data/sift1m --limit 10000
+
+# IVF-PQ deferred
+cargo run --release -- --dataset-dir /data/sift1m --engine ailake-ivf-pq-deferred
+
+# Compare vs LanceDB
+cargo run --release --features lancedb-bench -- \
+    --dataset-dir /data/sift1m --engine all
+
+# Compare vs pgvector
+cargo run --release --features pgvector-bench -- \
+    --dataset-dir /data/sift1m \
+    --engine pgvector \
+    --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
 ```
 
-Available engines (`--engine`):
-
-| Engine | Description |
-|---|---|
-| `ailake` (default) | HNSW deferred — Parquet written immediately, HNSW built async |
-| `ailake-ivf-pq` | IVF-PQ inline — shared codebook, rerank=3× |
-| `ailake-ivf-pq-deferred` | IVF-PQ deferred — Parquet immediately, IVF-PQ built async |
-| `ailake-auto` | Auto — detects hardware, picks HNSW or IVF-PQ |
-| `lancedb` | LanceDB IVF-HNSW-SQ (requires `--features lancedb-bench`) |
-| `all` | All engines side-by-side (requires `--features lancedb-bench`) |
-
-Expected results on CPU with AVX2, 8 cores (SIFT-1M, top_k=10):
+Expected results (SIFT-1M, top_k=10, x86_64 AVX2 8-core):
 
 ```
 Engine                    Write         Index build   Recall@10   QPS      p99
@@ -526,62 +536,6 @@ AI-Lake HNSW deferred     199k vec/s    165s defer    0.9963      1365     1.96m
 AI-Lake IVF-PQ deferred   251k vec/s    42.7s defer   0.9065      252      5.53ms
 AI-Lake Auto/HNSW         6.3k vec/s    159s inline   0.9960      1485     1.67ms
 LanceDB IVF-HNSW-SQ       530k vec/s    55s inline    0.8805      745     63.34ms
-```
-
-```bash
-# Smoke-test: 10k vectors
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --limit 10000
-
-# IVF-PQ deferred (write throughput validation)
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --engine ailake-ivf-pq-deferred
-
-# Auto engine (hardware detection)
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --engine ailake-auto
-
-# Adjust ef and top_k
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --top-k 10 --ef 100
-```
-
-### 8B. LanceDB benchmark (comparison)
-
-```bash
-cargo run --release -p ailake-bench --features lancedb-bench -- \
-    --dataset-dir data/sift1m --engine lancedb
-```
-
-Full comparison AI-Lake vs LanceDB side-by-side:
-
-```bash
-cargo run --release -p ailake-bench --features lancedb-bench -- \
-    --dataset-dir data/sift1m --engine all
-```
-
-### 8C. pgvector benchmark (comparison)
-
-Requires PostgreSQL with `pgvector ≥ 0.5.0` extension (HNSW support).
-
-**Start PostgreSQL + pgvector via Docker:**
-```bash
-docker run -d --name pg-ailake \
-  -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 \
-  pgvector/pgvector:pg16
-```
-
-**Run pgvector benchmark alone:**
-```bash
-cargo run --release -p ailake-bench --features pgvector-bench -- \
-    --dataset-dir data/sift1m \
-    --engine pgvector \
-    --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
-```
-
-**Full comparison AI-Lake + LanceDB + pgvector:**
-```bash
-cargo run --release -p ailake-bench --features lancedb-bench,pgvector-bench -- \
-    --dataset-dir data/sift1m \
-    --engine all \
-    --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
 ```
 
 Optional pgvector parameters:
@@ -597,7 +551,7 @@ Deep Lake free tier only supports exact search (brute-force). The script below m
 
 ```bash
 pip install deeplake numpy
-python3 ailake-bench/scripts/deeplake_bench.py \
+python3 scripts/deeplake_bench.py  # run from ailake-benchmarks repo \
     --dataset-dir data/sift1m \
     --limit 10000
 ```
@@ -722,7 +676,7 @@ assert_eq!(detect_backend(), HardwareBackend::AmdRocm);
 The `ailake-auto` engine prints the hardware profile before running:
 
 ```bash
-cargo run --release -p ailake-bench -- \
+cargo run --release -- \
     --dataset-dir data/sift1m --engine ailake-auto --limit 50000
 ```
 
@@ -815,10 +769,10 @@ IVF-PQ uses an index with inverted lists encoded by Product Quantization, instea
 
 ```bash
 # Basic benchmark (SIFT-1M, defaults: nlist=256, nprobe=8, pq_m=8)
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --engine ailake-ivf-pq
+cargo run --release -- --dataset-dir data/sift1m --engine ailake-ivf-pq
 
 # Adjust parameters
-cargo run --release -p ailake-bench -- \
+cargo run --release -- \
     --dataset-dir data/sift1m \
     --engine ailake-ivf-pq \
     --ivf-nlist 512 \
@@ -826,7 +780,7 @@ cargo run --release -p ailake-bench -- \
     --ivf-pq-m 16
 
 # Full comparison AI-Lake HNSW + IVF-PQ + LanceDB + pgvector
-cargo run --release -p ailake-bench --features lancedb-bench,pgvector-bench -- \
+cargo run --release --features lancedb-bench,pgvector-bench -- \
     --dataset-dir data/sift1m \
     --engine all \
     --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
@@ -1900,7 +1854,7 @@ ailake-catalog/   Iceberg catalog: HadoopCatalog, RestCatalog, NessieCatalog, Jd
 ailake-store/     storage abstraction: LocalStore + ObjectStoreBackend (S3/GCS/Azure via object_store)
 ailake-query/     TableWriter (write_batch, write_batch_ivf_pq, write_batch_multi), MemTableWriter,
                   search() with geometric pruning, ContextAssembler, CompactionExecutor
-ailake-bench/     SIFT-1M benchmark: HNSW, IVF-PQ (--engine ailake-ivf-pq), LanceDB, pgvector
+ailake-benchmarks  SIFT-1M benchmark (separate repo): https://github.com/ThiagoLange/ailake-benchmarks
 ailake-py/        PyO3 bindings (outside workspace — compile with maturin)
 ailake-jni/       C-ABI cdylib via JNA for Spark, Trino, and Flink
 spark-plugin/     Spark 3.5 Catalyst strategy (Kotlin/Gradle)

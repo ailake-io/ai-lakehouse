@@ -220,10 +220,8 @@ ailake/
 │   ├── Cargo.toml
 │   └── src/
 │       └── main.rs             # CLI: ailake create / insert / search / compact / info
-├── ailake-bench/
 │   ├── Cargo.toml
 │   └── src/
-│       └── main.rs             # SIFT-1M benchmark vs. LanceDB / pgvector (--engine flag)
 ├── ailake-py/
 │   ├── Cargo.toml
 │   ├── pyproject.toml

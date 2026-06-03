@@ -232,7 +232,6 @@ members = [
     "ailake-cli",
     "tests",
     "ailake-jni",
-    "ailake-bench",
     "ailake-py",
 ]
 
