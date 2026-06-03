@@ -547,19 +547,24 @@ cargo run --release -p ailake-bench -- --dataset-dir data/sift1m
 
 What it measures:
 - **Write phase**: 10 shards × 100k vectors, wall time + vec/s throughput
+- **Index build**: time for background HNSW/IVF-PQ builds to reach `IndexStatus::Ready`
 - **Index load**: time to `SearchSession::load()` all shards into memory
 - **Search phase** (top_k=10, ef=50): Recall@10, QPS, mean/p50/p95/p99 latency
 
-Reference results (x86_64 with AVX2, 10-core CPU):
+Reference results (SIFT-1M, x86_64 AVX2, 8 cores):
 
-| Metric | Value |
-|--------|-------|
-| Write throughput | ~2400 vec/s |
-| Index load (10 shards) | ~3 s |
-| Recall@10 | ~0.96 |
-| QPS | ~450 |
-| Latency mean | ~2.2 ms |
-| Latency p99 | ~4.5 ms |
+| Engine | Write | Index build | Recall@10 | QPS | p99 |
+|--------|-------|-------------|-----------|-----|-----|
+| `ailake` (HNSW deferred) | 199k vec/s | 165s (async) | 0.9963 | 1365 | 1.96ms |
+| `ailake-ivf-pq-deferred` | 251k vec/s | 42.7s (async) | 0.9065 | 252 | 5.53ms |
+| `ailake-auto` (HNSW) | 6.3k vec/s | 159s (inline) | 0.9960 | 1485 | 1.67ms |
+| `lancedb` | 530k vec/s | 55s (inline) | 0.8805 | 745 | 63.34ms |
+
+Engine selection guide:
+- `ailake` — best recall, streaming ingestion (deferred build)
+- `ailake-ivf-pq-deferred` — 100× smaller index; use when RAM is limited
+- `ailake-auto` — hardware-adaptive; use in heterogeneous deployments
+- `lancedb` — comparison baseline only
 
 ### `ailake-file/benches/write.rs`
 

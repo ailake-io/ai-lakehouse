@@ -54,7 +54,7 @@ Vector data transformations. No I/O.
 
 - `Quantizer::f32_to_f16_bytes(&[f32]) -> Vec<u8>` — half-precision cast
 - `Quantizer::f32_to_i8(&[f32]) -> (Vec<i8>, ScalingParams)` — symmetric min-max
-- `PQCodebook::train(vectors, M, k, max_iter) -> PQCodebook` — k-means++ per subspace
+- `PQCodebook::train(vectors, M, k, max_iter) -> PQCodebook` — k-means++ per subspace; init is O(n × k) via incremental min-dist update (not O(n × k²))
 - `PQCodebook::encode(&[f32]) -> Vec<u8>` — M bytes, one code per subspace
 - `PQCodebook::compute_adc_table(query) -> Vec<Vec<f32>>` — precomputed ADC table for fast batch search
 - `PQCodebook::adc_distance(codes, table) -> f32` — O(M) approximate distance
@@ -77,8 +77,10 @@ HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) 
   - Visited tracking: thread-local generation bitmap — O(1) reset by incrementing generation counter; no per-query allocation
   - `search(query: &[f32], top_k: usize, ef_search: usize) -> Vec<(RowId, f32)>`
   - CPU fallback: `brute_force()` via `rayon::par_iter()` — activated only when `neighbors` is empty
-- `IvfPqIndex` / `IvfPqConfig` / `IvfPqSerializer` — inverted file index with Product Quantization
-  - `IvfPqConfig::for_dataset(dim, n)` — scales `nlist` to √n clamped [16, 1024]
+- `IvfPqIndex` / `IvfPqConfig` / `IvfPqSerializer` / `IvfPqCodebook` — inverted file index with Product Quantization
+  - `IvfPqConfig::for_dataset(dim, n)` — scales `nlist` to √n clamped [16, 1024]; `nprobe = nlist/4` (25% coverage)
+  - `IvfPqIndex::train_codebook(vectors, metric, config) -> IvfPqCodebook` — trains coarse quantizer + PQ without building inverted lists; call once and reuse across shards
+  - `IvfPqIndex::build_with_codebook(row_ids, vectors, codebook)` — assigns and encodes using pre-trained codebook; O(n) only, no k-means
   - `kmeans_dispatch()` — priority: CUDA → ROCm → CPU rayon
 - `AnyIndex` — enum dispatching search to `HnswIndex` or `IvfPqIndex`
 - `HnswSerializer` — bincode-based serialization of the full HNSW graph
@@ -167,13 +169,19 @@ Object storage abstraction. Thin wrapper over the `object_store` crate.
 ### `ailake-query`
 Query planning and execution. The integration layer — depends on all data-plane crates.
 
-- `TableWriter` — `write_batch(batch, embeddings)` + `commit()` → Iceberg snapshot
+- `TableWriter` — write path for all index types:
+  - `write_batch(batch, embeddings)` — HNSW inline
+  - `write_batch_deferred(batch, embeddings)` — Parquet immediately (~200k vec/s); HNSW built async in background tokio task
+  - `write_batch_ivf_pq(batch, embeddings, config)` — IVF-PQ inline; shared codebook cached after first shard (`cached_ivf_codebook`)
+  - `write_batch_ivf_pq_deferred(batch, embeddings, config)` — Parquet immediately; IVF-PQ built async; shared codebook via `Arc<tokio::sync::OnceCell<IvfPqCodebook>>` ensures k-means runs once across all concurrent background tasks
+  - `write_batch_auto(batch, embeddings)` — detects hardware, delegates to HNSW or IVF-PQ
+  - `commit() -> SnapshotId` — writes Iceberg snapshot
 - `VectorPruner::prune(files, query, metric, threshold)` — filters `Vec<DataFileEntry>` using centroid geometry; works on catalog metadata only, zero file I/O for pruned files
-- `search(table, query, config, ...)` — full pipeline: list catalog → prune → load HNSW → global top-k merge; `SearchConfig.pruning_threshold` controls prune aggressiveness; `SearchConfig.rerank_factor` enables reranking after PQ (fetch `top_k × factor` candidates, recompute exact distances from raw vectors, re-sort)
-- `SearchSession` — pre-loads all shard HNSW indexes once, serves many queries without I/O per query:
+- `search(table, query, config, ...)` — full pipeline: list catalog → prune → load index → global top-k merge; `SearchConfig.pruning_threshold` controls prune aggressiveness; `SearchConfig.rerank_factor` enables reranking after PQ (fetch `top_k × factor` candidates, recompute exact distances from raw vectors, re-sort)
+- `SearchSession` — pre-loads all shard indexes once, serves many queries without I/O per query:
   - `SearchSession::load(table, vector_column, dim, catalog, store, load_raw) -> AilakeResult<Self>`
   - `SearchSession::search_query(query, config) -> Vec<SearchResult>` — sync, no I/O
-  - Used by `ailake-bench` to achieve ~450 QPS on SIFT-1M
+  - `load_raw=true` loads raw F32 vectors for exact reranking (required for multi-shard IVF-PQ with per-shard codebooks; optional when shared codebook is used)
 - `CompactionPlanner::plan(files)` — selects files smaller than `target_file_size_bytes`
 - `CompactionExecutor::compact(files, output_path)` — merges N files into one via Arrow `concat_batches`, rebuilds HNSW, returns new `DataFileEntry`
 - `CompactionExecutor::run(planner, table, catalog, prefix)` — full cycle: plan + compact + commit + delete old files

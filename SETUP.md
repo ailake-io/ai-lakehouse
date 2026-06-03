@@ -506,25 +506,37 @@ bash ailake-bench/scripts/download_sift1m.sh
 cargo run --release -p ailake-bench -- --dataset-dir data/sift1m
 ```
 
-Expected result (CPU with AVX2, parallel HNSW build):
+Available engines (`--engine`):
+
+| Engine | Description |
+|---|---|
+| `ailake` (default) | HNSW deferred — Parquet written immediately, HNSW built async |
+| `ailake-ivf-pq` | IVF-PQ inline — shared codebook, rerank=3× |
+| `ailake-ivf-pq-deferred` | IVF-PQ deferred — Parquet immediately, IVF-PQ built async |
+| `ailake-auto` | Auto — detects hardware, picks HNSW or IVF-PQ |
+| `lancedb` | LanceDB IVF-HNSW-SQ (requires `--features lancedb-bench`) |
+| `all` | All engines side-by-side (requires `--features lancedb-bench`) |
+
+Expected results on CPU with AVX2, 8 cores (SIFT-1M, top_k=10):
+
 ```
-Write phase
-  Throughput    : ~2400 vec/s
-
-Build phase  (10 shards, parallel)
-  Build time    : ~155 s  (vs ~220 s single-threaded)
-
-Search phase  (top_k=10, ef=50)  [indexes pre-loaded]
-  Recall@10     : ~0.996
-  QPS           : ~450
-  Latency mean  : ~2.2 ms
-  Latency p99   : ~4.5 ms
+Engine                    Write         Index build   Recall@10   QPS      p99
+──────────────────────────────────────────────────────────────────────────────
+AI-Lake HNSW deferred     199k vec/s    165s defer    0.9963      1365     1.96ms
+AI-Lake IVF-PQ deferred   251k vec/s    42.7s defer   0.9065      252      5.53ms
+AI-Lake Auto/HNSW         6.3k vec/s    159s inline   0.9960      1485     1.67ms
+LanceDB IVF-HNSW-SQ       530k vec/s    55s inline    0.8805      745     63.34ms
 ```
 
-Options:
 ```bash
-# Limit base to 10k vectors for quick smoke-test
+# Smoke-test: 10k vectors
 cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --limit 10000
+
+# IVF-PQ deferred (write throughput validation)
+cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --engine ailake-ivf-pq-deferred
+
+# Auto engine (hardware detection)
+cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --engine ailake-auto
 
 # Adjust ef and top_k
 cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --top-k 10 --ef 100
@@ -537,7 +549,7 @@ cargo run --release -p ailake-bench --features lancedb-bench -- \
     --dataset-dir data/sift1m --engine lancedb
 ```
 
-To compare AI-Lake vs LanceDB side-by-side:
+Full comparison AI-Lake vs LanceDB side-by-side:
 
 ```bash
 cargo run --release -p ailake-bench --features lancedb-bench -- \

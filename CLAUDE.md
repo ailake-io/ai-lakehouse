@@ -425,6 +425,10 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] `MemTable` write buffer para ingestão streaming
 - [x] AVX-512 + FMA + F16C SIMD para kernels de distância
 - [x] Flink connector (`VectorScanSource` + `VectorScanTableFactory`)
+- [x] **IVF-PQ shared codebook** — `IvfPqCodebook` treinado uma vez no primeiro shard e reutilizado em todos os shards subsequentes via `Arc<tokio::sync::OnceCell>`; distâncias ADC comparáveis cross-shard sem reranking por codebook incompatível
+- [x] **`write_batch_ivf_pq_deferred`** — variante async de IVF-PQ: persiste Parquet imediatamente (~200k vec/s), treina índice IVF-PQ em background (mesmo padrão do HNSW deferred); `IndexStatus::Indexing → Ready`
+- [x] **Fix k-means++ O(n×k²) → O(n×k)** — `kmeans_pp_init` usa min-dist incremental; parallelismo via `rayon::par_iter` no assignment loop e no init; speedup 17× em IVF-PQ SIFT-1M
+- [x] **Fix `HadoopCatalog::commit_snapshot`** — operações `Replace`/`Overwrite` não herdam manifests anteriores; corrige bug onde `IndexStatus::Ready` nunca convergia com múltiplos background tasks concorrentes
 
 ### Fase 5 — Próximos Passos
 

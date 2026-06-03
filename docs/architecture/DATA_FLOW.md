@@ -84,6 +84,48 @@ Invariant after commit:
 
 ---
 
+## Deferred write path (HNSW and IVF-PQ)
+
+`write_batch_deferred` (HNSW) and `write_batch_ivf_pq_deferred` (IVF-PQ) decouple Parquet write latency from index build time.
+
+```
+Caller
+  │
+  │  write_batch_deferred(batch, embeddings)
+  ▼
+TableWriter (fast path — Parquet only)
+  │
+  ├─► AilakeFileWriter::write_parquet_only()
+  │     → Parquet bytes, no AILK section
+  │
+  ├─► store.put(file_path, parquet_bytes)
+  │     → S3 PUT, returns in ~4s for 200k vec/s
+  │
+  ├─► catalog entry: IndexStatus::Indexing
+  │
+  └─► tokio::spawn (background task)
+        │
+        ├─► [IVF-PQ only] OnceCell::get_or_try_init
+        │     → first task trains codebook (k-means)
+        │     → subsequent tasks await and reuse shared codebook
+        │
+        ├─► build HNSW or IvfPqIndex::build_with_codebook
+        │
+        ├─► AilakeFileWriter::write (rewrite file with AILK section)
+        │
+        ├─► store.put (overwrite Parquet-only file with full AILK file)
+        │
+        └─► CAS retry loop:
+              load current snapshot → mark file Ready → commit Replace snapshot
+              verify Ready survived (sibling tasks may race) → retry if not
+```
+
+**Throughput**: write returns after the Parquet PUT — ~200k vec/s for both engines. Index builds in background without blocking ingestion.
+
+**`IndexStatus` lifecycle**: `Indexing` (set at commit time) → `Ready` (set by background task after AILK section is written and catalog updated). The `SearchSession` serves `Indexing` shards via flat scan (exact brute-force) until the transition completes. `Replace` commits overwrite the manifest list with the new complete state to avoid duplicate entries.
+
+---
+
 ## Read path — vector search
 
 ```mermaid
