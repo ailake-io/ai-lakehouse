@@ -46,8 +46,8 @@ python3 -c "import pyarrow; print(pyarrow.__version__)"
 ## 1. Clone and build
 
 ```bash
-git clone https://github.com/ThiagoLange/iceberg-ai-deltalakehouse.git
-cd iceberg-ai-deltalakehouse
+git clone https://github.com/ThiagoLange/ai-lakehouse.git
+cd ai-lakehouse
 
 # Default build — parallel CPU (rayon), no CUDA dependency
 cargo build --workspace

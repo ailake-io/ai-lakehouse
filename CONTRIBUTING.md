@@ -43,8 +43,8 @@ Optional (for full compat-heavy tests):
 ### 1. Clone and enter the repository
 
 ```bash
-git clone https://github.com/ThiagoLange/iceberg-ai-deltalakehouse.git
-cd iceberg-ai-deltalakehouse
+git clone https://github.com/ThiagoLange/ai-lakehouse.git
+cd ai-lakehouse
 git checkout develop   # all work goes here first
 ```
 
@@ -406,10 +406,10 @@ feat(ailake-index): add IVF-PQ adaptive nlist selection
 
 ## Reporting issues
 
-- **Bug**: use the [Bug Report](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/issues/new?template=bug_report.yml) template.
-- **Feature request**: use the [Feature Request](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/issues/new?template=feature_request.yml) template.
+- **Bug**: use the [Bug Report](https://github.com/ThiagoLange/ai-lakehouse/issues/new?template=bug_report.yml) template.
+- **Feature request**: use the [Feature Request](https://github.com/ThiagoLange/ai-lakehouse/issues/new?template=feature_request.yml) template.
 - **Security vulnerability**: follow [`SECURITY.md`](./SECURITY.md) — do not open a public issue.
-- **Questions and design discussions**: use [GitHub Discussions](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/discussions).
+- **Questions and design discussions**: use [GitHub Discussions](https://github.com/ThiagoLange/ai-lakehouse/discussions).
 
 ---
 

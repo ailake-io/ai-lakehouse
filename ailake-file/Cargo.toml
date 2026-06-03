@@ -4,7 +4,7 @@ version     = "0.0.10"
 edition     = "2021"
 description = "Self-contained AI-Lake file writer/reader — Parquet extended with HNSW footer"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["parquet", "vector", "hnsw", "iceberg", "lakehouse"]
 categories  = ["database", "encoding", "filesystem"]
 

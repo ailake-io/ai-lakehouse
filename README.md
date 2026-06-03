@@ -1,6 +1,6 @@
 # AI-Lake Format
 
-[![CI](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/actions/workflows/ci.yml)
+[![CI](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/ailake-core.svg)](https://crates.io/crates/ailake-core)
 [![PyPI](https://img.shields.io/pypi/v/ailake.svg)](https://pypi.org/p/ailake)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
@@ -118,22 +118,22 @@ results = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20)
 pip install apache-airflow-providers-ailake
 ```
 
-**JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases):
+**JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
 VERSION=0.0.10
 
 # Spark plugin
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
 
 # Trino plugin
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/trino-plugin-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/trino-plugin-${VERSION}-plugin.jar
 
 # Flink connector
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/ailake-flink-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/ailake-flink-${VERSION}-plugin.jar
 
 # Native library (required by all three — place on java.library.path)
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/libailake_jni.so
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/libailake_jni.so
 ```
 
 See [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) for installation and configuration.
