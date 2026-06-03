@@ -284,3 +284,54 @@ Detection priority: AMD ROCm first, then NVIDIA CUDA, then CPU. AMD is checked f
 - AMD via `candle-core` ROCm feature: `candle-core/rocm` is not a stable feature; requires build-time dependency.
 - AMD via cuVS FFI: cuVS is NVIDIA-only by design; rejected.
 - HIP CUDA compatibility layer reliance: AMD ROCm ships `libcuda.so.1` as a compat shim, but relying on it would break vendor identification and could silently use the wrong code path.
+
+---
+
+## ADR-013: IVF-PQ shared codebook across shards
+
+**Date**: 2026-06  
+**Status**: Accepted
+
+**Context**: The original multi-shard IVF-PQ design trained an independent PQ codebook per shard (100k vectors each). Each codebook produces ADC distances on a different numerical scale. When search results from 10 shards are merged globally (sorted by distance), the comparison is between values from 10 incomparable scales — systematically biasing the merge toward shards with lower ADC values regardless of true distance. `Recall@10 = 0.32` on SIFT-1M despite correct `nlist/nprobe` parameters.
+
+**Decision**: Train the codebook once on the first shard and reuse it across all shards via `Arc<tokio::sync::OnceCell<IvfPqCodebook>>`. All shards built from the same codebook produce ADC distances that are numerically comparable — cross-shard merge by distance is correct.
+
+New public API:
+- `IvfPqCodebook` struct (coarse centroids + PQ)
+- `IvfPqIndex::train_codebook(vectors, metric, config) -> IvfPqCodebook`
+- `IvfPqIndex::build_with_codebook(row_ids, vectors, codebook) -> IvfPqIndex`
+- `AilakeFileWriter::with_shared_ivf_codebook(Arc<IvfPqCodebook>)`
+
+**Consequences**:
+- `Recall@10` with `nprobe=nlist/4` and `rerank_factor=3`: 0.32 → 0.91.
+- k-means training runs once (first shard) instead of N times. Write speedup: ~4× for inline, ~30× when combined with deferred build.
+- Codebook is trained on 100k vectors (first shard). For datasets where shard 0 has an atypical distribution, recall may be slightly lower than a globally-trained codebook. Mitigated by the IVF assignment being robust to moderate distributional drift.
+
+**Rejected alternatives**:
+- Global codebook from all shards combined: requires two-pass write (first scan all shards for training, then write with built indexes). Breaks the streaming single-pass write model.
+- Per-shard codebook with exact reranking only: still works (reranking corrects the merge), but adds memory overhead for raw vectors and latency for exact distance computation.
+
+---
+
+## ADR-014: Deferred IVF-PQ index build
+
+**Date**: 2026-06  
+**Status**: Accepted
+
+**Context**: IVF-PQ k-means training is the bottleneck for write throughput (~7k vec/s inline vs ~200k vec/s for Parquet-only writes). HNSW already had a deferred build path (`write_batch_deferred`) that writes Parquet immediately and builds the HNSW in a background tokio task. The same pattern can apply to IVF-PQ.
+
+**Decision**: `write_batch_ivf_pq_deferred` writes Parquet-only first (same fast path as HNSW deferred), then spawns a background task that:
+1. Gets or trains the shared codebook via `Arc<tokio::sync::OnceCell<IvfPqCodebook>>` — first task trains, all others await and reuse.
+2. Calls `IvfPqIndex::build_with_codebook` (O(n) assign+encode, no k-means for shards 2-N).
+3. Rewrites the file with the AILK section.
+4. Transitions `IndexStatus::Indexing → Ready` via the same CAS retry loop used by HNSW deferred.
+
+**Consequences**:
+- Write throughput: ~200k vec/s (limited by Parquet writes) vs ~7k vec/s inline.
+- Index build time: 42.7s for 1M vectors in background vs 130s inline blocking write.
+- Search during the build window: `SearchSession` serves `Indexing` shards via flat scan (exact brute-force). Acceptable for most workloads — HNSW deferred has the same behavior.
+- `OnceCell` ensures exactly one k-means training run regardless of how many shards are written concurrently.
+
+**Rejected alternatives**:
+- Global k-means before any shard writes: breaks streaming ingestion model; requires knowing all vectors upfront.
+- Train on each shard independently (no sharing): works but no write speedup benefit, and cross-shard ADC distances remain incomparable.

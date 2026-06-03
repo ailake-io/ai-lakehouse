@@ -4,7 +4,7 @@ version     = "0.0.10"
 edition     = "2021"
 description = "Parquet reader/writer with VECTOR column type for the AI-Lake format"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["parquet", "arrow", "vector", "iceberg", "embedding"]
 categories  = ["database", "encoding", "data-structures"]
 

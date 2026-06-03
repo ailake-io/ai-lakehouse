@@ -533,33 +533,37 @@ Scripts:
 
 ## Benchmarks
 
-### `ailake-bench` — SIFT-1M end-to-end
+### SIFT-1M end-to-end (external repo)
 
-`ailake-bench` is the canonical public benchmark. Measures write throughput, search QPS, latency percentiles, and Recall@10 against SIFT-1M ground truth.
+Benchmarks live at **https://github.com/ThiagoLange/ailake-benchmarks**.
 
 ```bash
-# Download dataset (~164 MB)
-bash ailake-bench/scripts/download_sift1m.sh
-
-# Run (uses --release automatically via cargo run --release)
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m
+git clone https://github.com/ThiagoLange/ailake-benchmarks.git
+cd ailake-benchmarks
+bash scripts/download_sift1m.sh /data/sift1m
+cargo run --release -- --dataset-dir /data/sift1m
 ```
 
 What it measures:
 - **Write phase**: 10 shards × 100k vectors, wall time + vec/s throughput
+- **Index build**: time for background HNSW/IVF-PQ builds to reach `IndexStatus::Ready`
 - **Index load**: time to `SearchSession::load()` all shards into memory
 - **Search phase** (top_k=10, ef=50): Recall@10, QPS, mean/p50/p95/p99 latency
 
-Reference results (x86_64 with AVX2, 10-core CPU):
+Reference results (SIFT-1M, x86_64 AVX2, 8 cores):
 
-| Metric | Value |
-|--------|-------|
-| Write throughput | ~2400 vec/s |
-| Index load (10 shards) | ~3 s |
-| Recall@10 | ~0.96 |
-| QPS | ~450 |
-| Latency mean | ~2.2 ms |
-| Latency p99 | ~4.5 ms |
+| Engine | Write | Index build | Recall@10 | QPS | p99 |
+|--------|-------|-------------|-----------|-----|-----|
+| `ailake` (HNSW deferred) | 199k vec/s | 165s (async) | 0.9963 | 1365 | 1.96ms |
+| `ailake-ivf-pq-deferred` | 251k vec/s | 42.7s (async) | 0.9065 | 252 | 5.53ms |
+| `ailake-auto` (HNSW) | 6.3k vec/s | 159s (inline) | 0.9960 | 1485 | 1.67ms |
+| `lancedb` | 530k vec/s | 55s (inline) | 0.8805 | 745 | 63.34ms |
+
+Engine selection guide:
+- `ailake` — best recall, streaming ingestion (deferred build)
+- `ailake-ivf-pq-deferred` — 100× smaller index; use when RAM is limited
+- `ailake-auto` — hardware-adaptive; use in heterogeneous deployments
+- `lancedb` — comparison baseline only
 
 ### `ailake-file/benches/write.rs`
 
@@ -643,7 +647,6 @@ cargo bench --workspace
 | `compat-pyiceberg` | `write_fixture` + `pip install pyiceberg[pyarrow]` + `check_pyiceberg.py` | PyIceberg `StaticTable.scan()` |
 | `test-airflow-provider` | `pip install apache-airflow pytest` + `pytest tests/` | Airflow provider unit tests (2.x/3.x) |
 | `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context |
-| `bench-build` | `cargo build -p ailake-bench` | bench crate compiles |
 
 ### `ci-gpu.yml` — manual dispatch (`workflow_dispatch`)
 
@@ -749,7 +752,7 @@ All workflows are `workflow_dispatch`. Trigger in this order — each step must 
 
 | Step | Workflow | What it does | Blocks on |
 |---|---|---|---|
-| 1 | **CI** (`ci.yml`) | Rust fmt/clippy/deny, unit, integration, compat Python/DuckDB/PyIceberg/ailake-py, Airflow provider tests, bench-build | Must pass |
+| 1 | **CI** (`ci.yml`) | Rust fmt/clippy/deny, unit, integration, compat Python/DuckDB/PyIceberg/ailake-py, Airflow provider tests | Must pass |
 | 2 | **CI Go** (`ci-go.yml`) | Go SDK build + vet | Must pass |
 | 3 | **CI C++** (`ci-cpp.yml`) | C++17 cmake build | Must pass |
 | 4 | **CI GPU** (`ci-gpu.yml`) | GPU unit tests on Windows self-hosted runner (CUDA/ROCm); skips gracefully if `AILAKE_GPU_BACKEND=none` | Must pass (on GPU runner) |

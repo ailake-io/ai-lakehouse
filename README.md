@@ -1,6 +1,6 @@
 # AI-Lake Format
 
-[![CI](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/actions/workflows/ci.yml)
+[![CI](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/ailake-core.svg)](https://crates.io/crates/ailake-core)
 [![PyPI](https://img.shields.io/pypi/v/ailake.svg)](https://pypi.org/p/ailake)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
@@ -25,7 +25,7 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 
 **Rust core, first-class Python and JVM.** The write/search path is pure Rust (zero GC pauses, no JVM heap pressure). Python gets zero-copy PyArrow `RecordBatch` results. Spark, Trino, and Flink get a JNA C-ABI bridge — four exported functions shared across all three JVM plugins.
 
-**Storage-efficient at scale.** F16 quantization halves vector storage vs. F32. Product Quantization (IVF-PQ) reduces the index footprint 10–100× for S3-resident workloads where sequential reads are cheap. PQ reranking recovers precision with a second pass over the raw F16 column.
+**Storage-efficient at scale.** F16 quantization halves vector storage vs. F32. Product Quantization (IVF-PQ) reduces the index footprint 10–100× for S3-resident workloads where sequential reads are cheap. PQ reranking recovers precision with a second pass over the raw F16 column. IVF-PQ deferred build writes Parquet at ~250k vec/s and trains the index asynchronously — same throughput as HNSW deferred.
 
 | | Iceberg alone | External vector DB | **AI-Lake** |
 |---|---|---|---|
@@ -118,22 +118,22 @@ results = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20)
 pip install apache-airflow-providers-ailake
 ```
 
-**JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases):
+**JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
 VERSION=0.0.10
 
 # Spark plugin
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
 
 # Trino plugin
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/trino-plugin-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/trino-plugin-${VERSION}-plugin.jar
 
 # Flink connector
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/ailake-flink-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/ailake-flink-${VERSION}-plugin.jar
 
 # Native library (required by all three — place on java.library.path)
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/libailake_jni.so
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/libailake_jni.so
 ```
 
 See [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) for installation and configuration.
@@ -201,7 +201,7 @@ ailake/
 │   └── src/
 │       ├── lib.rs              # AnyIndex enum — dispatches HNSW or IVF-PQ
 │       ├── hnsw.rs             # hnsw_rs wrapper
-│       ├── ivf_pq.rs           # IvfPqIndex, IvfPqConfig, IvfPqSerializer
+│       ├── ivf_pq.rs           # IvfPqIndex, IvfPqConfig, IvfPqCodebook, IvfPqSerializer
 │       ├── gpu.rs              # NVIDIA CUDA (cuBLAS libloading) + AMD ROCm (hipBLAS libloading) GPU backends
 │       ├── hardware.rs         # HardwareProfile, HardwareBackend detection (CUDA / ROCm / CPU)
 │       ├── serialize.rs        # bincode serialization
@@ -210,7 +210,7 @@ ailake/
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
-│       ├── writer.rs           # TableWriter — write_batch, write_batch_ivf_pq, write_batch_multi
+│       ├── writer.rs           # TableWriter — write_batch, write_batch_deferred, write_batch_ivf_pq, write_batch_ivf_pq_deferred, write_batch_multi
 │       ├── mem_table.rs        # MemTableWriter — streaming ingestion write buffer
 │       ├── scanner.rs          # search() with geometric pruning; AnyIndex dispatch
 │       ├── pruner.rs           # VectorPruner — centroid-based file pruning
@@ -220,10 +220,8 @@ ailake/
 │   ├── Cargo.toml
 │   └── src/
 │       └── main.rs             # CLI: ailake create / insert / search / compact / info
-├── ailake-bench/
 │   ├── Cargo.toml
 │   └── src/
-│       └── main.rs             # SIFT-1M benchmark vs. LanceDB / pgvector (--engine flag)
 ├── ailake-py/
 │   ├── Cargo.toml
 │   ├── pyproject.toml
@@ -298,9 +296,9 @@ cargo check --workspace
 | **Phase 1** | ✅ Complete | Local MVP — write + search on local filesystem, HNSW footer, Iceberg catalog |
 | **Phase 2** | ✅ Complete | Cloud storage (`ObjectStoreBackend`), mmap HNSW loading, compaction, PQ, geometric pruning, `ContextAssembler`, PyO3 bindings |
 | **Phase 3** | ✅ Complete | Catalog backends (Nessie/JDBC/Glue), JNA C-ABI bindings, multi-column vectors, Spark/Trino/Flink plugins |
-| **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog) |
+| **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector; **IVF-PQ shared codebook** (single k-means training across all shards — ADC distances comparable cross-shard); **`write_batch_ivf_pq_deferred`** (~250k vec/s write, async IVF-PQ build); **k-means++ O(n×k) fix** + rayon parallelism (17× speedup); **`HadoopCatalog` Replace fix** (`IndexStatus::Ready` convergence with concurrent background tasks) |
 | **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP REST server, Apache Airflow provider, idempotent writes, Compat Heavy CI (Spark+Iceberg, Trino+REST, BigQuery emulator), TruffleHog secret scanning, cloud deployment guides |
 | **Phase 6** | ✅ Complete | Public distribution pipeline — crates.io, PyPI (manylinux abi3 wheels), Airflow provider on PyPI, pre-built JVM JARs + `libailake_jni.so` on GitHub Releases, dynamic Python versioning |
-| **Phase 7** | 🚧 Planned | DuckLake catalog backend (`DuckLakeCatalog` over DuckDB), dbt integration guide (dbt-spark + dbt-trino with AI-Lake plugins) |
+| **Phase 7** | 🚧 Planned | `write_batch_auto_deferred` (Auto engine deferred — ~200k vec/s regardless of index type); DuckLake catalog backend (`DuckLakeCatalog` over DuckDB); dbt integration guide (dbt-spark + dbt-trino with AI-Lake plugins) |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.

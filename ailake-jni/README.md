@@ -1,6 +1,6 @@
 # ailake-jni
 
-C-ABI cdylib that exposes the [AI-Lake](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse) vector search engine to JVM runtimes (Spark, Trino, Flink) via [JNA](https://github.com/java-native-access/jna).
+C-ABI cdylib that exposes the [AI-Lake](https://github.com/ThiagoLange/ai-lakehouse) vector search engine to JVM runtimes (Spark, Trino, Flink) via [JNA](https://github.com/java-native-access/jna).
 
 ## Overview
 

@@ -205,6 +205,8 @@ in by the OS — critical for large indexes on S3-backed storage.
 The blob is a **bincode v1** serialization of `ailake_index::IvfPqIndex`
 via `IvfPqSerializer`. Internal structure (`IvfPqSnapshot`):
 
+> **Shared codebook**: when multiple shards are written via `write_batch_ivf_pq_deferred` or `write_batch_ivf_pq`, all shards after the first reuse the same `coarse_centroids` and `pq_codebook` trained on the first shard. The serialized blob for each file still contains the full codebook (self-contained file guarantee), but the values are identical across shards — ADC distances are numerically comparable during multi-shard merge.
+
 ```
 [ config: IvfPqConfig
     nlist: u64        — number of coarse Voronoi cells

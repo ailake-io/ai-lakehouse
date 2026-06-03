@@ -1,6 +1,6 @@
 # apache-airflow-providers-ailake
 
-Apache Airflow provider for [AI-Lake Format](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse) — an Iceberg-compatible file format that unifies tabular data, embeddings, and HNSW vector indexes in a single Parquet file.
+Apache Airflow provider for [AI-Lake Format](https://github.com/ThiagoLange/ai-lakehouse) — an Iceberg-compatible file format that unifies tabular data, embeddings, and HNSW vector indexes in a single Parquet file.
 
 ## Installation
 
@@ -38,5 +38,5 @@ hook = AilakeHook(conn_id="ailake_default")
 
 ## Links
 
-- [Source](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse)
-- [Issue tracker](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/issues)
+- [Source](https://github.com/ThiagoLange/ai-lakehouse)
+- [Issue tracker](https://github.com/ThiagoLange/ai-lakehouse/issues)

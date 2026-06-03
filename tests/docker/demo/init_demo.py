@@ -96,7 +96,7 @@ def _maybe_register_nessie(table_path: str) -> None:
     No-op when NESSIE_URI is unset.
 
     Trino 400+ dropped hadoop catalog type; Nessie is the catalog backend for
-    the engine overlay (compose-demo-engines.yml).
+    the engines profile (--profile engines in compose-demo.yml).
     """
     import urllib.request
 

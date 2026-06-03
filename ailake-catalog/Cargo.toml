@@ -4,7 +4,7 @@ version     = "0.0.10"
 edition     = "2021"
 description = "Iceberg Spec v2 catalog backends (Hadoop, REST, Glue, Nessie, JDBC) for AI-Lake"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["iceberg", "catalog", "lakehouse", "parquet", "metadata"]
 categories  = ["database", "data-structures"]
 

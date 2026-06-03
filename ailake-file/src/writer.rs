@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_core::{AilakeResult, Centroid, RowId, VectorStoragePolicy};
-use ailake_index::{HnswBuilder, HnswConfig, HnswSerializer, IvfPqConfig, IvfPqSerializer};
+use ailake_index::{
+    HnswBuilder, HnswConfig, HnswSerializer, IvfPqCodebook, IvfPqConfig, IvfPqIndex,
+    IvfPqSerializer,
+};
 use ailake_parquet::ParquetVectorWriter;
 use ailake_vec::compute_centroid_and_radius;
 use arrow_array::RecordBatch;
@@ -40,6 +43,8 @@ pub struct VectorColumnBatch<'a> {
 pub struct AilakeFileWriter {
     policy: VectorStoragePolicy,
     index_type: IndexType,
+    /// Pre-trained shared codebook. When set, skips k-means for IVF-PQ builds.
+    shared_codebook: Option<std::sync::Arc<IvfPqCodebook>>,
 }
 
 impl AilakeFileWriter {
@@ -47,7 +52,15 @@ impl AilakeFileWriter {
         Self {
             policy,
             index_type: IndexType::default(),
+            shared_codebook: None,
         }
+    }
+
+    /// Use a pre-trained IVF-PQ codebook instead of running k-means.
+    /// Shards built from the same codebook produce comparable ADC distances.
+    pub fn with_shared_ivf_codebook(mut self, codebook: std::sync::Arc<IvfPqCodebook>) -> Self {
+        self.shared_codebook = Some(codebook);
+        self
     }
 
     pub fn with_hnsw_config(mut self, config: HnswConfig) -> Self {
@@ -145,6 +158,7 @@ impl AilakeFileWriter {
                 record_count,
                 current_offset,
                 &self.index_type,
+                self.shared_codebook.as_deref(),
             )?;
             let kv_key = if i == 0 {
                 "ailake.footer_offset".to_string()
@@ -186,6 +200,7 @@ fn build_ailk_section(
     record_count: u64,
     ailk_abs_offset: u64,
     index_type: &IndexType,
+    shared_codebook: Option<&IvfPqCodebook>,
 ) -> AilakeResult<Bytes> {
     let centroid: Centroid = compute_centroid_and_radius(embeddings, policy.metric);
     let centroid_bytes = encode_centroid(&centroid);
@@ -218,12 +233,16 @@ fn build_ailk_section(
         }
         IndexType::IvfPq(ivf_config) => {
             let row_ids: Vec<RowId> = (0..embeddings.len() as u64).map(RowId::new).collect();
-            let index = ailake_index::IvfPqIndex::train(
-                &row_ids,
-                embeddings,
-                policy.metric,
-                ivf_config.clone(),
-            )?;
+            let index = if let Some(cb) = shared_codebook {
+                IvfPqIndex::build_with_codebook(&row_ids, embeddings, cb)?
+            } else {
+                ailake_index::IvfPqIndex::train(
+                    &row_ids,
+                    embeddings,
+                    policy.metric,
+                    ivf_config.clone(),
+                )?
+            };
             (IvfPqSerializer::to_bytes(&index)?, FLAG_INDEX_IVF_PQ)
         }
         IndexType::Auto => unreachable!("Auto resolved above"),

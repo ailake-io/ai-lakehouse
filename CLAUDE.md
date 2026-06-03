@@ -425,9 +425,14 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] `MemTable` write buffer para ingestão streaming
 - [x] AVX-512 + FMA + F16C SIMD para kernels de distância
 - [x] Flink connector (`VectorScanSource` + `VectorScanTableFactory`)
+- [x] **IVF-PQ shared codebook** — `IvfPqCodebook` treinado uma vez no primeiro shard e reutilizado em todos os shards subsequentes via `Arc<tokio::sync::OnceCell>`; distâncias ADC comparáveis cross-shard sem reranking por codebook incompatível
+- [x] **`write_batch_ivf_pq_deferred`** — variante async de IVF-PQ: persiste Parquet imediatamente (~200k vec/s), treina índice IVF-PQ em background (mesmo padrão do HNSW deferred); `IndexStatus::Indexing → Ready`
+- [x] **Fix k-means++ O(n×k²) → O(n×k)** — `kmeans_pp_init` usa min-dist incremental; parallelismo via `rayon::par_iter` no assignment loop e no init; speedup 17× em IVF-PQ SIFT-1M
+- [x] **Fix `HadoopCatalog::commit_snapshot`** — operações `Replace`/`Overwrite` não herdam manifests anteriores; corrige bug onde `IndexStatus::Ready` nunca convergia com múltiplos background tasks concorrentes
 
 ### Fase 5 — Próximos Passos
 
+- [ ] **`write_batch_auto_deferred`** — variante deferred do engine Auto: detecta hardware em runtime e delega para `write_batch_deferred` (HNSW, CPU) ou `write_batch_ivf_pq_deferred` (IVF-PQ, GPU). Eleva throughput do Auto de 6.3k vec/s (inline bloqueante) para ~200k vec/s (Parquet-only imediato, índice async). Implementação: método em `TableWriter` que resolve `IndexType::Auto` → chama o deferred correspondente. Adicionar `--engine ailake-auto-deferred` ao bench para validar.
 - [ ] **DuckLake catalog backend** — `DuckLakeCatalog` em `ailake-catalog/` implementando `CatalogProvider` sobre catálogo DuckDB (dep: crate `duckdb`); mapeamento de metadados vetoriais (`centroid`, `radius`, `footer-offset`) para tabelas internas DuckLake; modelo de commit via INSERT no catálogo DuckDB. *Aguardar estabilização da spec DuckLake (anunciada mai/2025) antes de implementar.*
 - [ ] **dbt integration guide** — documentar fluxo `dbt (transform) → AI-Lake SDK (ingest + HNSW)` para dbt-spark e dbt-trino com plugins AI-Lake carregados
 
