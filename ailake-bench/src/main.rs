@@ -451,8 +451,16 @@ async fn run_ailake_ivf_pq(args: &Args, ds: &dataset::Dataset) -> anyhow::Result
     // Derive nlist/nprobe from shard size; CLI args override when non-zero.
     let auto_cfg = IvfPqConfig::for_dataset(ds.dim, args.shard_size);
     let ivf_config = IvfPqConfig {
-        nlist: if args.ivf_nlist > 0 { args.ivf_nlist } else { auto_cfg.nlist },
-        nprobe: if args.ivf_nprobe > 0 { args.ivf_nprobe } else { auto_cfg.nprobe },
+        nlist: if args.ivf_nlist > 0 {
+            args.ivf_nlist
+        } else {
+            auto_cfg.nlist
+        },
+        nprobe: if args.ivf_nprobe > 0 {
+            args.ivf_nprobe
+        } else {
+            auto_cfg.nprobe
+        },
         pq_m: args.ivf_pq_m,
         pq_k: 256,
         max_iter: 25,
@@ -626,8 +634,16 @@ async fn run_ailake_ivf_pq_deferred(
 
     let auto_cfg = IvfPqConfig::for_dataset(ds.dim, args.shard_size);
     let ivf_config = IvfPqConfig {
-        nlist: if args.ivf_nlist > 0 { args.ivf_nlist } else { auto_cfg.nlist },
-        nprobe: if args.ivf_nprobe > 0 { args.ivf_nprobe } else { auto_cfg.nprobe },
+        nlist: if args.ivf_nlist > 0 {
+            args.ivf_nlist
+        } else {
+            auto_cfg.nlist
+        },
+        nprobe: if args.ivf_nprobe > 0 {
+            args.ivf_nprobe
+        } else {
+            auto_cfg.nprobe
+        },
         pq_m: args.ivf_pq_m,
         pq_k: 256,
         max_iter: 25,
@@ -697,7 +713,10 @@ async fn run_ailake_ivf_pq_deferred(
             "timed out waiting for IVF-PQ builds after {}s",
             index_timeout.as_secs()
         );
-        let files = catalog.list_files(&table, None).await.context("list files")?;
+        let files = catalog
+            .list_files(&table, None)
+            .await
+            .context("list files")?;
         let ready = files
             .iter()
             .filter(|f| f.index_status == IndexStatus::Ready)

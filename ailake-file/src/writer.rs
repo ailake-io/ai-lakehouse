@@ -58,10 +58,7 @@ impl AilakeFileWriter {
 
     /// Use a pre-trained IVF-PQ codebook instead of running k-means.
     /// Shards built from the same codebook produce comparable ADC distances.
-    pub fn with_shared_ivf_codebook(
-        mut self,
-        codebook: std::sync::Arc<IvfPqCodebook>,
-    ) -> Self {
+    pub fn with_shared_ivf_codebook(mut self, codebook: std::sync::Arc<IvfPqCodebook>) -> Self {
         self.shared_codebook = Some(codebook);
         self
     }

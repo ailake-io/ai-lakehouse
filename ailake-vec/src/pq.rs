@@ -196,12 +196,15 @@ fn kmeans_pp_init(points: &[Vec<f32>], k: usize) -> Vec<Vec<f32>> {
         }
         let new_centroid = points[chosen].clone();
         // Incremental update: only recompute distance to the newly added centroid.
-        points.par_iter().zip(min_dists.par_iter_mut()).for_each(|(p, min_d)| {
-            let d = l2_sq(p, &new_centroid);
-            if d < *min_d {
-                *min_d = d;
-            }
-        });
+        points
+            .par_iter()
+            .zip(min_dists.par_iter_mut())
+            .for_each(|(p, min_d)| {
+                let d = l2_sq(p, &new_centroid);
+                if d < *min_d {
+                    *min_d = d;
+                }
+            });
         centroids.push(new_centroid);
     }
     centroids

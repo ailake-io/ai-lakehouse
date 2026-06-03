@@ -170,8 +170,16 @@ impl TableWriter {
         let fp = file_path.clone();
         let codebook_cell = self.deferred_ivf_codebook.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                build_ivf_pq_and_patch_index(store, catalog, policy, table, fp, ivf_config, codebook_cell).await
+            if let Err(e) = build_ivf_pq_and_patch_index(
+                store,
+                catalog,
+                policy,
+                table,
+                fp,
+                ivf_config,
+                codebook_cell,
+            )
+            .await
             {
                 error!(
                     "ailake: deferred IVF-PQ build failed — file is indexed as Parquet-only until \
