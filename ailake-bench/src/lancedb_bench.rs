@@ -69,7 +69,17 @@ pub async fn run(
     eprintln!("\nLanceDB index build (IVF-HNSW-SQ, partitions={num_partitions}, ef_construction={ef_construction}) …");
     let index_start = Instant::now();
 
-    table
+    // Progress ticker: IVF-HNSW-SQ on 1M vectors can take 30–120 s with no output.
+    let ticker = tokio::spawn(async move {
+        let mut secs = 0u32;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            secs += 10;
+            eprintln!("  … still building index ({secs}s) …");
+        }
+    });
+
+    let build_result = table
         .create_index(
             &["vector"],
             Index::IvfHnswSq(
@@ -82,7 +92,10 @@ pub async fn run(
         )
         .execute()
         .await
-        .context("create ivf-hnsw-sq index")?;
+        .context("create ivf-hnsw-sq index");
+
+    ticker.abort();
+    build_result?;
 
     let index_elapsed = index_start.elapsed();
     eprintln!("  index built in {:.1}s", index_elapsed.as_secs_f64());
