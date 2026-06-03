@@ -18,6 +18,7 @@ lz4_flex    = { workspace = true }
 zstd        = { workspace = true }
 thiserror   = { workspace = true }
 serde       = { workspace = true }
+rayon       = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }

@@ -3,6 +3,7 @@
 // At dim=1536, M=48: 6144 bytes → 48 bytes per vector (128x reduction, ~93-95% recall@10).
 
 use ailake_core::AilakeError;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,13 +131,13 @@ fn kmeans(points: &[Vec<f32>], k: usize, max_iter: usize) -> Vec<Vec<f32>> {
     let mut centroids = kmeans_pp_init(points, k);
 
     for _ in 0..max_iter {
-        // Assign each point to nearest centroid
+        // Parallel assignment: each point finds its nearest centroid independently.
         let assignments: Vec<usize> = points
-            .iter()
+            .par_iter()
             .map(|p| nearest_centroid(p, &centroids))
             .collect();
 
-        // Update centroids
+        // Update centroids (serial reduction — n×dim is cache-friendly enough here)
         let mut new_centroids = vec![vec![0.0f32; dim]; k];
         let mut counts = vec![0usize; k];
         for (point, &assigned) in points.iter().zip(assignments.iter()) {
@@ -168,23 +169,17 @@ fn kmeans(points: &[Vec<f32>], k: usize, max_iter: usize) -> Vec<Vec<f32>> {
     centroids
 }
 
-/// K-means++ centroid initialization.
+/// K-means++ centroid initialization — O(n × k) via incremental min-dist update.
 fn kmeans_pp_init(points: &[Vec<f32>], k: usize) -> Vec<Vec<f32>> {
-    let mut centroids = vec![points[0].clone()];
+    let mut centroids = Vec::with_capacity(k);
     let mut rng_state = 0x123456789u64;
 
+    centroids.push(points[0].clone());
+    // Track min distance from each point to the nearest centroid chosen so far.
+    let mut min_dists: Vec<f32> = points.par_iter().map(|p| l2_sq(p, &centroids[0])).collect();
+
     while centroids.len() < k {
-        let dists: Vec<f32> = points
-            .iter()
-            .map(|p| {
-                centroids
-                    .iter()
-                    .map(|c| l2_sq(p, c))
-                    .fold(f32::INFINITY, f32::min)
-            })
-            .collect();
-        let total: f32 = dists.iter().sum();
-        // Simple LCG random for deterministic behavior (no rand dep in vec crate)
+        let total: f32 = min_dists.iter().sum();
         rng_state = rng_state
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
@@ -192,14 +187,22 @@ fn kmeans_pp_init(points: &[Vec<f32>], k: usize) -> Vec<Vec<f32>> {
         let target = r * total;
         let mut cumsum = 0.0f32;
         let mut chosen = points.len() - 1;
-        for (i, &d) in dists.iter().enumerate() {
+        for (i, &d) in min_dists.iter().enumerate() {
             cumsum += d;
             if cumsum >= target {
                 chosen = i;
                 break;
             }
         }
-        centroids.push(points[chosen].clone());
+        let new_centroid = points[chosen].clone();
+        // Incremental update: only recompute distance to the newly added centroid.
+        points.par_iter().zip(min_dists.par_iter_mut()).for_each(|(p, min_d)| {
+            let d = l2_sq(p, &new_centroid);
+            if d < *min_d {
+                *min_d = d;
+            }
+        });
+        centroids.push(new_centroid);
     }
     centroids
 }
