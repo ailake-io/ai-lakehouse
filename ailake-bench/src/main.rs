@@ -507,9 +507,9 @@ async fn run_ailake_ivf_pq(args: &Args, ds: &dataset::Dataset) -> anyhow::Result
     );
 
     // ── Load indexes ──────────────────────────────────────────────────────────
-    // All shards share the same codebook — ADC distances are comparable across shards.
-    // No reranking or raw vector loading needed.
-    eprintln!("  Loading IVF-PQ indexes into memory …");
+    // Shared codebook ensures consistent ADC distances across shards.
+    // Reranking with exact L2 corrects residual ADC approximation error for top-k selection.
+    eprintln!("  Loading IVF-PQ indexes into memory (raw vectors for reranking) …");
     let load_start = Instant::now();
     let session = SearchSession::load(
         &table,
@@ -517,7 +517,7 @@ async fn run_ailake_ivf_pq(args: &Args, ds: &dataset::Dataset) -> anyhow::Result
         ds.dim as u32,
         catalog.clone(),
         store.clone(),
-        false,
+        true,
     )
     .await
     .context("load search session")?;
@@ -530,7 +530,7 @@ async fn run_ailake_ivf_pq(args: &Args, ds: &dataset::Dataset) -> anyhow::Result
 
     // ── Search phase ──────────────────────────────────────────────────────────
     eprintln!(
-        "\nAI-Lake IVF-PQ search phase (top_k={}, nprobe={}) …",
+        "\nAI-Lake IVF-PQ search phase (top_k={}, nprobe={}, rerank=3x) …",
         args.top_k, ivf_config.nprobe
     );
 
@@ -538,7 +538,7 @@ async fn run_ailake_ivf_pq(args: &Args, ds: &dataset::Dataset) -> anyhow::Result
         top_k: args.top_k,
         ef_search: args.ef,
         pruning_threshold: f32::INFINITY,
-        rerank_factor: None,
+        rerank_factor: Some(3),
     };
 
     let num_queries = ds.queries.len();
