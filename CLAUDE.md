@@ -432,6 +432,7 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 
 ### Fase 5 — Próximos Passos
 
+- [ ] **`write_batch_auto_deferred`** — variante deferred do engine Auto: detecta hardware em runtime e delega para `write_batch_deferred` (HNSW, CPU) ou `write_batch_ivf_pq_deferred` (IVF-PQ, GPU). Eleva throughput do Auto de 6.3k vec/s (inline bloqueante) para ~200k vec/s (Parquet-only imediato, índice async). Implementação: método em `TableWriter` que resolve `IndexType::Auto` → chama o deferred correspondente. Adicionar `--engine ailake-auto-deferred` ao bench para validar.
 - [ ] **DuckLake catalog backend** — `DuckLakeCatalog` em `ailake-catalog/` implementando `CatalogProvider` sobre catálogo DuckDB (dep: crate `duckdb`); mapeamento de metadados vetoriais (`centroid`, `radius`, `footer-offset`) para tabelas internas DuckLake; modelo de commit via INSERT no catálogo DuckDB. *Aguardar estabilização da spec DuckLake (anunciada mai/2025) antes de implementar.*
 - [ ] **dbt integration guide** — documentar fluxo `dbt (transform) → AI-Lake SDK (ingest + HNSW)` para dbt-spark e dbt-trino com plugins AI-Lake carregados
 
