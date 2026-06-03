@@ -86,12 +86,12 @@ struct Args {
     #[arg(long)]
     limit: Option<usize>,
 
-    /// IVF-PQ coarse clusters (nlist)
-    #[arg(long, default_value_t = 256)]
+    /// IVF-PQ coarse clusters (nlist); 0 = auto (sqrt of shard size)
+    #[arg(long, default_value_t = 0)]
     ivf_nlist: usize,
 
-    /// IVF-PQ clusters probed per query (nprobe)
-    #[arg(long, default_value_t = 8)]
+    /// IVF-PQ clusters probed per query (nprobe); 0 = auto (nlist/8)
+    #[arg(long, default_value_t = 0)]
     ivf_nprobe: usize,
 
     /// IVF-PQ sub-vectors (pq_m, must divide 128 for SIFT)
@@ -195,6 +195,7 @@ async fn main() -> anyhow::Result<()> {
             {
                 let ailake = run_ailake(&args, &ds).await?;
                 let ailake_ivf = run_ailake_ivf_pq(&args, &ds).await?;
+                let ailake_auto = run_ailake_auto(&args, &ds).await?;
                 let lancedb = lancedb_bench::run(
                     &ds,
                     args.top_k,
@@ -205,7 +206,8 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
 
-                let results: Vec<BenchResult> = vec![ailake, ailake_ivf, lancedb];
+                #[allow(unused_mut)]
+                let mut results: Vec<BenchResult> = vec![ailake, ailake_ivf, ailake_auto, lancedb];
 
                 #[cfg(feature = "pgvector-bench")]
                 if let Some(ref pg_url) = args.pgvector_url {
@@ -308,7 +310,13 @@ async fn run_ailake(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<BenchR
     // ── Wait for background HNSW builds ──────────────────────────────────────
     eprintln!("  Waiting for {num_shards} background HNSW build(s) …");
     let index_start = Instant::now();
+    let index_timeout = std::time::Duration::from_secs(600);
     loop {
+        anyhow::ensure!(
+            index_start.elapsed() < index_timeout,
+            "timed out waiting for HNSW builds after {}s — check logs for deferred build errors",
+            index_timeout.as_secs()
+        );
         let files = catalog
             .list_files(&table, None)
             .await
@@ -434,9 +442,11 @@ async fn run_ailake_ivf_pq(args: &Args, ds: &dataset::Dataset) -> anyhow::Result
         keep_raw_for_reranking: false,
     };
 
+    // Derive nlist/nprobe from shard size; CLI args override when non-zero.
+    let auto_cfg = IvfPqConfig::for_dataset(ds.dim, args.shard_size);
     let ivf_config = IvfPqConfig {
-        nlist: args.ivf_nlist,
-        nprobe: args.ivf_nprobe,
+        nlist: if args.ivf_nlist > 0 { args.ivf_nlist } else { auto_cfg.nlist },
+        nprobe: if args.ivf_nprobe > 0 { args.ivf_nprobe } else { auto_cfg.nprobe },
         pq_m: args.ivf_pq_m,
         pq_k: 256,
         max_iter: 25,
