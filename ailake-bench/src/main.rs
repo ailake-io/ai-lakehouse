@@ -45,6 +45,8 @@ enum Engine {
     Ailake,
     /// AI-Lake with IVF-PQ index (smaller index, sequential-scan, better S3 throughput)
     AilakeIvfPq,
+    /// AI-Lake with IVF-PQ index built asynchronously (Parquet written immediately, ~200k vec/s)
+    AilakeIvfPqDeferred,
     /// AI-Lake with auto-selected index (detects GPU / CPU cores at runtime)
     AilakeAuto,
     Lancedb,
@@ -144,6 +146,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Engine::AilakeIvfPq => {
             let r = run_ailake_ivf_pq(&args, &ds).await?;
+            bench_result::print_single(&r, ds.base.len(), args.top_k);
+        }
+        Engine::AilakeIvfPqDeferred => {
+            let r = run_ailake_ivf_pq_deferred(&args, &ds).await?;
             bench_result::print_single(&r, ds.base.len(), args.top_k);
         }
         Engine::AilakeAuto => {
@@ -578,6 +584,206 @@ async fn run_ailake_ivf_pq(args: &Args, ds: &dataset::Dataset) -> anyhow::Result
         write_secs: write_elapsed.as_secs_f64(),
         write_vec_per_sec,
         index_build_secs: 0.0, // inline — already counted in write_secs
+        load_secs: load_elapsed.as_secs_f64(),
+        recall: recall_sum / num_queries as f64,
+        qps: lat.qps,
+        mean_ms: lat.mean_ms,
+        p50_ms: lat.p50_ms,
+        p95_ms: lat.p95_ms,
+        p99_ms: lat.p99_ms,
+    })
+}
+
+async fn run_ailake_ivf_pq_deferred(
+    args: &Args,
+    ds: &dataset::Dataset,
+) -> anyhow::Result<BenchResult> {
+    let tmp;
+    let table_root: PathBuf = match &args.table_dir {
+        Some(p) => {
+            let mut p = p.clone();
+            p.push("ivf_pq_deferred");
+            p
+        }
+        None => {
+            tmp = tempfile::TempDir::new().context("create temp dir")?;
+            tmp.path().to_path_buf()
+        }
+    };
+
+    let store: Arc<dyn Store> = Arc::new(LocalStore::new(&table_root));
+    let catalog = Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+    let table = TableIdent::new("default", "sift1m_ivf_deferred");
+
+    let policy = VectorStoragePolicy {
+        column_name: "embedding".to_string(),
+        dim: ds.dim as u32,
+        metric: VectorMetric::Euclidean,
+        precision: VectorPrecision::F16,
+        pq: None,
+        keep_raw_for_reranking: false,
+    };
+
+    let auto_cfg = IvfPqConfig::for_dataset(ds.dim, args.shard_size);
+    let ivf_config = IvfPqConfig {
+        nlist: if args.ivf_nlist > 0 { args.ivf_nlist } else { auto_cfg.nlist },
+        nprobe: if args.ivf_nprobe > 0 { args.ivf_nprobe } else { auto_cfg.nprobe },
+        pq_m: args.ivf_pq_m,
+        pq_k: 256,
+        max_iter: 25,
+    };
+
+    eprintln!(
+        "\nAI-Lake IVF-PQ deferred write phase (nlist={}, nprobe={}, pq_m={}) …",
+        ivf_config.nlist, ivf_config.nprobe, ivf_config.pq_m
+    );
+    let write_start = Instant::now();
+
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let total_base = ds.base.len();
+    let shard_size = args.shard_size;
+    let num_shards = total_base.div_ceil(shard_size);
+
+    let mut writer = TableWriter::create_or_open(
+        catalog.clone(),
+        store.clone(),
+        policy.clone(),
+        table.clone(),
+    )
+    .await
+    .context("create table")?;
+
+    for shard_idx in 0..num_shards {
+        let base_offset = shard_idx * shard_size;
+        let end = (base_offset + shard_size).min(total_base);
+        let shard_vecs = &ds.base[base_offset..end];
+        let n = shard_vecs.len();
+
+        let ids: Vec<i64> = (base_offset as i64..(base_offset + n) as i64).collect();
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(ids))])?;
+
+        writer
+            .write_batch_ivf_pq_deferred(&batch, shard_vecs, ivf_config.clone())
+            .await
+            .with_context(|| format!("write shard {shard_idx}"))?;
+
+        eprint!(
+            "\r  shard {}/{} ({} vectors)",
+            shard_idx + 1,
+            num_shards,
+            end
+        );
+    }
+    eprintln!();
+
+    let snapshot_id = writer.commit().await.context("commit")?;
+    let write_elapsed = write_start.elapsed();
+    let write_vec_per_sec = total_base as f64 / write_elapsed.as_secs_f64();
+
+    eprintln!(
+        "  committed snapshot {}  ({:.1}s  {:.0} vec/s) — Parquet-only, IVF-PQ building …",
+        snapshot_id,
+        write_elapsed.as_secs_f64(),
+        write_vec_per_sec,
+    );
+
+    // ── Wait for background IVF-PQ builds ────────────────────────────────────
+    eprintln!("  Waiting for {num_shards} background IVF-PQ build(s) …");
+    let index_start = Instant::now();
+    let index_timeout = std::time::Duration::from_secs(600);
+    loop {
+        anyhow::ensure!(
+            index_start.elapsed() < index_timeout,
+            "timed out waiting for IVF-PQ builds after {}s",
+            index_timeout.as_secs()
+        );
+        let files = catalog.list_files(&table, None).await.context("list files")?;
+        let ready = files
+            .iter()
+            .filter(|f| f.index_status == IndexStatus::Ready)
+            .count();
+        if ready >= num_shards {
+            break;
+        }
+        eprint!("\r  Indexing: {ready}/{num_shards} shards ready …");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let index_build_elapsed = index_start.elapsed();
+    eprintln!(
+        "\r  All {num_shards} shards indexed in {:.1}s                    ",
+        index_build_elapsed.as_secs_f64()
+    );
+
+    // ── Load indexes ──────────────────────────────────────────────────────────
+    eprintln!("  Loading IVF-PQ indexes into memory (raw vectors for reranking) …");
+    let load_start = Instant::now();
+    let session = SearchSession::load(
+        &table,
+        "embedding",
+        ds.dim as u32,
+        catalog.clone(),
+        store.clone(),
+        true,
+    )
+    .await
+    .context("load search session")?;
+    let load_elapsed = load_start.elapsed();
+    eprintln!(
+        "  Loaded {} shard(s) in {:.2}s",
+        session.shard_count(),
+        load_elapsed.as_secs_f64()
+    );
+
+    // ── Search phase ──────────────────────────────────────────────────────────
+    eprintln!(
+        "\nAI-Lake IVF-PQ deferred search phase (top_k={}, nprobe={}, rerank=3x) …",
+        args.top_k, ivf_config.nprobe
+    );
+
+    let search_cfg = SearchConfig {
+        top_k: args.top_k,
+        ef_search: args.ef,
+        pruning_threshold: f32::INFINITY,
+        rerank_factor: Some(3),
+    };
+
+    let num_queries = ds.queries.len();
+    let mut latencies_us: Vec<u64> = Vec::with_capacity(num_queries);
+    let mut recall_sum = 0.0f64;
+    let search_wall_start = Instant::now();
+
+    for (qi, query) in ds.queries.iter().enumerate() {
+        let t0 = Instant::now();
+        let results = session.search_query(query, &search_cfg);
+        latencies_us.push(t0.elapsed().as_micros() as u64);
+
+        let result_ids: Vec<u32> = results
+            .iter()
+            .map(|r| {
+                let part_num = parse_part_num(&r.file_path);
+                (part_num as u64 * shard_size as u64 + r.row_id.as_u64()) as u32
+            })
+            .collect();
+
+        recall_sum += metrics::recall_at_k(&result_ids, &ds.ground_truth[qi], args.top_k);
+
+        if (qi + 1) % 1000 == 0 {
+            eprint!("\r  {}/{} queries …", qi + 1, num_queries);
+        }
+    }
+    eprintln!("\r  {num_queries}/{num_queries} queries done");
+
+    let search_wall_ns = search_wall_start.elapsed().as_nanos() as u64;
+    let lat = metrics::LatencyStats::compute(&mut latencies_us, search_wall_ns);
+
+    Ok(BenchResult {
+        engine: format!(
+            "AI-Lake IVF-PQ deferred ({num_shards} shards, nlist={}, nprobe={}, pq_m={})",
+            ivf_config.nlist, ivf_config.nprobe, ivf_config.pq_m
+        ),
+        write_secs: write_elapsed.as_secs_f64(),
+        write_vec_per_sec,
+        index_build_secs: index_build_elapsed.as_secs_f64(),
         load_secs: load_elapsed.as_secs_f64(),
         recall: recall_sum / num_queries as f64,
         qps: lat.qps,
