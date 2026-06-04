@@ -198,6 +198,7 @@ impl RaBitQSerializer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ailake_vec::cosine_distance;
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
     fn unit_vecs(n: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {
