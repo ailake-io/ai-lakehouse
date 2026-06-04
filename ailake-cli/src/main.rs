@@ -224,7 +224,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             rabitq_keep_raw,
         } => {
             let ident = parse_table_ident(&table);
-            let rabitq_cfg = rabitq.then(|| RaBitQConfig {
+            let rabitq_cfg = rabitq.then_some(RaBitQConfig {
                 seed: rabitq_seed,
                 keep_raw: rabitq_keep_raw,
             });

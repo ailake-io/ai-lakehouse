@@ -401,7 +401,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         "i8" => VectorPrecision::I8,
         _ => VectorPrecision::F16,
     };
-    let rabitq_cfg = req.rabitq.then(|| RaBitQConfig {
+    let rabitq_cfg = req.rabitq.then_some(RaBitQConfig {
         seed: req.rabitq_seed,
         keep_raw: req.rabitq_keep_raw,
     });
