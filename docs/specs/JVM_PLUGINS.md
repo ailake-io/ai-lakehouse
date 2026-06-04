@@ -101,7 +101,10 @@ The library exports C-ABI symbols consumed by JNA. All three plugins use the JSO
 char* ailake_search_json(const char* request_json);
 
 // request_json: {"warehouse":"...","namespace":"default","table":"...",
-//                "dim":1536,"ids":[...],"embeddings":[[...],...]}
+//                "dim":1536,"ids":[...],"embeddings":[[...],...],
+//                "metric":"cosine","precision":"f16",
+//                "rabitq":true,"rabitq_seed":42,"rabitq_keep_raw":true}
+// rabitq fields are optional — omit for default HNSW index.
 // Returns: {"ok":true,"snapshot_id":N}
 char* ailake_write_batch_json(const char* request_json);
 

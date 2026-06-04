@@ -70,6 +70,18 @@ Writes a batch of records and their embeddings to an AI-Lake table.
 }
 ```
 
+Optional RaBitQ fields (omit to use default HNSW):
+
+```json
+{
+  "rabitq":          true,
+  "rabitq_seed":     42,
+  "rabitq_keep_raw": true
+}
+```
+
+`rabitq_keep_raw` defaults to `true` when omitted. Set to `false` for extreme storage compression (disables reranking).
+
 **Response JSON:** `{"ok": true, "snapshot_id": 7}` or `{"ok": false, "error": "..."}`.
 
 ---

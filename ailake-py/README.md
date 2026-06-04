@@ -47,6 +47,9 @@ snapshot_id = writer.commit()
 | `pre_normalize` | `False` | Normalize to unit L2 at write time (recommended for cosine). Enables `1-dot(a,b)` fast path. |
 | `hnsw_m` | `None` (=16) | HNSW connections per node. Higher → better recall, more memory. |
 | `hnsw_ef_construction` | `None` (=150) | HNSW build pool size. Higher → better quality, slower build. |
+| `rabitq` | `False` | Use RaBitQ flat index instead of HNSW: 1 bit/dim = 16× smaller than F16. Better recall than naive binary quantization. Use with `rerank_factor ≥ 3` at search. |
+| `rabitq_seed` | `0` | Seed for RaBitQ random rotation matrix. |
+| `rabitq_keep_raw` | `True` | Keep raw F16 vectors for exact reranking (recommended). |
 
 HNSW tuning guide:
 
@@ -56,6 +59,44 @@ HNSW tuning guide:
 | General purpose (default) | 16 | 150 |
 | High recall (RAG) | 24 | 200 |
 | Max recall (medical, legal) | 32 | 400 |
+
+### RaBitQ — extreme compression (1 bit/dim)
+
+RaBitQ is a flat index with no graph construction: 1 bit/dim after a random rotation, yielding better recall than naive binary quantization via an unbiased XOR/popcount IP estimator. Write throughput ~300k vec/s (no k-means, no graph). Storage: 200 bytes/vector at dim=1536 (15× smaller than F16).
+
+Use when storage is the primary constraint or write throughput matters more than recall. Pair with `rerank_factor ≥ 3` to recover precision using the stored raw F16 vectors.
+
+```python
+import ailake
+import numpy as np
+
+# Write with RaBitQ (keep_raw=True stores F16 vectors for reranking)
+writer = ailake.TableWriter(
+    path="./rabitq_table",
+    dim=1536,
+    metric="cosine",
+    rabitq=True,
+    rabitq_seed=42,       # same seed across all shards → comparable distances
+    rabitq_keep_raw=True, # recommended: enables reranking
+)
+writer.write_batch(texts=texts, embeddings=embeddings)
+writer.commit()
+
+# Search with reranking for best recall
+results = ailake.search(
+    path="./rabitq_table",
+    query=query,
+    top_k=10,
+    rerank_factor=3,  # fetch top_30, rerank with raw F16, return top_10
+)
+```
+
+| Index | Bytes/vector (dim=1536) | Recall@10 (with rerank) | Write (vec/s) |
+|---|---|---|---|
+| HNSW (F16) | ~3 200 | ≥ 0.95 | ~50k |
+| IVF-PQ (M=48) | ~50 | 0.90–0.95 | ~200k |
+| RaBitQ (no raw) | **192** | 0.70–0.85 | **~300k** |
+| RaBitQ + raw F16 | ~3 264 | **0.85–0.95** | **~300k** |
 
 ### Search
 

@@ -79,7 +79,7 @@ Starts at byte 0 of every AILK section. All integer fields little-endian.
 |--------|------|-------|-------------------|-------------|
 | 0      | 4    | bytes | `magic`           | `AILK` (0x41 0x49 0x4C 0x4B) |
 | 4      | 2    | u16   | `format_version`  | Must be `1` for this spec |
-| 6      | 2    | u16   | `flags`           | Bit 0: index type — `0` = HNSW (default), `1` = IVF-PQ. Bits 1–15 reserved, must be `0`. |
+| 6      | 2    | u16   | `flags`           | Bit 0: `1` = IVF-PQ index. Bit 1: `1` = RaBitQ index. If both bits are `0`, index is HNSW (default). Bits 2–15 reserved, must be `0`. |
 | 8      | 4    | u32   | `dim`             | Vector dimensionality |
 | 12     | 1    | u8    | `precision`       | See §3.1 |
 | 13     | 1    | u8    | `distance_metric` | See §3.2 |
@@ -159,9 +159,13 @@ downloading or opening the file beyond the manifest.
 Starts at `hnsw_offset` relative to AILK section start
 (= `HEADER_SIZE + centroid_len = 64 + dim × 4 + 4`).
 
-The index type is determined by `header.flags & 0x0001`:
-- `0` → HNSW (§6.1)
-- `1` → IVF-PQ (§6.2)
+The index type is determined by the `flags` field:
+
+| `flags` value | Index type |
+|---|---|
+| `0x0000` | HNSW (§6.1) |
+| `0x0001` | IVF-PQ (§6.2) |
+| `0x0002` | RaBitQ (§6.3) |
 
 ### 6.1 HNSW Index Blob (`flags & 0x0001 == 0`)
 
@@ -254,6 +258,66 @@ over HNSW when `hardware_profile.recommend_ivf_pq(n_vectors)` returns true
 (currently: dataset ≥ 100 000 vectors on a GPU-capable host, or when the
 caller explicitly calls `writer.with_ivf_pq(IvfPqConfig)`).
 
+### 6.3 RaBitQ Index Blob (`flags & 0x0002 == FLAG_INDEX_RABITQ`)
+
+The blob is a **bincode v1** serialization of `ailake_index::RaBitQIndex`
+via `RaBitQSerializer`. RaBitQ is a **flat index** — no graph structure.
+
+> **Storage**: 1 bit/dim per vector (packed into `ceil(dim/8)` bytes) + 8 bytes overhead per vector (norm + scale). For dim=1536: **200 bytes/vector** vs 3 072 bytes for F16 — **15× compression**. Optional raw F16 vectors stored alongside for exact reranking.
+
+> **Rotation matrix**: a `dim × dim` column-normalized Gaussian matrix is generated deterministically from `seed` at runtime. It is **not** serialized — only `seed` is stored. Readers MUST regenerate the matrix via `RaBitQCodebook::rebuild_proj(seed, dim)` before searching.
+
+Binary layout:
+
+```
+[ codebook.dim:  u64    — vector dimensionality (usize serialized as u64) ]
+[ codebook.seed: u64    — seed for deterministic rotation matrix generation ]
+[ entries: Vec<RaBitQVec>  — one per database vector
+    each entry:
+      code:  Vec<u8>    — ceil(dim/8) packed sign bits: bit i = sign((P·x̂)[i])
+      norm:  f32        — original L2 norm of x (before normalization)
+      scale: f32        — sum(|P·x̂|) / sqrt(dim); used in IP estimator
+]
+[ row_ids: Vec<u64>     — 0-based Parquet row indices, parallel to entries ]
+[ metric:  u32          — DistanceMetric enum variant (§3.2) ]
+[ dim:     u32          — vector dimensionality (redundant with codebook.dim) ]
+[ raw_f16: Option<Vec<u16>>
+    tag: 0x00 = None (no raw vectors stored)
+    tag: 0x01 = Some; followed by u64 count + count × u16 (IEEE 754 F16 LE)
+    length = record_count × dim when present
+]
+```
+
+Readers deserialize with:
+
+```rust
+use ailake_index::RaBitQSerializer;
+let mut index = RaBitQSerializer::from_bytes(blob)?;
+// rebuild_proj is called automatically inside from_bytes
+```
+
+Search algorithm:
+
+1. Normalize query to unit L2. Apply rotation matrix P → `q_proj` (F32 vector).
+2. Compute query binary code: `q_code[i] = sign(q_proj[i])` packed into bytes.
+3. Compute query scale: `q_scale = sum(|q_proj|) / sqrt(dim)`.
+4. For each database vector i: `IP_estimate = (1 - 2·hamming(q_code, code_i) / dim) × q_scale × scale_i`.
+5. Convert IP estimate to distance by metric (cosine: `1 - IP`, dot: `-IP × |q| × norm_i`, Euclidean: approximated).
+6. Sort ascending, return top-k by estimated distance.
+7. **Reranking** (when `raw_f16` present and `rerank_factor > 1`): fetch top `rerank_factor × k` candidates, compute exact F16 distances, re-sort, return top-k.
+
+Key invariant: `len(entries) == len(row_ids) == header.record_count`. Readers MUST verify this before search.
+
+When to use RaBitQ vs HNSW vs IVF-PQ:
+
+| Criterion | HNSW | IVF-PQ | RaBitQ |
+|---|---|---|---|
+| Write throughput | ~50k vec/s | ~200k vec/s | **~300k vec/s** |
+| Index build time | O(n log n) | O(n) k-means | **O(n)** one-pass |
+| Storage (dim=1536) | 15–20% overhead | 2–5% of F16 | **1.5% of F32** |
+| Recall@10 (exact) | ≥ 0.95 | 0.90–0.95 | 0.80–0.95 (with rerank) |
+| Best use case | Online search | S3 cold storage | High-insert, extreme compression |
+
 ---
 
 ## 7. Vector Column Encoding (Parquet)
@@ -326,7 +390,7 @@ Vector statistics live in `DataFile.custom_properties` (string→string map):
 | `ailake.hnsw_len`        | `"4194304"`   | Byte length of primary AILK section |
 | `ailake.vector_column`   | `"embedding"` | Primary vector column name |
 | `ailake.vector_dim`      | `"1536"`      | Vector dimensionality |
-| `ailake.index_type`      | `"hnsw"` or `"ivf_pq"` | Index type in the AILK section |
+| `ailake.index_type`      | `"hnsw"`, `"ivf_pq"`, or `"rabitq"` | Index type in the AILK section |
 | `ailake.<col>.centroid`  | `"BBBB..."`   | Centroid for secondary column `<col>` |
 | `ailake.<col>.radius`    | `"0.289"`     | Radius for secondary column `<col>` |
 | `ailake.<col>.hnsw_offset` | `"..."`     | AILK section offset for secondary column `<col>` |

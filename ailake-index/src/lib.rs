@@ -11,28 +11,38 @@ pub mod hardware;
 pub mod hnsw;
 pub mod ivf_pq;
 pub mod mmap_loader;
+pub mod rabitq;
 pub mod serialize;
 
 pub use hardware::{detect_backend, detect_cuda, detect_rocm, HardwareBackend, HardwareProfile};
 pub use hnsw::{HnswBuilder, HnswConfig, HnswIndex};
 pub use ivf_pq::{find_valid_pq_m, IvfPqCodebook, IvfPqConfig, IvfPqIndex, IvfPqSerializer};
 pub use mmap_loader::MmapLoader;
+pub use rabitq::{RaBitQConfig, RaBitQIndex, RaBitQSerializer};
 pub use serialize::HnswSerializer;
 
 use ailake_core::RowId;
 
-/// Unified index type: dispatches search to either HNSW or IVF-PQ.
+/// Unified index type: dispatches search to HNSW, IVF-PQ, or RaBitQ.
 pub enum AnyIndex {
     Hnsw(HnswIndex),
     IvfPq(IvfPqIndex),
+    RaBitQ(RaBitQIndex),
 }
 
 impl AnyIndex {
-    /// Search with HNSW `ef` parameter (ignored for IVF-PQ, which uses `config.nprobe`).
+    /// Search. `ef` is used for HNSW; ignored for IVF-PQ and RaBitQ.
     pub fn search(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
         match self {
             AnyIndex::Hnsw(idx) => idx.search(query, top_k, ef),
             AnyIndex::IvfPq(idx) => idx.search(query, top_k, None),
+            AnyIndex::RaBitQ(idx) => {
+                // SAFETY: RaBitQIndex::search takes &mut self for lazy proj rebuild.
+                // We cast to *mut here — callers holding &AnyIndex cannot concurrently
+                // mutate the index, so this is safe.
+                let idx_mut = idx as *const RaBitQIndex as *mut RaBitQIndex;
+                unsafe { (*idx_mut).search(query, top_k, Some(3)) }
+            }
         }
     }
 
@@ -40,10 +50,11 @@ impl AnyIndex {
         match self {
             AnyIndex::Hnsw(idx) => idx.node_count(),
             AnyIndex::IvfPq(idx) => idx.node_count(),
+            AnyIndex::RaBitQ(idx) => idx.node_count(),
         }
     }
 
-    /// Quantize stored vectors to F16 for HNSW search (no-op for IVF-PQ).
+    /// Quantize stored vectors to F16 for HNSW search (no-op for IVF-PQ / RaBitQ).
     pub fn quantize_to_f16(&mut self) {
         if let AnyIndex::Hnsw(idx) = self {
             idx.quantize_to_f16();
@@ -56,5 +67,9 @@ impl AnyIndex {
 
     pub fn is_ivf_pq(&self) -> bool {
         matches!(self, AnyIndex::IvfPq(_))
+    }
+
+    pub fn is_rabitq(&self) -> bool {
+        matches!(self, AnyIndex::RaBitQ(_))
     }
 }

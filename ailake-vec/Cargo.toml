@@ -19,7 +19,7 @@ zstd        = { workspace = true }
 thiserror   = { workspace = true }
 serde       = { workspace = true }
 rayon       = { workspace = true }
+rand        = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }
-rand        = { workspace = true }

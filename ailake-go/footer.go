@@ -19,8 +19,9 @@ const (
 	HeaderSize  = 64
 	TrailerSize = 24
 
-	// flags bit 0: index type
-	FlagIndexIvfPq uint16 = 0x0001
+	// flags bit 0: IVF-PQ index; bit 1: RaBitQ index.
+	FlagIndexIvfPq  uint16 = 0x0001
+	FlagIndexRaBitQ uint16 = 0x0002
 
 	// precision values
 	PrecisionF32    uint8 = 0
@@ -51,6 +52,9 @@ type AilakeHeader struct {
 
 // IsIvfPq reports whether the index blob is IVF-PQ (vs HNSW).
 func (h *AilakeHeader) IsIvfPq() bool { return h.Flags&FlagIndexIvfPq != 0 }
+
+// IsRaBitQ reports whether the index blob is RaBitQ flat (vs HNSW or IVF-PQ).
+func (h *AilakeHeader) IsRaBitQ() bool { return h.Flags&FlagIndexRaBitQ != 0 }
 
 // AilakeTrailer is the 24-byte trailer at the end of every AILK section.
 type AilakeTrailer struct {

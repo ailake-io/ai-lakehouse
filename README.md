@@ -25,7 +25,7 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 
 **Rust core, first-class Python and JVM.** The write/search path is pure Rust (zero GC pauses, no JVM heap pressure). Python gets zero-copy PyArrow `RecordBatch` results. Spark, Trino, and Flink get a JNA C-ABI bridge — four exported functions shared across all three JVM plugins.
 
-**Storage-efficient at scale.** F16 quantization halves vector storage vs. F32. Product Quantization (IVF-PQ) reduces the index footprint 10–100× for S3-resident workloads where sequential reads are cheap. PQ reranking recovers precision with a second pass over the raw F16 column. IVF-PQ deferred build writes Parquet at ~250k vec/s and trains the index asynchronously — same throughput as HNSW deferred.
+**Storage-efficient at scale.** F16 quantization halves vector storage vs. F32. Product Quantization (IVF-PQ) reduces the index footprint 10–100× for S3-resident workloads where sequential reads are cheap. **RaBitQ** achieves 16× compression over F16 (1 bit/dim = 200 bytes/vector at dim=1536) via random rotation + XOR/popcount — better recall than naive binary quantization, with no graph construction overhead (~300k vec/s write throughput). PQ reranking recovers precision with a second pass over the raw F16 column.
 
 | | Iceberg alone | External vector DB | **AI-Lake** |
 |---|---|---|---|
@@ -169,7 +169,8 @@ ailake/
 │       ├── quantize.rs         # F32→F16→I8 scalar quantization
 │       ├── distance.rs         # Cosine, Euclidean, DotProduct, centroid computation
 │       ├── compress.rs         # BlockCompressor (zstd / lz4 / none)
-│       └── pq.rs               # Product Quantization — PQCodebook, ADC distance
+│       ├── pq.rs               # Product Quantization — PQCodebook, ADC distance
+│       └── rabitq.rs           # RaBitQCodebook, RaBitQVec — random rotation + 1 bit/dim encoding
 ├── ailake-file/
 │   ├── Cargo.toml
 │   └── src/
@@ -199,9 +200,10 @@ ailake/
 ├── ailake-index/
 │   ├── Cargo.toml
 │   └── src/
-│       ├── lib.rs              # AnyIndex enum — dispatches HNSW or IVF-PQ
+│       ├── lib.rs              # AnyIndex enum — dispatches HNSW, IVF-PQ, or RaBitQ
 │       ├── hnsw.rs             # hnsw_rs wrapper
 │       ├── ivf_pq.rs           # IvfPqIndex, IvfPqConfig, IvfPqCodebook, IvfPqSerializer
+│       ├── rabitq.rs           # RaBitQIndex, RaBitQConfig, RaBitQSerializer (1 bit/dim flat index)
 │       ├── gpu.rs              # NVIDIA CUDA (cuBLAS libloading) + AMD ROCm (hipBLAS libloading) GPU backends
 │       ├── hardware.rs         # HardwareProfile, HardwareBackend detection (CUDA / ROCm / CPU)
 │       ├── serialize.rs        # bincode serialization
