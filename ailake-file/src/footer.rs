@@ -9,8 +9,9 @@ pub const AILAKE_FORMAT_VERSION: u16 = 1;
 pub const TRAILER_SIZE: usize = 24;
 pub const HEADER_SIZE: usize = 64;
 
-/// `flags` bit 0 = 0: HNSW index (default). bit 0 = 1: IVF-PQ index.
+/// `flags` bit 0 = 0: HNSW index (default). bit 0 = 1: IVF-PQ index. bit 1 = 1: RaBitQ index.
 pub const FLAG_INDEX_IVF_PQ: u16 = 0x0001;
+pub const FLAG_INDEX_RABITQ: u16 = 0x0002;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]

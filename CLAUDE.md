@@ -438,6 +438,19 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [ ] **DuckLake catalog backend** — `DuckLakeCatalog` em `ailake-catalog/` implementando `CatalogProvider` sobre catálogo DuckDB (dep: crate `duckdb`); mapeamento de metadados vetoriais (`centroid`, `radius`, `footer-offset`) para tabelas internas DuckLake; modelo de commit via INSERT no catálogo DuckDB. *Aguardar estabilização da spec DuckLake (anunciada mai/2025) antes de implementar.*
 - [ ] **dbt integration guide** — documentar fluxo `dbt (transform) → AI-Lake SDK (ingest + HNSW)` para dbt-spark e dbt-trino com plugins AI-Lake carregados
 
+### Fase 6 — Qualidade de Recall e Developer Experience
+
+- [x] **`VectorMetric::NormalizedCosine` + `pre_normalize`** — `VectorStoragePolicy::pre_normalize = true` normaliza vetores para L2 unitário na escrita e usa `1-dot(a,b)` no hot loop do HNSW em vez de cosine completo (sem sqrt). ~12-20% speedup em search para dim=1536. Query normalizada automaticamente em todos os bindings (Rust, Python, Go, C++). Exposto via `ailake create --pre-normalize` (CLI) e `TableWriter(pre_normalize=True)` (Python).
+- [x] **`hnsw_m` + `hnsw_ef_construction` por tabela** — `VectorStoragePolicy::hnsw_m` e `hnsw_ef_construction` permitem tunar M e ef por tabela sem mudar o código; armazenados como `ailake.hnsw-m` / `ailake.hnsw-ef-construction` em propriedades Iceberg. Exposto via CLI (`--hnsw-m`, `--hnsw-ef`) e Python (`hnsw_m=`, `hnsw_ef_construction=`).
+- [x] **MRL / dimension truncation documentado** — modelos Matryoshka (OpenAI text-embedding-3-*, Cohere embed-v3, Jina v3, Nomic v1.5) permitem truncar dimensão sem retreinamento; AI-Lake suporta nativamente via `dim` menor na criação da tabela. Documentado em `ailake-py/README.md` e `SETUP.md §8H` com tabela recall×storage (1536→512 = 3× menos storage, ~97% recall@10).
+
+### Fase 7 — Compressão Extrema e Novos Tipos de Índice
+
+- [x] **RaBitQ (Random Binary Quantization)** — novo tipo de índice flat com 1 bit/dim (16× menor que F16). Melhor recall que binary quantization ingênuo via rotação aleatória + estimador IP não-viesado (XOR + popcount). Reranking com F16 brutos opcional. `ailake_vec::rabitq::RaBitQCodebook`, `ailake_index::RaBitQIndex`, `FLAG_INDEX_RABITQ = 0x0002`. Python: `TableWriter(rabitq=True)`.
+- [ ] **Binary quantization Hamming SIMD** — implementar `VectorPrecision::Binary` com kernels AVX2/NEON de distância Hamming (popcount de XOR byte-a-byte). Complemento natural ao RaBitQ para modelos treinados para busca binária (Cohere embed-v3 modo `binary`).
+- [ ] **`write_batch_rabitq_deferred`** — variante async do RaBitQ: persiste Parquet imediatamente, codifica índice binário em background. Mesmo padrão do HNSW deferred / IVF-PQ deferred.
+- [ ] **RaBitQ + HNSW híbrido** — usar RaBitQ como pré-filtro no graph traversal do HNSW: distâncias binárias (rápidas) para candidates, distâncias exatas F16 só para top-k final. Estimativa: 2-3× speedup no HNSW sem perda de recall.
+
 ---
 
 ## 11. Stack Técnica — Rust

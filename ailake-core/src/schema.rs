@@ -51,6 +51,30 @@ pub struct VectorStoragePolicy {
     /// Recommended values: 100 (fast), 150 (default), 200 (quality), 400 (max quality).
     #[serde(default)]
     pub hnsw_ef_construction: Option<u32>,
+    /// RaBitQ configuration. When set, the file writer embeds a RaBitQ flat index
+    /// instead of HNSW. Best for workloads that require extreme storage compression
+    /// (1 bit/dim = 16× smaller than F16) with better recall than naive binary
+    /// quantization. Use `rerank_factor ≥ 3` at search time for full precision.
+    #[serde(default)]
+    pub rabitq: Option<RaBitQConfig>,
+}
+
+/// RaBitQ quantization configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaBitQConfig {
+    /// Seed for the random rotation matrix. Same seed → identical quantization
+    /// across shards, enabling consistent distance comparisons.
+    #[serde(default)]
+    pub seed: u64,
+    /// Keep raw F16 vectors alongside binary codes for exact reranking.
+    /// Disabling this halves the storage of the index section but prevents
+    /// reranking — only use when storage is the primary constraint.
+    #[serde(default = "default_keep_raw")]
+    pub keep_raw: bool,
+}
+
+fn default_keep_raw() -> bool {
+    true
 }
 
 impl VectorStoragePolicy {
@@ -65,6 +89,7 @@ impl VectorStoragePolicy {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+            rabitq: None,
         }
     }
 }

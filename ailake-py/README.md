@@ -47,6 +47,9 @@ snapshot_id = writer.commit()
 | `pre_normalize` | `False` | Normalize to unit L2 at write time (recommended for cosine). Enables `1-dot(a,b)` fast path. |
 | `hnsw_m` | `None` (=16) | HNSW connections per node. Higher → better recall, more memory. |
 | `hnsw_ef_construction` | `None` (=150) | HNSW build pool size. Higher → better quality, slower build. |
+| `rabitq` | `False` | Use RaBitQ flat index instead of HNSW: 1 bit/dim = 16× smaller than F16. Better recall than naive binary quantization. Use with `rerank_factor ≥ 3` at search. |
+| `rabitq_seed` | `0` | Seed for RaBitQ random rotation matrix. |
+| `rabitq_keep_raw` | `True` | Keep raw F16 vectors for exact reranking (recommended). |
 
 HNSW tuning guide:
 
