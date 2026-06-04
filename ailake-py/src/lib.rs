@@ -59,6 +59,7 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, rabitq=false, rabitq_seed=0, rabitq_keep_raw=true))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         path: &str,
         vector_column: &str,
