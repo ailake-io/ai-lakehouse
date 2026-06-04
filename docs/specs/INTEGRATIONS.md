@@ -137,7 +137,7 @@ spark.sql("CALL glue_catalog.system.rewrite_data_files("
 ailake_compact("s3://my-bucket/warehouse/db/my_ailake_table/")
 ```
 
-**Important**: during streaming, new files produced by the stream writer have no HNSW in their AI-Lake footer. They are still readable as standard Iceberg files. Vector search returns only chunks from files that have been compacted (with HNSW). Run compaction frequently to minimize the "blind window."
+**Important**: during streaming, new files produced by the stream writer have no HNSW (or RaBitQ) in their AI-Lake footer. They are still readable as standard Iceberg files. Vector search returns only chunks from files that have been compacted (with an index). Run compaction frequently to minimize the "blind window." RaBitQ is a faster compaction choice than HNSW for high-ingest tables — one-pass O(n) encoding, no graph construction.
 
 ---
 

@@ -850,6 +850,77 @@ Search phase  (top_k=10)
 
 ---
 
+## 8I. RaBitQ flat index (`--rabitq`)
+
+RaBitQ uses 1 bit/dim (packed sign bits) after a random rotation — 16× smaller than F16 with better recall than naive binary quantization via an unbiased XOR/popcount IP estimator. No graph construction: write is one-pass O(n), making it the fastest index to build.
+
+### When to use RaBitQ
+
+| Criterion | RaBitQ | HNSW | IVF-PQ |
+|---|---|---|---|
+| Write throughput | **~300k vec/s** | ~50k vec/s | ~200k vec/s |
+| Storage (dim=1536) | **200 bytes/vec** | ~10 MB/50k vecs | ~2 MB/50k vecs |
+| Recall@10 (with rerank) | 0.85–0.95 | ≥0.95 | 0.90–0.95 |
+| Graph build overhead | **None** | O(n log n) | O(n) k-means |
+| Best use case | High-insert, extreme compression | Online search | S3 cold storage |
+
+Use RaBitQ when storage is the primary constraint and you can afford a second pass for reranking.
+
+### CLI usage
+
+```bash
+# Create table with RaBitQ flat index
+ailake create s3://my-lake/docs/ --dim 1536 --metric cosine --rabitq
+
+# With custom seed (for reproducibility across shards)
+ailake create s3://my-lake/docs/ --dim 1536 --metric cosine \
+    --rabitq --rabitq-seed 42
+
+# Without raw F16 storage (extreme compression, no reranking)
+ailake create s3://my-lake/docs/ --dim 1536 --metric cosine \
+    --rabitq --rabitq-seed 42 --no-rabitq-keep-raw
+```
+
+### Python usage
+
+```python
+import ailake
+
+writer = ailake.TableWriter(
+    "s3://my-lake/docs/",
+    dim=1536,
+    metric="cosine",
+    rabitq=True,
+    rabitq_seed=42,       # same seed across all shards → comparable distances
+    rabitq_keep_raw=True, # keep F16 for reranking (recommended)
+)
+writer.write_batch(texts, embeddings)
+writer.commit()
+
+# Search with reranking: fetch top_30, rerank with raw F16, return top_10
+results = ailake.search(
+    path="s3://my-lake/docs/",
+    query=query_embedding,
+    top_k=10,
+    rerank_factor=3,  # recommended: ≥ 3 for RaBitQ
+)
+```
+
+### Storage comparison (dim=1536, 1M vectors)
+
+| Index | Bytes/vector | Total (1M vecs) |
+|---|---|---|
+| F32 raw | 6 144 | 6 GB |
+| F16 raw | 3 072 | 3 GB |
+| HNSW graph (F16) | ~3 200 | ~3.2 GB |
+| IVF-PQ (M=48) | ~50 | ~50 MB |
+| **RaBitQ (no raw)** | **192** | **192 MB** |
+| RaBitQ + raw F16 | 3 264 | ~3.3 GB (codes + F16) |
+
+**Note**: with `keep_raw=False`, only the binary codes and norms are stored — 192 bytes/vec for dim=1536, with no reranking possible. With `keep_raw=True` (default), raw F16 vectors are also stored for reranking — total is similar to HNSW but with faster writes.
+
+---
+
 ## 9. Testing RestCatalog — multi-cloud
 
 `RestCatalog` implements the [Iceberg REST Catalog spec](https://iceberg.apache.org/spec/#rest-catalog) and works with Polaris, Nessie, S3 Tables, AWS BigLake, and Unity Catalog.

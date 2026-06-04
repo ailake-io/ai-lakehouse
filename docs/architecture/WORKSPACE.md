@@ -65,6 +65,11 @@ Vector data transformations. No I/O.
 - `exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32` — dispatches to correct metric; used by reranking after PQ
 - `compute_centroid_and_radius(&[Vec<f32>], VectorMetric) -> Centroid`
 - `BlockCompressor::zstd(level)`, `BlockCompressor::lz4()` — block-level compression
+- `RaBitQCodebook::new(dim, seed) -> Self` — generates dim×dim column-normalized Gaussian rotation matrix P deterministically from `seed`; P is **not serialized** — regenerated on load via `rebuild_proj()`
+- `RaBitQCodebook::encode(&[f32]) -> RaBitQVec` — normalizes, projects, packs sign bits; stores `norm` (original L2) and `scale` (sum(|P·x̂|)/sqrt(dim))
+- `RaBitQCodebook::estimate_ip(q_proj, q_scale, entry) -> f32` — unbiased IP estimator via XOR + popcount: `(1 - 2·hamming/dim) × q_scale × entry.scale`
+- `encode_batch(codebook, vectors) -> Vec<RaBitQVec>` — parallel encoding via `rayon`
+- `RaBitQVec { code: Vec<u8>, norm: f32, scale: f32 }` — 1 bit/dim storage (ceil(dim/8) bytes code)
 
 ### `ailake-index`
 HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) + AMD ROCm (runtime libloading). CPU fallback always available.
@@ -82,7 +87,12 @@ HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) 
   - `IvfPqIndex::train_codebook(vectors, metric, config) -> IvfPqCodebook` — trains coarse quantizer + PQ without building inverted lists; call once and reuse across shards
   - `IvfPqIndex::build_with_codebook(row_ids, vectors, codebook)` — assigns and encodes using pre-trained codebook; O(n) only, no k-means
   - `kmeans_dispatch()` — priority: CUDA → ROCm → CPU rayon
-- `AnyIndex` — enum dispatching search to `HnswIndex` or `IvfPqIndex`
+- `RaBitQIndex` — flat brute-force index over binary-coded vectors
+  - `build(row_ids, vectors, metric, config, keep_raw) -> RaBitQIndex` — one-pass O(n) encode; no graph, no k-means
+  - `search(query, top_k, rerank_factor) -> Vec<(RowId, f32)>` — normalize → project → XOR/popcount IP estimate for all entries → optional exact F16 reranking for top `rerank_factor × k` candidates
+  - Mutation on search: `codebook.rebuild_proj()` called lazily if projection matrix is missing (after deserialization)
+- `RaBitQSerializer` — bincode roundtrip for `RaBitQIndex`; `from_bytes` automatically calls `rebuild_proj()`
+- `AnyIndex` — enum dispatching search to `HnswIndex`, `IvfPqIndex`, or `RaBitQIndex`
 - `HnswSerializer` — bincode-based serialization of the full HNSW graph
 - `MmapLoader` — opens a serialized HNSW from a memory-mapped byte slice
   - Lazy: graph traversal only pages in the regions touched during search
@@ -103,14 +113,17 @@ HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) 
 
 - `AilakeFileWriter` — high-level writer:
   1. Writes RecordBatch via `ailake-parquet`
-  2. Builds HNSW via `ailake-index`
-  3. Serializes HNSW + centroid + radius into the AI-Lake footer
+  2. Auto-selects index type from `VectorStoragePolicy`:
+     - `policy.rabitq.is_some()` → `IndexType::RaBitQ` (flat, one-pass)
+     - `policy.pq.is_some()` → `IndexType::IvfPq`
+     - default → `IndexType::Hnsw`
+  3. Builds and serializes the index (HNSW / IVF-PQ / RaBitQ) into the AI-Lake footer
   4. Appends footer to the file after the final PAR1 marker
   5. Updates Parquet `key_value_metadata` with `ailake.hnsw_offset` and `ailake.hnsw_len`
 - `AilakeFileReader` — high-level reader:
   - `read_parquet()` → returns Parquet data only (via `ailake-parquet`)
-  - `load_index()` → reads AI-Lake footer, returns `HnswIndex` via mmap
-  - `get_centroid()` → reads centroid + radius from footer header (cheap, no HNSW load)
+  - `load_index()` → reads AI-Lake footer flags, dispatches to correct deserializer, returns `AnyIndex`
+  - `get_centroid()` → reads centroid + radius from footer header (cheap, no index load)
 - `FooterLayout` — binary layout spec of the AI-Lake footer (see `FILE_FORMAT.md`)
 
 See [`docs/specs/FILE_FORMAT.md`](../specs/FILE_FORMAT.md) for the binary layout.
