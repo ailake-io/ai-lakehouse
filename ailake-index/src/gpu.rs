@@ -954,8 +954,8 @@ mod rocm_impl {
         // Result: C[n + q*N] = dot(db[n], query[q])
         let (alpha, beta) = match metric {
             VectorMetric::DotProduct | VectorMetric::NormalizedCosine => (-1.0f32, 0.0f32), // negate → min-distance semantics
-            VectorMetric::Cosine => (-1.0f32, 0.0f32),     // 1 − cos added below
-            VectorMetric::Euclidean => (-2.0f32, 0.0f32),  // −2·q·dᵀ; norms added below
+            VectorMetric::Cosine => (-1.0f32, 0.0f32), // 1 − cos added below
+            VectorMetric::Euclidean => (-2.0f32, 0.0f32), // −2·q·dᵀ; norms added below
         };
 
         let rc = unsafe {

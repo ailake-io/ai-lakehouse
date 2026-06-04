@@ -73,7 +73,8 @@ impl TableWriter {
             "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?}",
             path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction
         );
-        let mut policy = VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
+        let mut policy =
+            VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
         policy.pre_normalize = pre_normalize;
         policy.hnsw_m = hnsw_m;
         policy.hnsw_ef_construction = hnsw_ef_construction;

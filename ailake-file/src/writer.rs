@@ -205,20 +205,19 @@ fn build_ailk_section(
     // Normalize to unit L2 when pre_normalize is set.
     // Enables the NormalizedCosine fast path: 1-dot(a,b) instead of full cosine.
     let norm_storage: Vec<Vec<f32>>;
-    let (embeddings, hnsw_metric) = if policy.pre_normalize
-        && policy.metric == ailake_core::VectorMetric::Cosine
-    {
-        norm_storage = embeddings
-            .iter()
-            .map(|v| ailake_vec::normalize_l2(v))
-            .collect();
-        (
-            norm_storage.as_slice(),
-            ailake_core::VectorMetric::NormalizedCosine,
-        )
-    } else {
-        (embeddings, policy.metric)
-    };
+    let (embeddings, hnsw_metric) =
+        if policy.pre_normalize && policy.metric == ailake_core::VectorMetric::Cosine {
+            norm_storage = embeddings
+                .iter()
+                .map(|v| ailake_vec::normalize_l2(v))
+                .collect();
+            (
+                norm_storage.as_slice(),
+                ailake_core::VectorMetric::NormalizedCosine,
+            )
+        } else {
+            (embeddings, policy.metric)
+        };
 
     let centroid: Centroid = compute_centroid_and_radius(embeddings, hnsw_metric);
     let centroid_bytes = encode_centroid(&centroid);
