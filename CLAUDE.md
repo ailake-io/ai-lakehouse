@@ -429,6 +429,7 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] **`write_batch_ivf_pq_deferred`** — variante async de IVF-PQ: persiste Parquet imediatamente (~200k vec/s), treina índice IVF-PQ em background (mesmo padrão do HNSW deferred); `IndexStatus::Indexing → Ready`
 - [x] **Fix k-means++ O(n×k²) → O(n×k)** — `kmeans_pp_init` usa min-dist incremental; parallelismo via `rayon::par_iter` no assignment loop e no init; speedup 17× em IVF-PQ SIFT-1M
 - [x] **Fix `HadoopCatalog::commit_snapshot`** — operações `Replace`/`Overwrite` não herdam manifests anteriores; corrige bug onde `IndexStatus::Ready` nunca convergia com múltiplos background tasks concorrentes
+- [x] **`VectorMetric::NormalizedCosine` + `pre_normalize`** — `VectorStoragePolicy::pre_normalize = true` normaliza vetores para L2 unitário na escrita e usa `1-dot(a,b)` no hot loop do HNSW em vez de cosine completo (sem sqrt). ~12-20% speedup em search para dim=1536. Query normalizada automaticamente em todos os bindings (Rust, Python, Go, C++). Exposto via `ailake create --pre-normalize` (CLI) e `TableWriter(pre_normalize=True)` (Python).
 
 ### Fase 5 — Próximos Passos
 

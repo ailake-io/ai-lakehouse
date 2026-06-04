@@ -23,6 +23,8 @@ writer = ailake.TableWriter(
     vector_column="embedding",  # default
     dim=1536,                   # default
     metric="cosine",            # cosine | euclidean | dot_product
+    pre_normalize=True,         # normalize to unit L2 at write time (recommended for cosine)
+                                # enables NormalizedCosine fast path: 1-dot(a,b), no sqrt
 )
 
 texts = ["Document about AI", "Another document"]
