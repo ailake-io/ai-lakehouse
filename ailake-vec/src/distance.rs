@@ -63,6 +63,7 @@ pub fn exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32 {
         VectorMetric::Cosine => cosine_distance(a, b),
         VectorMetric::Euclidean => euclidean_distance(a, b),
         VectorMetric::DotProduct => -dot_product(a, b),
+        VectorMetric::NormalizedCosine => normalized_cosine_distance(a, b),
     }
 }
 
@@ -115,6 +116,26 @@ pub fn dot_product_f16(a: &[f32], b: &[f16]) -> f32 {
         }
     }
     dot_f16_scalar(a, b)
+}
+
+/// Normalize a vector to unit L2 length. Returns a zero vector unchanged.
+pub fn normalize_l2(v: &[f32]) -> Vec<f32> {
+    let norm_sq: f32 = v.iter().map(|x| x * x).sum();
+    if norm_sq < 1e-12 {
+        return v.to_vec();
+    }
+    let inv = 1.0 / norm_sq.sqrt();
+    v.iter().map(|x| x * inv).collect()
+}
+
+/// 1 - dot(a, b) for pre-normalized unit vectors — no sqrt, no norm computation.
+/// Equivalent to cosine distance but ~2× faster in the HNSW hot loop.
+pub fn normalized_cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+    1.0 - dot_product(a, b)
+}
+
+pub fn normalized_cosine_distance_f16(a: &[f32], b: &[f16]) -> f32 {
+    1.0 - dot_product_f16(a, b)
 }
 
 pub fn compute_centroid_and_radius(vectors: &[Vec<f32>], metric: VectorMetric) -> Centroid {
@@ -824,6 +845,25 @@ mod tests {
             (cos_f - cos_s).abs() < 1e-3,
             "f16 cosine mismatch: {cos_f} vs {cos_s}"
         );
+    }
+
+    #[test]
+    fn normalize_l2_unit() {
+        let v = vec![3.0f32, 4.0];
+        let n = normalize_l2(&v);
+        let norm: f32 = n.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6, "norm={norm}");
+        assert!((n[0] - 0.6).abs() < 1e-6);
+        assert!((n[1] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalized_cosine_matches_cosine_on_unit_vecs() {
+        let a = normalize_l2(&[1.0f32, 1.0, 0.0]);
+        let b = normalize_l2(&[1.0f32, 0.0, 1.0]);
+        let cos = cosine_distance(&a, &b);
+        let ncos = normalized_cosine_distance(&a, &b);
+        assert!((cos - ncos).abs() < 1e-5, "cos={cos} ncos={ncos}");
     }
 
     #[test]

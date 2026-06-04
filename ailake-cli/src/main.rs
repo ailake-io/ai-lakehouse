@@ -200,6 +200,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 precision: precision.into(),
                 pq: None,
                 keep_raw_for_reranking: false,
+                pre_normalize: false,
             };
 
             catalog
@@ -254,6 +255,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     precision: VectorPrecision::F16,
                     pq: None,
                     keep_raw_for_reranking: false,
+                    pre_normalize: false,
                 },
                 Err(_) => VectorStoragePolicy {
                     column_name: embeddings.clone(),
@@ -262,6 +264,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     precision: VectorPrecision::F16,
                     pq: None,
                     keep_raw_for_reranking: false,
+                    pre_normalize: false,
                 },
             };
 
@@ -402,6 +405,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 precision: VectorPrecision::F16,
                 pq: None,
                 keep_raw_for_reranking: false,
+                pre_normalize: false,
             };
 
             let files = catalog
@@ -497,6 +501,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 precision: VectorPrecision::F16,
                 pq: None,
                 keep_raw_for_reranking: false,
+                pre_normalize: false,
             };
             serve::run(
                 catalog as Arc<dyn CatalogProvider>,

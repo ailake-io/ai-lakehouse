@@ -421,6 +421,7 @@ fn metric_to_u8(m: VectorMetric) -> u8 {
         VectorMetric::Cosine => 0,
         VectorMetric::Euclidean => 1,
         VectorMetric::DotProduct => 2,
+        VectorMetric::NormalizedCosine => 3,
     }
 }
 
@@ -429,6 +430,7 @@ fn u8_to_metric(v: u8) -> AilakeResult<VectorMetric> {
         0 => Ok(VectorMetric::Cosine),
         1 => Ok(VectorMetric::Euclidean),
         2 => Ok(VectorMetric::DotProduct),
+        3 => Ok(VectorMetric::NormalizedCosine),
         _ => Err(AilakeError::Catalog(format!("unknown metric byte: {v}"))),
     }
 }

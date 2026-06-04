@@ -290,7 +290,7 @@ mod nvidia_impl {
         // SGEMM: C[N×Q col-major] = alpha * db[N×dim]^T * queries[Q×dim]
         // C[n + q*N] = dot(db[n], query[q])
         let (alpha, beta) = match metric {
-            VectorMetric::DotProduct => (-1.0f32, 0.0f32),
+            VectorMetric::DotProduct | VectorMetric::NormalizedCosine => (-1.0f32, 0.0f32),
             VectorMetric::Cosine => (-1.0f32, 0.0f32),
             VectorMetric::Euclidean => (-2.0f32, 0.0f32),
         };
@@ -355,7 +355,7 @@ mod nvidia_impl {
                         let raw = c_host[ni + qi * n];
                         match metric {
                             VectorMetric::DotProduct => raw,
-                            VectorMetric::Cosine => 1.0 + raw,
+                            VectorMetric::Cosine | VectorMetric::NormalizedCosine => 1.0 + raw,
                             VectorMetric::Euclidean => {
                                 let q_sq: f32 = queries[qi].iter().map(|x| x * x).sum();
                                 (q_sq + db_sq.as_ref().unwrap()[ni] + raw).max(0.0).sqrt()
@@ -953,7 +953,7 @@ mod rocm_impl {
         //
         // Result: C[n + q*N] = dot(db[n], query[q])
         let (alpha, beta) = match metric {
-            VectorMetric::DotProduct => (-1.0f32, 0.0f32), // negate → min-distance semantics
+            VectorMetric::DotProduct | VectorMetric::NormalizedCosine => (-1.0f32, 0.0f32), // negate → min-distance semantics
             VectorMetric::Cosine => (-1.0f32, 0.0f32),     // 1 − cos added below
             VectorMetric::Euclidean => (-2.0f32, 0.0f32),  // −2·q·dᵀ; norms added below
         };
@@ -1022,7 +1022,7 @@ mod rocm_impl {
                             // raw = −dot → already min-distance order
                             VectorMetric::DotProduct => raw,
                             // raw = −cos_sim → 1 − cos_sim = 1 + raw
-                            VectorMetric::Cosine => 1.0 + raw,
+                            VectorMetric::Cosine | VectorMetric::NormalizedCosine => 1.0 + raw,
                             // raw = −2·q·d → add ||q||² + ||d||², clamp, sqrt
                             VectorMetric::Euclidean => {
                                 let q_sq: f32 = queries[qi].iter().map(|x| x * x).sum();

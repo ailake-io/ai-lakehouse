@@ -202,7 +202,25 @@ fn build_ailk_section(
     index_type: &IndexType,
     shared_codebook: Option<&IvfPqCodebook>,
 ) -> AilakeResult<Bytes> {
-    let centroid: Centroid = compute_centroid_and_radius(embeddings, policy.metric);
+    // Normalize to unit L2 when pre_normalize is set.
+    // Enables the NormalizedCosine fast path: 1-dot(a,b) instead of full cosine.
+    let norm_storage: Vec<Vec<f32>>;
+    let (embeddings, hnsw_metric) = if policy.pre_normalize
+        && policy.metric == ailake_core::VectorMetric::Cosine
+    {
+        norm_storage = embeddings
+            .iter()
+            .map(|v| ailake_vec::normalize_l2(v))
+            .collect();
+        (
+            norm_storage.as_slice(),
+            ailake_core::VectorMetric::NormalizedCosine,
+        )
+    } else {
+        (embeddings, policy.metric)
+    };
+
+    let centroid: Centroid = compute_centroid_and_radius(embeddings, hnsw_metric);
     let centroid_bytes = encode_centroid(&centroid);
 
     // Resolve Auto to a concrete variant before matching.
@@ -224,7 +242,7 @@ fn build_ailk_section(
 
     let (index_bytes, flags) = match index_type {
         IndexType::Hnsw(hnsw_config) => {
-            let mut builder = HnswBuilder::new(policy.dim, policy.metric, hnsw_config.clone());
+            let mut builder = HnswBuilder::new(policy.dim, hnsw_metric, hnsw_config.clone());
             for (i, v) in embeddings.iter().enumerate() {
                 builder.insert(RowId::new(i as u64), v.clone());
             }
@@ -324,6 +342,7 @@ mod tests {
             precision: VectorPrecision::F16,
             pq: None,
             keep_raw_for_reranking: false,
+            pre_normalize: false,
         }
     }
 
@@ -361,6 +380,7 @@ mod tests {
             precision: VectorPrecision::F16,
             pq: None,
             keep_raw_for_reranking: false,
+            pre_normalize: false,
         };
 
         let writer = AilakeFileWriter::new(policy1.clone());

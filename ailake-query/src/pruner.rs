@@ -51,7 +51,7 @@ impl VectorPruner {
 
 fn compute_distance(a: &[f32], b: &[f32], metric: VectorMetric) -> f32 {
     match metric {
-        VectorMetric::Cosine => cosine_distance(a, b),
+        VectorMetric::Cosine | VectorMetric::NormalizedCosine => cosine_distance(a, b),
         VectorMetric::Euclidean => euclidean_distance(a, b),
         VectorMetric::DotProduct => -dot_product(a, b),
     }

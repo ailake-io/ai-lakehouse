@@ -290,6 +290,7 @@ mod tests {
                 precision: VectorPrecision::F16,
                 pq: None,
                 keep_raw_for_reranking: false,
+                pre_normalize: false,
             },
             extra: std::collections::HashMap::new(),
         }

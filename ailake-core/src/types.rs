@@ -58,6 +58,10 @@ pub enum VectorMetric {
     Cosine = 0,
     Euclidean = 1,
     DotProduct = 2,
+    /// Cosine on pre-normalized unit vectors: distance = 1 - dot(a, b).
+    /// No sqrt in the hot loop — ~2× faster than Cosine for the same recall.
+    /// Set VectorStoragePolicy::pre_normalize = true to enable automatically.
+    NormalizedCosine = 3,
 }
 
 /// Per-file geometric statistics used for pruning

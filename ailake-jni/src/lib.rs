@@ -399,6 +399,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         precision,
         pq: None,
         keep_raw_for_reranking: false,
+        pre_normalize: false,
     };
 
     let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
