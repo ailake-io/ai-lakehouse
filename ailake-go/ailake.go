@@ -89,6 +89,12 @@ func Search(
 	}
 	metric := metricFromString(info.VectorMetric)
 
+	// NormalizedCosine requires unit-length query; normalize here so callers
+	// don't need to pre-normalize manually.
+	if metric == MetricNormalizedCosine {
+		query = normalizeL2(query)
+	}
+
 	// Geometric pruning
 	var survivors []DataFileEntry
 	for _, e := range entries {
@@ -266,6 +272,8 @@ func metricFromString(s string) uint8 {
 		return MetricEuclidean
 	case "dotproduct", "dot":
 		return MetricDotProduct
+	case "normalized_cosine":
+		return MetricNormalizedCosine
 	default:
 		return MetricCosine
 	}

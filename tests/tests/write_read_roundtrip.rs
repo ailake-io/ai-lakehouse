@@ -28,6 +28,7 @@ async fn write_10k_rows_search_top10() {
         precision: VectorPrecision::F16,
         pq: None,
         keep_raw_for_reranking: false,
+        pre_normalize: false,
     };
 
     // Create table and write 10k rows split across 2 batches

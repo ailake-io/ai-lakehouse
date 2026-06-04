@@ -80,6 +80,7 @@ struct TableInfo {
 inline Metric metric_from_str(const std::string& s) {
     if (s == "euclidean") return Metric::Euclidean;
     if (s == "dotproduct" || s == "dot") return Metric::DotProduct;
+    if (s == "normalized_cosine") return Metric::NormalizedCosine;
     return Metric::Cosine;
 }
 

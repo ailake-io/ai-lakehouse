@@ -34,6 +34,13 @@ pub struct VectorStoragePolicy {
     pub precision: VectorPrecision,
     pub pq: Option<PQConfig>,
     pub keep_raw_for_reranking: bool,
+    /// Normalize each input vector to unit L2 length before indexing.
+    /// Enables the NormalizedCosine fast path in HNSW: distance = 1 - dot(a, b),
+    /// no sqrt, ~2× faster distance computation. Semantics unchanged — same top-k
+    /// results as Cosine. Most embedding models (OpenAI, Cohere, etc.) produce
+    /// nearly-unit vectors; enabling this adds negligible write overhead.
+    #[serde(default)]
+    pub pre_normalize: bool,
 }
 
 impl VectorStoragePolicy {
@@ -45,6 +52,7 @@ impl VectorStoragePolicy {
             precision: VectorPrecision::F16,
             pq: None,
             keep_raw_for_reranking: true,
+            pre_normalize: false,
         }
     }
 }

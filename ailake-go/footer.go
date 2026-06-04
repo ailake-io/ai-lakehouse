@@ -29,9 +29,10 @@ const (
 	PrecisionBinary uint8 = 3
 
 	// distance metric values
-	MetricCosine     uint8 = 0
-	MetricEuclidean  uint8 = 1
-	MetricDotProduct uint8 = 2
+	MetricCosine            uint8 = 0
+	MetricEuclidean         uint8 = 1
+	MetricDotProduct        uint8 = 2
+	MetricNormalizedCosine  uint8 = 3
 )
 
 // AilakeHeader is the 64-byte header at the start of every AILK section.

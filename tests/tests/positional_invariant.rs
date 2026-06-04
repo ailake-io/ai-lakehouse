@@ -16,6 +16,7 @@ async fn positional_invariant_holds_for_1k_rows() {
         precision: VectorPrecision::F16,
         pq: None,
         keep_raw_for_reranking: false,
+        pre_normalize: false,
     };
     let (batch, embs) = fixtures::generate_batch(1000, dim as usize);
     let writer = AilakeFileWriter::new(policy);

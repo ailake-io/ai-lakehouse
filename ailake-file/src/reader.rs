@@ -199,6 +199,7 @@ fn distance_metric_to_vector_metric(dm: DistanceMetric) -> VectorMetric {
         DistanceMetric::Cosine => VectorMetric::Cosine,
         DistanceMetric::Euclidean => VectorMetric::Euclidean,
         DistanceMetric::DotProduct => VectorMetric::DotProduct,
+        DistanceMetric::NormalizedCosine => VectorMetric::NormalizedCosine,
     }
 }
 
@@ -219,6 +220,7 @@ mod tests {
             precision: VectorPrecision::F16,
             pq: None,
             keep_raw_for_reranking: false,
+            pre_normalize: false,
         }
     }
 

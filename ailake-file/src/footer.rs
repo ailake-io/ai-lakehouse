@@ -27,6 +27,7 @@ pub enum DistanceMetric {
     Cosine = 0,
     Euclidean = 1,
     DotProduct = 2,
+    NormalizedCosine = 3,
 }
 
 impl From<VectorPrecision> for Precision {
@@ -46,6 +47,7 @@ impl From<VectorMetric> for DistanceMetric {
             VectorMetric::Cosine => DistanceMetric::Cosine,
             VectorMetric::Euclidean => DistanceMetric::Euclidean,
             VectorMetric::DotProduct => DistanceMetric::DotProduct,
+            VectorMetric::NormalizedCosine => DistanceMetric::NormalizedCosine,
         }
     }
 }
@@ -70,6 +72,7 @@ impl TryFrom<u8> for DistanceMetric {
             0 => Ok(DistanceMetric::Cosine),
             1 => Ok(DistanceMetric::Euclidean),
             2 => Ok(DistanceMetric::DotProduct),
+            3 => Ok(DistanceMetric::NormalizedCosine),
             _ => Err(AilakeError::UnsupportedFormatVersion(v as u16)),
         }
     }

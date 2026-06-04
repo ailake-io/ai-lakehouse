@@ -30,6 +30,7 @@ fn bench_write(c: &mut Criterion) {
         precision: VectorPrecision::F16,
         pq: None,
         keep_raw_for_reranking: false,
+        pre_normalize: false,
     };
     let writer = AilakeFileWriter::new(policy);
 
