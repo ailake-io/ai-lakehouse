@@ -28,7 +28,7 @@ static constexpr uint16_t kFlagIndexIvfPq = 0x0001;
 enum class Precision : uint8_t { F32 = 0, F16 = 1, I8 = 2, Binary = 3 };
 
 // distance metric values
-enum class Metric : uint8_t { Cosine = 0, Euclidean = 1, DotProduct = 2 };
+enum class Metric : uint8_t { Cosine = 0, Euclidean = 1, DotProduct = 2, NormalizedCosine = 3 };
 
 // ---------------------------------------------------------------------------
 // Helpers

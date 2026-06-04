@@ -38,12 +38,34 @@ func dotProduct(a, b []float32) float32 {
 	return float32(sum)
 }
 
+func normalizedCosineDistance(a, b []float32) float32 {
+	return 1.0 - dotProduct(a, b)
+}
+
+func normalizeL2(v []float32) []float32 {
+	var sum float64
+	for _, x := range v {
+		sum += float64(x) * float64(x)
+	}
+	if sum < 1e-12 {
+		return v
+	}
+	inv := float32(1.0 / math.Sqrt(sum))
+	out := make([]float32, len(v))
+	for i, x := range v {
+		out[i] = x * inv
+	}
+	return out
+}
+
 func distanceByMetric(metric uint8, query, centroid []float32) float32 {
 	switch metric {
 	case MetricEuclidean:
 		return euclideanDistance(query, centroid)
 	case MetricDotProduct:
 		return -dotProduct(query, centroid)
+	case MetricNormalizedCosine:
+		return normalizedCosineDistance(query, centroid)
 	default:
 		return cosineDistance(query, centroid)
 	}
