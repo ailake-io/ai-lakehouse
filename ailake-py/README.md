@@ -36,6 +36,27 @@ writer.write_batch(texts=texts, embeddings=embeddings)
 snapshot_id = writer.commit()
 ```
 
+### TableWriter parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `path` | required | Table root path (local or `s3://`, `gs://`, `az://`) |
+| `vector_column` | `"embedding"` | Vector column name |
+| `dim` | `1536` | Vector dimension |
+| `metric` | `"cosine"` | `cosine`, `euclidean`, `dot_product` |
+| `pre_normalize` | `False` | Normalize to unit L2 at write time (recommended for cosine). Enables `1-dot(a,b)` fast path. |
+| `hnsw_m` | `None` (=16) | HNSW connections per node. Higher → better recall, more memory. |
+| `hnsw_ef_construction` | `None` (=150) | HNSW build pool size. Higher → better quality, slower build. |
+
+HNSW tuning guide:
+
+| Goal | `hnsw_m` | `hnsw_ef_construction` |
+|---|---|---|
+| Low latency / high QPS | 8 | 100 |
+| General purpose (default) | 16 | 150 |
+| High recall (RAG) | 24 | 200 |
+| Max recall (medical, legal) | 32 | 400 |
+
 ### Search
 
 ```python
