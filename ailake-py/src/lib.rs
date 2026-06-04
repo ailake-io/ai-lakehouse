@@ -58,14 +58,15 @@ pub struct TableWriter {
 impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine"))]
-    fn new(path: &str, vector_column: &str, dim: u32, metric: &str) -> PyResult<Self> {
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false))]
+    fn new(path: &str, vector_column: &str, dim: u32, metric: &str, pre_normalize: bool) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
-            "ailake-py: TableWriter::new path={} dim={} metric={}",
-            path, dim, metric
+            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={}",
+            path, dim, metric, pre_normalize
         );
-        let policy = VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
+        let mut policy = VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
+        policy.pre_normalize = pre_normalize;
         let (catalog, store) = local_catalog_store(path);
         let table = TableIdent::new("default", "table");
 
@@ -271,8 +272,9 @@ fn parse_metric(s: &str) -> PyResult<VectorMetric> {
         "cosine" => Ok(VectorMetric::Cosine),
         "euclidean" => Ok(VectorMetric::Euclidean),
         "dot_product" | "dotproduct" => Ok(VectorMetric::DotProduct),
+        "normalized_cosine" => Ok(VectorMetric::NormalizedCosine),
         other => Err(PyValueError::new_err(format!(
-            "unknown metric '{other}' — use cosine, euclidean, or dot_product"
+            "unknown metric '{other}' — use cosine, euclidean, dot_product, or normalized_cosine"
         ))),
     }
 }
