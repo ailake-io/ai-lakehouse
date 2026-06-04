@@ -157,7 +157,7 @@ pub struct RaBitQVec {
 /// Pack the sign bits of a float slice into bytes.
 /// Bit i in the output = (v[i] > 0.0).
 pub fn bits_from_signs(v: &[f32]) -> Vec<u8> {
-    let code_len = (v.len() + 7) / 8;
+    let code_len = v.len().div_ceil(8);
     let mut code = vec![0u8; code_len];
     for (i, &val) in v.iter().enumerate() {
         if val > 0.0 {
