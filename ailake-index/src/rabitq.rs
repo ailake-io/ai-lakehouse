@@ -12,7 +12,7 @@
 
 use ailake_core::{AilakeError, AilakeResult, RowId, VectorMetric};
 use ailake_vec::{
-    cosine_distance, euclidean_distance, exact_distance,
+    exact_distance,
     rabitq::{encode_batch, RaBitQCodebook, RaBitQVec},
 };
 use half::f16;
