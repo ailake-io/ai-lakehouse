@@ -205,20 +205,19 @@ fn build_ailk_section(
     // Normalize to unit L2 when pre_normalize is set.
     // Enables the NormalizedCosine fast path: 1-dot(a,b) instead of full cosine.
     let norm_storage: Vec<Vec<f32>>;
-    let (embeddings, hnsw_metric) = if policy.pre_normalize
-        && policy.metric == ailake_core::VectorMetric::Cosine
-    {
-        norm_storage = embeddings
-            .iter()
-            .map(|v| ailake_vec::normalize_l2(v))
-            .collect();
-        (
-            norm_storage.as_slice(),
-            ailake_core::VectorMetric::NormalizedCosine,
-        )
-    } else {
-        (embeddings, policy.metric)
-    };
+    let (embeddings, hnsw_metric) =
+        if policy.pre_normalize && policy.metric == ailake_core::VectorMetric::Cosine {
+            norm_storage = embeddings
+                .iter()
+                .map(|v| ailake_vec::normalize_l2(v))
+                .collect();
+            (
+                norm_storage.as_slice(),
+                ailake_core::VectorMetric::NormalizedCosine,
+            )
+        } else {
+            (embeddings, policy.metric)
+        };
 
     let centroid: Centroid = compute_centroid_and_radius(embeddings, hnsw_metric);
     let centroid_bytes = encode_centroid(&centroid);
@@ -242,7 +241,16 @@ fn build_ailk_section(
 
     let (index_bytes, flags) = match index_type {
         IndexType::Hnsw(hnsw_config) => {
-            let mut builder = HnswBuilder::new(policy.dim, hnsw_metric, hnsw_config.clone());
+            // Policy-level M/ef_construction override the IndexType defaults when set.
+            let config = HnswConfig {
+                m: policy.hnsw_m.map(|v| v as usize).unwrap_or(hnsw_config.m),
+                ef_construction: policy
+                    .hnsw_ef_construction
+                    .map(|v| v as usize)
+                    .unwrap_or(hnsw_config.ef_construction),
+                max_elements: hnsw_config.max_elements,
+            };
+            let mut builder = HnswBuilder::new(policy.dim, hnsw_metric, config);
             for (i, v) in embeddings.iter().enumerate() {
                 builder.insert(RowId::new(i as u64), v.clone());
             }
@@ -343,6 +351,8 @@ mod tests {
             pq: None,
             keep_raw_for_reranking: false,
             pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
         }
     }
 
@@ -381,6 +391,8 @@ mod tests {
             pq: None,
             keep_raw_for_reranking: false,
             pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
         };
 
         let writer = AilakeFileWriter::new(policy1.clone());

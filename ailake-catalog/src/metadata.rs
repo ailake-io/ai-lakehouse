@@ -87,6 +87,12 @@ impl IcebergMetadata {
             "ailake.vector-precision".to_string(),
             format!("{:?}", policy.precision).to_lowercase(),
         );
+        if let Some(m) = policy.hnsw_m {
+            properties.insert("ailake.hnsw-m".to_string(), m.to_string());
+        }
+        if let Some(ef) = policy.hnsw_ef_construction {
+            properties.insert("ailake.hnsw-ef-construction".to_string(), ef.to_string());
+        }
 
         let now_ms = now_ms();
         IcebergMetadata {
@@ -152,6 +158,8 @@ mod tests {
             pq: None,
             keep_raw_for_reranking: false,
             pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
         }
     }
 

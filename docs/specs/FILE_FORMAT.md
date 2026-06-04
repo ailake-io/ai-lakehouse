@@ -169,6 +169,11 @@ The blob is a **bincode v1** serialization of an `hnsw_rs::Hnsw` graph
 wrapped in `ailake_index::HnswIndex`. Internal layout (opaque to readers
 outside `ailake-index`):
 
+> **Tuning**: `max_m` and `ef_construction` in the blob come from
+> `VectorStoragePolicy::hnsw_m` and `hnsw_ef_construction` when set
+> (stored as `ailake.hnsw-m` / `ailake.hnsw-ef-construction` in Iceberg
+> metadata properties). Defaults: M=16, ef_construction=150.
+
 ```
 [ bincode header ]
 [ layer_count: u64 ]

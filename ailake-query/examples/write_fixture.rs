@@ -90,6 +90,8 @@ async fn main() {
         pq: None,
         keep_raw_for_reranking: false,
         pre_normalize: false,
+        hnsw_m: None,
+        hnsw_ef_construction: None,
     };
 
     let mut writer = TableWriter::create_or_open(

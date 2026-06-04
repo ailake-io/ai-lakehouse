@@ -516,6 +516,9 @@ cargo run --release -- --dataset-dir /data/sift1m --limit 10000
 # IVF-PQ deferred
 cargo run --release -- --dataset-dir /data/sift1m --engine ailake-ivf-pq-deferred
 
+# HNSW M/ef comparison (M=8 vs M=16 default vs M=32)
+cargo run --release -- --dataset-dir /data/sift1m --engine ailake-hnsw-compare
+
 # Compare vs LanceDB
 cargo run --release --features lancedb-bench -- \
     --dataset-dir /data/sift1m --engine all
@@ -536,6 +539,16 @@ AI-Lake HNSW deferred     199k vec/s    165s defer    0.9963      1365     1.96m
 AI-Lake IVF-PQ deferred   251k vec/s    42.7s defer   0.9065      252      5.53ms
 AI-Lake Auto/HNSW         6.3k vec/s    159s inline   0.9960      1485     1.67ms
 LanceDB IVF-HNSW-SQ       530k vec/s    55s inline    0.8805      745     63.34ms
+```
+
+HNSW M/ef comparison (SIFT-1M, top_k=10):
+
+```
+Config              Index build   Recall@10   QPS    p99     Use case
+────────────────────────────────────────────────────────────────────
+M=8,  ef=100         55s          0.9850      2053   0.86ms  Low latency / high QPS
+M=16, ef=150 (def)  139s          0.9960      1366   1.28ms  General purpose
+M=32, ef=400        435s          0.9985       908   1.91ms  Max recall (medical, legal)
 ```
 
 Optional pgvector parameters:
@@ -763,7 +776,37 @@ cargo build --release
 
 ---
 
-## 8G. IVF-PQ benchmark (`--engine ailake-ivf-pq`)
+## 8G. HNSW M/ef tuning (`--hnsw-m`, `--hnsw-ef`)
+
+HNSW M and ef_construction are now per-table parameters stored in Iceberg metadata.
+
+```bash
+# Set at table creation time via CLI
+ailake create s3://my-lake/docs/ --dim 1536 --metric cosine \
+    --hnsw-m 32 --hnsw-ef 400
+
+# Or via Python
+writer = ailake.TableWriter("s3://my-lake/docs/",
+    metric="cosine", hnsw_m=32, hnsw_ef_construction=400)
+```
+
+| Parameter | Default | Range | Effect |
+|---|---|---|---|
+| `--hnsw-m` | 16 | 4–64 | Connections per node. Higher → better recall, more memory, slower build |
+| `--hnsw-ef` | 150 | 40–500 | Build candidate pool. Higher → better graph quality, slower build |
+
+Quick guide:
+
+| Goal | M | ef_construction |
+|---|---|---|
+| Low latency / max QPS | 8 | 100 |
+| General purpose (default) | 16 | 150 |
+| High recall (production RAG) | 24 | 200 |
+| Max recall (medical, legal) | 32 | 400 |
+
+`ef_search` (query-time) is separate — set via `SearchConfig.ef_search` (Rust) or the `--ef` flag in the benchmark.
+
+## 8H. IVF-PQ benchmark (`--engine ailake-ivf-pq`)
 
 IVF-PQ uses an index with inverted lists encoded by Product Quantization, instead of the HNSW graph. Index is 10-100× smaller — a good choice for S3 where sequential access is cheaper.
 

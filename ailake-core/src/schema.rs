@@ -41,6 +41,16 @@ pub struct VectorStoragePolicy {
     /// nearly-unit vectors; enabling this adds negligible write overhead.
     #[serde(default)]
     pub pre_normalize: bool,
+    /// HNSW M parameter — connections per node. `None` = default (16).
+    /// Higher M → better recall, more memory, slower build.
+    /// Recommended values: 8 (low-memory), 16 (default), 32 (high-recall), 64 (max).
+    #[serde(default)]
+    pub hnsw_m: Option<u32>,
+    /// HNSW ef_construction — candidate pool size during build. `None` = default (150).
+    /// Higher ef_construction → better graph quality, slower build.
+    /// Recommended values: 100 (fast), 150 (default), 200 (quality), 400 (max quality).
+    #[serde(default)]
+    pub hnsw_ef_construction: Option<u32>,
 }
 
 impl VectorStoragePolicy {
@@ -53,6 +63,8 @@ impl VectorStoragePolicy {
             pq: None,
             keep_raw_for_reranking: true,
             pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
         }
     }
 }
