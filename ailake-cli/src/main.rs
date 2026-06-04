@@ -54,6 +54,14 @@ enum Commands {
         /// high-dim embeddings (OpenAI, Cohere). No-op for euclidean/dot.
         #[arg(long, default_value_t = false)]
         pre_normalize: bool,
+        /// HNSW M — connections per node (default: 16).
+        /// Higher → better recall, more memory. Range: 4–64.
+        #[arg(long)]
+        hnsw_m: Option<u32>,
+        /// HNSW ef_construction — candidate pool during build (default: 150).
+        /// Higher → better graph quality, slower build. Range: 40–400.
+        #[arg(long)]
+        hnsw_ef: Option<u32>,
     },
     /// Insert a Parquet file (with an embedding column) into a table
     Insert {
@@ -198,6 +206,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             precision,
             column,
             pre_normalize,
+            hnsw_m,
+            hnsw_ef,
         } => {
             let ident = parse_table_ident(&table);
             let policy = VectorStoragePolicy {
@@ -208,6 +218,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 pq: None,
                 keep_raw_for_reranking: false,
                 pre_normalize,
+                hnsw_m,
+                hnsw_ef_construction: hnsw_ef,
             };
 
             catalog
@@ -263,6 +275,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                     pq: None,
                     keep_raw_for_reranking: false,
                     pre_normalize: false,
+                    hnsw_m: None,
+                    hnsw_ef_construction: None,
                 },
                 Err(_) => VectorStoragePolicy {
                     column_name: embeddings.clone(),
@@ -272,6 +286,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                     pq: None,
                     keep_raw_for_reranking: false,
                     pre_normalize: false,
+                    hnsw_m: None,
+                    hnsw_ef_construction: None,
                 },
             };
 
@@ -413,6 +429,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 pq: None,
                 keep_raw_for_reranking: false,
                 pre_normalize: false,
+                hnsw_m: None,
+                hnsw_ef_construction: None,
             };
 
             let files = catalog
@@ -509,6 +527,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 pq: None,
                 keep_raw_for_reranking: false,
                 pre_normalize: false,
+                hnsw_m: None,
+                hnsw_ef_construction: None,
             };
             serve::run(
                 catalog as Arc<dyn CatalogProvider>,

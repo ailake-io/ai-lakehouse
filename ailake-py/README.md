@@ -25,6 +25,8 @@ writer = ailake.TableWriter(
     metric="cosine",            # cosine | euclidean | dot_product
     pre_normalize=True,         # normalize to unit L2 at write time (recommended for cosine)
                                 # enables NormalizedCosine fast path: 1-dot(a,b), no sqrt
+    hnsw_m=16,                  # HNSW connections per node (default 16; 32 = higher recall)
+    hnsw_ef_construction=150,   # HNSW build quality (default 150; 400 = max quality)
 )
 
 texts = ["Document about AI", "Another document"]
