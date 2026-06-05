@@ -246,6 +246,42 @@ jobs:
           name: wheels-linux-${{ matrix.target }}
           path: dist
 
+  pypi-macos:
+    # Disabled: no macOS self-hosted runner available.
+    # To enable: remove `if: false`, add `pypi-macos` to pypi-publish needs,
+    # and set runs-on to the macOS runner label (e.g. [self-hosted, macOS, ARM64]).
+    name: Build Python wheel — macOS (${{ matrix.target }})
+    if: false
+    needs: release
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+
+      - uses: PyO3/maturin-action@v1
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+        with:
+          target: ${{ matrix.target }}
+          command: build
+          args: --release --out dist --find-interpreter --manifest-path ailake-py/Cargo.toml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+
   pypi-windows:
     name: Build Python wheel — Windows (x86_64)
     needs: release
