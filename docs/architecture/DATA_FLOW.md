@@ -139,7 +139,7 @@ AilakeFileWriter::new(policy)
   │   ↳ auto-selects IndexType::RaBitQ from policy.rabitq
   │
   ├─► ailake-vec / RaBitQCodebook::new(dim, seed)
-  │     │  1. generate dim×dim column-normalized Gaussian rotation matrix P
+  │     │  1. generate dim×dim modified Gram-Schmidt orthonormal matrix P (P^T·P = I)
   │     │     (deterministic from seed — not stored on disk)
   │     └─► returns: RaBitQCodebook
   │
@@ -165,7 +165,7 @@ AilakeFileWriter::new(policy)
   └─► catalog commit (same flow as HNSW)
 ```
 
-**Throughput**: ~300k vec/s. No k-means training, no graph construction — encoding is one-pass.
+**Throughput**: ~163k vec/s (SIFT-1M measured; no k-means, no graph — encoding is one-pass). Search is sequential O(N) flat scan; outer shard parallelism handles concurrency.
 
 **Storage** (dim=1536 per vector):
 - Binary codes: `ceil(1536/8)` = 192 bytes
@@ -236,11 +236,11 @@ ailake-query / VectorScanner
   │   └─► AnyIndex::search(query, top_k, ef)
   │         │  HNSW:   greedy graph traversal, candidate heap
   │         │  IVF-PQ: coarse quantize, nprobe cells, ADC distance
-  │         │  RaBitQ: normalize query → project → binary code →
-  │         │            for each entry: XOR + popcount → IP estimate
+  │         │  RaBitQ: normalize query → project → binarize query once (estimate_ip_binary) →
+  │         │            sequential scan: XOR + popcount → IP estimate per entry →
+  │         │            O(N) select_nth_unstable_by for top candidates →
   │         │            if raw_f16 present + rerank_factor > 1:
-  │         │              top (rerank_factor × k) candidates reranked with
-  │         │              exact F16 distances
+  │         │              top (rerank_factor × k) candidates reranked with exact F16 distances
   │         └─► returns: Vec<(RowId, f32)>
   │
   ├─► merge results across all surviving files, global top-k sort

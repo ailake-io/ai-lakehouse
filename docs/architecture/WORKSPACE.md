@@ -65,9 +65,10 @@ Vector data transformations. No I/O.
 - `exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32` — dispatches to correct metric; used by reranking after PQ
 - `compute_centroid_and_radius(&[Vec<f32>], VectorMetric) -> Centroid`
 - `BlockCompressor::zstd(level)`, `BlockCompressor::lz4()` — block-level compression
-- `RaBitQCodebook::new(dim, seed) -> Self` — generates dim×dim column-normalized Gaussian rotation matrix P deterministically from `seed`; P is **not serialized** — regenerated on load via `rebuild_proj()`
+- `RaBitQCodebook::new(dim, seed) -> Self` — generates dim×dim **modified Gram-Schmidt orthonormal matrix** (P^T · P = I) deterministically from `seed`; P is **not serialized** — regenerated on load via `rebuild_proj()`
 - `RaBitQCodebook::encode(&[f32]) -> RaBitQVec` — normalizes, projects, packs sign bits; stores `norm` (original L2) and `scale` (sum(|P·x̂|)/sqrt(dim))
-- `RaBitQCodebook::estimate_ip(q_proj, q_scale, entry) -> f32` — unbiased IP estimator via XOR + popcount: `(1 - 2·hamming/dim) × q_scale × entry.scale`
+- `RaBitQCodebook::estimate_ip_binary(b_q: &[u8], q_scale: f32, entry: &RaBitQVec) -> f32` — unbiased IP estimator accepting **pre-binarized** query codes; XOR + popcount: `(1 - 2·hamming/dim) × q_scale × entry.scale`. Call once per search (binarize query before the scan loop).
+- `RaBitQCodebook::estimate_ip(q_proj, q_scale, entry) -> f32` — convenience wrapper over `estimate_ip_binary`; binarizes `q_proj` on every call (avoid in hot paths)
 - `encode_batch(codebook, vectors) -> Vec<RaBitQVec>` — parallel encoding via `rayon`
 - `RaBitQVec { code: Vec<u8>, norm: f32, scale: f32 }` — 1 bit/dim storage (ceil(dim/8) bytes code)
 
@@ -89,9 +90,8 @@ HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) 
   - `kmeans_dispatch()` — priority: CUDA → ROCm → CPU rayon
 - `RaBitQIndex` — flat brute-force index over binary-coded vectors
   - `build(row_ids, vectors, metric, config, keep_raw) -> RaBitQIndex` — one-pass O(n) encode; no graph, no k-means
-  - `search(query, top_k, rerank_factor) -> Vec<(RowId, f32)>` — normalize → project → XOR/popcount IP estimate for all entries → optional exact F16 reranking for top `rerank_factor × k` candidates
-  - Mutation on search: `codebook.rebuild_proj()` called lazily if projection matrix is missing (after deserialization)
-- `RaBitQSerializer` — bincode roundtrip for `RaBitQIndex`; `from_bytes` automatically calls `rebuild_proj()`
+  - `search(&self, query, top_k, rerank_factor) -> Vec<(RowId, f32)>` — pre-binarize query once → sequential O(N) scan using `estimate_ip_binary` → O(N) `select_nth_unstable_by` for top candidates → optional exact F16 reranking. Takes `&self` (not `&mut self`) — safe for concurrent shard-level parallelism via rayon.
+- `RaBitQSerializer` — bincode roundtrip for `RaBitQIndex`; `from_bytes` automatically calls `rebuild_proj()` (never lazy on search)
 - `AnyIndex` — enum dispatching search to `HnswIndex`, `IvfPqIndex`, or `RaBitQIndex`
 - `HnswSerializer` — bincode-based serialization of the full HNSW graph
 - `MmapLoader` — opens a serialized HNSW from a memory-mapped byte slice

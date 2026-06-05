@@ -265,7 +265,7 @@ via `RaBitQSerializer`. RaBitQ is a **flat index** — no graph structure.
 
 > **Storage**: 1 bit/dim per vector (packed into `ceil(dim/8)` bytes) + 8 bytes overhead per vector (norm + scale). For dim=1536: **200 bytes/vector** vs 3 072 bytes for F16 — **15× compression**. Optional raw F16 vectors stored alongside for exact reranking.
 
-> **Rotation matrix**: a `dim × dim` column-normalized Gaussian matrix is generated deterministically from `seed` at runtime. It is **not** serialized — only `seed` is stored. Readers MUST regenerate the matrix via `RaBitQCodebook::rebuild_proj(seed, dim)` before searching.
+> **Rotation matrix**: a `dim × dim` **modified Gram-Schmidt orthonormal matrix** (P^T · P = I) is generated deterministically from `seed` at runtime. It is **not** serialized — only `seed` is stored. Readers MUST regenerate the matrix via `RaBitQCodebook::rebuild_proj(seed, dim)` before searching. Orthonormal projection preserves inner products exactly (unit sphere → unit sphere), giving better recall than a column-normalized Gaussian.
 
 Binary layout:
 
@@ -299,12 +299,12 @@ let mut index = RaBitQSerializer::from_bytes(blob)?;
 Search algorithm:
 
 1. Normalize query to unit L2. Apply rotation matrix P → `q_proj` (F32 vector).
-2. Compute query binary code: `q_code[i] = sign(q_proj[i])` packed into bytes.
+2. Compute query binary code once: `b_q[i] = sign(q_proj[i])` packed into bytes (`bits_from_signs`). This pre-binarization is done **once per search call**, not once per entry (`estimate_ip_binary` interface).
 3. Compute query scale: `q_scale = sum(|q_proj|) / sqrt(dim)`.
-4. For each database vector i: `IP_estimate = (1 - 2·hamming(q_code, code_i) / dim) × q_scale × scale_i`.
-5. Convert IP estimate to distance by metric (cosine: `1 - IP`, dot: `-IP × |q| × norm_i`, Euclidean: approximated).
-6. Sort ascending, return top-k by estimated distance.
-7. **Reranking** (when `raw_f16` present and `rerank_factor > 1`): fetch top `rerank_factor × k` candidates, compute exact F16 distances, re-sort, return top-k.
+4. Sequential scan (inner): for each database vector i: `IP_estimate = (1 - 2·hamming(b_q, code_i) / dim) × q_scale × scale_i`.
+5. Convert IP estimate to distance by metric (cosine: `1 - IP`, dot: `-IP × |q| × norm_i`, Euclidean: approximated via `||q||² + ||x||² - 2·IP·||q||·||x||`).
+6. O(N) partial select: `select_nth_unstable_by(candidates − 1)` brings top `candidates = rerank_factor × top_k` to front, then sort only those `candidates` entries.
+7. **Reranking** (when `raw_f16` present and `rerank_factor > 1`): compute exact F16 distances for top candidates, re-sort, return top-k.
 
 Key invariant: `len(entries) == len(row_ids) == header.record_count`. Readers MUST verify this before search.
 
@@ -312,7 +312,7 @@ When to use RaBitQ vs HNSW vs IVF-PQ:
 
 | Criterion | HNSW | IVF-PQ | RaBitQ |
 |---|---|---|---|
-| Write throughput | ~50k vec/s | ~200k vec/s | **~300k vec/s** |
+| Write throughput | ~50k vec/s | ~200k vec/s | **~163k vec/s** (SIFT-1M measured) |
 | Index build time | O(n log n) | O(n) k-means | **O(n)** one-pass |
 | Storage (dim=1536) | 15–20% overhead | 2–5% of F16 | **1.5% of F32** |
 | Recall@10 (exact) | ≥ 0.95 | 0.90–0.95 | 0.80–0.95 (with rerank) |

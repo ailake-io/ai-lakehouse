@@ -62,9 +62,9 @@ HNSW tuning guide:
 
 ### RaBitQ — extreme compression (1 bit/dim)
 
-RaBitQ is a flat index with no graph construction: 1 bit/dim after a random rotation, yielding better recall than naive binary quantization via an unbiased XOR/popcount IP estimator. Write throughput ~300k vec/s (no k-means, no graph). Storage: 200 bytes/vector at dim=1536 (15× smaller than F16).
+RaBitQ is a flat index with no graph construction: 1 bit/dim after a **modified Gram-Schmidt orthonormal rotation**, yielding better recall than naive binary quantization via an unbiased XOR/popcount IP estimator. Write throughput ~163k vec/s (no k-means, no graph; SIFT-1M measured). Storage: 200 bytes/vector at dim=1536 (15× smaller than F16). Search is sequential O(N) flat scan; shard-level parallelism handled automatically.
 
-Use when storage is the primary constraint or write throughput matters more than recall. Pair with `rerank_factor ≥ 3` to recover precision using the stored raw F16 vectors.
+Use when storage is the primary constraint or write throughput matters more than recall. Designed for **cosine** workloads — recall on Euclidean datasets is lower (~0.67 at rerank=3 on SIFT-1M). Pair with `rerank_factor ≥ 3` (cosine) or `≥ 10` (Euclidean/complex) to recover precision using the stored raw F16 vectors.
 
 ```python
 import ailake
@@ -87,16 +87,16 @@ results = ailake.search(
     path="./rabitq_table",
     query=query,
     top_k=10,
-    rerank_factor=3,  # fetch top_30, rerank with raw F16, return top_10
+    rerank_factor=10,  # recommended: ≥ 3 for most cosine, ≥ 10 for complex datasets
 )
 ```
 
-| Index | Bytes/vector (dim=1536) | Recall@10 (with rerank) | Write (vec/s) |
+| Index | Bytes/vector (dim=1536) | Recall@10 cosine (rerank≥3) | Write (vec/s) |
 |---|---|---|---|
 | HNSW (F16) | ~3 200 | ≥ 0.95 | ~50k |
 | IVF-PQ (M=48) | ~50 | 0.90–0.95 | ~200k |
-| RaBitQ (no raw) | **192** | 0.70–0.85 | **~300k** |
-| RaBitQ + raw F16 | ~3 264 | **0.85–0.95** | **~300k** |
+| RaBitQ (no raw) | **192** | 0.70–0.85 | **~163k** |
+| RaBitQ + raw F16 | ~3 264 | **0.85–0.95** | **~163k** |
 
 ### Search
 

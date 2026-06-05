@@ -25,7 +25,7 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 
 **Rust core, first-class Python and JVM.** The write/search path is pure Rust (zero GC pauses, no JVM heap pressure). Python gets zero-copy PyArrow `RecordBatch` results. Spark, Trino, and Flink get a JNA C-ABI bridge — four exported functions shared across all three JVM plugins.
 
-**Storage-efficient at scale.** F16 quantization halves vector storage vs. F32. Product Quantization (IVF-PQ) reduces the index footprint 10–100× for S3-resident workloads where sequential reads are cheap. **RaBitQ** achieves 16× compression over F16 (1 bit/dim = 200 bytes/vector at dim=1536) via random rotation + XOR/popcount — better recall than naive binary quantization, with no graph construction overhead (~300k vec/s write throughput). PQ reranking recovers precision with a second pass over the raw F16 column.
+**Storage-efficient at scale.** F16 quantization halves vector storage vs. F32. Product Quantization (IVF-PQ) reduces the index footprint 10–100× for S3-resident workloads where sequential reads are cheap. **RaBitQ** achieves 16× compression over F16 (1 bit/dim = 200 bytes/vector at dim=1536) via modified Gram-Schmidt orthonormal rotation + XOR/popcount — better recall than naive binary quantization, with no graph construction overhead (~163k vec/s write throughput, SIFT-1M measured). PQ reranking recovers precision with a second pass over the raw F16 column.
 
 | | Iceberg alone | External vector DB | **AI-Lake** |
 |---|---|---|---|

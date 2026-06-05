@@ -852,17 +852,21 @@ Search phase  (top_k=10)
 
 ## 8I. RaBitQ flat index (`--rabitq`)
 
-RaBitQ uses 1 bit/dim (packed sign bits) after a random rotation — 16× smaller than F16 with better recall than naive binary quantization via an unbiased XOR/popcount IP estimator. No graph construction: write is one-pass O(n), making it the fastest index to build.
+RaBitQ uses 1 bit/dim (packed sign bits) after a **modified Gram-Schmidt orthonormal random rotation** — 16× smaller than F16 with better recall than naive binary quantization via an unbiased XOR/popcount IP estimator. No graph construction: write is one-pass O(n), making it the fastest index to build. Search is sequential O(N) flat scan with O(N) partial select; outer shard parallelism handles concurrency.
 
 ### When to use RaBitQ
 
 | Criterion | RaBitQ | HNSW | IVF-PQ |
 |---|---|---|---|
-| Write throughput | **~300k vec/s** | ~50k vec/s | ~200k vec/s |
+| Write throughput | **~163k vec/s** (SIFT-1M measured) | ~50k vec/s | ~200k vec/s |
 | Storage (dim=1536) | **200 bytes/vec** | ~10 MB/50k vecs | ~2 MB/50k vecs |
-| Recall@10 (with rerank) | 0.85–0.95 | ≥0.95 | 0.90–0.95 |
+| Recall@10 cosine (rerank≥3) | 0.85–0.95 | ≥0.95 | 0.90–0.95 |
+| Recall@10 Euclidean (rerank=3) | ~0.67 | ≥0.95 | 0.90–0.95 |
+| Search QPS (SIFT-1M, 10 shards) | ~101 | ~1400 | ~380 |
 | Graph build overhead | **None** | O(n log n) | O(n) k-means |
-| Best use case | High-insert, extreme compression | Online search | S3 cold storage |
+| Best use case | High-insert, extreme compression, cosine | Online search | S3 cold storage |
+
+RaBitQ is designed for **cosine** workloads. Euclidean recall is lower because the IP estimator adds approximation noise when converting to L2. Use `rerank_factor ≥ 10` for complex datasets; `rerank_factor ≥ 3` is sufficient for most real-world embedding models.
 
 Use RaBitQ when storage is the primary constraint and you can afford a second pass for reranking.
 
@@ -902,7 +906,7 @@ results = ailake.search(
     path="s3://my-lake/docs/",
     query=query_embedding,
     top_k=10,
-    rerank_factor=3,  # recommended: ≥ 3 for RaBitQ
+    rerank_factor=10,  # recommended: ≥ 3 for most datasets, ≥ 10 for complex/Euclidean
 )
 ```
 
