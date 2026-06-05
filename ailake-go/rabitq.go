@@ -131,17 +131,40 @@ func DeserializeRaBitQ(buf []byte) (*RaBitQIndex, error) {
 	return idx, nil
 }
 
-// buildProj regenerates the dim×dim projection matrix from the seed.
-// Uses the same algorithm as RaBitQCodebook::rebuild_proj in Rust:
-// column-normalized random Gaussian matrix.
+// buildProj regenerates the dim×dim projection matrix from the seed using
+// modified Gram-Schmidt orthogonalization (P^T·P = I), matching
+// RaBitQCodebook::rebuild_proj in Rust.
+//
+// WARNING: Go's math/rand PRNG (LCG-based) produces a different random sequence
+// than Rust's StdRng (ChaCha12). The resulting matrix will differ for the same
+// seed — cross-language RaBitQ search is currently BROKEN for files written by
+// the Rust SDK. TODO: replace with a ChaCha12-compatible PRNG (e.g. import
+// golang.org/x/crypto/chacha20 and implement the StdRng seed expansion).
 func (idx *RaBitQIndex) buildProj(dim int) {
 	proj := make([]float32, dim*dim)
 	rng := rand.New(rand.NewSource(int64(idx.Seed)))
+
+	// Fill with uniform [-1, 1] values (row-major: proj[row*dim + col]).
+	for i := range proj {
+		proj[i] = float32(rng.Float64()*2 - 1)
+	}
+
+	// Modified Gram-Schmidt: orthogonalize columns in place.
 	for col := 0; col < dim; col++ {
+		// Subtract projection onto all previous (already orthonormal) columns.
+		for prev := 0; prev < col; prev++ {
+			var dot float64
+			for row := 0; row < dim; row++ {
+				dot += float64(proj[row*dim+col]) * float64(proj[row*dim+prev])
+			}
+			for row := 0; row < dim; row++ {
+				proj[row*dim+col] -= float32(dot) * proj[row*dim+prev]
+			}
+		}
+		// Normalize to unit length.
 		var normSq float64
 		for row := 0; row < dim; row++ {
-			v := rng.Float64()*2 - 1
-			proj[row*dim+col] = float32(v)
+			v := float64(proj[row*dim+col])
 			normSq += v * v
 		}
 		inv := float32(1.0 / math.Sqrt(normSq+1e-24))
