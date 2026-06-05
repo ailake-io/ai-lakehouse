@@ -13,10 +13,9 @@
 use ailake_core::{AilakeError, AilakeResult, RowId, VectorMetric};
 use ailake_vec::{
     exact_distance,
-    rabitq::{encode_batch, RaBitQCodebook, RaBitQVec},
+    rabitq::{bits_from_signs, encode_batch, RaBitQCodebook, RaBitQVec},
 };
 use half::f16;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // ── Index ─────────────────────────────────────────────────────────────────────
@@ -101,8 +100,12 @@ impl RaBitQIndex {
     ///
     /// If `rerank_factor` > 1 and raw F16 vectors are available, the top
     /// `rerank_factor × top_k` candidates are reranked with exact F16 distances.
+    ///
+    /// Inner scan is intentionally sequential — callers (e.g. `SearchSession`) run
+    /// shard searches in parallel via rayon. Nesting par_iter here would spawn
+    /// O(shards × N) micro-tasks and cause scheduler overhead that destroys QPS.
     pub fn search(
-        &mut self,
+        &self,
         query: &[f32],
         top_k: usize,
         rerank_factor: Option<usize>,
@@ -110,28 +113,29 @@ impl RaBitQIndex {
         if self.entries.is_empty() {
             return vec![];
         }
-        // Ensure projection matrix is ready after deserialization.
-        if !self.codebook.is_ready() {
-            self.codebook.rebuild_proj();
-        }
+        debug_assert!(
+            self.codebook.is_ready(),
+            "RaBitQCodebook not initialized — call rebuild_proj() after deserialization"
+        );
 
         let (q_proj, q_scale) = self.codebook.prepare_query(query);
+        let b_q = bits_from_signs(&q_proj);
         let n = self.entries.len();
         let q_norm = query.iter().map(|x| x * x).sum::<f32>().sqrt();
 
-        // Coarse search: IP estimate via binary codes (parallel)
-        let mut scored: Vec<(usize, f32)> = (0..n)
-            .into_par_iter()
-            .map(|i| {
-                let ip = self
-                    .codebook
-                    .estimate_ip(&q_proj, q_scale, &self.entries[i]);
+        // Coarse scan: sequential — outer shard parallelism handles concurrency.
+        let mut scored: Vec<(usize, f32)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let ip = self.codebook.estimate_ip_binary(&b_q, q_scale, entry);
                 let dist = match self.metric {
                     VectorMetric::Cosine | VectorMetric::NormalizedCosine => 1.0 - ip,
-                    VectorMetric::DotProduct => -ip * q_norm * self.entries[i].norm,
+                    VectorMetric::DotProduct => -ip * q_norm * entry.norm,
                     VectorMetric::Euclidean => {
                         // ||q - x||² ≈ ||q||² + ||x||² - 2·ip·||q||·||x||
-                        let norm_x = self.entries[i].norm;
+                        let norm_x = entry.norm;
                         (q_norm * q_norm + norm_x * norm_x - 2.0 * ip * q_norm * norm_x)
                             .max(0.0)
                             .sqrt()
@@ -141,16 +145,24 @@ impl RaBitQIndex {
             })
             .collect();
 
-        scored.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let candidates = rerank_factor.unwrap_or(1).max(1) * top_k;
+        let cmp = |a: &(usize, f32), b: &(usize, f32)| {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+        };
+        // O(N) partial select to bring top `candidates` to front, then sort only those.
+        if candidates < n {
+            scored.select_nth_unstable_by(candidates - 1, cmp);
+            scored.truncate(candidates);
+        }
+        scored.sort_unstable_by(cmp);
 
         // Rerank top candidates with exact F16 distances if raw vectors available
-        let candidates = rerank_factor.unwrap_or(1).max(1) * top_k;
         let rerank_slice = &scored[..candidates.min(scored.len())];
 
         if let Some(ref raw) = self.raw_f16 {
             let dim = self.dim as usize;
             let mut reranked: Vec<(usize, f32)> = rerank_slice
-                .par_iter()
+                .iter()
                 .map(|&(i, _)| {
                     let db_f16 = &raw[i * dim..(i + 1) * dim];
                     let db_f32: Vec<f32> = db_f16.iter().map(|x| x.to_f32()).collect();
@@ -158,9 +170,7 @@ impl RaBitQIndex {
                     (i, d)
                 })
                 .collect();
-            reranked.sort_unstable_by(|a, b| {
-                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            reranked.sort_unstable_by(cmp);
             reranked
                 .into_iter()
                 .take(top_k)

@@ -36,13 +36,7 @@ impl AnyIndex {
         match self {
             AnyIndex::Hnsw(idx) => idx.search(query, top_k, ef),
             AnyIndex::IvfPq(idx) => idx.search(query, top_k, None),
-            AnyIndex::RaBitQ(idx) => {
-                // SAFETY: RaBitQIndex::search takes &mut self for lazy proj rebuild.
-                // We cast to *mut here — callers holding &AnyIndex cannot concurrently
-                // mutate the index, so this is safe.
-                let idx_mut = idx as *const RaBitQIndex as *mut RaBitQIndex;
-                unsafe { (*idx_mut).search(query, top_k, Some(3)) }
-            }
+            AnyIndex::RaBitQ(idx) => idx.search(query, top_k, Some(3)),
         }
     }
 

@@ -50,19 +50,35 @@ impl RaBitQCodebook {
         let dim = self.dim;
         let mut rng = StdRng::seed_from_u64(self.seed);
 
-        // Generate dim×dim random Gaussian matrix with each column normalized
-        // to unit length — yields an approximately orthogonal (isometric) map.
-        // True QR is O(dim³) which is impractical for dim=1536; column-normalized
-        // Gaussian is sufficient for the sign-quantization use case.
+        // Generate an orthogonal dim×dim matrix via modified Gram-Schmidt.
+        // Columns are orthonormal: P^T·P = I. O(D²) per column = O(D³) total.
+        // For D=128: ~2M ops (negligible); for D=1536: ~3.6B ops — if this
+        // ever becomes a bottleneck, replace with Randomized Hadamard Transform.
         let mut proj = vec![0.0f32; dim * dim];
+
+        // Fill with random Gaussian entries (row-major: proj[row*dim + col])
+        for x in proj.iter_mut() {
+            *x = rng.gen::<f32>() * 2.0 - 1.0;
+        }
+
+        // Modified Gram-Schmidt: orthogonalize columns in place.
         for col in 0..dim {
-            let mut norm_sq = 0.0f32;
-            for row in 0..dim {
-                let v: f32 = rng.gen::<f32>() * 2.0 - 1.0;
-                proj[row * dim + col] = v;
-                norm_sq += v * v;
+            // Subtract projection of this column onto all previous columns.
+            for prev in 0..col {
+                let dot: f32 = (0..dim)
+                    .map(|row| proj[row * dim + col] * proj[row * dim + prev])
+                    .sum();
+                for row in 0..dim {
+                    let p = proj[row * dim + prev];
+                    proj[row * dim + col] -= dot * p;
+                }
             }
-            let inv = 1.0 / norm_sq.sqrt().max(1e-12);
+            // Normalize to unit length.
+            let norm: f32 = (0..dim)
+                .map(|row| proj[row * dim + col] * proj[row * dim + col])
+                .sum::<f32>()
+                .sqrt();
+            let inv = 1.0 / norm.max(1e-12);
             for row in 0..dim {
                 proj[row * dim + col] *= inv;
             }
@@ -122,13 +138,13 @@ impl RaBitQCodebook {
         (pq, scale)
     }
 
-    /// Estimate inner product between a prepared query and a database entry.
+    /// Estimate inner product using pre-binarized query codes.
     ///
-    /// `q_proj`: output of `prepare_query().0`
-    /// `q_scale`: output of `prepare_query().1`
-    pub fn estimate_ip(&self, q_proj: &[f32], q_scale: f32, entry: &RaBitQVec) -> f32 {
+    /// `b_q`: `bits_from_signs(q_proj)` — compute **once** per query, reuse for all entries.
+    /// `q_scale`: output of `prepare_query().1`.
+    /// This avoids recomputing `bits_from_signs` inside the parallel search loop.
+    pub fn estimate_ip_binary(&self, b_q: &[u8], q_scale: f32, entry: &RaBitQVec) -> f32 {
         let dim = self.dim;
-        let b_q = bits_from_signs(q_proj);
         let hamming: u32 = b_q
             .iter()
             .zip(entry.code.iter())
@@ -136,6 +152,18 @@ impl RaBitQCodebook {
             .sum();
         // Unbiased IP estimator: (1 - 2H/D) * s_q * s_x
         (1.0 - 2.0 * hamming as f32 / dim as f32) * q_scale * entry.scale
+    }
+
+    /// Estimate inner product between a prepared query and a database entry.
+    ///
+    /// `q_proj`: output of `prepare_query().0`
+    /// `q_scale`: output of `prepare_query().1`
+    ///
+    /// Prefer [`estimate_ip_binary`] when calling in a tight loop — it avoids
+    /// recomputing `bits_from_signs` for every entry.
+    pub fn estimate_ip(&self, q_proj: &[f32], q_scale: f32, entry: &RaBitQVec) -> f32 {
+        let b_q = bits_from_signs(q_proj);
+        self.estimate_ip_binary(&b_q, q_scale, entry)
     }
 }
 
