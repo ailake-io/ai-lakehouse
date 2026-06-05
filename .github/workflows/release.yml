@@ -2,8 +2,8 @@ name: Release
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
+  # push:
+  #   branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -187,10 +187,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$TAG" \
-            "spark-plugin/build/libs/spark-plugin-${VERSION}-plugin.jar" \
-            "trino-plugin/build/libs/trino-plugin-${VERSION}-plugin.jar" \
-            "ailake-flink/build/libs/ailake-flink-${VERSION}-plugin.jar" \
-            "target/release/libailake_jni.so" \
+            spark-plugin/build/libs/spark-plugin-*-plugin.jar \
+            trino-plugin/build/libs/trino-plugin-*-plugin.jar \
+            ailake-flink/build/libs/ailake-flink-*-plugin.jar \
+            target/release/libailake_jni.so \
             --clobber
 
   publish-airflow:
