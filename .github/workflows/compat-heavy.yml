@@ -21,21 +21,35 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Build fixture
-        env:
-          COMPAT_FIXTURE_PATH: /tmp/ailake-spark-fixture
+        run: cargo run --example write_fixture -p ailake-query
+
+      - name: Set up Python venv
         run: |
-          rm -rf /tmp/ailake-spark-fixture
-          cargo run --example write_fixture -p ailake-query
+          rm -rf /tmp/spark-venv
+          python3.12 -m venv /tmp/spark-venv
+          /tmp/spark-venv/bin/pip install \
+            --index-url https://pypi.org/simple/ \
+            "pyspark<4.0" pyarrow
 
       - name: Check Spark Parquet compatibility (direct read)
         run: |
-          cat > /tmp/spark_parquet_compat.py << 'PYEOF'
+          unset SPARK_HOME
+          export PYSPARK_PYTHON=/tmp/spark-venv/bin/python3
+          export SPARK_LOCAL_IP=127.0.0.1
+          /tmp/spark-venv/bin/python3 - <<'EOF'
           import sys, pathlib
           from pyspark.sql import SparkSession
 
-          fixture_dir = pathlib.Path("/tmp/ailake-spark-fixture")
+          fixture_dir = pathlib.Path("./compat-fixture")
           expected = int((fixture_dir / "fixture_rows.txt").read_text().strip())
           parquet_paths = [
               p.strip()
@@ -70,25 +84,18 @@ jobs:
 
           print(f"PASS (Parquet): Spark read {total} rows, schema={cols}, id=({id_min}, {id_max})")
           spark.stop()
-          PYEOF
-
-          # Use Docker image to avoid pip network dependency.
-          # Fixture written to /tmp/ailake-spark-fixture so absolute paths in
-          # Parquet/Iceberg metadata resolve identically inside the container.
-          docker run --rm \
-            -v "/tmp/ailake-spark-fixture:/tmp/ailake-spark-fixture:ro" \
-            -v "/tmp/spark_parquet_compat.py:/test.py:ro" \
-            -e SPARK_LOCAL_IP=127.0.0.1 \
-            bitnami/spark:3.5 \
-            python3 /test.py
+          EOF
 
       - name: Check Spark + Iceberg HadoopCatalog (SQL query)
         run: |
-          cat > /tmp/spark_iceberg_compat.py << 'PYEOF'
+          unset SPARK_HOME
+          export PYSPARK_PYTHON=/tmp/spark-venv/bin/python3
+          export SPARK_LOCAL_IP=127.0.0.1
+          /tmp/spark-venv/bin/python3 - <<'EOF'
           import sys, os, pathlib
           from pyspark.sql import SparkSession
 
-          fixture_dir = pathlib.Path("/tmp/ailake-spark-fixture")
+          fixture_dir = pathlib.Path("./compat-fixture").resolve()
           expected = int((fixture_dir / "fixture_rows.txt").read_text().strip())
 
           spark = (
@@ -126,6 +133,7 @@ jobs:
           assert id_min == 0, f"FAIL: min id {id_min}"
           assert id_max == expected - 1, f"FAIL: max id {id_max}"
 
+          # Verify schema via Iceberg catalog
           cols = spark.sql(
               "SELECT * FROM ailake.default.compat_test LIMIT 1"
           ).columns
@@ -136,22 +144,7 @@ jobs:
               f"PASS (Iceberg SQL): {count} rows, id={id_min}..{id_max}, schema={cols}"
           )
           spark.stop()
-          PYEOF
-
-          # Mount host Maven/Ivy2 cache so spark.jars.packages resolves from
-          # local cache without requiring network access to Maven Central.
-          docker run --rm \
-            -v "/tmp/ailake-spark-fixture:/tmp/ailake-spark-fixture:ro" \
-            -v "/tmp/spark_iceberg_compat.py:/test.py:ro" \
-            -v "${HOME}/.m2:/root/.m2" \
-            -v "${HOME}/.ivy2:/root/.ivy2" \
-            -e SPARK_LOCAL_IP=127.0.0.1 \
-            bitnami/spark:3.5 \
-            python3 /test.py
-
-      - name: Cleanup
-        if: always()
-        run: rm -rf /tmp/ailake-spark-fixture /tmp/spark_parquet_compat.py /tmp/spark_iceberg_compat.py
+          EOF
 
   compat-trino:
     name: compat-trino
