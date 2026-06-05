@@ -1,35 +1,19 @@
 name: Publish Python
 
+# Manual fallback only. The canonical pypi-linux / pypi-windows / pypi-sdist /
+# pypi-publish jobs live in release.yml (needs: release) where they have direct
+# access to the release job outputs. Use this workflow to re-publish wheels to
+# an existing release without rerunning the full release pipeline.
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows: ["Release"]
-    types: [completed]
-    branches: [main]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  # When triggered by workflow_run, abort if the Release workflow failed.
-  guard:
-    name: Guard — release must have succeeded
-    runs-on: [self-hosted, Linux, X64]
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
-    steps:
-      - name: Release workflow status
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            echo "Triggered by Release workflow — conclusion: ${{ github.event.workflow_run.conclusion }}"
-          else
-            echo "Triggered manually via workflow_dispatch"
-          fi
-
   linux:
     name: Build Linux (${{ matrix.target }})
-    needs: guard
+    runs-on: [self-hosted, Linux, X64]
     runs-on: [self-hosted, Linux, X64]
     strategy:
       matrix:
@@ -102,7 +86,6 @@ jobs:
 
   windows:
     name: Build Windows (x86_64)
-    needs: guard
     runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v6
@@ -143,7 +126,6 @@ jobs:
 
   sdist:
     name: Build sdist
-    needs: guard
     runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Fix Docker-owned file permissions
