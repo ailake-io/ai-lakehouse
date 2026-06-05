@@ -400,7 +400,7 @@ feat(ailake-index): add IVF-PQ adaptive nlist selection
 ### What happens after merge
 
 - `develop` receives the PR.
-- When ready for release, maintainers bump versions, update CHANGELOG, run CI and Compat Heavy, then merge to `main` — `release.yml` fires automatically on the merge and publishes crates, JVM plugins, Airflow provider, and Python wheels in a sequential chain (see [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md#manual-actions-trigger-order-pre-release)).
+- When ready for release, maintainers update CHANGELOG, run CI and Compat Heavy, then merge to `main` — `release.yml` fires automatically, auto-bumps the patch version in all `Cargo.toml` files, creates the git tag, and publishes crates, JVM plugins, Airflow provider, and Python wheels in a sequential chain. No manual version edits needed (see [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md#manual-actions-trigger-order-pre-release)).
 
 ---
 

@@ -762,21 +762,28 @@ Steps 4 and 5 require the Windows self-hosted GPU runner — can run in parallel
 
 ### `release.yml` sequential chain
 
-`release.yml` is a single `workflow_dispatch` that runs everything in order:
+`release.yml` triggers on `push: branches: [main]` (automatic) and `workflow_dispatch` (manual).
+
+The `release` job auto-bumps the patch version before tagging — **no manual version edits required**:
+
+1. Reads the latest semver tag (`v*.*.*`) and increments the patch component (`v0.0.11` → `v0.0.12`).
+2. Updates every `Cargo.toml` (crate version + inter-crate deps) via `sed`.
+3. Commits the bump with `[skip ci]` and pushes to `main` — `[skip ci]` prevents a second workflow run.
+4. Creates the git tag and GitHub Release on the bumped commit.
+5. Runs the full publish chain sequentially.
 
 ```
-release          → creates git tag + GitHub Release
-  └── publish-crates   → cargo publish (ailake-core … ailake-cli, in dependency order)
-        └── publish-jvm      → fat-JARs (Spark/Trino/Flink) + libailake_jni.so → gh release upload
-              └── publish-airflow  → apache-airflow-providers-ailake wheel → PyPI + gh release upload
-                    └── pypi-linux     → ailake wheel Linux x86_64 then aarch64 (max-parallel: 1)
-                          └── pypi-macos     → [if: false — no macOS runner yet]
-                                └── pypi-windows   → ailake wheel Windows x86_64
-                                      └── pypi-sdist     → source distribution
-                                            └── pypi-publish   → twine upload → PyPI + gh release upload
+merge develop → main  (or workflow_dispatch)
+  └── release job
+        ├── patch+1 from latest tag → bump all Cargo.toml → commit [skip ci] → push main
+        ├── git tag vX.Y.Z → push
+        ├── gh release create
+        └── publish-crates → publish-jvm → publish-airflow
+              └── pypi-linux (x86_64 → aarch64) → pypi-macos [disabled] → pypi-windows
+                    └── pypi-sdist → pypi-publish
 ```
 
-If any job fails, re-run only that job (and its dependents) — the GitHub Release and git tag already exist.
+If any publish job fails, re-run only that job and its dependents — the tag and GitHub Release already exist.
 
 **Fallback workflows** (re-publish without rerunning the full chain):
 
