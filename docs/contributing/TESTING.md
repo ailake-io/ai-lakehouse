@@ -756,7 +756,7 @@ All CI workflows are `workflow_dispatch`. Trigger in this order — each step mu
 | 4 | **CI GPU** (`ci-gpu.yml`) | GPU unit tests on Windows self-hosted runner (CUDA/ROCm); skips gracefully if `AILAKE_GPU_BACKEND=none` | Must pass (on GPU runner) |
 | 5 | **CI GPU Data** (`ci-gpu-data.yml`) | GPU data integration tests on Windows self-hosted runner — recall@10 ≥ 99% vs CPU brute-force | Must pass (on GPU runner) |
 | 6 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
-| 7 | **Release** (`release.yml`) | Single workflow — runs all publishing steps sequentially (see chain below) | Steps 1–6 green |
+| 7 | **Release** (`release.yml`) | Triggered automatically on merge to `main` — runs all publishing steps sequentially (see chain below). Can also be triggered manually via `workflow_dispatch`. | Steps 1–6 green |
 
 Steps 4 and 5 require the Windows self-hosted GPU runner — can run in parallel with steps 2 and 3.
 
