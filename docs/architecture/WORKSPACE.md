@@ -406,8 +406,8 @@ Phase 4 complete.
 
 Delivered in Phase 5:
 
-- **`ailake-go`** — Native Go SDK: Iceberg `metadata.json` reading, Parquet scan via `parquet-go`, vector search over pre-built indexes, `SearchSession` multi-query mode
-- **`ailake-cpp`** — C++17 header-only SDK: `AilakeReader`, `AilakeWriter`, `VectorSearch`; hardware detection matching Rust (CUDA → ROCm → CPU SIMD); `ailake-cpp/src/catalog.cpp` + `search.cpp`
+- **`ailake-go`** — Native Go SDK: Iceberg `metadata.json` reading, Parquet scan via `parquet-go`, vector search over pre-built indexes, `SearchSession` multi-query mode. RaBitQ support: `chacha12.go` (ChaCha12 PRNG + splitmix64 seed expansion matching Rust `StdRng::seed_from_u64`), `DeserializeRaBitQ`, `(RaBitQIndex).Search` with F16 reranking.
+- **`ailake-cpp`** — C++17 header-only SDK: `AilakeReader`, `AilakeWriter`, `VectorSearch`; hardware detection matching Rust (CUDA → ROCm → CPU SIMD); `ailake-cpp/src/catalog.cpp` + `search.cpp`. RaBitQ support: `chacha12.hpp` (`ChaCha12Rng` + `splitmix64_expand`), `rabitq.hpp` (`deserialize_rabitq`, `rabitq_search`), `kFlagIndexRaBitQ=0x0002`, `SearchOptions::rabitq_rerank_factor`.
 - **`ailake-cli`: `ailake serve`** — HTTP JSON server exposing write/search/catalog over REST; enables universal access from any language without FFI
 - **`apache-airflow-providers-ailake`** — Airflow 2.x/3.x provider package:
   - `AilakeHook` — connection to AI-Lake table on object storage

@@ -265,7 +265,7 @@ via `RaBitQSerializer`. RaBitQ is a **flat index** — no graph structure.
 
 > **Storage**: 1 bit/dim per vector (packed into `ceil(dim/8)` bytes) + 8 bytes overhead per vector (norm + scale). For dim=1536: **200 bytes/vector** vs 3 072 bytes for F16 — **15× compression**. Optional raw F16 vectors stored alongside for exact reranking.
 
-> **Rotation matrix**: a `dim × dim` **modified Gram-Schmidt orthonormal matrix** (P^T · P = I) is generated deterministically from `seed` at runtime. It is **not** serialized — only `seed` is stored. Readers MUST regenerate the matrix via `RaBitQCodebook::rebuild_proj(seed, dim)` before searching. Orthonormal projection preserves inner products exactly (unit sphere → unit sphere), giving better recall than a column-normalized Gaussian.
+> **Rotation matrix**: a `dim × dim` **modified Gram-Schmidt orthonormal matrix** (P^T · P = I) is generated deterministically from `seed` at runtime. It is **not** serialized — only `seed` is stored. Readers MUST regenerate the matrix using **Rust's `StdRng::seed_from_u64` PRNG sequence**: splitmix64 seed expansion (4 rounds, LE) → 32-byte ChaCha12 key → 6 double-round ChaCha12 blocks → floats via `(u32>>9)|0x3f800000` as f32 − 1.0 (Standard dist), scaled ×2−1. Cross-language implementations in C++ (`chacha12.hpp`) and Go (`chacha12.go`) implement this exact sequence. A different PRNG produces an incompatible projection space and recall ≈ 0%.
 
 Binary layout:
 
@@ -636,16 +636,18 @@ The AI-Lake format is designed so that any language can read and search
 AI-Lake files by implementing §15's bincode decoder and the AILK header parser
 (§3). No dependency on the Rust crate is required.
 
-| Language | Module | AILK header | Bincode decoder | HNSW search | IVF-PQ search |
-|----------|--------|-------------|-----------------|-------------|---------------|
-| **Rust** | `ailake-file`, `ailake-index` | `AilakeHeader::from_bytes` | `HnswSerializer`, `IvfPqSerializer` | `HnswIndex::search` | `IvfPqIndex::search` |
-| **C++17** | `ailake-cpp/include/ailake/` | `footer.hpp` → `AilakeHeader::parse` | `bincode.hpp` → `BincodeReader` | `hnsw.hpp` → `deserialize_hnsw` + `hnsw_search` | `ivfpq.hpp` → `deserialize_ivfpq` + `ivfpq_search` |
-| **Go** | `ailake-go/` | `footer.go` → `ParseHeaderBytes` | `bincode.go` → `bincodeReader` | `hnsw.go` → `DeserializeHnsw` + `(HnswIndex).Search` | `ivfpq.go` → `DeserializeIvfPq` + `(IvfPqIndex).Search` |
+| Language | Module | AILK header | Bincode decoder | HNSW search | IVF-PQ search | RaBitQ search |
+|----------|--------|-------------|-----------------|-------------|---------------|---------------|
+| **Rust** | `ailake-file`, `ailake-index` | `AilakeHeader::from_bytes` | `HnswSerializer`, `IvfPqSerializer` | `HnswIndex::search` | `IvfPqIndex::search` | `RaBitQSerializer` + `RaBitQIndex::search` |
+| **C++17** | `ailake-cpp/include/ailake/` | `footer.hpp` → `is_rabitq()` | `bincode.hpp` → `BincodeReader` | `hnsw.hpp` → `hnsw_search` | `ivfpq.hpp` → `ivfpq_search` | `rabitq.hpp` → `deserialize_rabitq` + `rabitq_search`; `chacha12.hpp` → `ChaCha12Rng` |
+| **Go** | `ailake-go/` | `footer.go` → `IsRaBitQ()` | `bincode.go` → `bincodeReader` | `hnsw.go` → `(HnswIndex).Search` | `ivfpq.go` → `(IvfPqIndex).Search` | `rabitq.go` → `DeserializeRaBitQ` + `(RaBitQIndex).Search`; `chacha12.go` → `chacha12Rng` |
 
 All three implementations follow the same read algorithm (§9) and enforce the
 same integrity invariants (§10). The C++ and Go SDKs were independently
 verified against the Rust reference implementation using the shared compat
 fixture (`ailake-query/examples/write_fixture.rs`).
+
+> **RNG compatibility**: RaBitQ requires regenerating the projection matrix P from `seed` — all implementations MUST use the same PRNG. C++ and Go use `chacha12.hpp`/`chacha12.go` implementing Rust's `StdRng::seed_from_u64`: splitmix64 seed expansion (u64 → 32-byte key, 4 rounds) + ChaCha12 block cipher (6 double rounds, Bernstein layout) + `Standard` float distribution (`f32::from_bits((u32>>9)|0x3f800000) - 1.0`). Any new language binding MUST implement this sequence to maintain cross-language correctness.
 
 ### 16.1 Bootstrap sequence (language-agnostic)
 
