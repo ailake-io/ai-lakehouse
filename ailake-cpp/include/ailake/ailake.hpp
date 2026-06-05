@@ -17,6 +17,7 @@
 
 #include "footer.hpp"
 #include "bincode.hpp"
+#include "chacha12.hpp"
 #include "distance.hpp"
 #include "hardware.hpp"
 #include "hnsw.hpp"

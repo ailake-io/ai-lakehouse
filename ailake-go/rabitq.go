@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
-	"math/rand"
 	"sort"
 )
 
@@ -135,18 +134,17 @@ func DeserializeRaBitQ(buf []byte) (*RaBitQIndex, error) {
 // modified Gram-Schmidt orthogonalization (P^T·P = I), matching
 // RaBitQCodebook::rebuild_proj in Rust.
 //
-// WARNING: Go's math/rand PRNG (LCG-based) produces a different random sequence
-// than Rust's StdRng (ChaCha12). The resulting matrix will differ for the same
-// seed — cross-language RaBitQ search is currently BROKEN for files written by
-// the Rust SDK. TODO: replace with a ChaCha12-compatible PRNG (e.g. import
-// golang.org/x/crypto/chacha20 and implement the StdRng seed expansion).
+// Uses ChaCha12 PRNG seeded via splitmix64 expansion, matching Rust's
+// StdRng::seed_from_u64. The float sequence is identical to Rust's
+// gen::<f32>() * 2.0 - 1.0 via Standard distribution.
 func (idx *RaBitQIndex) buildProj(dim int) {
 	proj := make([]float32, dim*dim)
-	rng := rand.New(rand.NewSource(int64(idx.Seed)))
+	rng := newChaCha12FromSeed(idx.Seed)
 
-	// Fill with uniform [-1, 1] values (row-major: proj[row*dim + col]).
+	// Fill with uniform [-1, 1) values (row-major: proj[row*dim + col]).
+	// Matches Rust: rng.gen::<f32>() * 2.0 - 1.0
 	for i := range proj {
-		proj[i] = float32(rng.Float64()*2 - 1)
+		proj[i] = rng.nextF32()
 	}
 
 	// Modified Gram-Schmidt: orthogonalize columns in place.

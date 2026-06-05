@@ -5,22 +5,17 @@
 //
 // Rotation matrix: modified Gram-Schmidt orthonormal (P^T·P = I), matching
 // ailake-vec/src/rabitq.rs rebuild_proj().
-//
-// WARNING: std::mt19937_64 produces different sequences than Rust StdRng
-// (ChaCha12). For the same seed, this implementation generates a different
-// projection matrix than the Rust/Go SDKs — cross-language RaBitQ search is
-// currently BROKEN for files written by the Rust SDK.
-// TODO: replace std::mt19937_64 with a ChaCha12-compatible PRNG that matches
-// Rust's StdRng::seed_from_u64 seed expansion.
+// RNG: ChaCha12 via chacha12.hpp, seeded with splitmix64 expansion —
+// identical float sequence to Rust StdRng::seed_from_u64 (rand 0.8+).
 #pragma once
 
 #include "bincode.hpp"
+#include "chacha12.hpp"
 #include "distance.hpp"
 #include "hnsw.hpp" // SearchResult
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <random>
 #include <vector>
 
 namespace ailake {
@@ -64,16 +59,17 @@ struct RaBitQIndex {
 
 // ---------------------------------------------------------------------------
 // build_proj — regenerate the dim×dim rotation matrix from seed.
+// Uses ChaCha12Rng seeded via splitmix64, matching Rust StdRng::seed_from_u64.
+// Float sequence identical to Rust gen::<f32>() * 2.0 - 1.0 (Standard dist).
 // ---------------------------------------------------------------------------
 
 inline void build_proj(RaBitQIndex& idx) {
     const size_t dim = idx.dim;
     idx.proj.assign(dim * dim, 0.f);
 
-    // Fill row-major with uniform [-1, 1] values.
-    std::mt19937_64 rng(idx.seed);
-    std::uniform_real_distribution<float> udist(-1.f, 1.f);
-    for (auto& v : idx.proj) v = udist(rng);
+    // Fill row-major with uniform [-1, 1) values matching Rust's sequence.
+    ChaCha12Rng rng(idx.seed);
+    for (auto& v : idx.proj) v = rng.next_f32();
 
     // Modified Gram-Schmidt: orthogonalize columns in place.
     for (size_t col = 0; col < dim; ++col) {
