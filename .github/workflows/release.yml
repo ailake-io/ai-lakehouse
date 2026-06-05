@@ -128,7 +128,7 @@ jobs:
 
   publish-jvm:
     name: Build and upload JVM plugin JARs
-    needs: release
+    needs: [release, publish-crates]
     runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
@@ -172,7 +172,7 @@ jobs:
 
   publish-airflow:
     name: Build and publish Airflow provider
-    needs: release
+    needs: [release, publish-jvm]
     runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
@@ -210,11 +210,12 @@ jobs:
 
   pypi-linux:
     name: Build Python wheel — Linux (${{ matrix.target }})
-    needs: release
+    needs: publish-airflow
     runs-on: [self-hosted, Linux, X64]
     strategy:
       matrix:
         target: [x86_64, aarch64]
+      max-parallel: 1
     steps:
       - name: Fix Docker-owned file permissions
         run: |
@@ -248,15 +249,16 @@ jobs:
 
   pypi-macos:
     # Disabled: no macOS self-hosted runner available.
-    # To enable: remove `if: false`, add `pypi-macos` to pypi-publish needs,
-    # and set runs-on to the macOS runner label (e.g. [self-hosted, macOS, ARM64]).
+    # To enable: remove `if: false`, set runs-on to the macOS runner label
+    # (e.g. [self-hosted, macOS, ARM64]), and add `pypi-macos` to pypi-publish needs.
     name: Build Python wheel — macOS (${{ matrix.target }})
     if: false
-    needs: release
+    needs: pypi-linux
     runs-on: macos-latest
     strategy:
       matrix:
         target: [x86_64-apple-darwin, aarch64-apple-darwin]
+      max-parallel: 1
     steps:
       - uses: actions/checkout@v6
 
@@ -284,7 +286,7 @@ jobs:
 
   pypi-windows:
     name: Build Python wheel — Windows (x86_64)
-    needs: release
+    needs: pypi-macos
     runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v6
@@ -325,7 +327,7 @@ jobs:
 
   pypi-sdist:
     name: Build Python sdist
-    needs: release
+    needs: pypi-windows
     runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Fix Docker-owned file permissions
@@ -353,7 +355,7 @@ jobs:
 
   pypi-publish:
     name: Publish Python wheel to PyPI
-    needs: [release, pypi-linux, pypi-windows, pypi-sdist]
+    needs: [release, pypi-linux, pypi-macos, pypi-windows, pypi-sdist]
     runs-on: [self-hosted, Linux, X64]
     permissions:
       actions: read
