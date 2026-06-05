@@ -163,3 +163,41 @@ jobs:
             "ailake-flink/build/libs/ailake-flink-${VERSION}-plugin.jar" \
             "target/release/libailake_jni.so" \
             --clobber
+
+  publish-airflow:
+    name: Build and publish Airflow provider
+    needs: release
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Build wheel and sdist
+        run: |
+          pip install hatchling
+          cd airflow-providers-ailake
+          python -m hatchling build --target wheel --target sdist
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          pip install twine
+          twine upload --skip-existing airflow-providers-ailake/dist/*
+
+      - name: Upload wheel to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            airflow-providers-ailake/dist/*.whl \
+            airflow-providers-ailake/dist/*.tar.gz \
+            --clobber

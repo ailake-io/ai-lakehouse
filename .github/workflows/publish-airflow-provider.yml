@@ -1,25 +1,35 @@
 name: Publish Airflow Provider
 
+# Manual fallback only. The canonical publish-airflow job lives in release.yml
+# (needs: release) where it has direct access to the release job outputs.
+# Use this workflow to re-publish the Airflow provider without rerunning the
+# full release pipeline.
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach assets to (e.g. v0.1.0). Leave empty to derive from Cargo.toml."
+        required: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   publish:
-    name: Build and publish apache-airflow-providers-ailake to PyPI
+    name: Build and publish apache-airflow-providers-ailake to PyPI (manual)
     runs-on: [self-hosted, Linux, X64]
     permissions:
-      contents: write   # needed to upload wheel asset to GitHub Release
-    # After creating a PyPI account, create a "pypi" environment in
-    # Settings → Environments with PYPI_API_TOKEN as an environment secret.
-    # Uncomment below to add a manual approval gate before publish runs.
-    # environment:
-    #   name: pypi
-    #   url: https://pypi.org/p/apache-airflow-providers-ailake
+      contents: write
     steps:
       - uses: actions/checkout@v6
+
+      - name: Resolve tag
+        id: meta
+        run: |
+          VERSION=$(grep '^version' ailake-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          TAG="${{ github.event.inputs.tag }}"
+          [ -z "$TAG" ] && TAG="v$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         with:
@@ -40,11 +50,10 @@ jobs:
           twine upload --skip-existing airflow-providers-ailake/dist/*
 
       - name: Upload wheel to GitHub Release
-        run: |
-          VERSION=$(grep '^version' ailake-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          TAG="v$VERSION"
-          gh release upload "$TAG" airflow-providers-ailake/dist/*.whl \
-            airflow-providers-ailake/dist/*.tar.gz --clobber 2>/dev/null || \
-            echo "Warning: GitHub Release $TAG not found — run the Release workflow first."
         env:
           GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.meta.outputs.tag }}" \
+            airflow-providers-ailake/dist/*.whl \
+            airflow-providers-ailake/dist/*.tar.gz \
+            --clobber
