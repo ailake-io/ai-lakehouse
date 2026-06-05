@@ -21,14 +21,15 @@ static constexpr uint16_t kFormatVersion  = 1;
 static constexpr size_t   kHeaderSize     = 64;
 static constexpr size_t   kTrailerSize    = 24;
 
-// flags bit 0: index type
-static constexpr uint16_t kFlagIndexIvfPq = 0x0001;
+// index type flags (bits 0–1 of header.flags)
+static constexpr uint16_t kFlagIndexIvfPq  = 0x0001; // bit 0: IVF-PQ
+static constexpr uint16_t kFlagIndexRaBitQ = 0x0002; // bit 1: RaBitQ flat index
 
 // precision values
 enum class Precision : uint8_t { F32 = 0, F16 = 1, I8 = 2, Binary = 3 };
 
 // distance metric values
-enum class Metric : uint8_t { Cosine = 0, Euclidean = 1, DotProduct = 2 };
+enum class Metric : uint8_t { Cosine = 0, Euclidean = 1, DotProduct = 2, NormalizedCosine = 3 };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -76,7 +77,8 @@ struct AilakeHeader {
     uint64_t  hnsw_offset;     // relative to AILK section start
     uint64_t  hnsw_len;
 
-    bool is_ivf_pq() const noexcept { return (flags & kFlagIndexIvfPq) != 0; }
+    bool is_ivf_pq()  const noexcept { return (flags & kFlagIndexIvfPq)  != 0; }
+    bool is_rabitq()  const noexcept { return (flags & kFlagIndexRaBitQ) != 0; }
 };
 
 // Parse a 64-byte AILK header from buf.

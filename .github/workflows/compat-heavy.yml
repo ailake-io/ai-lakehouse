@@ -36,7 +36,9 @@ jobs:
         run: |
           rm -rf /tmp/spark-venv
           python3.12 -m venv /tmp/spark-venv
-          /tmp/spark-venv/bin/pip install "pyspark<4.0" pyarrow
+          /tmp/spark-venv/bin/pip install \
+            --index-url https://pypi.org/simple/ \
+            "pyspark<4.0" pyarrow
 
       - name: Check Spark Parquet compatibility (direct read)
         run: |

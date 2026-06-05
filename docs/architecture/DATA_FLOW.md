@@ -84,6 +84,98 @@ Invariant after commit:
 
 ---
 
+## Deferred write path (HNSW and IVF-PQ)
+
+`write_batch_deferred` (HNSW) and `write_batch_ivf_pq_deferred` (IVF-PQ) decouple Parquet write latency from index build time.
+
+```
+Caller
+  │
+  │  write_batch_deferred(batch, embeddings)
+  ▼
+TableWriter (fast path — Parquet only)
+  │
+  ├─► AilakeFileWriter::write_parquet_only()
+  │     → Parquet bytes, no AILK section
+  │
+  ├─► store.put(file_path, parquet_bytes)
+  │     → S3 PUT, returns in ~4s for 200k vec/s
+  │
+  ├─► catalog entry: IndexStatus::Indexing
+  │
+  └─► tokio::spawn (background task)
+        │
+        ├─► [IVF-PQ only] OnceCell::get_or_try_init
+        │     → first task trains codebook (k-means)
+        │     → subsequent tasks await and reuse shared codebook
+        │
+        ├─► build HNSW or IvfPqIndex::build_with_codebook
+        │
+        ├─► AilakeFileWriter::write (rewrite file with AILK section)
+        │
+        ├─► store.put (overwrite Parquet-only file with full AILK file)
+        │
+        └─► CAS retry loop:
+              load current snapshot → mark file Ready → commit Replace snapshot
+              verify Ready survived (sibling tasks may race) → retry if not
+```
+
+**Throughput**: write returns after the Parquet PUT — ~200k vec/s for both engines. Index builds in background without blocking ingestion.
+
+**`IndexStatus` lifecycle**: `Indexing` (set at commit time) → `Ready` (set by background task after AILK section is written and catalog updated). The `SearchSession` serves `Indexing` shards via flat scan (exact brute-force) until the transition completes. `Replace` commits overwrite the manifest list with the new complete state to avoid duplicate entries.
+
+---
+
+## RaBitQ write path (flat index, one-pass O(n))
+
+`write_batch` with `policy.rabitq = Some(RaBitQConfig)` — no background task, no graph construction.
+
+```
+Caller
+  │
+  │  write_batch(batch, embeddings)   ← policy.rabitq set
+  ▼
+AilakeFileWriter::new(policy)
+  │   ↳ auto-selects IndexType::RaBitQ from policy.rabitq
+  │
+  ├─► ailake-vec / RaBitQCodebook::new(dim, seed)
+  │     │  1. generate dim×dim modified Gram-Schmidt orthonormal matrix P (P^T·P = I)
+  │     │     (deterministic from seed — not stored on disk)
+  │     └─► returns: RaBitQCodebook
+  │
+  ├─► [for each vector v]
+  │     │  2. normalize v to unit L2 → v̂
+  │     │  3. project: P·v̂ → rotated (F32 vector)
+  │     │  4. sign bits → packed byte code (ceil(dim/8) bytes)
+  │     │  5. store norm(v) and scale = sum(|P·v̂|)/sqrt(dim)
+  │     └─► returns: RaBitQVec { code, norm, scale }
+  │
+  ├─► [if keep_raw=true]
+  │     │  6. quantize v → F16, store alongside codes
+  │     └─► enables exact reranking at search time
+  │
+  ├─► ailake-file: append AILK section
+  │     │  7. header: flags=0x0002 (FLAG_INDEX_RABITQ)
+  │     │  8. centroid blob
+  │     │  9. RaBitQ blob: bincode(RaBitQIndex { seed, entries, row_ids, raw_f16 })
+  │     │     NOTE: rotation matrix P is NOT stored — only seed is stored.
+  │     │           Readers regenerate P from seed before searching.
+  │     └─► returns: file bytes
+  │
+  └─► catalog commit (same flow as HNSW)
+```
+
+**Throughput**: ~163k vec/s (SIFT-1M measured; no k-means, no graph — encoding is one-pass). Search is sequential O(N) flat scan; outer shard parallelism handles concurrency.
+
+**Storage** (dim=1536 per vector):
+- Binary codes: `ceil(1536/8)` = 192 bytes
+- norm + scale: 8 bytes
+- raw F16 (optional): 3072 bytes
+- Total (keep_raw=true): ~3280 bytes — comparable to HNSW, but write is 6× faster.
+- Total (keep_raw=false): 200 bytes — 15× smaller than F16.
+
+---
+
 ## Read path — vector search
 
 ```mermaid
@@ -133,15 +225,22 @@ ailake-query / VectorScanner
   │   │     │  5b. write bytes to temp file
   │   │     └─► returns: tmp_file_path
   │   │
-  │   ├─► ailake-index / MmapLoader
-  │   │     │  6a. open tmp_file with memmap2::Mmap
-  │   │     │  6b. parse AI-Lake header (first 64 bytes)
-  │   │     │  6c. deserialize HNSW from graph section via bincode
-  │   │     │       (mmap-backed — only touched pages are loaded)
-  │   │     └─► returns: HnswIndex
+  │   ├─► ailake-index / MmapLoader or RaBitQSerializer
+  │   │     │  6a. open tmp_file (HNSW: via memmap2::Mmap; RaBitQ: load full blob)
+  │   │     │  6b. parse AI-Lake header flags:
+  │   │     │       flags & 0x0002 → RaBitQSerializer::from_bytes (rebuilds proj)
+  │   │     │       flags & 0x0001 → IvfPqSerializer::from_bytes
+  │   │     │       default         → MmapLoader::from_bytes (HNSW mmap)
+  │   │     └─► returns: AnyIndex (Hnsw | IvfPq | RaBitQ)
   │   │
-  │   └─► ailake-index / HnswIndex.search()
-  │         │  6d. run HNSW search: query → top_k × oversampling candidates
+  │   └─► AnyIndex::search(query, top_k, ef)
+  │         │  HNSW:   greedy graph traversal, candidate heap
+  │         │  IVF-PQ: coarse quantize, nprobe cells, ADC distance
+  │         │  RaBitQ: normalize query → project → binarize query once (estimate_ip_binary) →
+  │         │            sequential scan: XOR + popcount → IP estimate per entry →
+  │         │            O(N) select_nth_unstable_by for top candidates →
+  │         │            if raw_f16 present + rerank_factor > 1:
+  │         │              top (rerank_factor × k) candidates reranked with exact F16 distances
   │         └─► returns: Vec<(RowId, f32)>
   │
   ├─► merge results across all surviving files, global top-k sort

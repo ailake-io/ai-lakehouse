@@ -17,10 +17,7 @@ already indexed and ready for vector search.
 For engine demos (Trino + BigQuery emulator):
 
 ```bash
-docker compose \
-  -f tests/docker/compose-demo.yml \
-  -f tests/docker/compose-demo-engines.yml \
-  up -d
+docker compose -f tests/docker/compose-demo.yml --profile engines up -d
 ```
 
 See [`tests/docker/`](./tests/docker/) for full details.
@@ -49,8 +46,8 @@ python3 -c "import pyarrow; print(pyarrow.__version__)"
 ## 1. Clone and build
 
 ```bash
-git clone https://github.com/ThiagoLange/iceberg-ai-deltalakehouse.git
-cd iceberg-ai-deltalakehouse
+git clone https://github.com/ThiagoLange/ai-lakehouse.git
+cd ai-lakehouse
 
 # Default build — parallel CPU (rayon), no CUDA dependency
 cargo build --workspace
@@ -86,7 +83,7 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Should finish with `119 passed` (3 ignored — tests requiring an external server or PyArrow installed).
+Should finish with `112 passed` (2 ignored — doctests requiring live credentials or runtime context).
 
 ### Tests by crate
 
@@ -494,85 +491,64 @@ What the test validates:
 
 ## 8. Running benchmarks
 
-### 8A. SIFT-1M benchmark (ailake-bench)
+Benchmarks live in a separate repository:
+**https://github.com/ThiagoLange/ailake-benchmarks**
 
-Public benchmark with the SIFT-1M dataset (1M vectors, 128-dim Euclidean).
-
-**Dataset download** (~164 MB):
-```bash
-bash ailake-bench/scripts/download_sift1m.sh
-# Downloads to data/sift1m/
-```
-
-**Run:**
-```bash
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m
-```
-
-Expected result (CPU with AVX2, parallel HNSW build):
-```
-Write phase
-  Throughput    : ~2400 vec/s
-
-Build phase  (10 shards, parallel)
-  Build time    : ~155 s  (vs ~220 s single-threaded)
-
-Search phase  (top_k=10, ef=50)  [indexes pre-loaded]
-  Recall@10     : ~0.996
-  QPS           : ~450
-  Latency mean  : ~2.2 ms
-  Latency p99   : ~4.5 ms
-```
-
-Options:
-```bash
-# Limit base to 10k vectors for quick smoke-test
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --limit 10000
-
-# Adjust ef and top_k
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --top-k 10 --ef 100
-```
-
-### 8B. LanceDB benchmark (comparison)
+### 8A. Setup
 
 ```bash
-cargo run --release -p ailake-bench --features lancedb-bench -- \
-    --dataset-dir data/sift1m --engine lancedb
+git clone https://github.com/ThiagoLange/ailake-benchmarks.git
+cd ailake-benchmarks
+
+# Dataset download (~164 MB)
+bash scripts/download_sift1m.sh /data/sift1m
 ```
 
-To compare AI-Lake vs LanceDB side-by-side:
+### 8B. Run
 
 ```bash
-cargo run --release -p ailake-bench --features lancedb-bench -- \
-    --dataset-dir data/sift1m --engine all
-```
+# Default: AI-Lake HNSW deferred
+cargo run --release -- --dataset-dir /data/sift1m
 
-### 8C. pgvector benchmark (comparison)
+# Smoke-test (10k vectors)
+cargo run --release -- --dataset-dir /data/sift1m --limit 10000
 
-Requires PostgreSQL with `pgvector ≥ 0.5.0` extension (HNSW support).
+# IVF-PQ deferred
+cargo run --release -- --dataset-dir /data/sift1m --engine ailake-ivf-pq-deferred
 
-**Start PostgreSQL + pgvector via Docker:**
-```bash
-docker run -d --name pg-ailake \
-  -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 \
-  pgvector/pgvector:pg16
-```
+# HNSW M/ef comparison (M=8 vs M=16 default vs M=32)
+cargo run --release -- --dataset-dir /data/sift1m --engine ailake-hnsw-compare
 
-**Run pgvector benchmark alone:**
-```bash
-cargo run --release -p ailake-bench --features pgvector-bench -- \
-    --dataset-dir data/sift1m \
+# Compare vs LanceDB
+cargo run --release --features lancedb-bench -- \
+    --dataset-dir /data/sift1m --engine all
+
+# Compare vs pgvector
+cargo run --release --features pgvector-bench -- \
+    --dataset-dir /data/sift1m \
     --engine pgvector \
     --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
 ```
 
-**Full comparison AI-Lake + LanceDB + pgvector:**
-```bash
-cargo run --release -p ailake-bench --features lancedb-bench,pgvector-bench -- \
-    --dataset-dir data/sift1m \
-    --engine all \
-    --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
+Expected results (SIFT-1M, top_k=10, x86_64 AVX2 8-core):
+
+```
+Engine                    Write         Index build   Recall@10   QPS      p99
+──────────────────────────────────────────────────────────────────────────────
+AI-Lake HNSW deferred     199k vec/s    165s defer    0.9963      1365     1.96ms
+AI-Lake IVF-PQ deferred   251k vec/s    42.7s defer   0.9065      252      5.53ms
+AI-Lake Auto/HNSW         6.3k vec/s    159s inline   0.9960      1485     1.67ms
+LanceDB IVF-HNSW-SQ       530k vec/s    55s inline    0.8805      745     63.34ms
+```
+
+HNSW M/ef comparison (SIFT-1M, top_k=10):
+
+```
+Config              Index build   Recall@10   QPS    p99     Use case
+────────────────────────────────────────────────────────────────────
+M=8,  ef=100         55s          0.9850      2053   0.86ms  Low latency / high QPS
+M=16, ef=150 (def)  139s          0.9960      1366   1.28ms  General purpose
+M=32, ef=400        435s          0.9985       908   1.91ms  Max recall (medical, legal)
 ```
 
 Optional pgvector parameters:
@@ -588,7 +564,7 @@ Deep Lake free tier only supports exact search (brute-force). The script below m
 
 ```bash
 pip install deeplake numpy
-python3 ailake-bench/scripts/deeplake_bench.py \
+python3 scripts/deeplake_bench.py  # run from ailake-benchmarks repo \
     --dataset-dir data/sift1m \
     --limit 10000
 ```
@@ -713,7 +689,7 @@ assert_eq!(detect_backend(), HardwareBackend::AmdRocm);
 The `ailake-auto` engine prints the hardware profile before running:
 
 ```bash
-cargo run --release -p ailake-bench -- \
+cargo run --release -- \
     --dataset-dir data/sift1m --engine ailake-auto --limit 50000
 ```
 
@@ -800,16 +776,46 @@ cargo build --release
 
 ---
 
-## 8G. IVF-PQ benchmark (`--engine ailake-ivf-pq`)
+## 8G. HNSW M/ef tuning (`--hnsw-m`, `--hnsw-ef`)
+
+HNSW M and ef_construction are now per-table parameters stored in Iceberg metadata.
+
+```bash
+# Set at table creation time via CLI
+ailake create s3://my-lake/docs/ --dim 1536 --metric cosine \
+    --hnsw-m 32 --hnsw-ef 400
+
+# Or via Python
+writer = ailake.TableWriter("s3://my-lake/docs/",
+    metric="cosine", hnsw_m=32, hnsw_ef_construction=400)
+```
+
+| Parameter | Default | Range | Effect |
+|---|---|---|---|
+| `--hnsw-m` | 16 | 4–64 | Connections per node. Higher → better recall, more memory, slower build |
+| `--hnsw-ef` | 150 | 40–500 | Build candidate pool. Higher → better graph quality, slower build |
+
+Quick guide:
+
+| Goal | M | ef_construction |
+|---|---|---|
+| Low latency / max QPS | 8 | 100 |
+| General purpose (default) | 16 | 150 |
+| High recall (production RAG) | 24 | 200 |
+| Max recall (medical, legal) | 32 | 400 |
+
+`ef_search` (query-time) is separate — set via `SearchConfig.ef_search` (Rust) or the `--ef` flag in the benchmark.
+
+## 8H. IVF-PQ benchmark (`--engine ailake-ivf-pq`)
 
 IVF-PQ uses an index with inverted lists encoded by Product Quantization, instead of the HNSW graph. Index is 10-100× smaller — a good choice for S3 where sequential access is cheaper.
 
 ```bash
 # Basic benchmark (SIFT-1M, defaults: nlist=256, nprobe=8, pq_m=8)
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m --engine ailake-ivf-pq
+cargo run --release -- --dataset-dir data/sift1m --engine ailake-ivf-pq
 
 # Adjust parameters
-cargo run --release -p ailake-bench -- \
+cargo run --release -- \
     --dataset-dir data/sift1m \
     --engine ailake-ivf-pq \
     --ivf-nlist 512 \
@@ -817,7 +823,7 @@ cargo run --release -p ailake-bench -- \
     --ivf-pq-m 16
 
 # Full comparison AI-Lake HNSW + IVF-PQ + LanceDB + pgvector
-cargo run --release -p ailake-bench --features lancedb-bench,pgvector-bench -- \
+cargo run --release --features lancedb-bench,pgvector-bench -- \
     --dataset-dir data/sift1m \
     --engine all \
     --pgvector-url "host=localhost user=postgres password=postgres dbname=postgres"
@@ -841,6 +847,81 @@ Search phase  (top_k=10)
   QPS           : ~2100
   Index size    : ~5 MB  (vs ~80 MB HNSW for 1M vectors dim=128)
 ```
+
+---
+
+## 8I. RaBitQ flat index (`--rabitq`)
+
+RaBitQ uses 1 bit/dim (packed sign bits) after a **modified Gram-Schmidt orthonormal random rotation** — 16× smaller than F16 with better recall than naive binary quantization via an unbiased XOR/popcount IP estimator. No graph construction: write is one-pass O(n), making it the fastest index to build. Search is sequential O(N) flat scan with O(N) partial select; outer shard parallelism handles concurrency.
+
+### When to use RaBitQ
+
+| Criterion | RaBitQ | HNSW | IVF-PQ |
+|---|---|---|---|
+| Write throughput | **~163k vec/s** (SIFT-1M measured) | ~50k vec/s | ~200k vec/s |
+| Storage (dim=1536) | **200 bytes/vec** | ~10 MB/50k vecs | ~2 MB/50k vecs |
+| Recall@10 cosine (rerank≥3) | 0.85–0.95 | ≥0.95 | 0.90–0.95 |
+| Recall@10 Euclidean (rerank=3) | ~0.67 | ≥0.95 | 0.90–0.95 |
+| Search QPS (SIFT-1M, 10 shards) | ~101 | ~1400 | ~380 |
+| Graph build overhead | **None** | O(n log n) | O(n) k-means |
+| Best use case | High-insert, extreme compression, cosine | Online search | S3 cold storage |
+
+RaBitQ is designed for **cosine** workloads. Euclidean recall is lower because the IP estimator adds approximation noise when converting to L2. Use `rerank_factor ≥ 10` for complex datasets; `rerank_factor ≥ 3` is sufficient for most real-world embedding models.
+
+Use RaBitQ when storage is the primary constraint and you can afford a second pass for reranking.
+
+### CLI usage
+
+```bash
+# Create table with RaBitQ flat index
+ailake create s3://my-lake/docs/ --dim 1536 --metric cosine --rabitq
+
+# With custom seed (for reproducibility across shards)
+ailake create s3://my-lake/docs/ --dim 1536 --metric cosine \
+    --rabitq --rabitq-seed 42
+
+# Without raw F16 storage (extreme compression, no reranking)
+ailake create s3://my-lake/docs/ --dim 1536 --metric cosine \
+    --rabitq --rabitq-seed 42 --no-rabitq-keep-raw
+```
+
+### Python usage
+
+```python
+import ailake
+
+writer = ailake.TableWriter(
+    "s3://my-lake/docs/",
+    dim=1536,
+    metric="cosine",
+    rabitq=True,
+    rabitq_seed=42,       # same seed across all shards → comparable distances
+    rabitq_keep_raw=True, # keep F16 for reranking (recommended)
+)
+writer.write_batch(texts, embeddings)
+writer.commit()
+
+# Search with reranking: fetch top_30, rerank with raw F16, return top_10
+results = ailake.search(
+    path="s3://my-lake/docs/",
+    query=query_embedding,
+    top_k=10,
+    rerank_factor=10,  # recommended: ≥ 3 for most datasets, ≥ 10 for complex/Euclidean
+)
+```
+
+### Storage comparison (dim=1536, 1M vectors)
+
+| Index | Bytes/vector | Total (1M vecs) |
+|---|---|---|
+| F32 raw | 6 144 | 6 GB |
+| F16 raw | 3 072 | 3 GB |
+| HNSW graph (F16) | ~3 200 | ~3.2 GB |
+| IVF-PQ (M=48) | ~50 | ~50 MB |
+| **RaBitQ (no raw)** | **192** | **192 MB** |
+| RaBitQ + raw F16 | 3 264 | ~3.3 GB (codes + F16) |
+
+**Note**: with `keep_raw=False`, only the binary codes and norms are stored — 192 bytes/vec for dim=1536, with no reranking possible. With `keep_raw=True` (default), raw F16 vectors are also stored for reranking — total is similar to HNSW but with faster writes.
 
 ---
 
@@ -1891,7 +1972,7 @@ ailake-catalog/   Iceberg catalog: HadoopCatalog, RestCatalog, NessieCatalog, Jd
 ailake-store/     storage abstraction: LocalStore + ObjectStoreBackend (S3/GCS/Azure via object_store)
 ailake-query/     TableWriter (write_batch, write_batch_ivf_pq, write_batch_multi), MemTableWriter,
                   search() with geometric pruning, ContextAssembler, CompactionExecutor
-ailake-bench/     SIFT-1M benchmark: HNSW, IVF-PQ (--engine ailake-ivf-pq), LanceDB, pgvector
+ailake-benchmarks  SIFT-1M benchmark (separate repo): https://github.com/ThiagoLange/ailake-benchmarks
 ailake-py/        PyO3 bindings (outside workspace — compile with maturin)
 ailake-jni/       C-ABI cdylib via JNA for Spark, Trino, and Flink
 spark-plugin/     Spark 3.5 Catalyst strategy (Kotlin/Gradle)

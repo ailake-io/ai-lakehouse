@@ -21,7 +21,7 @@ use ailake_catalog::{
     hadoop::HadoopCatalog,
     provider::{CatalogProvider, TableIdent},
 };
-use ailake_core::{VectorMetric, VectorStoragePolicy};
+use ailake_core::{schema::RaBitQConfig as CoreRaBitQConfig, VectorMetric, VectorStoragePolicy};
 use ailake_query::{
     search as rs_search, Chunk, ContextAssembler, ContextAssemblerConfig, SearchConfig,
     TableWriter as RsTableWriter,
@@ -36,7 +36,14 @@ fn rt() -> PyResult<tokio::runtime::Runtime> {
 
 fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>) {
     let store: Arc<dyn Store> = Arc::new(LocalStore::new(path));
-    let catalog: Arc<dyn CatalogProvider> = Arc::new(HadoopCatalog::new(Arc::clone(&store), ""));
+    // Use a file:// URI as warehouse so that Iceberg metadata.json and manifest
+    // files contain absolute file:// paths. Required for Trino's Iceberg
+    // connector and any reader that resolves location URIs strictly.
+    // LocalStore::full_path strips the file:// prefix before I/O.
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let warehouse_uri = format!("file://{}", canonical.display());
+    let catalog: Arc<dyn CatalogProvider> =
+        Arc::new(HadoopCatalog::new(Arc::clone(&store), &warehouse_uri));
     (catalog, store)
 }
 
@@ -51,14 +58,36 @@ pub struct TableWriter {
 impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine"))]
-    fn new(path: &str, vector_column: &str, dim: u32, metric: &str) -> PyResult<Self> {
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, rabitq=false, rabitq_seed=0, rabitq_keep_raw=true))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        path: &str,
+        vector_column: &str,
+        dim: u32,
+        metric: &str,
+        pre_normalize: bool,
+        hnsw_m: Option<u32>,
+        hnsw_ef_construction: Option<u32>,
+        rabitq: bool,
+        rabitq_seed: u64,
+        rabitq_keep_raw: bool,
+    ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
-            "ailake-py: TableWriter::new path={} dim={} metric={}",
-            path, dim, metric
+            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} rabitq={}",
+            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction, rabitq
         );
-        let policy = VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
+        let mut policy =
+            VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
+        policy.pre_normalize = pre_normalize;
+        policy.hnsw_m = hnsw_m;
+        policy.hnsw_ef_construction = hnsw_ef_construction;
+        if rabitq {
+            policy.rabitq = Some(CoreRaBitQConfig {
+                seed: rabitq_seed,
+                keep_raw: rabitq_keep_raw,
+            });
+        }
         let (catalog, store) = local_catalog_store(path);
         let table = TableIdent::new("default", "table");
 
@@ -264,8 +293,9 @@ fn parse_metric(s: &str) -> PyResult<VectorMetric> {
         "cosine" => Ok(VectorMetric::Cosine),
         "euclidean" => Ok(VectorMetric::Euclidean),
         "dot_product" | "dotproduct" => Ok(VectorMetric::DotProduct),
+        "normalized_cosine" => Ok(VectorMetric::NormalizedCosine),
         other => Err(PyValueError::new_err(format!(
-            "unknown metric '{other}' — use cosine, euclidean, or dot_product"
+            "unknown metric '{other}' — use cosine, euclidean, dot_product, or normalized_cosine"
         ))),
     }
 }

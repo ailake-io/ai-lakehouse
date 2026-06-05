@@ -1,16 +1,16 @@
 [package]
 name        = "ailake-parquet"
-version     = "0.0.10"
+version     = "0.0.11"
 edition     = "2021"
 description = "Parquet reader/writer with VECTOR column type for the AI-Lake format"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["parquet", "arrow", "vector", "iceberg", "embedding"]
 categories  = ["database", "encoding", "data-structures"]
 
 [dependencies]
-ailake-core  = { path = "../ailake-core", version     = "0.0.10" }
-ailake-vec   = { path = "../ailake-vec", version     = "0.0.10" }
+ailake-core  = { path = "../ailake-core", version     = "0.0.11" }
+ailake-vec   = { path = "../ailake-vec", version     = "0.0.11" }
 parquet      = { workspace = true }
 arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }

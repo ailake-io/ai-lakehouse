@@ -2,6 +2,8 @@ name: Release
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -9,11 +11,14 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  publish:
-    name: Publish to crates.io
+  release:
+    name: Create GitHub Release
     runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write   # needed to create tags and GitHub Releases
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -44,12 +49,25 @@ jobs:
           ### Rust crates (crates.io)
           All crates bumped to \`${{ steps.version.outputs.version }}\`.
 
-          ### Python wheel
-          Published separately via the **Publish Python** workflow — wheel artifacts will be attached to this release after that workflow completes.
+          ### Python wheel (PyPI)
+          \`ailake\` wheel published to PyPI for x86_64 and aarch64 Linux and Windows x86_64.
+
+          ### Airflow provider (PyPI)
+          \`apache-airflow-providers-ailake\` published to PyPI.
+
+          ### JVM plugins
+          Spark, Trino, and Flink fat-JARs and \`libailake_jni.so\` attached as release assets.
           " \
             --draft=false
         env:
           GH_TOKEN: ${{ github.token }}
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: release
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v6
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -109,3 +127,282 @@ jobs:
 
       - name: Publish ailake-cli
         run: cargo publish -p ailake-cli
+
+  publish-jvm:
+    name: Build and upload JVM plugin JARs
+    needs: [release, publish-crates]
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.release.outputs.version }}
+      TAG: ${{ needs.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Build libailake_jni.so
+        run: cargo build --release -p ailake-jni
+
+      - name: Build fat-JARs
+        run: |
+          gradle -p spark-plugin  shadowJar --no-daemon --no-configuration-cache
+          gradle -p trino-plugin  shadowJar --no-daemon --no-configuration-cache
+          gradle -p ailake-flink  shadowJar --no-daemon --no-configuration-cache
+
+      - name: Upload JVM artifacts to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            "spark-plugin/build/libs/spark-plugin-${VERSION}-plugin.jar" \
+            "trino-plugin/build/libs/trino-plugin-${VERSION}-plugin.jar" \
+            "ailake-flink/build/libs/ailake-flink-${VERSION}-plugin.jar" \
+            "target/release/libailake_jni.so" \
+            --clobber
+
+  publish-airflow:
+    name: Build and publish Airflow provider
+    needs: [release, publish-jvm]
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Build wheel and sdist
+        run: |
+          pip install hatchling
+          cd airflow-providers-ailake
+          python -m hatchling build --target wheel --target sdist
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          pip install twine
+          twine upload --skip-existing airflow-providers-ailake/dist/*
+
+      - name: Upload wheel to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            airflow-providers-ailake/dist/*.whl \
+            airflow-providers-ailake/dist/*.tar.gz \
+            --clobber
+
+  pypi-linux:
+    name: Build Python wheel — Linux (${{ matrix.target }})
+    needs: publish-airflow
+    runs-on: [self-hosted, Linux, X64]
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+      max-parallel: 1
+    steps:
+      - name: Fix Docker-owned file permissions
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
+            "rm -rf dist/ target/ 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
+
+      - uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - uses: PyO3/maturin-action@v1
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+          CARGO_TARGET_DIR: /tmp/ailake-target-${{ matrix.target }}
+          RUNNER_ALLOW_RUNASROOT: "1"
+        with:
+          target: ${{ matrix.target }}
+          manylinux: auto
+          before-script-linux: |
+            yum install -y perl-core make gcc 2>/dev/null \
+              || dnf install -y perl-core make gcc 2>/dev/null \
+              || apt-get install -y perl make gcc 2>/dev/null \
+              || true
+          command: build
+          args: --release --out dist --manifest-path ailake-py/Cargo.toml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  pypi-macos:
+    # Disabled: no macOS self-hosted runner available.
+    # To enable: remove `if: false`, set runs-on to the macOS runner label
+    # (e.g. [self-hosted, macOS, ARM64]), and add `pypi-macos` to pypi-publish needs.
+    name: Build Python wheel — macOS (${{ matrix.target }})
+    if: false
+    needs: pypi-linux
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+      max-parallel: 1
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+
+      - uses: PyO3/maturin-action@v1
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+        with:
+          target: ${{ matrix.target }}
+          command: build
+          args: --release --out dist --find-interpreter --manifest-path ailake-py/Cargo.toml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+
+  pypi-windows:
+    name: Build Python wheel — Windows (x86_64)
+    needs: pypi-macos
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Add Cargo to PATH
+        shell: pwsh
+        run: |
+          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install Rust stable
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --target x86_64-pc-windows-msvc
+          rustup default stable
+
+      - name: Add Strawberry Perl to PATH
+        shell: pwsh
+        run: |
+          echo "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - uses: PyO3/maturin-action@v1
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+          CARGO_TARGET_DIR: C:\t
+        with:
+          target: x86_64
+          command: build
+          args: --release --out dist --manifest-path ailake-py/Cargo.toml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: dist
+
+  pypi-sdist:
+    name: Build Python sdist
+    needs: pypi-windows
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Fix Docker-owned file permissions
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
+            "rm -rf dist/ 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
+
+      - uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist --manifest-path ailake-py/Cargo.toml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+
+  pypi-publish:
+    name: Publish Python wheel to PyPI
+    needs: [release, pypi-linux, pypi-macos, pypi-windows, pypi-sdist]
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      actions: read
+      contents: write
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+    steps:
+      - name: Pre-checkout cleanup of root-owned files
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
+            "rm -rf dist dist-raw 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
+
+      - uses: actions/checkout@v6
+
+      - name: Download wheels
+        run: gh run download ${{ github.run_id }} --pattern "wheels-*" --dir dist-raw
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Flatten artifacts into dist/
+        run: |
+          mkdir -p dist
+          find dist-raw -name "*.whl" -o -name "*.tar.gz" | xargs -I{} cp {} dist/
+          rm -rf dist-raw
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          pip install twine
+          twine upload --skip-existing dist/*
+
+      - name: Upload wheels to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" dist/*.whl dist/*.tar.gz --clobber
+
+      - name: Cleanup root-owned dist/
+        if: always()
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
+            "rm -rf dist dist-raw 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true

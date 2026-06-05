@@ -155,15 +155,21 @@ impl CatalogProvider for HadoopCatalog {
         let manifest_len = manifest_bytes.len();
         self.store.put(&manifest_file_path, manifest_bytes).await?;
 
-        // Collect manifest paths from the previous snapshot (if any) for the manifest list
+        // Collect manifest paths from the previous snapshot (if any) for the manifest list.
+        // Replace/Overwrite: new manifest IS the complete state — don't inherit old manifests.
+        // Append/Delete: inherit previous manifests so old files remain visible.
         let mut all_manifests: Vec<(String, i64)> = Vec::new();
-        if let Some(prev_snap) = meta.snapshots.last() {
-            if let Ok(ml_bytes) = self.store.get(&prev_snap.manifest_list).await {
-                if let Ok(prev_manifests) = read_manifest_list(&ml_bytes) {
-                    for prev_path in prev_manifests {
-                        // Get the file size for the manifest list entry
-                        let len = self.store.file_size(&prev_path).await.unwrap_or(0) as i64;
-                        all_manifests.push((prev_path, len));
+        if matches!(
+            snapshot.operation,
+            crate::provider::SnapshotOperation::Append | crate::provider::SnapshotOperation::Delete
+        ) {
+            if let Some(prev_snap) = meta.snapshots.last() {
+                if let Ok(ml_bytes) = self.store.get(&prev_snap.manifest_list).await {
+                    if let Ok(prev_manifests) = read_manifest_list(&ml_bytes) {
+                        for prev_path in prev_manifests {
+                            let len = self.store.file_size(&prev_path).await.unwrap_or(0) as i64;
+                            all_manifests.push((prev_path, len));
+                        }
                     }
                 }
             }
@@ -284,6 +290,10 @@ mod tests {
                 precision: VectorPrecision::F16,
                 pq: None,
                 keep_raw_for_reranking: false,
+                pre_normalize: false,
+                hnsw_m: None,
+                hnsw_ef_construction: None,
+                rabitq: None,
             },
             extra: std::collections::HashMap::new(),
         }

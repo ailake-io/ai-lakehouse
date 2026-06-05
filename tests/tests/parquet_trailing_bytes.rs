@@ -14,6 +14,10 @@ fn make_policy(dim: u32) -> VectorStoragePolicy {
         precision: VectorPrecision::F16,
         pq: None,
         keep_raw_for_reranking: false,
+        pre_normalize: false,
+        hnsw_m: None,
+        hnsw_ef_construction: None,
+        rabitq: None,
     }
 }
 
@@ -50,7 +54,6 @@ fn ailake_file_is_valid_parquet() {
 }
 
 #[test]
-#[ignore = "requires python3 with pyarrow"]
 fn pyarrow_ignores_ailake_footer() {
     let dim = 8u32;
     let (batch, embs) = fixtures::generate_batch(5, dim as usize);

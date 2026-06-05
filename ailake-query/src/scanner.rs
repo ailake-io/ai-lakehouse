@@ -414,7 +414,7 @@ impl SearchSession {
                 // Geometric pruning per shard.
                 if let Some(centroid) = ailake_catalog::decode_centroid(&shard.entry, self.metric) {
                     let dist = match self.metric {
-                        VectorMetric::Cosine => {
+                        VectorMetric::Cosine | VectorMetric::NormalizedCosine => {
                             ailake_vec::cosine_distance(query, &centroid.values)
                         }
                         VectorMetric::Euclidean => {
@@ -514,6 +514,10 @@ mod tests {
             precision: VectorPrecision::F16,
             pq: None,
             keep_raw_for_reranking: false,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            rabitq: None,
         }
     }
 

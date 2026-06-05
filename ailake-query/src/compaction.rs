@@ -364,6 +364,10 @@ mod tests {
             precision: VectorPrecision::F16,
             pq: None,
             keep_raw_for_reranking: false,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            rabitq: None,
         };
 
         // Write two small files

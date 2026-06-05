@@ -18,6 +18,6 @@ exec jupyter lab \
     --port=8888 \
     --no-browser \
     --allow-root \
-    --ServerApp.token='' \
+    --IdentityProvider.token='' \
     --ServerApp.password='' \
     --notebook-dir=/notebooks

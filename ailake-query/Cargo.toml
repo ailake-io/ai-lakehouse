@@ -1,21 +1,21 @@
 [package]
 name        = "ailake-query"
-version     = "0.0.10"
+version     = "0.0.11"
 edition     = "2021"
 description = "Query planner and executor for AI-Lake — vector search, compaction, ContextAssembler"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["vector-search", "iceberg", "lakehouse", "hnsw", "rag"]
 categories  = ["database", "algorithms"]
 
 [dependencies]
-ailake-core    = { path = "../ailake-core", version     = "0.0.10" }
-ailake-file    = { path = "../ailake-file", version     = "0.0.10" }
-ailake-catalog = { path = "../ailake-catalog", version     = "0.0.10" }
-ailake-store   = { path = "../ailake-store", version     = "0.0.10" }
-ailake-index   = { path = "../ailake-index", version     = "0.0.10" }
-ailake-vec     = { path = "../ailake-vec", version     = "0.0.10" }
-ailake-parquet = { path = "../ailake-parquet", version     = "0.0.10" }
+ailake-core    = { path = "../ailake-core", version     = "0.0.11" }
+ailake-file    = { path = "../ailake-file", version     = "0.0.11" }
+ailake-catalog = { path = "../ailake-catalog", version     = "0.0.11" }
+ailake-store   = { path = "../ailake-store", version     = "0.0.11" }
+ailake-index   = { path = "../ailake-index", version     = "0.0.11" }
+ailake-vec     = { path = "../ailake-vec", version     = "0.0.11" }
+ailake-parquet = { path = "../ailake-parquet", version     = "0.0.11" }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
 arrow-select   = { workspace = true }

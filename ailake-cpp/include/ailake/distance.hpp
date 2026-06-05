@@ -113,15 +113,17 @@ inline float euclidean_distance_avx2(const float* a, const float* b, size_t n) {
 inline float compute_distance(Metric metric, const float* a, const float* b, size_t n) {
 #if defined(__AVX2__)
     switch (metric) {
-        case Metric::Euclidean:  return euclidean_distance_avx2(a, b, n);
-        case Metric::DotProduct: return -dot_product_avx2(a, b, n);
-        default:                 return cosine_distance_avx2(a, b, n);
+        case Metric::Euclidean:         return euclidean_distance_avx2(a, b, n);
+        case Metric::DotProduct:        return -dot_product_avx2(a, b, n);
+        case Metric::NormalizedCosine:  return 1.0f - dot_product_avx2(a, b, n);
+        default:                        return cosine_distance_avx2(a, b, n);
     }
 #else
     switch (metric) {
-        case Metric::Euclidean:  return euclidean_distance_scalar(a, b, n);
-        case Metric::DotProduct: return -dot_product_scalar(a, b, n);
-        default:                 return cosine_distance_scalar(a, b, n);
+        case Metric::Euclidean:         return euclidean_distance_scalar(a, b, n);
+        case Metric::DotProduct:        return -dot_product_scalar(a, b, n);
+        case Metric::NormalizedCosine:  return 1.0f - dot_product_scalar(a, b, n);
+        default:                        return cosine_distance_scalar(a, b, n);
     }
 #endif
 }

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_core::{AilakeResult, Centroid, RowId, VectorStoragePolicy};
-use ailake_index::{HnswBuilder, HnswConfig, HnswSerializer, IvfPqConfig, IvfPqSerializer};
+use ailake_index::{
+    HnswBuilder, HnswConfig, HnswSerializer, IvfPqCodebook, IvfPqConfig, IvfPqIndex,
+    IvfPqSerializer, RaBitQConfig, RaBitQIndex, RaBitQSerializer,
+};
 use ailake_parquet::ParquetVectorWriter;
 use ailake_vec::compute_centroid_and_radius;
 use arrow_array::RecordBatch;
@@ -8,7 +11,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::footer::{
     AilakeHeader, AilakeTrailer, DistanceMetric, Precision, AILAKE_FORMAT_VERSION,
-    FLAG_INDEX_IVF_PQ, HEADER_SIZE, TRAILER_SIZE,
+    FLAG_INDEX_IVF_PQ, FLAG_INDEX_RABITQ, HEADER_SIZE, TRAILER_SIZE,
 };
 
 /// Which index algorithm to embed in the AILK section.
@@ -23,6 +26,11 @@ pub enum IndexType {
     /// Chooses IVF-PQ when a GPU or ≥8 CPU cores are available AND the dataset
     /// has ≥5 000 vectors. Falls back to HNSW otherwise (local/low-power hardware).
     Auto,
+    /// RaBitQ flat index. Best when storage is the primary constraint:
+    /// 1 bit/dim = 16× smaller than F16. Better recall than naive binary
+    /// quantization via random rotation + unbiased IP estimator.
+    /// Recommended: use with `keep_raw = true` + `rerank_factor ≥ 3` at search time.
+    RaBitQ(RaBitQConfig),
 }
 
 impl Default for IndexType {
@@ -40,14 +48,32 @@ pub struct VectorColumnBatch<'a> {
 pub struct AilakeFileWriter {
     policy: VectorStoragePolicy,
     index_type: IndexType,
+    /// Pre-trained shared codebook. When set, skips k-means for IVF-PQ builds.
+    shared_codebook: Option<std::sync::Arc<IvfPqCodebook>>,
 }
 
 impl AilakeFileWriter {
     pub fn new(policy: VectorStoragePolicy) -> Self {
+        let index_type = if let Some(rb) = &policy.rabitq {
+            IndexType::RaBitQ(RaBitQConfig {
+                seed: rb.seed,
+                keep_raw: rb.keep_raw,
+            })
+        } else {
+            IndexType::default()
+        };
         Self {
             policy,
-            index_type: IndexType::default(),
+            index_type,
+            shared_codebook: None,
         }
+    }
+
+    /// Use a pre-trained IVF-PQ codebook instead of running k-means.
+    /// Shards built from the same codebook produce comparable ADC distances.
+    pub fn with_shared_ivf_codebook(mut self, codebook: std::sync::Arc<IvfPqCodebook>) -> Self {
+        self.shared_codebook = Some(codebook);
+        self
     }
 
     pub fn with_hnsw_config(mut self, config: HnswConfig) -> Self {
@@ -145,6 +171,7 @@ impl AilakeFileWriter {
                 record_count,
                 current_offset,
                 &self.index_type,
+                self.shared_codebook.as_deref(),
             )?;
             let kv_key = if i == 0 {
                 "ailake.footer_offset".to_string()
@@ -186,8 +213,26 @@ fn build_ailk_section(
     record_count: u64,
     ailk_abs_offset: u64,
     index_type: &IndexType,
+    shared_codebook: Option<&IvfPqCodebook>,
 ) -> AilakeResult<Bytes> {
-    let centroid: Centroid = compute_centroid_and_radius(embeddings, policy.metric);
+    // Normalize to unit L2 when pre_normalize is set.
+    // Enables the NormalizedCosine fast path: 1-dot(a,b) instead of full cosine.
+    let norm_storage: Vec<Vec<f32>>;
+    let (embeddings, hnsw_metric) =
+        if policy.pre_normalize && policy.metric == ailake_core::VectorMetric::Cosine {
+            norm_storage = embeddings
+                .iter()
+                .map(|v| ailake_vec::normalize_l2(v))
+                .collect();
+            (
+                norm_storage.as_slice(),
+                ailake_core::VectorMetric::NormalizedCosine,
+            )
+        } else {
+            (embeddings, policy.metric)
+        };
+
+    let centroid: Centroid = compute_centroid_and_radius(embeddings, hnsw_metric);
     let centroid_bytes = encode_centroid(&centroid);
 
     // Resolve Auto to a concrete variant before matching.
@@ -209,7 +254,16 @@ fn build_ailk_section(
 
     let (index_bytes, flags) = match index_type {
         IndexType::Hnsw(hnsw_config) => {
-            let mut builder = HnswBuilder::new(policy.dim, policy.metric, hnsw_config.clone());
+            // Policy-level M/ef_construction override the IndexType defaults when set.
+            let config = HnswConfig {
+                m: policy.hnsw_m.map(|v| v as usize).unwrap_or(hnsw_config.m),
+                ef_construction: policy
+                    .hnsw_ef_construction
+                    .map(|v| v as usize)
+                    .unwrap_or(hnsw_config.ef_construction),
+                max_elements: hnsw_config.max_elements,
+            };
+            let mut builder = HnswBuilder::new(policy.dim, hnsw_metric, config);
             for (i, v) in embeddings.iter().enumerate() {
                 builder.insert(RowId::new(i as u64), v.clone());
             }
@@ -218,13 +272,28 @@ fn build_ailk_section(
         }
         IndexType::IvfPq(ivf_config) => {
             let row_ids: Vec<RowId> = (0..embeddings.len() as u64).map(RowId::new).collect();
-            let index = ailake_index::IvfPqIndex::train(
+            let index = if let Some(cb) = shared_codebook {
+                IvfPqIndex::build_with_codebook(&row_ids, embeddings, cb)?
+            } else {
+                ailake_index::IvfPqIndex::train(
+                    &row_ids,
+                    embeddings,
+                    policy.metric,
+                    ivf_config.clone(),
+                )?
+            };
+            (IvfPqSerializer::to_bytes(&index)?, FLAG_INDEX_IVF_PQ)
+        }
+        IndexType::RaBitQ(rb_config) => {
+            let row_ids: Vec<RowId> = (0..embeddings.len() as u64).map(RowId::new).collect();
+            let index = RaBitQIndex::build(
                 &row_ids,
                 embeddings,
-                policy.metric,
-                ivf_config.clone(),
+                hnsw_metric,
+                rb_config.clone(),
+                rb_config.keep_raw,
             )?;
-            (IvfPqSerializer::to_bytes(&index)?, FLAG_INDEX_IVF_PQ)
+            (RaBitQSerializer::to_bytes(&index)?, FLAG_INDEX_RABITQ)
         }
         IndexType::Auto => unreachable!("Auto resolved above"),
     };
@@ -305,6 +374,10 @@ mod tests {
             precision: VectorPrecision::F16,
             pq: None,
             keep_raw_for_reranking: false,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            rabitq: None,
         }
     }
 
@@ -342,6 +415,10 @@ mod tests {
             precision: VectorPrecision::F16,
             pq: None,
             keep_raw_for_reranking: false,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            rabitq: None,
         };
 
         let writer = AilakeFileWriter::new(policy1.clone());

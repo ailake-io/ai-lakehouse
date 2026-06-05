@@ -34,6 +34,47 @@ pub struct VectorStoragePolicy {
     pub precision: VectorPrecision,
     pub pq: Option<PQConfig>,
     pub keep_raw_for_reranking: bool,
+    /// Normalize each input vector to unit L2 length before indexing.
+    /// Enables the NormalizedCosine fast path in HNSW: distance = 1 - dot(a, b),
+    /// no sqrt, ~2× faster distance computation. Semantics unchanged — same top-k
+    /// results as Cosine. Most embedding models (OpenAI, Cohere, etc.) produce
+    /// nearly-unit vectors; enabling this adds negligible write overhead.
+    #[serde(default)]
+    pub pre_normalize: bool,
+    /// HNSW M parameter — connections per node. `None` = default (16).
+    /// Higher M → better recall, more memory, slower build.
+    /// Recommended values: 8 (low-memory), 16 (default), 32 (high-recall), 64 (max).
+    #[serde(default)]
+    pub hnsw_m: Option<u32>,
+    /// HNSW ef_construction — candidate pool size during build. `None` = default (150).
+    /// Higher ef_construction → better graph quality, slower build.
+    /// Recommended values: 100 (fast), 150 (default), 200 (quality), 400 (max quality).
+    #[serde(default)]
+    pub hnsw_ef_construction: Option<u32>,
+    /// RaBitQ configuration. When set, the file writer embeds a RaBitQ flat index
+    /// instead of HNSW. Best for workloads that require extreme storage compression
+    /// (1 bit/dim = 16× smaller than F16) with better recall than naive binary
+    /// quantization. Use `rerank_factor ≥ 3` at search time for full precision.
+    #[serde(default)]
+    pub rabitq: Option<RaBitQConfig>,
+}
+
+/// RaBitQ quantization configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaBitQConfig {
+    /// Seed for the random rotation matrix. Same seed → identical quantization
+    /// across shards, enabling consistent distance comparisons.
+    #[serde(default)]
+    pub seed: u64,
+    /// Keep raw F16 vectors alongside binary codes for exact reranking.
+    /// Disabling this halves the storage of the index section but prevents
+    /// reranking — only use when storage is the primary constraint.
+    #[serde(default = "default_keep_raw")]
+    pub keep_raw: bool,
+}
+
+fn default_keep_raw() -> bool {
+    true
 }
 
 impl VectorStoragePolicy {
@@ -45,6 +86,10 @@ impl VectorStoragePolicy {
             precision: VectorPrecision::F16,
             pq: None,
             keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            rabitq: None,
         }
     }
 }

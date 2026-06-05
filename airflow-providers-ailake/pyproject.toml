@@ -24,8 +24,8 @@ classifiers = [
 ]
 
 [project.urls]
-Repository    = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
-"Bug Tracker" = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/issues"
+Repository    = "https://github.com/ThiagoLange/ai-lakehouse"
+"Bug Tracker" = "https://github.com/ThiagoLange/ai-lakehouse/issues"
 
 [project.entry-points."apache_airflow_provider"]
 provider_info = "airflow_providers_ailake:get_provider_info"

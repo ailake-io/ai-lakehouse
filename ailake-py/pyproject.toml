@@ -24,8 +24,8 @@ classifiers = [
 ]
 
 [project.urls]
-Repository    = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
-"Bug Tracker" = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/issues"
+Repository    = "https://github.com/ThiagoLange/ai-lakehouse"
+"Bug Tracker" = "https://github.com/ThiagoLange/ai-lakehouse/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

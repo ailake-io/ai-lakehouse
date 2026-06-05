@@ -1,18 +1,18 @@
 [package]
 name        = "ailake-file"
-version     = "0.0.10"
+version     = "0.0.11"
 edition     = "2021"
 description = "Self-contained AI-Lake file writer/reader — Parquet extended with HNSW footer"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["parquet", "vector", "hnsw", "iceberg", "lakehouse"]
 categories  = ["database", "encoding", "filesystem"]
 
 [dependencies]
-ailake-core    = { path = "../ailake-core", version     = "0.0.10" }
-ailake-parquet = { path = "../ailake-parquet", version     = "0.0.10" }
-ailake-vec     = { path = "../ailake-vec", version     = "0.0.10" }
-ailake-index   = { path = "../ailake-index", version     = "0.0.10" }
+ailake-core    = { path = "../ailake-core", version     = "0.0.11" }
+ailake-parquet = { path = "../ailake-parquet", version     = "0.0.11" }
+ailake-vec     = { path = "../ailake-vec", version     = "0.0.11" }
+ailake-index   = { path = "../ailake-index", version     = "0.0.11" }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
 thiserror      = { workspace = true }

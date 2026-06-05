@@ -43,8 +43,8 @@ Optional (for full compat-heavy tests):
 ### 1. Clone and enter the repository
 
 ```bash
-git clone https://github.com/ThiagoLange/iceberg-ai-deltalakehouse.git
-cd iceberg-ai-deltalakehouse
+git clone https://github.com/ThiagoLange/ai-lakehouse.git
+cd ai-lakehouse
 git checkout develop   # all work goes here first
 ```
 
@@ -400,16 +400,16 @@ feat(ailake-index): add IVF-PQ adaptive nlist selection
 ### What happens after merge
 
 - `develop` receives the PR.
-- When ready for release, maintainers bump versions, update CHANGELOG, merge to `main`, and run the release workflows in order (see [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md#manual-actions-trigger-order-pre-release)).
+- When ready for release, maintainers bump versions, update CHANGELOG, run CI and Compat Heavy, then merge to `main` — `release.yml` fires automatically on the merge and publishes crates, JVM plugins, Airflow provider, and Python wheels in a sequential chain (see [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md#manual-actions-trigger-order-pre-release)).
 
 ---
 
 ## Reporting issues
 
-- **Bug**: use the [Bug Report](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/issues/new?template=bug_report.yml) template.
-- **Feature request**: use the [Feature Request](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/issues/new?template=feature_request.yml) template.
+- **Bug**: use the [Bug Report](https://github.com/ThiagoLange/ai-lakehouse/issues/new?template=bug_report.yml) template.
+- **Feature request**: use the [Feature Request](https://github.com/ThiagoLange/ai-lakehouse/issues/new?template=feature_request.yml) template.
 - **Security vulnerability**: follow [`SECURITY.md`](./SECURITY.md) — do not open a public issue.
-- **Questions and design discussions**: use [GitHub Discussions](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/discussions).
+- **Questions and design discussions**: use [GitHub Discussions](https://github.com/ThiagoLange/ai-lakehouse/discussions).
 
 ---
 

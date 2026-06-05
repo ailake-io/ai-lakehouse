@@ -9,8 +9,9 @@ pub const AILAKE_FORMAT_VERSION: u16 = 1;
 pub const TRAILER_SIZE: usize = 24;
 pub const HEADER_SIZE: usize = 64;
 
-/// `flags` bit 0 = 0: HNSW index (default). bit 0 = 1: IVF-PQ index.
+/// `flags` bit 0 = 0: HNSW index (default). bit 0 = 1: IVF-PQ index. bit 1 = 1: RaBitQ index.
 pub const FLAG_INDEX_IVF_PQ: u16 = 0x0001;
+pub const FLAG_INDEX_RABITQ: u16 = 0x0002;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,6 +28,7 @@ pub enum DistanceMetric {
     Cosine = 0,
     Euclidean = 1,
     DotProduct = 2,
+    NormalizedCosine = 3,
 }
 
 impl From<VectorPrecision> for Precision {
@@ -46,6 +48,7 @@ impl From<VectorMetric> for DistanceMetric {
             VectorMetric::Cosine => DistanceMetric::Cosine,
             VectorMetric::Euclidean => DistanceMetric::Euclidean,
             VectorMetric::DotProduct => DistanceMetric::DotProduct,
+            VectorMetric::NormalizedCosine => DistanceMetric::NormalizedCosine,
         }
     }
 }
@@ -70,6 +73,7 @@ impl TryFrom<u8> for DistanceMetric {
             0 => Ok(DistanceMetric::Cosine),
             1 => Ok(DistanceMetric::Euclidean),
             2 => Ok(DistanceMetric::DotProduct),
+            3 => Ok(DistanceMetric::NormalizedCosine),
             _ => Err(AilakeError::UnsupportedFormatVersion(v as u16)),
         }
     }

@@ -9,6 +9,51 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.11] — 2026-06-05
+
+### Changed
+- **`release.yml`**: Restructured into a single sequential publish chain — `release` → `publish-crates` → `publish-jvm` → `publish-airflow` → `pypi-linux` (max-parallel:1) → `pypi-macos` (disabled) → `pypi-windows` → `pypi-sdist` → `pypi-publish`. All publish jobs run automatically after the release job using `needs:` — no separate manual triggers needed. `publish-pypi.yml`, `publish-jvm.yml`, and `publish-airflow-provider.yml` demoted to manual fallback workflows for re-publishing without rerunning the full pipeline. Triggers: `push: branches: [main]` (automatic on merge) and `workflow_dispatch` (manual).
+- **`.github/workflows/compat-heavy.yml` (`compat-spark`)**: `pip install pyspark` now uses `--index-url https://pypi.org/simple/` to bypass the runner's pip mirror configuration.
+
+### Fixed
+- **`ailake-go/chacha12.go` + `ailake-cpp/include/ailake/chacha12.hpp`**: Cross-language RaBitQ search was producing recall ≈ 0% because Go (`math/rand` LCG) and C++ (`std::mt19937_64`) generated completely different projection matrices than Rust's `StdRng` (ChaCha12) for the same seed. Fixed by implementing the full Rust PRNG: splitmix64 seed expansion (`u64 → 32-byte key`, 4 rounds) + ChaCha12 block function (6 double rounds, Bernstein state layout) + Standard float distribution (`f32::from_bits((u32>>9)|0x3f800000) - 1.0`). Go and C++ now regenerate bit-identical matrices to the Rust SDK for any seed.
+- **`ailake-cpp/include/ailake/`**: Added `kFlagIndexRaBitQ = 0x0002`, `AilakeHeader::is_rabitq()`, `RaBitQIndex`, `deserialize_rabitq`, `rabitq_search` (O(N) scan + `std::nth_element` partial select + optional F16 reranking), `SearchOptions::rabitq_rerank_factor`. C++ SDK previously silently misrouted RaBitQ files as HNSW. New `BincodeReader` methods: `read_u16()`, `read_u8_vec_flat()`, `read_u16_vec()`.
+- **`ailake-index/src/rabitq.rs` + `ailake-index/src/lib.rs`**: `RaBitQIndex::search` now takes `&self` instead of `&mut self` — the unsafe raw-pointer cast workaround in `AnyIndex::RaBitQ` is removed. Shard-level parallelism via rayon in `SearchSession` is now fully safe with no `unsafe` code.
+- **`ailake-index/src/rabitq.rs`**: Inner binary scan is now sequential (`iter().enumerate()`; no `into_par_iter()`). Outer shard parallelism in `SearchSession` already handles concurrency — nesting `par_iter` inside each shard spawned O(shards × N) micro-tasks (1M+ with 10 shards × 100k entries), making rayon scheduler overhead dominate actual work. **QPS on SIFT-1M: 48 → 101 (+2.1×)**.
+- **`ailake-index/src/rabitq.rs`**: Top-k candidate selection replaced full O(N log N) sort with O(N) `select_nth_unstable_by(candidates − 1)` + sort of `candidates` elements only. For `candidates = rerank_factor × top_k ≪ N` this eliminates most comparison work.
+- **`ailake-catalog/src/hadoop.rs`**: `HadoopCatalog::commit_snapshot` for `Replace`/`Overwrite` operations no longer inherits manifests from previous snapshots — new manifest IS the complete state. Previously, all operations unconditionally appended to the manifest list, causing `list_files` to return duplicate `DataFileEntry` records. With 10 concurrent deferred HNSW background tasks all racing to commit `Replace` snapshots, the accumulated duplicates prevented `IndexStatus::Ready` entries from reaching the `ready >= num_shards` threshold, causing the bench to block indefinitely.
+- **`ailake-vec/src/pq.rs`**: `kmeans_pp_init` complexity reduced from O(n × k²) to O(n × k) by maintaining an incremental `min_dist` array instead of recomputing all distances from scratch at each step. With n=100k, k=256: 3.2B → 25M distance computations for the init phase alone — **17× end-to-end write speedup** on SIFT-1M IVF-PQ benchmark (96s → 5.7s for 10k vectors).
+- **`ailake-bench/src/main.rs`**: `--engine ailake-ivf-pq` now derives `nlist`/`nprobe` from `IvfPqConfig::for_dataset(dim, shard_size)` when CLI args are left at default (0). Previous hardcoded defaults `nlist=256 nprobe=8` were calibrated for ~65k-vector datasets; with 100k vectors/shard `nprobe=8/256=3.1%` scan coverage produced `Recall@10=0.32`.
+- **`ailake-bench/src/main.rs`**: IVF-PQ multi-shard search now loads raw vectors (`load_with_raw=true`) and sets `rerank_factor=Some(3)`. Per-shard PQ codebooks produce ADC distances on different scales — cross-shard merge sorted by incomparable approximations, causing `Recall@10=0.32` even with correct nlist/nprobe. Exact reranking with true L2² distances corrects the merge step.
+
+### Added
+- **`ailake-vec/src/rabitq.rs`**: `RaBitQCodebook::estimate_ip_binary(b_q: &[u8], q_scale: f32, entry: &RaBitQVec) -> f32` — new public method that accepts pre-binarized query codes instead of raw `q_proj`. Eliminates repeated `bits_from_signs` calls in the search hot path (query is binarized once per search call, not once per entry). `estimate_ip` now wraps `estimate_ip_binary` for backwards compatibility.
+- **RaBitQ (Random Binary Quantization)**: new flat index type for extreme storage compression — 1 bit/dim = 16× smaller than F16, with better recall than naive binary quantization via random rotation + unbiased XOR/popcount IP estimator. Key types: `ailake_vec::rabitq::RaBitQCodebook` (random rotation matrix, seed-regenerated), `ailake_index::RaBitQIndex` (flat search + optional F16 reranking), `ailake_core::schema::RaBitQConfig`. File format flag `FLAG_INDEX_RABITQ = 0x0002`. `RaBitQConfig` re-exported from `ailake_core` crate root. `AilakeFileWriter::new` auto-selects `IndexType::RaBitQ` when `policy.rabitq` is set — callers using `write_batch`/`write_batch_idempotent` get RaBitQ automatically without calling `with_index_type`. Exposed via CLI `ailake create --rabitq [--rabitq-seed N] [--rabitq-keep-raw]` and Python `TableWriter(rabitq=True, rabitq_seed=0, rabitq_keep_raw=True)`. Use with `rerank_factor ≥ 3` at search time for best recall.
+- **`VectorStoragePolicy::hnsw_m` + `VectorStoragePolicy::hnsw_ef_construction`**: Per-table HNSW tuning parameters. `hnsw_m` controls connections per node (default 16; higher → better recall, more memory); `hnsw_ef_construction` controls candidate pool during build (default 150; higher → better graph quality, slower build). Both stored as `ailake.hnsw-m` / `ailake.hnsw-ef-construction` in Iceberg metadata properties. Exposed via `ailake create --hnsw-m 32 --hnsw-ef 400` (CLI) and `TableWriter(hnsw_m=32, hnsw_ef_construction=400)` (Python). `None` = use defaults (fully backwards-compatible).
+- **`VectorMetric::NormalizedCosine` (value `3`) + `VectorStoragePolicy::pre_normalize`**: New fast-path distance metric for cosine workloads. When `pre_normalize = true`, vectors are normalized to unit L2 at write time and HNSW uses `1 - dot(a, b)` instead of full cosine — eliminates the `sqrt` of norms from every edge traversal (~12–20% faster search on dim=1536). Query vectors are automatically normalized at search time in all bindings — callers need no changes. Exposed via `ailake create --pre-normalize` (CLI), `TableWriter(pre_normalize=True)` (Python), `MetricNormalizedCosine` (Go), and `Metric::NormalizedCosine` (C++). All metric match arms updated across `gpu`, `ivf_pq`, `serialize`, `pruner`, `scanner`, `parquet schema`, `footer`, and `reader`.
+- **`ailake-index/src/ivf_pq.rs`**: `IvfPqCodebook` struct — sharable coarse quantizer + PQ codebook trainable once and reused across all shards. New methods: `IvfPqIndex::train_codebook(vectors, metric, config) -> IvfPqCodebook` (k-means only, no inverted lists) and `IvfPqIndex::build_with_codebook(row_ids, vectors, codebook) -> IvfPqIndex` (assign + encode, no k-means). When all shards share the same codebook, ADC distances are numerically comparable across shards — cross-shard merge is correct without exact reranking.
+- **`ailake-file/src/writer.rs`**: `AilakeFileWriter::with_shared_ivf_codebook(Arc<IvfPqCodebook>)` builder — bypasses k-means training and calls `IvfPqIndex::build_with_codebook` instead of `IvfPqIndex::train`.
+- **`ailake-query/src/writer.rs`**: `TableWriter::write_batch_ivf_pq_deferred` — async variant of `write_batch_ivf_pq`. Persists Parquet immediately (~200k vec/s, same as HNSW deferred), spawns background tokio task to train IVF-PQ index, rewrite file with AILK section, and transition `IndexStatus::Indexing → Ready`. Shared codebook is coordinated via `Arc<tokio::sync::OnceCell<IvfPqCodebook>>` — first task trains, all others await and skip k-means.
+- **`ailake-query/src/writer.rs`**: `TableWriter` now caches `cached_ivf_codebook: Option<Arc<IvfPqCodebook>>` (synchronous path) and `deferred_ivf_codebook: Arc<tokio::sync::OnceCell<IvfPqCodebook>>` (deferred path).
+- **`ailake-bench/src/main.rs`**: new `--engine ailake-ivf-pq-deferred` — exercises `write_batch_ivf_pq_deferred`, waits for `IndexStatus::Ready`, searches with `rerank_factor=3`.
+
+### Changed
+- **`ailake-vec/src/rabitq.rs`**: `RaBitQCodebook::rebuild_proj` now generates a **modified Gram-Schmidt orthonormal matrix** (P^T · P = I) instead of a column-normalized Gaussian. Orthonormal projection preserves inner products exactly — unit-sphere vectors map to unit-sphere after rotation — improving recall fidelity on cosine workloads. The `seed` in `RaBitQCodebook` is still the only persisted field; readers regenerate P via `rebuild_proj(seed, dim)` as before.
+- **`ailake-vec/src/pq.rs`**: k-means assignment loop now uses `rayon::par_iter()` — parallel assignment across all CPU cores. `kmeans_pp_init` initial and incremental distance computations also parallelized via `par_iter`/`par_iter_mut`.
+- **`ailake-vec/Cargo.toml`**: added `rayon` workspace dependency.
+- **`ailake-index/src/ivf_pq.rs`**: `IvfPqConfig::for_dataset` now sets `nprobe = nlist/4` (25% coverage) instead of `nlist/8` (12.3%) — better candidate quality per shard, needed alongside reranking for `Recall@10 ≥ 0.90`.
+
+### Fixed
+- **`ailake-py/src/lib.rs`**: `local_catalog_store` now passes `file://{canonical_path}` as warehouse to `HadoopCatalog` so Iceberg `metadata.json` writes absolute `file://` URIs for `location` and manifest paths — required by Trino's Iceberg connector
+- **`ailake-store/src/local.rs`**: `LocalStore::full_path` strips `file://` prefix before `PathBuf::join` so absolute `file://` URIs resolve correctly on the local filesystem
+- **`tests/docker/compose-demo.yml`**: 9 DX issues fixed in demo stack — Trino 446 Nessie catalog (hadoop type removed in 400+), correct property names (`default-warehouse-dir`, `ref`), removed `:ro` on Trino volume (blocked `/data/trino/var`), BQ emulator healthcheck uses `bash /dev/tcp` (no curl in image), BQ host port 19050 (avoids Tor default 9050), Nessie registration uses real snapshot/schema IDs, direct Nessie API v1 via `urllib` (pyiceberg dropped nessie catalog in 0.8+), SQL `"table"` quoted in notebook 04 (reserved keyword in Trino)
+- **`tests/parquet_trailing_bytes.rs`**: `pyarrow_ignores_ailake_footer` de-ignored — PyArrow 24.0.0 available
+
+### Changed
+- **`tests/docker/compose-demo.yml`**: Trino and BigQuery emulator moved to `profiles: ["engines"]`; `compose-demo-engines.yml` overlay deleted — single-file command: `docker compose -f compose-demo.yml --profile engines up -d`
+
 ### Added
 - **`ailake-index/src/gpu.rs`**: 3 GPU unit tests gated on `AILAKE_GPU_BACKEND` env var — `gpu_search_batch_cosine_top1_exact` (cosine SGEMM, top-1 == query), `gpu_search_batch_euclidean_top1_exact` (euclidean SGEMM, dist-to-self ≈ 0), `gpu_kmeans_returns_k_centroids` (k-means produces k centroids of correct dim); skip silently when `AILAKE_GPU_BACKEND=none`
 - **`ailake-index/tests/gpu_data.rs`**: 3 GPU data integration tests fired against realistic synthetic datasets — `gpu_search_recall_vs_cpu_baseline` (2 000 vecs × dim 128, 20 queries, recall@10 ≥ 99% vs CPU brute-force), `gpu_search_exact_hit_in_large_db` (5 000 vecs × dim 64, query == db[1337], top-1 exact match), `gpu_kmeans_converges_on_clustered_data` (8 clusters × 50 vecs × dim 32, each centroid maps unique cluster within ε = 1.0); all skip when `AILAKE_GPU_BACKEND=none`
@@ -16,10 +61,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`docs/specs/FILE_FORMAT.md`**: added §15 "Bincode v1 Wire Format (Language-Agnostic)" — encoding rules table + field-by-field byte layout for HnswSnapshot and IvfPqSnapshot so any language can decode the index blob without the Rust crate; added §16 "Cross-Language Implementations" — Rust/C++/Go comparison table and language-agnostic 10-step bootstrap sequence
 - **`ailake-cpp/CMakeLists.txt`**: added `SPDX-License-Identifier: MIT OR Apache-2.0` header and inline licensing note — NVIDIA CUDA Toolkit (`-DAILAKE_CUDA=ON`) and AMD ROCm are third-party proprietary SDKs not bundled by default; binary distributors must comply with vendor EULAs
 - **`SETUP.md`**: added "Licensing note — third-party GPU SDKs" table in section 8F documenting NVIDIA/AMD SDK ownership, licenses, and per-language binding strategy (runtime dlopen vs. opt-in static link for C++)
-- **`README.md`**: added "Interactive demo" section with `docker compose up -d` quick start, notebook table, and engines overlay command; updated repository layout to include all `tests/docker/demo/` files
-- **`SETUP.md`**: added "Fastest path — Docker demo" section at the top pointing to `compose-demo.yml` and engines overlay
+- **`README.md`**: added "Interactive demo" section with `docker compose up -d` quick start, notebook table, and engines profile (`--profile engines`) command; updated repository layout to include all `tests/docker/demo/` files
+- **`SETUP.md`**: added "Fastest path — Docker demo" section at the top pointing to `compose-demo.yml` and engines profile (`--profile engines`)
 - **`docs/contributing/TESTING.md`**: added `index-cpu-fallback` job to `ci.yml` matrix; added `ci-gpu.yml` workflow section (Windows self-hosted GPU runner); updated `secret-scan.yml` note to document that automatic triggers are disabled while repo is private
-- **`tests/docker/compose-demo-engines.yml`**: optional engines overlay — adds Trino (port 8080) and BigQuery emulator (port 9050); activated with `docker compose -f compose-demo.yml -f compose-demo-engines.yml up -d`
+- **`tests/docker/compose-demo.yml` `engines` profile**: Trino 446 + BigQuery emulator added as optional services under `--profile engines`; activated with `docker compose -f compose-demo.yml --profile engines up -d`
 - **`tests/docker/demo/trino-catalog/ailake.properties`**: Trino Iceberg HadoopCatalog config pointing at the demo-data volume (`file:///data/ailake_demo`)
 - **`tests/docker/demo/notebooks/02_duckdb.ipynb`**: DuckDB demo — direct Parquet glob scan, filtered queries, aggregations, embedding as BLOB, optional Iceberg extension
 - **`tests/docker/demo/notebooks/03_spark.ipynb`**: Spark demo — PySpark local[*] mode (no cluster), direct Parquet read, Iceberg HadoopCatalog SQL, snapshot history
@@ -290,12 +335,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-[0.0.9]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.8...v0.0.9
-[0.0.8]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.7...v0.0.8
-[0.0.7]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.6...v0.0.7
-[0.0.6]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.5...v0.0.6
-[0.0.5]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.4...v0.0.5
-[0.0.4]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.3...v0.0.4
-[0.0.3]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.2...v0.0.3
-[0.0.2]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/compare/v0.0.1...v0.0.2
-[0.0.1]: https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/tag/v0.0.1
+[0.0.9]: https://github.com/ThiagoLange/ai-lakehouse/compare/v0.0.8...v0.0.9
+[0.0.8]: https://github.com/ThiagoLange/ai-lakehouse/compare/v0.0.7...v0.0.8
+[0.0.7]: https://github.com/ThiagoLange/ai-lakehouse/compare/v0.0.6...v0.0.7
+[0.0.6]: https://github.com/ThiagoLange/ai-lakehouse/compare/v0.0.5...v0.0.6
+[0.0.5]: https://github.com/ThiagoLange/ai-lakehouse/compare/v0.0.4...v0.0.5
+[0.0.4]: https://github.com/ThiagoLange/ai-lakehouse/compare/v0.0.3...v0.0.4
+[0.0.3]: https://github.com/ThiagoLange/ai-lakehouse/compare/v0.0.2...v0.0.3
+[0.0.2]: https://github.com/ThiagoLange/ai-lakehouse/compare/v0.0.1...v0.0.2
+[0.0.1]: https://github.com/ThiagoLange/ai-lakehouse/releases/tag/v0.0.1

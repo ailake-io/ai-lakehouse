@@ -1,11 +1,11 @@
 [package]
 name        = "ailake-jni"
-version     = "0.0.10"
+version     = "0.0.11"
 edition     = "2021"
 description = "C-ABI cdylib for AI-Lake — Spark, Trino, and Flink connectors via JNA"
 readme      = "README.md"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["jni", "spark", "trino", "vector-search", "lakehouse"]
 categories  = ["database", "api-bindings"]
 
@@ -13,10 +13,10 @@ categories  = ["database", "api-bindings"]
 crate-type = ["cdylib"]
 
 [dependencies]
-ailake-query   = { path = "../ailake-query", version     = "0.0.10" }
-ailake-catalog = { path = "../ailake-catalog", version     = "0.0.10" }
-ailake-store   = { path = "../ailake-store", version     = "0.0.10" }
-ailake-core    = { path = "../ailake-core", version     = "0.0.10" }
+ailake-query   = { path = "../ailake-query", version     = "0.0.11" }
+ailake-catalog = { path = "../ailake-catalog", version     = "0.0.11" }
+ailake-store   = { path = "../ailake-store", version     = "0.0.11" }
+ailake-core    = { path = "../ailake-core", version     = "0.0.11" }
 tokio          = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }

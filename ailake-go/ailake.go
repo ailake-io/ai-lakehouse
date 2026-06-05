@@ -89,6 +89,12 @@ func Search(
 	}
 	metric := metricFromString(info.VectorMetric)
 
+	// NormalizedCosine requires unit-length query; normalize here so callers
+	// don't need to pre-normalize manually.
+	if metric == MetricNormalizedCosine {
+		query = normalizeL2(query)
+	}
+
 	// Geometric pruning
 	var survivors []DataFileEntry
 	for _, e := range entries {
@@ -176,7 +182,14 @@ func searchFile(
 	// - IVF-PQ + CPU only       → CPU ADC (pure Go)
 	// - HNSW                    → CPU greedy graph traversal (sequential by nature)
 	var hits []SearchResult
-	if header.IsIvfPq() {
+	if header.IsRaBitQ() {
+		// RaBitQ flat index: brute-force binary search with optional F16 reranking.
+		idx, err := DeserializeRaBitQ(indexBuf)
+		if err != nil {
+			return nil, fmt.Errorf("deserialize RaBitQ: %w", err)
+		}
+		hits = idx.Search(query, opts.TopK, len(idx.RawF16) > 0)
+	} else if header.IsIvfPq() {
 		idx, err := DeserializeIvfPq(indexBuf)
 		if err != nil {
 			return nil, fmt.Errorf("deserialize IVF-PQ: %w", err)
@@ -266,6 +279,8 @@ func metricFromString(s string) uint8 {
 		return MetricEuclidean
 	case "dotproduct", "dot":
 		return MetricDotProduct
+	case "normalized_cosine":
+		return MetricNormalizedCosine
 	default:
 		return MetricCosine
 	}
