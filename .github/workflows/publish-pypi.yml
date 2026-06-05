@@ -2,14 +2,10 @@ name: Publish Python
 
 on:
   workflow_dispatch:
-  # workflow_run trigger is intentionally disabled while the repository is private.
-  # Re-enable when the repo goes public to auto-trigger PyPI publish after the
-  # Release workflow succeeds on main:
-  #
-  # workflow_run:
-  #   workflows: ["Release"]
-  #   types: [completed]
-  #   branches: [main]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+    branches: [main]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
