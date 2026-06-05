@@ -227,7 +227,7 @@ mod tests {
         let dim = 32;
         let vecs = unit_vecs(50, dim, 1);
         let row_ids: Vec<RowId> = (0..50u64).map(RowId::new).collect();
-        let mut idx = RaBitQIndex::build(
+        let idx = RaBitQIndex::build(
             &row_ids,
             &vecs,
             VectorMetric::Cosine,
@@ -248,7 +248,7 @@ mod tests {
         let n = 200;
         let vecs = unit_vecs(n, dim, 42);
         let row_ids: Vec<RowId> = (0..n as u64).map(RowId::new).collect();
-        let mut idx = RaBitQIndex::build(
+        let idx = RaBitQIndex::build(
             &row_ids,
             &vecs,
             VectorMetric::Cosine,
@@ -291,7 +291,7 @@ mod tests {
         .unwrap();
 
         let bytes = RaBitQSerializer::to_bytes(&idx).unwrap();
-        let mut idx2 = RaBitQSerializer::from_bytes(&bytes).unwrap();
+        let idx2 = RaBitQSerializer::from_bytes(&bytes).unwrap();
         let q = vecs[0].clone();
         let r1 = idx.entries[0].code.clone();
         let _r2 = idx2.search(&q, 1, None);
