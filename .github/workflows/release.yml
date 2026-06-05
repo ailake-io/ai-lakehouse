@@ -9,11 +9,14 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  publish:
-    name: Publish to crates.io
+  release:
+    name: Create GitHub Release
     runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write   # needed to create tags and GitHub Releases
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -50,6 +53,13 @@ jobs:
             --draft=false
         env:
           GH_TOKEN: ${{ github.token }}
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: release
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v6
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
