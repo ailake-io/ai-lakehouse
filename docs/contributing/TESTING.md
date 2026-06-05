@@ -717,22 +717,21 @@ All three skip when `AILAKE_GPU_BACKEND=none`.
 | `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests |
 | `compat-bigquery` | BigQuery: `fsouza/fake-gcs-server` + `goccy/bigquery-emulator:0.6.6`; pyarrow reads AILK Parquet + BQ streaming inserts (`insertAll`); validates row count, schema, `MIN`/`MAX(id)` |
 
-### `publish-jvm.yml` — manual dispatch (`workflow_dispatch`)
+### `publish-jvm.yml` — manual fallback (`workflow_dispatch`)
 
-Builds and uploads JVM plugin fat-JARs + `libailake_jni.so` to an existing GitHub Release.
+Re-builds and re-uploads JVM plugin fat-JARs + `libailake_jni.so` to an existing GitHub Release **without** rerunning the full release pipeline. The canonical publish-jvm job now lives inside `release.yml` (see below).
 
 | Input | Description |
 |---|---|
-| `tag` | Release tag to attach artifacts to (e.g. `v0.1.0`) |
+| `tag` | Release tag to attach artifacts to (e.g. `v0.1.0`). Optional — derived from `Cargo.toml` when omitted. |
 
-Artifacts uploaded:
-- `spark-plugin-{VERSION}-plugin.jar`
-- `trino-plugin-{VERSION}-plugin.jar`
-- `ailake-flink-{VERSION}-plugin.jar`
-- `libailake_jni.so`
+### `publish-pypi.yml` — manual fallback (`workflow_dispatch`)
 
-> Run after `compat-heavy.yml` passes and the GitHub Release exists (created by `release.yml`).
-> TODO: switch trigger to `on: release: types: [published]` when repo goes public.
+Re-builds and re-publishes `ailake` wheels to PyPI + attaches to an existing GitHub Release **without** rerunning the full release pipeline. The canonical build+publish chain lives inside `release.yml`.
+
+### `publish-airflow-provider.yml` — manual fallback (`workflow_dispatch`)
+
+Re-builds and re-publishes `apache-airflow-providers-ailake` to PyPI + attaches to an existing GitHub Release. The canonical publish-airflow job lives inside `release.yml`.
 
 ### Failure policy
 
@@ -741,14 +740,13 @@ Artifacts uploaded:
 | `fmt`, `clippy` | Every PR |
 | `unit`, `integration`, `compat-parquet` | Every PR |
 | `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg`, `compat-ailake-py` | Every PR |
-| `compat-spark`, `compat-trino`, `compat-jvm-plugins`, `compat-bigquery` | Release (manual dispatch before publish) |
-| `publish-jvm` | Release (run after `compat-heavy` passes and GitHub Release exists) |
+| `compat-spark`, `compat-trino`, `compat-jvm-plugins`, `compat-bigquery` | Release (manual dispatch before triggering `release.yml`) |
 
 ---
 
 ## Manual Actions trigger order (pre-release)
 
-All workflows are `workflow_dispatch`. Trigger in this order — each step must succeed before the next.
+All CI workflows are `workflow_dispatch`. Trigger in this order — each step must succeed before the next.
 
 | Step | Workflow | What it does | Blocks on |
 |---|---|---|---|
@@ -758,9 +756,32 @@ All workflows are `workflow_dispatch`. Trigger in this order — each step must 
 | 4 | **CI GPU** (`ci-gpu.yml`) | GPU unit tests on Windows self-hosted runner (CUDA/ROCm); skips gracefully if `AILAKE_GPU_BACKEND=none` | Must pass (on GPU runner) |
 | 5 | **CI GPU Data** (`ci-gpu-data.yml`) | GPU data integration tests on Windows self-hosted runner — recall@10 ≥ 99% vs CPU brute-force | Must pass (on GPU runner) |
 | 6 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
-| 7 | **Release** (`release.yml`) | Creates git tag + GitHub Release + publishes all Rust crates to crates.io | Steps 1–6 green |
-| 8 | **Publish Python** (`publish-pypi.yml`) | Builds ailake-py wheels (Linux x86_64/aarch64 + sdist), publishes to PyPI, attaches to GitHub Release | Step 7 complete |
-| 9 | **Publish Airflow Provider** (`publish-airflow-provider.yml`) | Builds wheel + sdist, publishes to PyPI, attaches to GitHub Release | Step 7 complete |
-| 10 | **Publish JVM Plugins** (`publish-jvm.yml`) | Builds fat-JARs (Spark/Trino/Flink) + `libailake_jni.so`, uploads to GitHub Release | Step 7 complete |
+| 7 | **Release** (`release.yml`) | Single workflow — runs all publishing steps sequentially (see chain below) | Steps 1–6 green |
 
-Steps 8, 9, 10 can run in parallel after step 7 completes. Steps 4 and 5 require the Windows self-hosted GPU runner — can run in parallel with steps 2 and 3.
+Steps 4 and 5 require the Windows self-hosted GPU runner — can run in parallel with steps 2 and 3.
+
+### `release.yml` sequential chain
+
+`release.yml` is a single `workflow_dispatch` that runs everything in order:
+
+```
+release          → creates git tag + GitHub Release
+  └── publish-crates   → cargo publish (ailake-core … ailake-cli, in dependency order)
+        └── publish-jvm      → fat-JARs (Spark/Trino/Flink) + libailake_jni.so → gh release upload
+              └── publish-airflow  → apache-airflow-providers-ailake wheel → PyPI + gh release upload
+                    └── pypi-linux     → ailake wheel Linux x86_64 then aarch64 (max-parallel: 1)
+                          └── pypi-macos     → [if: false — no macOS runner yet]
+                                └── pypi-windows   → ailake wheel Windows x86_64
+                                      └── pypi-sdist     → source distribution
+                                            └── pypi-publish   → twine upload → PyPI + gh release upload
+```
+
+If any job fails, re-run only that job (and its dependents) — the GitHub Release and git tag already exist.
+
+**Fallback workflows** (re-publish without rerunning the full chain):
+
+| Workflow | When to use |
+|---|---|
+| `publish-jvm.yml` | Re-upload JARs to existing release |
+| `publish-airflow-provider.yml` | Re-publish Airflow provider to existing release |
+| `publish-pypi.yml` | Re-build + re-publish Python wheels to existing release |

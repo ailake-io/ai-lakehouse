@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **`release.yml`**: Restructured into a single sequential publish chain — `release` → `publish-crates` → `publish-jvm` → `publish-airflow` → `pypi-linux` (max-parallel:1) → `pypi-macos` (disabled) → `pypi-windows` → `pypi-sdist` → `pypi-publish`. All publish jobs run automatically after the release job using `needs:` — no separate manual triggers needed. `publish-pypi.yml`, `publish-jvm.yml`, and `publish-airflow-provider.yml` demoted to manual fallback workflows for re-publishing without rerunning the full pipeline.
+- **`.github/workflows/compat-heavy.yml` (`compat-spark`)**: `pip install pyspark` now uses `--index-url https://pypi.org/simple/` to bypass the runner's pip mirror configuration.
+
 ### Fixed
 - **`ailake-go/chacha12.go` + `ailake-cpp/include/ailake/chacha12.hpp`**: Cross-language RaBitQ search was producing recall ≈ 0% because Go (`math/rand` LCG) and C++ (`std::mt19937_64`) generated completely different projection matrices than Rust's `StdRng` (ChaCha12) for the same seed. Fixed by implementing the full Rust PRNG: splitmix64 seed expansion (`u64 → 32-byte key`, 4 rounds) + ChaCha12 block function (6 double rounds, Bernstein state layout) + Standard float distribution (`f32::from_bits((u32>>9)|0x3f800000) - 1.0`). Go and C++ now regenerate bit-identical matrices to the Rust SDK for any seed.
 - **`ailake-cpp/include/ailake/`**: Added `kFlagIndexRaBitQ = 0x0002`, `AilakeHeader::is_rabitq()`, `RaBitQIndex`, `deserialize_rabitq`, `rabitq_search` (O(N) scan + `std::nth_element` partial select + optional F16 reranking), `SearchOptions::rabitq_rerank_factor`. C++ SDK previously silently misrouted RaBitQ files as HNSW. New `BincodeReader` methods: `read_u16()`, `read_u8_vec_flat()`, `read_u16_vec()`.
