@@ -325,9 +325,19 @@ jobs:
         with:
           ref: ${{ needs.release.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
+      - name: Install Rust (Windows)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            $tmp = "$env:TEMP\rustup-init.exe"
+            Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $tmp
+            Start-Process -FilePath $tmp -ArgumentList '-y','--default-toolchain','stable','--target','x86_64-pc-windows-msvc' -Wait -NoNewWindow
+            Remove-Item $tmp
+          } else {
+            rustup toolchain install stable --target x86_64-pc-windows-msvc
+            rustup default stable
+          }
+          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Add Strawberry Perl to PATH
         shell: pwsh
@@ -366,6 +376,8 @@ jobs:
         with:
           ref: ${{ needs.release.outputs.tag }}
           clean: false
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-python@v5
         with:
