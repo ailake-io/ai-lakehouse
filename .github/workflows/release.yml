@@ -318,7 +318,7 @@ jobs:
 
   pypi-windows:
     name: Build Python wheel — Windows (x86_64)
-    needs: [release, pypi-macos]
+    needs: [release, pypi-linux]
     runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v6
@@ -361,7 +361,7 @@ jobs:
 
   pypi-sdist:
     name: Build Python sdist
-    needs: [release, pypi-windows]
+    needs: [release, pypi-linux]
     runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Fix Docker-owned file permissions
@@ -390,7 +390,7 @@ jobs:
 
   pypi-publish:
     name: Publish Python wheel to PyPI
-    needs: [release, pypi-linux, pypi-macos, pypi-windows, pypi-sdist]
+    needs: [release, pypi-linux, pypi-windows, pypi-sdist]
     runs-on: [self-hosted, Linux, X64]
     permissions:
       actions: read
