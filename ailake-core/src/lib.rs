@@ -9,5 +9,7 @@ pub mod schema;
 pub mod types;
 
 pub use error::{AilakeError, AilakeResult};
-pub use schema::{llm_columns, LlmContextSchema, PQConfig, RaBitQConfig, VectorStoragePolicy};
+pub use schema::{
+    llm_columns, BinaryConfig, LlmContextSchema, PQConfig, RaBitQConfig, VectorStoragePolicy,
+};
 pub use types::{ByteLen, ByteOffset, Centroid, Dim, RowId, VectorMetric, VectorPrecision};

@@ -57,6 +57,29 @@ pub struct VectorStoragePolicy {
     /// quantization. Use `rerank_factor ≥ 3` at search time for full precision.
     #[serde(default)]
     pub rabitq: Option<RaBitQConfig>,
+    /// Binary Hamming configuration. When set, the file writer embeds a Hamming flat
+    /// index: each dimension's sign maps to 1 bit (no rotation). 32× smaller than F32.
+    /// Designed for models that produce binary-compatible vectors (Cohere embed-v3 binary,
+    /// Jina ColBERT). For general float embeddings, use RaBitQ — it achieves much better
+    /// recall via a random rotation before binarization.
+    #[serde(default)]
+    pub binary: Option<BinaryConfig>,
+}
+
+/// Binary Hamming quantization configuration.
+///
+/// For models trained to produce binary-compatible vectors (Cohere embed-v3 binary,
+/// Jina ColBERT, etc.). Sign of each dimension maps to 1 bit; Hamming distance.
+/// 32× compression vs F32. For general float embeddings use RaBitQ instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BinaryConfig {
+    /// Keep raw F16 vectors alongside binary codes for exact reranking.
+    #[serde(default = "default_keep_raw_binary")]
+    pub keep_raw: bool,
+}
+
+fn default_keep_raw_binary() -> bool {
+    true
 }
 
 /// RaBitQ quantization configuration.
@@ -90,6 +113,7 @@ impl VectorStoragePolicy {
             hnsw_m: None,
             hnsw_ef_construction: None,
             rabitq: None,
+            binary: None,
         }
     }
 }

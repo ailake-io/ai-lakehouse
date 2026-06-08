@@ -18,6 +18,7 @@ fn make_policy(dim: u32) -> VectorStoragePolicy {
         hnsw_m: None,
         hnsw_ef_construction: None,
         rabitq: None,
+        binary: None,
     }
 }
 

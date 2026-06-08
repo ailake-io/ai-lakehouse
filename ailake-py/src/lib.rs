@@ -21,7 +21,10 @@ use ailake_catalog::{
     hadoop::HadoopCatalog,
     provider::{CatalogProvider, TableIdent},
 };
-use ailake_core::{schema::RaBitQConfig as CoreRaBitQConfig, VectorMetric, VectorStoragePolicy};
+use ailake_core::{
+    schema::{BinaryConfig as CoreBinaryConfig, RaBitQConfig as CoreRaBitQConfig},
+    VectorMetric, VectorStoragePolicy,
+};
 use ailake_query::{
     search as rs_search, Chunk, ContextAssembler, ContextAssemblerConfig, SearchConfig,
     TableWriter as RsTableWriter,
@@ -58,7 +61,7 @@ pub struct TableWriter {
 impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, rabitq=false, rabitq_seed=0, rabitq_keep_raw=true))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, rabitq=false, rabitq_seed=0, rabitq_keep_raw=true, binary=false, binary_keep_raw=true))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         path: &str,
@@ -71,6 +74,8 @@ impl TableWriter {
         rabitq: bool,
         rabitq_seed: u64,
         rabitq_keep_raw: bool,
+        binary: bool,
+        binary_keep_raw: bool,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
@@ -86,6 +91,11 @@ impl TableWriter {
             policy.rabitq = Some(CoreRaBitQConfig {
                 seed: rabitq_seed,
                 keep_raw: rabitq_keep_raw,
+            });
+        }
+        if binary {
+            policy.binary = Some(CoreBinaryConfig {
+                keep_raw: binary_keep_raw,
             });
         }
         let (catalog, store) = local_catalog_store(path);

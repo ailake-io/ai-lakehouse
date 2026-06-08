@@ -7,7 +7,7 @@ use ailake_catalog::{
     hadoop::HadoopCatalog,
     provider::{CatalogProvider, TableIdent, TableProperties},
 };
-use ailake_core::{RaBitQConfig, VectorMetric, VectorPrecision, VectorStoragePolicy};
+use ailake_core::{BinaryConfig, RaBitQConfig, VectorMetric, VectorPrecision, VectorStoragePolicy};
 use ailake_query::{
     CompactionConfig, CompactionExecutor, CompactionPlanner, SearchConfig, TableWriter,
 };
@@ -73,6 +73,16 @@ enum Commands {
         /// Keep raw F16 vectors alongside binary codes for exact reranking (default: true).
         #[arg(long, default_value_t = true)]
         rabitq_keep_raw: bool,
+        /// Use Binary Hamming flat index instead of HNSW.
+        /// Sign of each dimension maps to 1 bit; distance = Hamming(a, b).
+        /// 32× smaller than F32. For models trained for binary search
+        /// (Cohere embed-v3 binary, Jina ColBERT). For general float embeddings
+        /// use --rabitq instead (better recall via random rotation).
+        #[arg(long, default_value_t = false)]
+        binary: bool,
+        /// Keep raw F16 vectors alongside binary codes for exact reranking (default: true).
+        #[arg(long, default_value_t = true)]
+        binary_keep_raw: bool,
     },
     /// Insert a Parquet file (with an embedding column) into a table
     Insert {
@@ -222,11 +232,16 @@ async fn run(cli: Cli) -> Result<(), String> {
             rabitq,
             rabitq_seed,
             rabitq_keep_raw,
+            binary,
+            binary_keep_raw,
         } => {
             let ident = parse_table_ident(&table);
             let rabitq_cfg = rabitq.then_some(RaBitQConfig {
                 seed: rabitq_seed,
                 keep_raw: rabitq_keep_raw,
+            });
+            let binary_cfg = binary.then_some(BinaryConfig {
+                keep_raw: binary_keep_raw,
             });
             let policy = VectorStoragePolicy {
                 column_name: column,
@@ -239,6 +254,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_m,
                 hnsw_ef_construction: hnsw_ef,
                 rabitq: rabitq_cfg,
+                binary: binary_cfg,
             };
 
             catalog
@@ -297,6 +313,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     hnsw_m: None,
                     hnsw_ef_construction: None,
                     rabitq: None,
+                    binary: None,
                 },
                 Err(_) => VectorStoragePolicy {
                     column_name: embeddings.clone(),
@@ -309,6 +326,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     hnsw_m: None,
                     hnsw_ef_construction: None,
                     rabitq: None,
+                    binary: None,
                 },
             };
 
@@ -453,6 +471,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_m: None,
                 hnsw_ef_construction: None,
                 rabitq: None,
+                binary: None,
             };
 
             let files = catalog
@@ -552,6 +571,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_m: None,
                 hnsw_ef_construction: None,
                 rabitq: None,
+                binary: None,
             };
             serve::run(
                 catalog as Arc<dyn CatalogProvider>,

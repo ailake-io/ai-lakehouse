@@ -3,12 +3,14 @@
 //!
 //! No I/O. Pure computation: quantization, distance functions, centroid computation, PQ.
 
+pub mod binary_quant;
 pub mod compress;
 pub mod distance;
 pub mod pq;
 pub mod quantize;
 pub mod rabitq;
 
+pub use binary_quant::{encode_batch as binary_encode_batch, f32_to_bits, hamming_distance};
 pub use compress::{BlockCompressor, CompressionCodec};
 pub use distance::{
     compute_centroid_and_radius, cosine_distance, cosine_distance_f16, dot_product,

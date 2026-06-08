@@ -518,6 +518,7 @@ mod tests {
             hnsw_m: None,
             hnsw_ef_construction: None,
             rabitq: None,
+            binary: None,
         }
     }
 

@@ -20,6 +20,7 @@ async fn positional_invariant_holds_for_1k_rows() {
         hnsw_m: None,
         hnsw_ef_construction: None,
         rabitq: None,
+        binary: None,
     };
     let (batch, embs) = fixtures::generate_batch(1000, dim as usize);
     let writer = AilakeFileWriter::new(policy);

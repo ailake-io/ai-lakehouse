@@ -32,6 +32,7 @@ async fn write_10k_rows_search_top10() {
         hnsw_m: None,
         hnsw_ef_construction: None,
         rabitq: None,
+        binary: None,
     };
 
     // Create table and write 10k rows split across 2 batches
@@ -103,6 +104,7 @@ async fn rabitq_write_search_returns_correct_top_result() {
             seed: 42,
             keep_raw: true,
         }),
+        binary: None,
     };
 
     let mut writer = TableWriter::create_or_open(
