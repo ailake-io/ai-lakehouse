@@ -79,7 +79,7 @@ Starts at byte 0 of every AILK section. All integer fields little-endian.
 |--------|------|-------|-------------------|-------------|
 | 0      | 4    | bytes | `magic`           | `AILK` (0x41 0x49 0x4C 0x4B) |
 | 4      | 2    | u16   | `format_version`  | Must be `1` for this spec |
-| 6      | 2    | u16   | `flags`           | Bit 0: `1` = IVF-PQ index. Bit 1: `1` = RaBitQ index. If both bits are `0`, index is HNSW (default). Bits 2–15 reserved, must be `0`. |
+| 6      | 2    | u16   | `flags`           | Bit 0: `1` = IVF-PQ index. Bit 1: `1` = RaBitQ index. Bit 2: `1` = Binary Hamming index. If all three bits are `0`, index is HNSW (default). Bits 3–15 reserved, must be `0`. |
 | 8      | 4    | u32   | `dim`             | Vector dimensionality |
 | 12     | 1    | u8    | `precision`       | See §3.1 |
 | 13     | 1    | u8    | `distance_metric` | See §3.2 |
@@ -166,6 +166,7 @@ The index type is determined by the `flags` field:
 | `0x0000` | HNSW (§6.1) |
 | `0x0001` | IVF-PQ (§6.2) |
 | `0x0002` | RaBitQ (§6.3) |
+| `0x0004` | Binary Hamming (§6.4) |
 
 ### 6.1 HNSW Index Blob (`flags & 0x0001 == 0`)
 
@@ -317,6 +318,57 @@ When to use RaBitQ vs HNSW vs IVF-PQ:
 | Storage (dim=1536) | 15–20% overhead | 2–5% of F16 | **1.5% of F32** |
 | Recall@10 (exact) | ≥ 0.95 | 0.90–0.95 | 0.80–0.95 (with rerank) |
 | Best use case | Online search | S3 cold storage | High-insert, extreme compression |
+
+### 6.4 Binary Hamming Index Blob (`flags & 0x0004 == FLAG_INDEX_BINARY`)
+
+The blob is a **bincode v1** serialization of `ailake_index::BinaryIndex`
+via `BinarySerializer`. Binary Hamming is a **flat index** — no graph, no
+rotation matrix.
+
+> **Storage**: 1 bit/dim per vector packed MSB-first into `ceil(dim/8)` bytes.
+> For dim=1536: **192 bytes/vector** — **32× smaller than F32, 16× smaller than F16**.
+> No orthonormal rotation (unlike RaBitQ). Quantization rule: `bit_i = (x_i >= 0.0) ? 1 : 0`, packed as bit 7 of byte 0 = dimension 0 (MSB-first).
+> Optional raw F16 vectors stored alongside for exact reranking (recommended).
+
+Binary layout:
+
+```
+[ codes:        Vec<u8>   — flat packed bits: record_count × ceil(dim/8) bytes
+                            Row i occupies codes[i*bytes_per_vec .. (i+1)*bytes_per_vec] ]
+[ bytes_per_vec: usize    — ceil(dim/8), serialized as u64 (bincode v1 usize rule) ]
+[ row_ids:      Vec<u64>  — 0-based Parquet row indices, parallel to codes ]
+[ metric:       u32       — DistanceMetric enum variant (§3.2) ]
+[ dim:          u32       — vector dimensionality ]
+[ raw_f16:      Option<Vec<u16>>
+    tag: 0x00 = None (no raw vectors stored)
+    tag: 0x01 = Some; followed by u64 count + count × u16 (IEEE 754 F16 LE)
+    length = record_count × dim when present ]
+```
+
+Bit packing rule (MSB-first): for dimension `i`, the sign bit is stored as bit `(7 - i%8)` of byte `i/8`. In code: `out[i/8] |= 0x80 >> (i%8)` when `x[i] >= 0.0`. All three language SDKs (Rust, Go, C++) implement this identical rule.
+
+Search algorithm:
+
+1. Binarize query once: `q_bits[i] = (q[i] >= 0.0)`, packed MSB-first.
+2. Sequential flat scan: for each database vector `i`, compute `hamming(q_bits, codes[i*bytes_per_vec..])`.
+3. SIMD dispatch: AVX2+SSSE3 nibble-LUT + PSADBW (32 bytes/iteration) → NEON `vcntq_u8` (16 bytes/iteration) → scalar u64-chunk `popcnt` (8 bytes/iteration).
+4. O(N) partial select: find top `candidates = rerank_factor × top_k` by Hamming distance.
+5. **Reranking** (when `raw_f16` present and `rerank_factor > 1`): compute exact F16 distances for top candidates using the stored metric, re-sort, return top-k.
+
+Key invariant: `len(codes) / bytes_per_vec == len(row_ids) == header.record_count`. Readers MUST verify this before search.
+
+When to use Binary Hamming vs other index types:
+
+| Criterion | HNSW | IVF-PQ | RaBitQ | **Binary Hamming** |
+|---|---|---|---|---|
+| Storage (dim=1536) | ~3 200 B/vec | ~50 B/vec | ~200 B/vec | **~192 B/vec** (no raw) |
+| Write throughput | ~50k vec/s | ~200k vec/s | ~163k vec/s | **>200k vec/s** |
+| Index build | O(n log n) graph | O(n) k-means | O(n) rotation | **O(n) one-pass** |
+| Recall@10 cosine | ≥ 0.95 | 0.90–0.95 | 0.85–0.95 (rerank) | 0.50–0.70 (no raw); 0.80–0.92 (rerank) |
+| Rotation matrix | — | — | Gram-Schmidt | **None** |
+| Best use case | RAG, online | S3 cold | Extreme compression | Max write speed |
+
+Use Binary Hamming when write throughput is the primary constraint and the use case tolerates reranking for recall recovery. Cosine workloads benefit most; pair with `rerank_factor ≥ 3` and `keep_raw = true`.
 
 ---
 
@@ -628,6 +680,24 @@ inv_codes        : Vec<Vec<u8>>
                    flat PQ codes for each vector in cluster i
 ```
 
+### 15.4 BinarySnapshot wire layout (§6.4, `flags & 0x0004 == FLAG_INDEX_BINARY`)
+
+```
+codes        : Vec<u8>    — u64 length (8 bytes LE) + length bytes
+                            flat packed sign bits, MSB-first; row i at
+                            offset i*bytes_per_vec within the flat array
+bytes_per_vec: usize      — serialized as u64; equals ceil(dim/8)
+row_ids      : Vec<u64>   — u64 length + length × u64 (Parquet row indices)
+metric       : u32        — DistanceMetric (§3.2), 4 bytes LE
+dim          : u32        — vector dimensionality, 4 bytes LE
+raw_f16      : Option<Vec<u16>>
+               0x00       — None (no raw vectors)
+               0x01 + u64 count + count × u16  — IEEE 754 F16 LE
+               count = record_count × dim when present
+```
+
+Integrity check: `codes.len() / bytes_per_vec == row_ids.len() == header.record_count`.
+
 ---
 
 ## 16. Cross-Language Implementations
@@ -636,11 +706,11 @@ The AI-Lake format is designed so that any language can read and search
 AI-Lake files by implementing §15's bincode decoder and the AILK header parser
 (§3). No dependency on the Rust crate is required.
 
-| Language | Module | AILK header | Bincode decoder | HNSW search | IVF-PQ search | RaBitQ search |
-|----------|--------|-------------|-----------------|-------------|---------------|---------------|
-| **Rust** | `ailake-file`, `ailake-index` | `AilakeHeader::from_bytes` | `HnswSerializer`, `IvfPqSerializer` | `HnswIndex::search` | `IvfPqIndex::search` | `RaBitQSerializer` + `RaBitQIndex::search` |
-| **C++17** | `ailake-cpp/include/ailake/` | `footer.hpp` → `is_rabitq()` | `bincode.hpp` → `BincodeReader` | `hnsw.hpp` → `hnsw_search` | `ivfpq.hpp` → `ivfpq_search` | `rabitq.hpp` → `deserialize_rabitq` + `rabitq_search`; `chacha12.hpp` → `ChaCha12Rng` |
-| **Go** | `ailake-go/` | `footer.go` → `IsRaBitQ()` | `bincode.go` → `bincodeReader` | `hnsw.go` → `(HnswIndex).Search` | `ivfpq.go` → `(IvfPqIndex).Search` | `rabitq.go` → `DeserializeRaBitQ` + `(RaBitQIndex).Search`; `chacha12.go` → `chacha12Rng` |
+| Language | Module | AILK header | Bincode decoder | HNSW search | IVF-PQ search | RaBitQ search | Binary Hamming search |
+|----------|--------|-------------|-----------------|-------------|---------------|---------------|----------------------|
+| **Rust** | `ailake-file`, `ailake-index` | `AilakeHeader::from_bytes` | `HnswSerializer`, `IvfPqSerializer` | `HnswIndex::search` | `IvfPqIndex::search` | `RaBitQSerializer` + `RaBitQIndex::search` | `BinarySerializer` + `BinaryIndex::search` |
+| **C++17** | `ailake-cpp/include/ailake/` | `footer.hpp` → `is_rabitq()`, `is_binary()` | `bincode.hpp` → `BincodeReader` | `hnsw.hpp` → `hnsw_search` | `ivfpq.hpp` → `ivfpq_search` | `rabitq.hpp` → `deserialize_rabitq` + `rabitq_search`; `chacha12.hpp` → `ChaCha12Rng` | `binary.hpp` → `deserialize_binary` + `binary_search` |
+| **Go** | `ailake-go/` | `footer.go` → `IsRaBitQ()`, `IsBinary()` | `bincode.go` → `bincodeReader` | `hnsw.go` → `(HnswIndex).Search` | `ivfpq.go` → `(IvfPqIndex).Search` | `rabitq.go` → `DeserializeRaBitQ` + `(RaBitQIndex).Search`; `chacha12.go` → `chacha12Rng` | `binary.go` → `DeserializeBinary` + `(BinaryIndex).Search` |
 
 All three implementations follow the same read algorithm (§9) and enforce the
 same integrity invariants (§10). The C++ and Go SDKs were independently
@@ -661,7 +731,7 @@ fixture (`ailake-query/examples/write_fixture.rs`).
 7. Read centroid blob at ailk_start + header.centroid_offset
    → geometric pruning (optional but recommended)
 8. Read index blob at ailk_start + header.hnsw_offset, length = header.hnsw_len
-9. Decode index blob via §15.2 (HNSW) or §15.3 (IVF-PQ) depending on flags
+9. Decode index blob via §15.2 (HNSW), §15.3 (IVF-PQ), §15.4 (Binary Hamming), or §6.3 (RaBitQ) depending on flags
 10. Search (§9.2)
 ```
 

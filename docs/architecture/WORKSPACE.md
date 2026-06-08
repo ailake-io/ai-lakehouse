@@ -71,6 +71,8 @@ Vector data transformations. No I/O.
 - `RaBitQCodebook::estimate_ip(q_proj, q_scale, entry) -> f32` — convenience wrapper over `estimate_ip_binary`; binarizes `q_proj` on every call (avoid in hot paths)
 - `encode_batch(codebook, vectors) -> Vec<RaBitQVec>` — parallel encoding via `rayon`
 - `RaBitQVec { code: Vec<u8>, norm: f32, scale: f32 }` — 1 bit/dim storage (ceil(dim/8) bytes code)
+- `binary_quantize(v: &[f32]) -> Vec<u8>` — MSB-first sign binarization: `bit_i = (v[i] >= 0.0)`, packed as `out[i/8] |= 0x80 >> (i%8)`; no rotation
+- `hamming_distance(a: &[u8], b: &[u8]) -> u32` — SIMD dispatch: AVX2+SSSE3 nibble-LUT → NEON `vcntq_u8` → scalar u64 `count_ones`
 
 ### `ailake-index`
 HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) + AMD ROCm (runtime libloading). CPU fallback always available.
@@ -92,7 +94,11 @@ HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) 
   - `build(row_ids, vectors, metric, config, keep_raw) -> RaBitQIndex` — one-pass O(n) encode; no graph, no k-means
   - `search(&self, query, top_k, rerank_factor) -> Vec<(RowId, f32)>` — pre-binarize query once → sequential O(N) scan using `estimate_ip_binary` → O(N) `select_nth_unstable_by` for top candidates → optional exact F16 reranking. Takes `&self` (not `&mut self`) — safe for concurrent shard-level parallelism via rayon.
 - `RaBitQSerializer` — bincode roundtrip for `RaBitQIndex`; `from_bytes` automatically calls `rebuild_proj()` (never lazy on search)
-- `AnyIndex` — enum dispatching search to `HnswIndex`, `IvfPqIndex`, or `RaBitQIndex`
+- `BinaryIndex` — flat Hamming scan over MSB-first sign-bit codes; no graph, no rotation
+  - `build(row_ids, vectors, metric, keep_raw) -> BinaryIndex` — one-pass O(n); binarize each vector as `bit_i = (x_i >= 0.0)`, pack MSB-first into `ceil(dim/8)` bytes
+  - `search(&self, query, top_k, rerank_factor) -> Vec<(RowId, f32)>` — binarize query once → sequential Hamming scan (SIMD dispatch: AVX2+SSSE3 → NEON → scalar popcnt) → optional exact F16 reranking
+- `BinarySerializer` — bincode roundtrip for `BinaryIndex`
+- `AnyIndex` — enum dispatching search to `HnswIndex`, `IvfPqIndex`, `RaBitQIndex`, or `BinaryIndex`
 - `HnswSerializer` — bincode-based serialization of the full HNSW graph
 - `MmapLoader` — opens a serialized HNSW from a memory-mapped byte slice
   - Lazy: graph traversal only pages in the regions touched during search
@@ -114,10 +120,11 @@ HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) 
 - `AilakeFileWriter` — high-level writer:
   1. Writes RecordBatch via `ailake-parquet`
   2. Auto-selects index type from `VectorStoragePolicy`:
+     - `policy.binary.is_some()` → `IndexType::Binary` (flat Hamming, one-pass)
      - `policy.rabitq.is_some()` → `IndexType::RaBitQ` (flat, one-pass)
      - `policy.pq.is_some()` → `IndexType::IvfPq`
      - default → `IndexType::Hnsw`
-  3. Builds and serializes the index (HNSW / IVF-PQ / RaBitQ) into the AI-Lake footer
+  3. Builds and serializes the index (HNSW / IVF-PQ / RaBitQ / Binary) into the AI-Lake footer
   4. Appends footer to the file after the final PAR1 marker
   5. Updates Parquet `key_value_metadata` with `ailake.hnsw_offset` and `ailake.hnsw_len`
 - `AilakeFileReader` — high-level reader:

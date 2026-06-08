@@ -89,9 +89,9 @@ Should finish with `112 passed` (2 ignored — doctests requiring live credentia
 
 | Crate | What it covers |
 |---|---|
-| `ailake-vec` | F32→F16 quantization, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centroids, `exact_distance`, SIMD (AVX2/NEON) |
-| `ailake-index` | HNSW build/search, IVF-PQ (train/search/serialize), GPU k-means dispatch, bincode serialization, MmapLoader round-trip |
-| `ailake-file` | Unified file write/read, AILK layout (HNSW and IVF-PQ), integrity |
+| `ailake-vec` | F32→F16 quantization, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centroids, `exact_distance`, SIMD (AVX2/NEON), RaBitQ encoding, binary sign quantization (MSB-first) |
+| `ailake-index` | HNSW build/search, IVF-PQ (train/search/serialize), RaBitQ (encode/search/serialize), Binary Hamming (encode/search/serialize), GPU k-means dispatch, bincode serialization, MmapLoader round-trip |
+| `ailake-file` | Unified file write/read, AILK layout (HNSW, IVF-PQ, RaBitQ, Binary Hamming), integrity |
 | `ailake-query` | ContextAssembler, geometric pruning, post-PQ reranking, MemTableWriter, write_batch_ivf_pq; `arrow_schema_to_iceberg_update` (automatic schema propagation on commit) |
 | `ailake-parquet` | write_batch_multi_vec / read_all_multi_vec (multi-vector columns) |
 | `tests` (integration) | write→read→search end-to-end, positional invariant, PyArrow compatibility, pruning, context assembler |
@@ -922,6 +922,58 @@ results = ailake.search(
 | RaBitQ + raw F16 | 3 264 | ~3.3 GB (codes + F16) |
 
 **Note**: with `keep_raw=False`, only the binary codes and norms are stored — 192 bytes/vec for dim=1536, with no reranking possible. With `keep_raw=True` (default), raw F16 vectors are also stored for reranking — total is similar to HNSW but with faster writes.
+
+---
+
+## 8J. Binary Hamming flat index (`--binary`)
+
+Binary Hamming uses 1 bit/dim packed MSB-first — no rotation matrix, no k-means. Quantization rule: `bit_i = (x_i >= 0.0)`. Storage: 192 bytes/vector at dim=1536 (32× smaller than F32). Write throughput exceeds 200k vec/s. Search is sequential Hamming scan with SIMD dispatch (AVX2+SSSE3 → NEON → scalar u64 popcnt). Lower recall than RaBitQ (no orthonormal rotation to spread signs); best for cosine with reranking.
+
+### CLI usage
+
+```bash
+# Create table with Binary Hamming flat index
+ailake create s3://my-lake/docs/ --dim 1536 --metric cosine --binary
+
+# Without raw F16 storage (maximum compression, no reranking)
+ailake create s3://my-lake/docs/ --dim 1536 --metric cosine --binary --no-binary-keep-raw
+```
+
+### Python usage
+
+```python
+import ailake
+
+writer = ailake.TableWriter(
+    "s3://my-lake/docs/",
+    dim=1536,
+    metric="cosine",
+    binary=True,
+    binary_keep_raw=True,  # keep F16 for reranking (recommended)
+)
+writer.write_batch(texts, embeddings)
+writer.commit()
+
+results = ailake.search(
+    path="s3://my-lake/docs/",
+    query=query_embedding,
+    top_k=10,
+    rerank_factor=3,  # ≥ 3 for cosine; ≥ 10 for Euclidean/complex
+)
+```
+
+### Storage comparison (dim=1536, 1M vectors)
+
+| Index | Bytes/vector | Total (1M vecs) | Recall@10 cosine |
+|---|---|---|---|
+| HNSW (F16) | ~3 200 | ~3.2 GB | ≥ 0.95 |
+| IVF-PQ (M=48) | ~50 | ~50 MB | 0.90–0.95 |
+| RaBitQ (no raw) | 192 | 192 MB | 0.70–0.85 |
+| RaBitQ + raw F16 | 3 264 | ~3.3 GB | 0.85–0.95 |
+| **Binary (no raw)** | **192** | **192 MB** | 0.50–0.70 |
+| Binary + raw F16 | 3 264 | ~3.3 GB | 0.80–0.92 |
+
+C++ SDK: 14 unit tests in `ailake-cpp/tests/test_binary.cpp` cover `f32_to_bits`, `hamming_distance`, and `binary_search` (empty, zero top_k, top-k cap, F16 rerank).
 
 ---
 
