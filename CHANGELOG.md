@@ -9,14 +9,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.13] — 2026-06-08
+
+### Added
+- **Binary Hamming flat index** — `IndexType::Binary` / `FLAG_INDEX_BINARY = 0x0004`. Binarizes each vector dimension via sign (positive = 1), packs to `ceil(dim/8)` bytes. Distance = Hamming (`popcount(a XOR b)`). 32× smaller than F32 (1 bit/dim vs 32 bits/dim). Designed for models trained to produce binary-compatible vectors (Cohere embed-v3 binary, Jina ColBERT). For general float embeddings use RaBitQ — it applies a random rotation before binarization and achieves much better recall at the same storage cost.
+  - **`ailake-vec/src/binary_quant.rs`**: `f32_to_bits` (sign packing, MSB-first), `hamming_distance` with AVX2/SSSE3 Mula nibble-LUT + PSADBW (32 bytes/iter), NEON `vcntq_u8` (16 bytes/iter), scalar u64-chunk fallback (maps to `popcnt`).
+  - **`ailake-index/src/binary.rs`**: `BinaryIndex` flat scan, `BinarySerializer` (bincode). Optional `keep_raw: bool` for exact F16 reranking; partial-select O(N) top-k with optional rerank. `rerank_factor ≥ 3` recommended.
+  - **`ailake-file`**: `FLAG_INDEX_BINARY = 0x0004` in footer; writer builds `BinaryIndex` when `policy.binary.is_some()`; reader dispatches on `FLAG_INDEX_BINARY` before RaBitQ/IVF-PQ/HNSW checks.
+  - **`ailake-core/src/schema.rs`**: `BinaryConfig { keep_raw: bool }` added to `VectorStoragePolicy`.
+  - **CLI**: `ailake create --binary [--binary-keep-raw]`.
+  - **Python**: `TableWriter(binary=True, binary_keep_raw=True)`.
+  - **JVM plugins** (Trino / Spark / Flink): search dispatches automatically via `AnyIndex::search()` — no plugin code changes needed. `ailake_write_batch_json` in `ailake-jni` now accepts `"binary":true,"binary_keep_raw":true` so JVM plugins can write Binary tables.
+  - **Go SDK** (`ailake-go/binary.go`): `BinaryIndex`, `DeserializeBinary` (bincode wire format), `hammingBinary` (u64-chunk XOR + `bits.OnesCount64` → POPCNT on x86_64 / VCNT+UADDLV on aarch64), `f32ToBits` (MSB-first), `BinaryIndex.Search` (Hamming scan + optional F16 rerank). `FlagIndexBinary = 0x0004` and `IsBinary()` in `footer.go`; dispatch in `searchFile()` before RaBitQ check.
+  - **C++ SDK** (`ailake-cpp/include/ailake/binary.hpp`): `BinaryIndex`, `deserialize_binary`, `f32_to_bits`, `hamming_distance` (AVX2+SSSE3 nibble-LUT / NEON `vcntq_u8` / scalar `__builtin_popcountll`), `binary_search` (O(N) scan + `std::nth_element` + optional F16 reranking). `kFlagIndexBinary = 0x0004` and `is_binary()` in `footer.hpp`; dispatch in `search_file()` before RaBitQ check.
+  - **C++ SDK tests** (`ailake-cpp/tests/`): `test_binary.cpp` — 14 tests covering `f32_to_bits` MSB-first packing, `hamming_distance` (single byte / multibyte / 32-byte AVX2 chunk), `binary_search` top-k, F16 reranking, and edge cases. Also created `test_footer.cpp`, `test_hnsw.cpp`, `test_ivfpq.cpp` (first C++ unit test suite — CMakeLists previously referenced non-existent files). `CMakeLists.txt` updated to per-module `foreach` loop.
+
+---
+
+## [0.0.12] — 2026-06-07
+
 ### Fixed
-- `tests/docker/demo/Dockerfile`: remove `COPY ailake-bench` (crate lives in separate repo; line caused Docker build failure)
-- `notebooks/04_trino.ipynb`, `notebooks/05_bigquery.ipynb`: fix pre-flight error message — wrong `-f compose-demo-engines.yml` replaced with `--profile engines`
 - `.github/workflows/publish-pypi.yml`: remove duplicate `runs-on` key in `linux` job
 - `.github/workflows/release.yml`: all downstream jobs (`publish-crates`, `publish-jvm`, `publish-airflow`, `pypi-linux/macos/windows/sdist`) now checkout `ref: ${{ needs.release.outputs.tag }}` — prevents publishing stale pre-bump version to crates.io/PyPI
 - `.github/workflows/release.yml`: fix cascade-skip — `pypi-windows` and `pypi-sdist` depended on `pypi-macos` (`if: false`); skipped job propagated to Windows, sdist, and `pypi-publish`, blocking PyPI release entirely; both now depend on `pypi-linux` instead; removed `pypi-macos` from `pypi-publish` needs
 - `.github/workflows/release.yml`, `publish-pypi.yml`: Windows Rust install — `dtolnay/rust-toolchain` uses bash internally (fails on Windows self-hosted); replaced with inline PowerShell that downloads `rustup-init.exe` if rustup absent, otherwise runs `rustup toolchain install`
 - `.github/workflows/release.yml` (`pypi-sdist`), `publish-pypi.yml` (`sdist`): add `dtolnay/rust-toolchain@stable` before `maturin sdist` — `maturin sdist` runs natively on Linux runner (no manylinux Docker), so cargo must be in PATH explicitly
+- `tests/docker/demo/Dockerfile`: remove `COPY ailake-bench` (crate lives in separate repo; line caused Docker build failure)
+- `notebooks/04_trino.ipynb`, `notebooks/05_bigquery.ipynb`: fix pre-flight error message — wrong `-f compose-demo-engines.yml` replaced with `--profile engines`
+
+### Changed
+- `.github/workflows/ci.yml`: disable automatic push/PR triggers — manual `workflow_dispatch` only while repo is private
+- `.github/workflows/release.yml`: manual-only trigger (`workflow_dispatch`); fix JAR glob pattern
 
 ### Docs
 - `README.md`: remove duplicate `ailake-cli/` lines in repo layout; add `ailake-go/`, `ailake-cpp/`, `airflow-providers-ailake/` to directory tree

@@ -176,6 +176,39 @@ AilakeFileWriter::new(policy)
 
 ---
 
+## Binary Hamming write path (flat index, one-pass O(n))
+
+`write_batch` with `policy.binary = Some(BinaryConfig)` — no rotation, no graph, no k-means.
+
+```
+Caller
+  │
+  │  write_batch(batch, embeddings)   ← policy.binary set
+  ▼
+AilakeFileWriter::new(policy)
+  │   ↳ auto-selects IndexType::Binary from policy.binary (checked before RaBitQ)
+  │
+  ├─► [for each vector v]
+  │     │  1. binarize: bit_i = (v[i] >= 0.0), pack MSB-first into ceil(dim/8) bytes
+  │     └─► returns: Vec<u8> code
+  │
+  ├─► [if keep_raw=true]
+  │     │  2. quantize v → F16, store alongside codes
+  │     └─► enables exact reranking at search time
+  │
+  ├─► ailake-file: append AILK section
+  │     │  3. header: flags=0x0004 (FLAG_INDEX_BINARY)
+  │     │  4. centroid blob
+  │     │  5. Binary blob: bincode(BinaryIndex { codes, bytes_per_vec, row_ids, metric, dim, raw_f16 })
+  │     └─► returns: file bytes
+  │
+  └─► catalog commit (same flow as HNSW)
+```
+
+**Throughput**: >200k vec/s (binarization is O(n) with no PRNG, no matrix multiply). Storage: 192 bytes/vec at dim=1536 (no raw); ~3264 bytes/vec with raw F16.
+
+---
+
 ## Read path — vector search
 
 ```mermaid
@@ -184,7 +217,7 @@ flowchart TD
     CAT["ailake-catalog\n1. read metadata.json → snapshot\n2. read snap-NNN.avro → DataFileEntry list\n3. decode centroid_b64, radius per file"]
     PRUNE["ailake-query / VectorPruner\n4. dist(query, centroid) - radius > threshold?\n   YES → skip file (zero S3 I/O)"]
     STORE["ailake-store\n5a. GET range [hnsw_offset, +hnsw_len)"]
-    MMAP["ailake-index / MmapLoader\n5b. write to tempfile\n5c. mmap → bincode::deserialize\n    HnswIndex or IvfPqIndex"]
+    MMAP["ailake-index / MmapLoader\n5b. write to tempfile\n5c. mmap → bincode::deserialize\n    HnswIndex, IvfPqIndex, RaBitQIndex, or BinaryIndex\n    (dispatched by AnyIndex from flags field)"]
     SEARCH["ailake-index\n5d. index.search(query, candidate_k)"]
     MERGE["merge all per-file results\nglobal top-k sort"]
     FETCH["ailake-parquet / ParquetVectorReader\n6. read specific row groups for winners\n   with predicate pushdown"]

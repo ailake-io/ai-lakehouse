@@ -471,7 +471,8 @@ Or set `ailake.native.lib` system property or `AILAKE_NATIVE_LIB` env var to poi
 | `vector.metric` | | `euclidean` | `cosine` / `euclidean` / `dot_product` |
 | `vector.precision` | | `f16` | `f16` / `f32` / `i8` |
 | `search.top-k` | | `10` | Results per query |
-| `search.ef` | | `50` | HNSW ef_search parameter |
+| `search.ef` | | `50` | HNSW ef_search parameter (ignored for IVF-PQ, RaBitQ, Binary Hamming index types) |
+| `search.rerank-factor` | | `1` | Rerank multiplier for RaBitQ and Binary Hamming flat indexes (≥ 3 recommended for cosine; ≥ 10 for Euclidean/complex). Ignored for HNSW and IVF-PQ. |
 
 ---
 

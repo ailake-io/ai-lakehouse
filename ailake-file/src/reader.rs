@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_core::{AilakeError, AilakeResult, Centroid, VectorMetric};
-use ailake_index::{AnyIndex, HnswIndex, IvfPqSerializer, MmapLoader, RaBitQSerializer};
+use ailake_index::{AnyIndex, BinarySerializer, HnswIndex, IvfPqSerializer, MmapLoader, RaBitQSerializer};
 use ailake_parquet::ParquetVectorReader;
 use arrow_array::RecordBatch;
 use bytes::Bytes;
 
 use crate::footer::{
-    AilakeHeader, DistanceMetric, FLAG_INDEX_IVF_PQ, FLAG_INDEX_RABITQ, HEADER_SIZE,
+    AilakeHeader, DistanceMetric, FLAG_INDEX_BINARY, FLAG_INDEX_IVF_PQ, FLAG_INDEX_RABITQ,
+    HEADER_SIZE,
 };
 
 pub struct AilakeFileReader {
@@ -157,7 +158,10 @@ impl AilakeFileReader {
         }
         let index_bytes = &self.bytes[index_start..index_end];
 
-        if header.flags & FLAG_INDEX_RABITQ != 0 {
+        if header.flags & FLAG_INDEX_BINARY != 0 {
+            let idx = BinarySerializer::from_bytes(index_bytes)?;
+            Ok(AnyIndex::Binary(idx))
+        } else if header.flags & FLAG_INDEX_RABITQ != 0 {
             let idx = RaBitQSerializer::from_bytes(index_bytes)?;
             Ok(AnyIndex::RaBitQ(idx))
         } else if header.flags & FLAG_INDEX_IVF_PQ != 0 {
@@ -229,6 +233,7 @@ mod tests {
             hnsw_m: None,
             hnsw_ef_construction: None,
             rabitq: None,
+            binary: None,
         }
     }
 
