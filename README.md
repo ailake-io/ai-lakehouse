@@ -221,9 +221,7 @@ ailake/
 ├── ailake-cli/
 │   ├── Cargo.toml
 │   └── src/
-│       └── main.rs             # CLI: ailake create / insert / search / compact / info
-│   ├── Cargo.toml
-│   └── src/
+│       └── main.rs             # CLI: ailake create / insert / search / compact / info / serve
 ├── ailake-py/
 │   ├── Cargo.toml
 │   ├── pyproject.toml
@@ -249,13 +247,49 @@ ailake/
 │       ├── VectorScanSplitManager.kt
 │       ├── VectorScanRecordSet.kt
 │       └── AilakeNative.kt
-└── ailake-flink/               # Kotlin — Flink Table API connector (Gradle)
-    ├── build.gradle.kts
-    └── src/main/kotlin/io/ailake/flink/
-        ├── AilakeCatalog.kt
-        ├── AilakeVectorConnectorFactory.kt
-        ├── AilakeVectorTableSink.kt
-        └── AilakeVectorTableSource.kt
+├── ailake-flink/               # Kotlin — Flink Table API connector (Gradle)
+│   ├── build.gradle.kts
+│   └── src/main/kotlin/io/ailake/flink/
+│       ├── AilakeCatalog.kt
+│       ├── AilakeVectorConnectorFactory.kt
+│       ├── AilakeVectorTableSink.kt
+│       └── AilakeVectorTableSource.kt
+├── ailake-go/                  # Go SDK — pure Go, no CGo (go.mod)
+│   ├── go.mod
+│   ├── ailake.go               # AilakeReader, AilakeWriter, VectorSearch
+│   ├── catalog.go              # Iceberg metadata.json + manifest reading
+│   ├── footer.go               # AI-Lake footer parser
+│   ├── hnsw.go                 # HNSW graph traversal
+│   ├── ivfpq.go                # IVF-PQ decoder + ADC search
+│   ├── rabitq.go               # RaBitQ 1-bit index + reranking
+│   ├── chacha12.go             # ChaCha12 PRNG (rotation matrix, bit-identical with Rust)
+│   ├── hardware.go             # Hardware detection (CUDA / ROCm / CPU)
+│   ├── http_search.go          # HTTP client for `ailake serve` REST API
+│   ├── distance.go             # Distance kernels (cosine, euclidean, dot)
+│   └── simd_amd64.s            # AVX2 distance kernels (Go assembly)
+├── ailake-cpp/                 # C++17 header-only SDK
+│   ├── CMakeLists.txt
+│   ├── include/ailake/
+│   │   ├── ailake.hpp          # Public API entry point
+│   │   ├── catalog.hpp         # Iceberg metadata reader
+│   │   ├── footer.hpp          # AI-Lake footer parser
+│   │   ├── hnsw.hpp            # HNSW search
+│   │   ├── ivfpq.hpp           # IVF-PQ decoder
+│   │   ├── rabitq.hpp          # RaBitQ search
+│   │   ├── chacha12.hpp        # ChaCha12 PRNG (bit-identical with Rust)
+│   │   ├── distance.hpp        # Distance kernels
+│   │   ├── hardware.hpp        # Hardware detection
+│   │   ├── bincode.hpp         # bincode deserializer
+│   │   ├── cuda/distance.cuh   # CUDA distance kernel
+│   │   └── rocm/blas.hpp       # ROCm hipBLAS wrapper
+│   └── src/
+│       ├── catalog.cpp
+│       └── search.cpp
+└── airflow-providers-ailake/   # Apache Airflow 2.x/3.x provider (Python)
+    ├── pyproject.toml
+    ├── README.md
+    └── airflow_providers_ailake/
+        # AilakeHook, AilakeWriteOperator, AilakeSearchOperator, AilakeSnapshotSensor
 tests/
 ├── write_read_roundtrip.rs
 ├── iceberg_compat.rs

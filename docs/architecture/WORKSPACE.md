@@ -293,8 +293,9 @@ zstd        = "0.13"
 pyo3        = { version = "0.24", features = ["extension-module"] }
 # uniffi removed — all JVM bindings use C-ABI + JNA
 
-# CLI
+# CLI + HTTP server
 clap        = { version = "4", features = ["derive", "env"] }
+axum        = "0.7"                   # `ailake serve` REST JSON server (ailake-cli)
 
 # Observability
 tracing            = "0.1"
