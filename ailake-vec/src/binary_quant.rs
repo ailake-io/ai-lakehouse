@@ -191,21 +191,21 @@ mod tests {
 
     #[test]
     fn hamming_identical_zero() {
-        let a = f32_to_bits(&vec![1.0, -1.0, 1.0, -1.0]);
+        let a = f32_to_bits(&[1.0, -1.0, 1.0, -1.0]);
         assert_eq!(hamming_distance(&a, &a), 0);
     }
 
     #[test]
     fn hamming_all_different() {
-        let a = f32_to_bits(&vec![1.0; 8]);
-        let b = f32_to_bits(&vec![-1.0; 8]);
+        let a = f32_to_bits(&[1.0; 8]);
+        let b = f32_to_bits(&[-1.0; 8]);
         assert_eq!(hamming_distance(&a, &b), 8);
     }
 
     #[test]
     fn hamming_one_bit() {
-        let a = f32_to_bits(&vec![1.0, -1.0]);
-        let b = f32_to_bits(&vec![1.0, 1.0]);
+        let a = f32_to_bits(&[1.0, -1.0]);
+        let b = f32_to_bits(&[1.0, 1.0]);
         assert_eq!(hamming_distance(&a, &b), 1);
     }
 
