@@ -14,7 +14,6 @@ jobs:
   linux:
     name: Build Linux (${{ matrix.target }})
     runs-on: [self-hosted, Linux, X64]
-    runs-on: [self-hosted, Linux, X64]
     strategy:
       matrix:
         target: [x86_64, aarch64]
