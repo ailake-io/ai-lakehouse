@@ -68,7 +68,7 @@ impl BinaryIndex {
             ));
         }
         let dim = vectors[0].len();
-        let bytes_per_vec = (dim + 7) / 8;
+        let bytes_per_vec = dim.div_ceil(8);
 
         // Encode all vectors to packed bits
         let mut codes = Vec::with_capacity(vectors.len() * bytes_per_vec);
