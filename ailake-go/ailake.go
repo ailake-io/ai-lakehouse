@@ -182,7 +182,14 @@ func searchFile(
 	// - IVF-PQ + CPU only       → CPU ADC (pure Go)
 	// - HNSW                    → CPU greedy graph traversal (sequential by nature)
 	var hits []SearchResult
-	if header.IsRaBitQ() {
+	if header.IsBinary() {
+		// Binary Hamming flat index: sign-binarize query, scan all codes, optional F16 rerank.
+		idx, err := DeserializeBinary(indexBuf)
+		if err != nil {
+			return nil, fmt.Errorf("deserialize Binary: %w", err)
+		}
+		hits = idx.Search(query, opts.TopK, len(idx.RawF16) > 0)
+	} else if header.IsRaBitQ() {
 		// RaBitQ flat index: brute-force binary search with optional F16 reranking.
 		idx, err := DeserializeRaBitQ(indexBuf)
 		if err != nil {

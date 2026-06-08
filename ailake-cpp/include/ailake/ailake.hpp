@@ -17,6 +17,7 @@
 
 #include "footer.hpp"
 #include "bincode.hpp"
+#include "binary.hpp"
 #include "chacha12.hpp"
 #include "distance.hpp"
 #include "hardware.hpp"
@@ -86,7 +87,11 @@ search_file(const std::string& abs_path,
 
     const auto& hw = opts.hardware();
 
-    if (hdr.is_rabitq()) {
+    if (hdr.is_binary()) {
+        auto idx = deserialize_binary(index_buf.data(), index_buf.size());
+        return binary_search(idx, query, opts.top_k, opts.rabitq_rerank_factor);
+
+    } else if (hdr.is_rabitq()) {
         auto idx = deserialize_rabitq(index_buf.data(), index_buf.size());
         return rabitq_search(idx, query, opts.top_k, opts.rabitq_rerank_factor);
 
@@ -205,7 +210,7 @@ search(HadoopCatalog& catalog,
             survivors.push_back(e);
     }
 
-    // Per-file HNSW / IVF-PQ / RaBitQ search
+    // Per-file Binary / RaBitQ / IVF-PQ / HNSW search
     std::vector<FileSearchResult> all;
     for (auto& e : survivors) {
         std::string abs = catalog.resolve_path(ns, tbl, e.path);
