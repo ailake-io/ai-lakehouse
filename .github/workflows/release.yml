@@ -2,8 +2,8 @@ name: Release
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
+  # push:
+  #   branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,19 +22,40 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # full history so tag push works
+          fetch-depth: 0  # full history needed to read latest tag
 
-      - name: Read version from Cargo.toml
+      - name: Bump patch version from latest tag
         id: version
-        run: |
-          VERSION=$(grep '^version' ailake-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Create and push git tag
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Derive next version from latest semver tag (patch+1).
+          # Falls back to v0.0.0 when no tags exist yet.
+          LATEST=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
+          LATEST=${LATEST:-v0.0.0}
+          MAJOR=$(echo "${LATEST#v}" | cut -d. -f1)
+          MINOR=$(echo "${LATEST#v}" | cut -d. -f2)
+          PATCH=$(echo "${LATEST#v}" | cut -d. -f3)
+          NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          NEW_TAG="v$NEW_VERSION"
+
+          # Bump every Cargo.toml (crate versions + inter-crate deps).
+          # Quotes ensure we don't partial-match e.g. "0.0.9" inside "0.0.10".
+          OLD_VERSION="${LATEST#v}"
+          find . -name "Cargo.toml" -not -path "*/target/*" \
+            -exec sed -i "s/\"$OLD_VERSION\"/\"$NEW_VERSION\"/g" {} \;
+
+          git add $(find . -name "Cargo.toml" -not -path "*/target/*")
+          git diff --cached --quiet || \
+            git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
+          git push origin main
+
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$NEW_TAG"         >> "$GITHUB_OUTPUT"
+
+      - name: Create and push git tag
+        run: |
           git tag "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
           git push origin "${{ steps.version.outputs.tag }}"
 
@@ -166,10 +187,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$TAG" \
-            "spark-plugin/build/libs/spark-plugin-${VERSION}-plugin.jar" \
-            "trino-plugin/build/libs/trino-plugin-${VERSION}-plugin.jar" \
-            "ailake-flink/build/libs/ailake-flink-${VERSION}-plugin.jar" \
-            "target/release/libailake_jni.so" \
+            spark-plugin/build/libs/spark-plugin-*-plugin.jar \
+            trino-plugin/build/libs/trino-plugin-*-plugin.jar \
+            ailake-flink/build/libs/ailake-flink-*-plugin.jar \
+            target/release/libailake_jni.so \
             --clobber
 
   publish-airflow:

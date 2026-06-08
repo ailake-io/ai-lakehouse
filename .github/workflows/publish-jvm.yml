@@ -57,11 +57,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           TAG="${{ steps.version.outputs.tag }}"
           gh release upload "$TAG" \
-            "spark-plugin/build/libs/spark-plugin-${VERSION}-plugin.jar" \
-            "trino-plugin/build/libs/trino-plugin-${VERSION}-plugin.jar" \
-            "ailake-flink/build/libs/ailake-flink-${VERSION}-plugin.jar" \
-            "target/release/libailake_jni.so" \
+            spark-plugin/build/libs/spark-plugin-*-plugin.jar \
+            trino-plugin/build/libs/trino-plugin-*-plugin.jar \
+            ailake-flink/build/libs/ailake-flink-*-plugin.jar \
+            target/release/libailake_jni.so \
             --clobber

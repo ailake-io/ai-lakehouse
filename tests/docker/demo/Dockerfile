@@ -38,7 +38,6 @@ COPY ailake-py        ailake-py/
 # all members listed in the root Cargo.toml to exist in the build context.
 COPY ailake-cli       ailake-cli/
 COPY ailake-jni       ailake-jni/
-COPY ailake-bench     ailake-bench/
 COPY tests            tests/
 
 WORKDIR /ailake-py

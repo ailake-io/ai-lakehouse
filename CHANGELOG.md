@@ -9,12 +9,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- `tests/docker/demo/Dockerfile`: remove `COPY ailake-bench` (crate lives in separate repo; line caused Docker build failure)
+- `notebooks/04_trino.ipynb`, `notebooks/05_bigquery.ipynb`: fix pre-flight error message — wrong `-f compose-demo-engines.yml` replaced with `--profile engines`
+- `.github/workflows/publish-pypi.yml`: remove duplicate `runs-on` key in `linux` job
+
+### Docs
+- `README.md`: remove duplicate `ailake-cli/` lines in repo layout; add `ailake-go/`, `ailake-cpp/`, `airflow-providers-ailake/` to directory tree
+- `docs/architecture/WORKSPACE.md`: document `axum = "0.7"` workspace dependency (`ailake serve` REST server)
+- `docs/specs/INTEGRATIONS.md`: add Python, Go, and C++ SDK rows to compatibility matrix
+
 ---
 
 ## [0.0.11] — 2026-06-05
 
 ### Changed
-- **`release.yml`**: Restructured into a single sequential publish chain — `release` → `publish-crates` → `publish-jvm` → `publish-airflow` → `pypi-linux` (max-parallel:1) → `pypi-macos` (disabled) → `pypi-windows` → `pypi-sdist` → `pypi-publish`. All publish jobs run automatically after the release job using `needs:` — no separate manual triggers needed. `publish-pypi.yml`, `publish-jvm.yml`, and `publish-airflow-provider.yml` demoted to manual fallback workflows for re-publishing without rerunning the full pipeline. Triggers: `push: branches: [main]` (automatic on merge) and `workflow_dispatch` (manual).
+- **`release.yml`**: Restructured into a single sequential publish chain — `release` → `publish-crates` → `publish-jvm` → `publish-airflow` → `pypi-linux` (max-parallel:1) → `pypi-macos` (disabled) → `pypi-windows` → `pypi-sdist` → `pypi-publish`. All publish jobs run automatically after the release job using `needs:` — no separate manual triggers needed. `publish-pypi.yml`, `publish-jvm.yml`, and `publish-airflow-provider.yml` demoted to manual fallback workflows for re-publishing without rerunning the full pipeline. Triggers: `push: branches: [main]` (automatic on merge) and `workflow_dispatch` (manual). The `release` job auto-bumps the patch version by reading the latest git tag (`v*.*.*`) and incrementing the patch component, updating all `Cargo.toml` files and committing with `[skip ci]` before tagging — no manual version edits required.
 - **`.github/workflows/compat-heavy.yml` (`compat-spark`)**: `pip install pyspark` now uses `--index-url https://pypi.org/simple/` to bypass the runner's pip mirror configuration.
 
 ### Fixed

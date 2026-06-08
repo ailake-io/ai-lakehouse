@@ -31,8 +31,11 @@ AI-Lake tables are read-compatible with any engine that supports Apache Iceberg 
 | **GCP Dataflow** | ✅ Beam IcebergIO | ✅ Beam IcebergIO | via SDK direct | ✅ |
 | **Snowflake** | ✅ Iceberg tables | Limited | — | — |
 | **Databricks (general)** | ✅ | ✅ | Phase 3 | ✅ |
+| **Python (`ailake-py`)** | ✅ PyArrow | ✅ TableWriter | ✅ `ailake.search()` | ✅ write_batch_idempotent |
+| **Go (`ailake-go`)** | ✅ AilakeReader | ✅ AilakeWriter | ✅ VectorSearch | — |
+| **C++17 (`ailake-cpp`)** | ✅ header-only | ✅ header-only | ✅ header-only | — |
 
-**SDK direct** = use the `ailake-py` Python SDK or `ailake-jni` JVM SDK to run vector search directly, outside of the engine's SQL planner.
+**SDK direct** = use the `ailake-py` Python SDK, `ailake-go` Go SDK, `ailake-cpp` C++ SDK, or `ailake-jni` JVM SDK to run vector search directly, outside of the engine's SQL planner.
 
 ---
 
