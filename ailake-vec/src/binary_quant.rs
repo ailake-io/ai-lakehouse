@@ -125,7 +125,10 @@ unsafe fn hamming_avx2(a: &[u8], b: &[u8]) -> u32 {
     // Sum 4 × u64 accumulators
     let mut buf = [0u64; 4];
     _mm256_storeu_si256(buf.as_mut_ptr() as *mut __m256i, acc);
-    let mut dist = buf[0].wrapping_add(buf[1]).wrapping_add(buf[2]).wrapping_add(buf[3]) as u32;
+    let mut dist = buf[0]
+        .wrapping_add(buf[1])
+        .wrapping_add(buf[2])
+        .wrapping_add(buf[3]) as u32;
 
     // Tail bytes (< 32)
     for i in (chunks32 * 32)..n {

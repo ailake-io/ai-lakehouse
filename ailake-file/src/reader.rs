@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_core::{AilakeError, AilakeResult, Centroid, VectorMetric};
-use ailake_index::{AnyIndex, BinarySerializer, HnswIndex, IvfPqSerializer, MmapLoader, RaBitQSerializer};
+use ailake_index::{
+    AnyIndex, BinarySerializer, HnswIndex, IvfPqSerializer, MmapLoader, RaBitQSerializer,
+};
 use ailake_parquet::ParquetVectorReader;
 use arrow_array::RecordBatch;
 use bytes::Bytes;

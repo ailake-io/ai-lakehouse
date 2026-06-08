@@ -306,8 +306,7 @@ fn build_ailk_section(
         }
         IndexType::Binary(bin_config) => {
             let row_ids: Vec<RowId> = (0..embeddings.len() as u64).map(RowId::new).collect();
-            let index =
-                BinaryIndex::build(&row_ids, embeddings, hnsw_metric, bin_config.keep_raw)?;
+            let index = BinaryIndex::build(&row_ids, embeddings, hnsw_metric, bin_config.keep_raw)?;
             (BinarySerializer::to_bytes(&index)?, FLAG_INDEX_BINARY)
         }
         IndexType::Auto => unreachable!("Auto resolved above"),

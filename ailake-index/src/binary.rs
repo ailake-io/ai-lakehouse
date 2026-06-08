@@ -196,7 +196,11 @@ mod tests {
     fn binary_vecs(n: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {
         let mut rng = StdRng::seed_from_u64(seed);
         (0..n)
-            .map(|_| (0..dim).map(|_| if rng.gen::<bool>() { 1.0f32 } else { -1.0 }).collect())
+            .map(|_| {
+                (0..dim)
+                    .map(|_| if rng.gen::<bool>() { 1.0f32 } else { -1.0 })
+                    .collect()
+            })
             .collect()
     }
 
@@ -204,8 +208,7 @@ mod tests {
     fn exact_self_is_top1() {
         let vecs = binary_vecs(50, 64, 1);
         let row_ids: Vec<RowId> = (0..50u64).map(RowId::new).collect();
-        let idx =
-            BinaryIndex::build(&row_ids, &vecs, VectorMetric::Cosine, false).unwrap();
+        let idx = BinaryIndex::build(&row_ids, &vecs, VectorMetric::Cosine, false).unwrap();
 
         let query = vecs[7].clone();
         let results = idx.search(&query, 1, None);
@@ -217,8 +220,7 @@ mod tests {
     fn rerank_produces_exact_distances() {
         let vecs = binary_vecs(100, 64, 99);
         let row_ids: Vec<RowId> = (0..100u64).map(RowId::new).collect();
-        let idx =
-            BinaryIndex::build(&row_ids, &vecs, VectorMetric::Cosine, true).unwrap();
+        let idx = BinaryIndex::build(&row_ids, &vecs, VectorMetric::Cosine, true).unwrap();
 
         let query = vecs[0].clone();
         let results = idx.search(&query, 5, Some(3));
@@ -232,8 +234,7 @@ mod tests {
     fn serialization_roundtrip() {
         let vecs = binary_vecs(30, 32, 42);
         let row_ids: Vec<RowId> = (0..30u64).map(RowId::new).collect();
-        let idx =
-            BinaryIndex::build(&row_ids, &vecs, VectorMetric::Euclidean, false).unwrap();
+        let idx = BinaryIndex::build(&row_ids, &vecs, VectorMetric::Euclidean, false).unwrap();
 
         let bytes = BinarySerializer::to_bytes(&idx).unwrap();
         let idx2 = BinarySerializer::from_bytes(&bytes).unwrap();
