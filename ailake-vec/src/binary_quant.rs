@@ -24,7 +24,7 @@
 ///
 /// Output length: `ceil(dim / 8)` bytes.
 pub fn f32_to_bits(v: &[f32]) -> Vec<u8> {
-    let n_bytes = (v.len() + 7) / 8;
+    let n_bytes = v.len().div_ceil(8);
     let mut out = vec![0u8; n_bytes];
     for (i, &x) in v.iter().enumerate() {
         if x >= 0.0 {
