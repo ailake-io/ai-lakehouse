@@ -322,7 +322,7 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
 /// Caller must free the returned pointer with `ailake_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) -> *mut c_char {
-    use ailake_core::{RaBitQConfig, VectorPrecision, VectorStoragePolicy};
+    use ailake_core::{BinaryConfig, RaBitQConfig, VectorPrecision, VectorStoragePolicy};
     use ailake_query::TableWriter;
     use arrow_array::{Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
@@ -346,6 +346,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         rabitq_seed: u64,
         #[serde(default = "default_keep_raw")]
         rabitq_keep_raw: bool,
+        #[serde(default)]
+        binary: bool,
+        #[serde(default = "default_keep_raw")]
+        binary_keep_raw: bool,
         ids: Vec<i64>,
         embeddings: Vec<Vec<f32>>,
     }
@@ -405,6 +409,9 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         seed: req.rabitq_seed,
         keep_raw: req.rabitq_keep_raw,
     });
+    let binary_cfg = req.binary.then_some(BinaryConfig {
+        keep_raw: req.binary_keep_raw,
+    });
     let policy = VectorStoragePolicy {
         column_name: req.vec_col.clone(),
         dim: req.dim,
@@ -416,7 +423,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         hnsw_m: None,
         hnsw_ef_construction: None,
         rabitq: rabitq_cfg,
-        binary: None,
+        binary: binary_cfg,
     };
 
     let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
