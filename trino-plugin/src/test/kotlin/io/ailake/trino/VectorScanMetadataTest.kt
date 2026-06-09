@@ -10,7 +10,15 @@ import java.util.Optional
 
 class VectorScanMetadataTest {
 
-    private val metadata = VectorScanMetadata("s3://bucket/table/", "embedding", 1536)
+    private val metadata = VectorScanMetadata(
+        tableUri = "s3://bucket/table/",
+        vectorColumn = "embedding",
+        dim = 1536,
+        metric = "cosine",
+        precision = "f16",
+        namespace = "default",
+        tableName = "table",
+    )
     private val session = mock<io.trino.spi.connector.ConnectorSession>()
 
     @Test
@@ -49,9 +57,11 @@ class VectorScanMetadataTest {
     }
 
     @Test
-    fun listTablesReturnsSearchTable() {
+    fun listTablesReturnsSearchAndIngestTables() {
         val tables = metadata.listTables(session, Optional.empty())
-        assertEquals(listOf(SchemaTableName("default", "search")), tables)
+        assertEquals(2, tables.size)
+        assertTrue(SchemaTableName("default", "search") in tables)
+        assertTrue(SchemaTableName("default", "ingest") in tables)
     }
 
     @Test

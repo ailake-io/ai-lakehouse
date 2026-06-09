@@ -18,7 +18,12 @@ class VectorScanConnectorFactory : ConnectorFactory {
             "ailake.table-uri is required in catalog properties"
         }
         val vectorColumn = config.getOrDefault("ailake.vector-column", "embedding")
-        val dim = config.getOrDefault("ailake.vector-dim", "1536").toInt()
-        return VectorScanConnector(tableUri, vectorColumn, dim)
+        val dim          = config.getOrDefault("ailake.vector-dim", "1536").toInt()
+        val metric       = config.getOrDefault("ailake.metric", "cosine")
+        val precision    = config.getOrDefault("ailake.precision", "f16")
+        val namespace    = config.getOrDefault("ailake.namespace", "default")
+        val tableName    = config.getOrDefault("ailake.table-name",
+            tableUri.trimEnd('/').substringAfterLast('/'))
+        return VectorScanConnector(tableUri, vectorColumn, dim, metric, precision, namespace, tableName)
     }
 }
