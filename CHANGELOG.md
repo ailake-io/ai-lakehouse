@@ -11,6 +11,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.15] — 2026-06-09
+
+### Fixed
+
+- **`release.yml`: sync version bump back to develop** — after bumping `Cargo.toml` on `main`, the action now merges `origin/main → develop` automatically so `develop` always tracks the same version as `main`.
+- **`release.yml`: idempotent `publish-crates` on re-run** — each `cargo publish` call treats exit code 10 (crate version already exists on crates.io) as success; re-running a partially-failed publish job skips already-published crates and continues with the remaining ones.
+- **`release.yml`: idempotent tag creation** — `git tag` step checks `git rev-parse` first; skips if tag already exists on remote.
+- **`release.yml`: idempotent GitHub Release creation** — `gh release create` step checks `gh release view` first; skips if release already exists.
+- **`release.yml`: non-fast-forward push rejection** — added `git pull --rebase origin main` before `git push origin main` in the version bump step; prevents rejection when PRs are merged to `main` after the action checks out but before it pushes the bump commit.
+
+---
+
 ## [0.0.14] — 2026-06-09
 
 ### Removed
