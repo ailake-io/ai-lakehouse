@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-cli"
-version     = "0.0.11"
+version     = "0.0.13"
 edition     = "2021"
 description = "AI-Lake Format — administrative CLI (create, insert, search, compact, info)"
 license     = "MIT OR Apache-2.0"
@@ -13,11 +13,11 @@ name = "ailake"
 path = "src/main.rs"
 
 [dependencies]
-ailake-core    = { path = "../ailake-core", version     = "0.0.11" }
-ailake-store   = { path = "../ailake-store", version     = "0.0.11", features = ["store-s3", "store-gcs", "store-azure"] }
-ailake-catalog = { path = "../ailake-catalog", version     = "0.0.11" }
-ailake-parquet = { path = "../ailake-parquet", version     = "0.0.11" }
-ailake-query   = { path = "../ailake-query", version     = "0.0.11" }
+ailake-core    = { path = "../ailake-core", version     = "0.0.13" }
+ailake-store   = { path = "../ailake-store", version     = "0.0.13", features = ["store-s3", "store-gcs", "store-azure"] }
+ailake-catalog = { path = "../ailake-catalog", version     = "0.0.13" }
+ailake-parquet = { path = "../ailake-parquet", version     = "0.0.13" }
+ailake-query   = { path = "../ailake-query", version     = "0.0.13" }
 bytes          = { workspace = true }
 clap           = { workspace = true }
 tokio          = { workspace = true }

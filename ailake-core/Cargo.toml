@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-core"
-version     = "0.0.11"
+version     = "0.0.13"
 edition     = "2021"
 description = "Core types and traits for the AI-Lake vector-native Lakehouse format"
 license     = "MIT OR Apache-2.0"
