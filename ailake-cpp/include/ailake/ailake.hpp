@@ -17,12 +17,10 @@
 
 #include "footer.hpp"
 #include "bincode.hpp"
-#include "chacha12.hpp"
 #include "distance.hpp"
 #include "hardware.hpp"
 #include "hnsw.hpp"
 #include "ivfpq.hpp"
-#include "rabitq.hpp"
 #include "catalog.hpp"
 #include "rocm/blas.hpp"
 
@@ -43,7 +41,6 @@ struct SearchOptions {
     int   ef_search            = 0;    // 0 → top_k * 5
     float pruning_threshold    = 0.8f;
     bool  use_flat_fallback    = true; // flat scan when HNSW graph is empty
-    int   rabitq_rerank_factor = 3;    // candidates = rerank_factor × top_k before exact rerank
 
     // Hardware profile override.
     // When nullptr (default), detect_hardware() is called automatically.
@@ -86,11 +83,7 @@ search_file(const std::string& abs_path,
 
     const auto& hw = opts.hardware();
 
-    if (hdr.is_rabitq()) {
-        auto idx = deserialize_rabitq(index_buf.data(), index_buf.size());
-        return rabitq_search(idx, query, opts.top_k, opts.rabitq_rerank_factor);
-
-    } else if (hdr.is_ivf_pq()) {
+    if (hdr.is_ivf_pq()) {
         auto idx = deserialize_ivfpq(index_buf.data(), index_buf.size());
 
 #ifdef AILAKE_CUDA_ENABLED
@@ -205,7 +198,7 @@ search(HadoopCatalog& catalog,
             survivors.push_back(e);
     }
 
-    // Per-file HNSW / IVF-PQ / RaBitQ search
+    // Per-file IVF-PQ / HNSW search
     std::vector<FileSearchResult> all;
     for (auto& e : survivors) {
         std::string abs = catalog.resolve_path(ns, tbl, e.path);

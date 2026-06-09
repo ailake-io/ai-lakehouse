@@ -102,9 +102,7 @@ char* ailake_search_json(const char* request_json);
 
 // request_json: {"warehouse":"...","namespace":"default","table":"...",
 //                "dim":1536,"ids":[...],"embeddings":[[...],...],
-//                "metric":"cosine","precision":"f16",
-//                "rabitq":true,"rabitq_seed":42,"rabitq_keep_raw":true}
-// rabitq fields are optional — omit for default HNSW index.
+//                "metric":"cosine","precision":"f16"}
 // Returns: {"ok":true,"snapshot_id":N}
 char* ailake_write_batch_json(const char* request_json);
 

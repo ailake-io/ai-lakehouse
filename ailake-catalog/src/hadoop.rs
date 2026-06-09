@@ -293,7 +293,6 @@ mod tests {
                 pre_normalize: false,
                 hnsw_m: None,
                 hnsw_ef_construction: None,
-                rabitq: None,
             },
             extra: std::collections::HashMap::new(),
         }

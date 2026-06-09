@@ -21,8 +21,3 @@ bytes          = { workspace = true }
 [dev-dependencies]
 tempfile    = { workspace = true }
 rand        = { workspace = true }
-criterion   = { workspace = true }
-
-[[bench]]
-name = "write"
-harness = false

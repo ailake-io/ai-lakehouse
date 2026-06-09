@@ -79,7 +79,7 @@ Starts at byte 0 of every AILK section. All integer fields little-endian.
 |--------|------|-------|-------------------|-------------|
 | 0      | 4    | bytes | `magic`           | `AILK` (0x41 0x49 0x4C 0x4B) |
 | 4      | 2    | u16   | `format_version`  | Must be `1` for this spec |
-| 6      | 2    | u16   | `flags`           | Bit 0: `1` = IVF-PQ index. Bit 1: `1` = RaBitQ index. If both bits are `0`, index is HNSW (default). Bits 2–15 reserved, must be `0`. |
+| 6      | 2    | u16   | `flags`           | Bit 0: `1` = IVF-PQ index. If bit 0 is `0`, index is HNSW (default). Bits 1–15 reserved, must be `0`. |
 | 8      | 4    | u32   | `dim`             | Vector dimensionality |
 | 12     | 1    | u8    | `precision`       | See §3.1 |
 | 13     | 1    | u8    | `distance_metric` | See §3.2 |
@@ -165,7 +165,6 @@ The index type is determined by the `flags` field:
 |---|---|
 | `0x0000` | HNSW (§6.1) |
 | `0x0001` | IVF-PQ (§6.2) |
-| `0x0002` | RaBitQ (§6.3) |
 
 ### 6.1 HNSW Index Blob (`flags & 0x0001 == 0`)
 
@@ -258,65 +257,6 @@ over HNSW when `hardware_profile.recommend_ivf_pq(n_vectors)` returns true
 (currently: dataset ≥ 100 000 vectors on a GPU-capable host, or when the
 caller explicitly calls `writer.with_ivf_pq(IvfPqConfig)`).
 
-### 6.3 RaBitQ Index Blob (`flags & 0x0002 == FLAG_INDEX_RABITQ`)
-
-The blob is a **bincode v1** serialization of `ailake_index::RaBitQIndex`
-via `RaBitQSerializer`. RaBitQ is a **flat index** — no graph structure.
-
-> **Storage**: 1 bit/dim per vector (packed into `ceil(dim/8)` bytes) + 8 bytes overhead per vector (norm + scale). For dim=1536: **200 bytes/vector** vs 3 072 bytes for F16 — **15× compression**. Optional raw F16 vectors stored alongside for exact reranking.
-
-> **Rotation matrix**: a `dim × dim` **modified Gram-Schmidt orthonormal matrix** (P^T · P = I) is generated deterministically from `seed` at runtime. It is **not** serialized — only `seed` is stored. Readers MUST regenerate the matrix using **Rust's `StdRng::seed_from_u64` PRNG sequence**: splitmix64 seed expansion (4 rounds, LE) → 32-byte ChaCha12 key → 6 double-round ChaCha12 blocks → floats via `(u32>>9)|0x3f800000` as f32 − 1.0 (Standard dist), scaled ×2−1. Cross-language implementations in C++ (`chacha12.hpp`) and Go (`chacha12.go`) implement this exact sequence. A different PRNG produces an incompatible projection space and recall ≈ 0%.
-
-Binary layout:
-
-```
-[ codebook.dim:  u64    — vector dimensionality (usize serialized as u64) ]
-[ codebook.seed: u64    — seed for deterministic rotation matrix generation ]
-[ entries: Vec<RaBitQVec>  — one per database vector
-    each entry:
-      code:  Vec<u8>    — ceil(dim/8) packed sign bits: bit i = sign((P·x̂)[i])
-      norm:  f32        — original L2 norm of x (before normalization)
-      scale: f32        — sum(|P·x̂|) / sqrt(dim); used in IP estimator
-]
-[ row_ids: Vec<u64>     — 0-based Parquet row indices, parallel to entries ]
-[ metric:  u32          — DistanceMetric enum variant (§3.2) ]
-[ dim:     u32          — vector dimensionality (redundant with codebook.dim) ]
-[ raw_f16: Option<Vec<u16>>
-    tag: 0x00 = None (no raw vectors stored)
-    tag: 0x01 = Some; followed by u64 count + count × u16 (IEEE 754 F16 LE)
-    length = record_count × dim when present
-]
-```
-
-Readers deserialize with:
-
-```rust
-use ailake_index::RaBitQSerializer;
-let mut index = RaBitQSerializer::from_bytes(blob)?;
-// rebuild_proj is called automatically inside from_bytes
-```
-
-Search algorithm:
-
-1. Normalize query to unit L2. Apply rotation matrix P → `q_proj` (F32 vector).
-2. Compute query binary code once: `b_q[i] = sign(q_proj[i])` packed into bytes (`bits_from_signs`). This pre-binarization is done **once per search call**, not once per entry (`estimate_ip_binary` interface).
-3. Compute query scale: `q_scale = sum(|q_proj|) / sqrt(dim)`.
-4. Sequential scan (inner): for each database vector i: `IP_estimate = (1 - 2·hamming(b_q, code_i) / dim) × q_scale × scale_i`.
-5. Convert IP estimate to distance by metric (cosine: `1 - IP`, dot: `-IP × |q| × norm_i`, Euclidean: approximated via `||q||² + ||x||² - 2·IP·||q||·||x||`).
-6. O(N) partial select: `select_nth_unstable_by(candidates − 1)` brings top `candidates = rerank_factor × top_k` to front, then sort only those `candidates` entries.
-7. **Reranking** (when `raw_f16` present and `rerank_factor > 1`): compute exact F16 distances for top candidates, re-sort, return top-k.
-
-Key invariant: `len(entries) == len(row_ids) == header.record_count`. Readers MUST verify this before search.
-
-When to use RaBitQ vs HNSW vs IVF-PQ:
-
-| Criterion | HNSW | IVF-PQ | RaBitQ |
-|---|---|---|---|
-| Write throughput | ~50k vec/s | ~200k vec/s | **~163k vec/s** (SIFT-1M measured) |
-| Index build time | O(n log n) | O(n) k-means | **O(n)** one-pass |
-| Storage (dim=1536) | 15–20% overhead | 2–5% of F16 | **1.5% of F32** |
-| Recall@10 (exact) | ≥ 0.95 | 0.90–0.95 | 0.80–0.95 (with rerank) |
-| Best use case | Online search | S3 cold storage | High-insert, extreme compression |
 
 ---
 
@@ -390,7 +330,7 @@ Vector statistics live in `DataFile.custom_properties` (string→string map):
 | `ailake.hnsw_len`        | `"4194304"`   | Byte length of primary AILK section |
 | `ailake.vector_column`   | `"embedding"` | Primary vector column name |
 | `ailake.vector_dim`      | `"1536"`      | Vector dimensionality |
-| `ailake.index_type`      | `"hnsw"`, `"ivf_pq"`, or `"rabitq"` | Index type in the AILK section |
+| `ailake.index_type`      | `"hnsw"` or `"ivf_pq"` | Index type in the AILK section |
 | `ailake.<col>.centroid`  | `"BBBB..."`   | Centroid for secondary column `<col>` |
 | `ailake.<col>.radius`    | `"0.289"`     | Radius for secondary column `<col>` |
 | `ailake.<col>.hnsw_offset` | `"..."`     | AILK section offset for secondary column `<col>` |
@@ -636,18 +576,16 @@ The AI-Lake format is designed so that any language can read and search
 AI-Lake files by implementing §15's bincode decoder and the AILK header parser
 (§3). No dependency on the Rust crate is required.
 
-| Language | Module | AILK header | Bincode decoder | HNSW search | IVF-PQ search | RaBitQ search |
-|----------|--------|-------------|-----------------|-------------|---------------|---------------|
-| **Rust** | `ailake-file`, `ailake-index` | `AilakeHeader::from_bytes` | `HnswSerializer`, `IvfPqSerializer` | `HnswIndex::search` | `IvfPqIndex::search` | `RaBitQSerializer` + `RaBitQIndex::search` |
-| **C++17** | `ailake-cpp/include/ailake/` | `footer.hpp` → `is_rabitq()` | `bincode.hpp` → `BincodeReader` | `hnsw.hpp` → `hnsw_search` | `ivfpq.hpp` → `ivfpq_search` | `rabitq.hpp` → `deserialize_rabitq` + `rabitq_search`; `chacha12.hpp` → `ChaCha12Rng` |
-| **Go** | `ailake-go/` | `footer.go` → `IsRaBitQ()` | `bincode.go` → `bincodeReader` | `hnsw.go` → `(HnswIndex).Search` | `ivfpq.go` → `(IvfPqIndex).Search` | `rabitq.go` → `DeserializeRaBitQ` + `(RaBitQIndex).Search`; `chacha12.go` → `chacha12Rng` |
+| Language | Module | AILK header | Bincode decoder | HNSW search | IVF-PQ search |
+|----------|--------|-------------|-----------------|-------------|---------------|
+| **Rust** | `ailake-file`, `ailake-index` | `AilakeHeader::from_bytes` | `HnswSerializer`, `IvfPqSerializer` | `HnswIndex::search` | `IvfPqIndex::search` |
+| **C++17** | `ailake-cpp/include/ailake/` | `footer.hpp` → `is_ivf_pq()` | `bincode.hpp` → `BincodeReader` | `hnsw.hpp` → `hnsw_search` | `ivfpq.hpp` → `ivfpq_search` |
+| **Go** | `ailake-go/` | `footer.go` → `IsIvfPq()` | `bincode.go` → `bincodeReader` | `hnsw.go` → `(HnswIndex).Search` | `ivfpq.go` → `(IvfPqIndex).Search` |
 
 All three implementations follow the same read algorithm (§9) and enforce the
 same integrity invariants (§10). The C++ and Go SDKs were independently
 verified against the Rust reference implementation using the shared compat
 fixture (`ailake-query/examples/write_fixture.rs`).
-
-> **RNG compatibility**: RaBitQ requires regenerating the projection matrix P from `seed` — all implementations MUST use the same PRNG. C++ and Go use `chacha12.hpp`/`chacha12.go` implementing Rust's `StdRng::seed_from_u64`: splitmix64 seed expansion (u64 → 32-byte key, 4 rounds) + ChaCha12 block cipher (6 double rounds, Bernstein layout) + `Standard` float distribution (`f32::from_bits((u32>>9)|0x3f800000) - 1.0`). Any new language binding MUST implement this sequence to maintain cross-language correctness.
 
 ### 16.1 Bootstrap sequence (language-agnostic)
 

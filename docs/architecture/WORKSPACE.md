@@ -65,12 +65,6 @@ Vector data transformations. No I/O.
 - `exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32` — dispatches to correct metric; used by reranking after PQ
 - `compute_centroid_and_radius(&[Vec<f32>], VectorMetric) -> Centroid`
 - `BlockCompressor::zstd(level)`, `BlockCompressor::lz4()` — block-level compression
-- `RaBitQCodebook::new(dim, seed) -> Self` — generates dim×dim **modified Gram-Schmidt orthonormal matrix** (P^T · P = I) deterministically from `seed`; P is **not serialized** — regenerated on load via `rebuild_proj()`
-- `RaBitQCodebook::encode(&[f32]) -> RaBitQVec` — normalizes, projects, packs sign bits; stores `norm` (original L2) and `scale` (sum(|P·x̂|)/sqrt(dim))
-- `RaBitQCodebook::estimate_ip_binary(b_q: &[u8], q_scale: f32, entry: &RaBitQVec) -> f32` — unbiased IP estimator accepting **pre-binarized** query codes; XOR + popcount: `(1 - 2·hamming/dim) × q_scale × entry.scale`. Call once per search (binarize query before the scan loop).
-- `RaBitQCodebook::estimate_ip(q_proj, q_scale, entry) -> f32` — convenience wrapper over `estimate_ip_binary`; binarizes `q_proj` on every call (avoid in hot paths)
-- `encode_batch(codebook, vectors) -> Vec<RaBitQVec>` — parallel encoding via `rayon`
-- `RaBitQVec { code: Vec<u8>, norm: f32, scale: f32 }` — 1 bit/dim storage (ceil(dim/8) bytes code)
 
 ### `ailake-index`
 HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) + AMD ROCm (runtime libloading). CPU fallback always available.
@@ -88,11 +82,7 @@ HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) 
   - `IvfPqIndex::train_codebook(vectors, metric, config) -> IvfPqCodebook` — trains coarse quantizer + PQ without building inverted lists; call once and reuse across shards
   - `IvfPqIndex::build_with_codebook(row_ids, vectors, codebook)` — assigns and encodes using pre-trained codebook; O(n) only, no k-means
   - `kmeans_dispatch()` — priority: CUDA → ROCm → CPU rayon
-- `RaBitQIndex` — flat brute-force index over binary-coded vectors
-  - `build(row_ids, vectors, metric, config, keep_raw) -> RaBitQIndex` — one-pass O(n) encode; no graph, no k-means
-  - `search(&self, query, top_k, rerank_factor) -> Vec<(RowId, f32)>` — pre-binarize query once → sequential O(N) scan using `estimate_ip_binary` → O(N) `select_nth_unstable_by` for top candidates → optional exact F16 reranking. Takes `&self` (not `&mut self`) — safe for concurrent shard-level parallelism via rayon.
-- `RaBitQSerializer` — bincode roundtrip for `RaBitQIndex`; `from_bytes` automatically calls `rebuild_proj()` (never lazy on search)
-- `AnyIndex` — enum dispatching search to `HnswIndex`, `IvfPqIndex`, or `RaBitQIndex`
+- `AnyIndex` — enum dispatching search to `HnswIndex` or `IvfPqIndex`
 - `HnswSerializer` — bincode-based serialization of the full HNSW graph
 - `MmapLoader` — opens a serialized HNSW from a memory-mapped byte slice
   - Lazy: graph traversal only pages in the regions touched during search
@@ -114,10 +104,9 @@ HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) 
 - `AilakeFileWriter` — high-level writer:
   1. Writes RecordBatch via `ailake-parquet`
   2. Auto-selects index type from `VectorStoragePolicy`:
-     - `policy.rabitq.is_some()` → `IndexType::RaBitQ` (flat, one-pass)
      - `policy.pq.is_some()` → `IndexType::IvfPq`
      - default → `IndexType::Hnsw`
-  3. Builds and serializes the index (HNSW / IVF-PQ / RaBitQ) into the AI-Lake footer
+  3. Builds and serializes the index (HNSW or IVF-PQ) into the AI-Lake footer
   4. Appends footer to the file after the final PAR1 marker
   5. Updates Parquet `key_value_metadata` with `ailake.hnsw_offset` and `ailake.hnsw_len`
 - `AilakeFileReader` — high-level reader:
@@ -407,8 +396,8 @@ Phase 4 complete.
 
 Delivered in Phase 5:
 
-- **`ailake-go`** — Native Go SDK: Iceberg `metadata.json` reading, Parquet scan via `parquet-go`, vector search over pre-built indexes, `SearchSession` multi-query mode. RaBitQ support: `chacha12.go` (ChaCha12 PRNG + splitmix64 seed expansion matching Rust `StdRng::seed_from_u64`), `DeserializeRaBitQ`, `(RaBitQIndex).Search` with F16 reranking.
-- **`ailake-cpp`** — C++17 header-only SDK: `AilakeReader`, `AilakeWriter`, `VectorSearch`; hardware detection matching Rust (CUDA → ROCm → CPU SIMD); `ailake-cpp/src/catalog.cpp` + `search.cpp`. RaBitQ support: `chacha12.hpp` (`ChaCha12Rng` + `splitmix64_expand`), `rabitq.hpp` (`deserialize_rabitq`, `rabitq_search`), `kFlagIndexRaBitQ=0x0002`, `SearchOptions::rabitq_rerank_factor`.
+- **`ailake-go`** — Native Go SDK: Iceberg `metadata.json` reading, Parquet scan via `parquet-go`, vector search over pre-built indexes, `SearchSession` multi-query mode.
+- **`ailake-cpp`** — C++17 header-only SDK: `AilakeReader`, `AilakeWriter`, `VectorSearch`; hardware detection matching Rust (CUDA → ROCm → CPU SIMD); `ailake-cpp/src/catalog.cpp` + `search.cpp`.
 - **`ailake-cli`: `ailake serve`** — HTTP JSON server exposing write/search/catalog over REST; enables universal access from any language without FFI
 - **`apache-airflow-providers-ailake`** — Airflow 2.x/3.x provider package:
   - `AilakeHook` — connection to AI-Lake table on object storage

@@ -47,9 +47,6 @@ snapshot_id = writer.commit()
 | `pre_normalize` | `False` | Normalize to unit L2 at write time (recommended for cosine). Enables `1-dot(a,b)` fast path. |
 | `hnsw_m` | `None` (=16) | HNSW connections per node. Higher → better recall, more memory. |
 | `hnsw_ef_construction` | `None` (=150) | HNSW build pool size. Higher → better quality, slower build. |
-| `rabitq` | `False` | Use RaBitQ flat index instead of HNSW: 1 bit/dim = 16× smaller than F16. Better recall than naive binary quantization. Use with `rerank_factor ≥ 3` at search. |
-| `rabitq_seed` | `0` | Seed for RaBitQ random rotation matrix. |
-| `rabitq_keep_raw` | `True` | Keep raw F16 vectors for exact reranking (recommended). |
 
 HNSW tuning guide:
 
@@ -59,44 +56,6 @@ HNSW tuning guide:
 | General purpose (default) | 16 | 150 |
 | High recall (RAG) | 24 | 200 |
 | Max recall (medical, legal) | 32 | 400 |
-
-### RaBitQ — extreme compression (1 bit/dim)
-
-RaBitQ is a flat index with no graph construction: 1 bit/dim after a **modified Gram-Schmidt orthonormal rotation**, yielding better recall than naive binary quantization via an unbiased XOR/popcount IP estimator. Write throughput ~163k vec/s (no k-means, no graph; SIFT-1M measured). Storage: 200 bytes/vector at dim=1536 (15× smaller than F16). Search is sequential O(N) flat scan; shard-level parallelism handled automatically.
-
-Use when storage is the primary constraint or write throughput matters more than recall. Designed for **cosine** workloads — recall on Euclidean datasets is lower (~0.67 at rerank=3 on SIFT-1M). Pair with `rerank_factor ≥ 3` (cosine) or `≥ 10` (Euclidean/complex) to recover precision using the stored raw F16 vectors.
-
-```python
-import ailake
-import numpy as np
-
-# Write with RaBitQ (keep_raw=True stores F16 vectors for reranking)
-writer = ailake.TableWriter(
-    path="./rabitq_table",
-    dim=1536,
-    metric="cosine",
-    rabitq=True,
-    rabitq_seed=42,       # same seed across all shards → comparable distances
-    rabitq_keep_raw=True, # recommended: enables reranking
-)
-writer.write_batch(texts=texts, embeddings=embeddings)
-writer.commit()
-
-# Search with reranking for best recall
-results = ailake.search(
-    path="./rabitq_table",
-    query=query,
-    top_k=10,
-    rerank_factor=10,  # recommended: ≥ 3 for most cosine, ≥ 10 for complex datasets
-)
-```
-
-| Index | Bytes/vector (dim=1536) | Recall@10 cosine (rerank≥3) | Write (vec/s) |
-|---|---|---|---|
-| HNSW (F16) | ~3 200 | ≥ 0.95 | ~50k |
-| IVF-PQ (M=48) | ~50 | 0.90–0.95 | ~200k |
-| RaBitQ (no raw) | **192** | 0.70–0.85 | **~163k** |
-| RaBitQ + raw F16 | ~3 264 | **0.85–0.95** | **~163k** |
 
 ### Search
 
@@ -163,7 +122,7 @@ Assembles a list of chunk dicts into structured XML ready for LLM input. Dedupli
 
 ## Iceberg compatibility
 
-Tables written by `ailake` are valid Apache Iceberg Spec v2 tables. Any Iceberg-compatible engine (Spark, Trino, DuckDB, PyIceberg) reads the tabular columns normally. The HNSW index lives in an AI-Lake extension section that standard Parquet readers silently ignore.
+Tables written by `ailake` are valid Apache Iceberg Spec v2 tables. Any Iceberg-compatible engine (Spark, Trino, DuckDB, PyIceberg) reads the tabular columns normally. The vector index (HNSW or IVF-PQ) lives in an AI-Lake extension section that standard Parquet readers silently ignore.
 
 ## License
 

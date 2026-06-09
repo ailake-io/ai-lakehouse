@@ -67,7 +67,6 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Dev/test
-criterion   = { version = "0.5", features = ["html_reports"] }
 tempfile    = "3"
 proptest    = "1"
 rand        = "0.8"
