@@ -87,5 +87,5 @@ class AilakeBatchWrite(handle: AilakeWriteHandle) extends BatchWrite {
 // ── WriteBuilder ──────────────────────────────────────────────────────────────
 
 class AilakeWriteBuilder(handle: AilakeWriteHandle) extends WriteBuilder {
-  def buildForBatch(): BatchWrite = new AilakeBatchWrite(handle)
+  override def buildForBatch(): BatchWrite = new AilakeBatchWrite(handle)
 }
