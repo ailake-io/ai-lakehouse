@@ -104,13 +104,18 @@ pip install ailake
 
 ```python
 import ailake
+import numpy as np
 
-writer = ailake.TableWriter("s3://my-lake/docs/")
-writer.write_batch(arrow_table, embeddings=np.array(..., dtype=np.float32))
-writer.commit()
+# Write
+table = ailake.open_table("s3://my-lake/docs/", dim=1536, metric="cosine")
+table.insert(texts, np.array(embeddings, dtype=np.float32))
+table.commit()
 
-results = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20)
-# returns a PyArrow RecordBatch — zero-copy to pandas / polars
+# Fluent search — chainable, DataFrame-native
+df = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20).to_pandas()
+
+# Async
+df = await table.search(query_embedding).limit(10).to_pandas_async()
 ```
 
 **Apache Airflow**:

@@ -403,24 +403,25 @@ Using the Python SDK:
 import ailake
 import numpy as np
 
-# Write
-writer = ailake.TableWriter(
-    path="/tmp/ailake-test",
-    vector_column="embedding",
-    dim=64,
-    metric="cosine",
-)
-writer.write_batch(
+# Write — fluent API (recommended)
+table = ailake.open_table("/tmp/ailake-test", dim=64, metric="cosine")
+table.insert(
     texts=["text chunk 1", "text chunk 2"],
     embeddings=np.random.rand(2, 64).astype(np.float32),
 )
-snapshot_id = writer.commit()
+snapshot_id = table.commit()
 print(f"Snapshot: {snapshot_id}")
 
-# Search
+# Search — chainable, materialise to pandas / polars / list
 query = np.random.rand(64).astype(np.float32)
-results = ailake.search(path="/tmp/ailake-test", query=query.tolist(), top_k=5)
-print(results)
+df = ailake.search("/tmp/ailake-test", query, top_k=5).to_pandas()
+print(df)
+
+# Async (optional)
+import asyncio
+async def run():
+    df = await table.search(query).limit(5).to_pandas_async()
+asyncio.run(run())
 
 # ContextAssembler
 ctx = ailake.assemble_context(
@@ -432,6 +433,8 @@ ctx = ailake.assemble_context(
 )
 print(ctx)
 ```
+
+> `ailake.TableWriter(path, ...)` is still supported for backward compatibility.
 
 ---
 

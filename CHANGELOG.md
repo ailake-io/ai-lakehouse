@@ -11,6 +11,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.16] — 2026-06-09
+
+### Added
+
+- **Python fluent API** — `open_table(path, **kwargs) → Table`, `Table.insert(texts, embeddings)`, `Table.search(query, top_k) → SearchQuery`, `SearchQuery.limit(n)`, `.to_list()`, `.to_pandas()`, `.to_polars()`. Chainable, DataFrame-native; accepts numpy arrays anywhere a vector is expected.
+- **Python async API** — `Table.insert_async`, `Table.commit_async`, `SearchQuery.to_list_async`, `to_pandas_async`, `to_polars_async`; backed by `run_in_executor` so asyncio event loop is never blocked; supports `asyncio.gather` for parallel searches.
+- **Python Jupyter repr** — `Table._repr_html_()` renders a styled card with path and vector config; `SearchQuery._repr_html_()` renders pending state or results table inline in notebooks.
+- **Python type stubs** (`ailake/_ailake.pyi`) — full stubs for `TableWriter`, `search`, `assemble_context` with `Sequence`-based input types; `_Embeddings`/`_Vector` aliases in `__init__.py`; `py.typed` PEP 561 marker; `mypy` passes with zero errors.
+- **Python mixed module layout** — Rust extension compiled as `ailake._ailake`; public Python surface at `ailake-py/python/ailake/__init__.py`; maturin `python-source = "python"` picks up the layout automatically; wheels include both Rust extension and Python wrapper.
+- **`ailake.TableWriter` backward-compat re-export** — existing code using `ailake.TableWriter(path, ...)` continues to work unchanged.
+- **Spark INSERT INTO** (`ailake-spark`) — `AilakeWriteBuilder`, `AilakeBatchWrite`, `AilakeDataWriter`, `AilakeDataWriterFactory` via Spark DataSourceV2 `WriteBuilder`; `AilakeCatalog` implements `StagingTableCatalog`; `INSERT INTO ailake_table SELECT ...` triggers native write path.
+- **Trino INSERT INTO** (`ailake-trino`) — `AilakePageSink`, `AilakePageSinkProvider`, `AilakeIngestTableHandle` via Trino SPI `ConnectorPageSink`; `INSERT INTO` DML routes through `ailake_write_batch_json` JNA bridge.
+
+### Fixed
+
+- **Trino SPI 430**: `ConnectorPageSinkContext` → `ConnectorPageSinkId` in `AilakePageSinkProvider` (removed in Trino 430+).
+- **Spark/Scala 2.12**: `def buildForBatch()` → `override def buildForBatch()` — Scala 2.12 requires explicit `override` for concrete Java default methods.
+- **Scala 2.12 compat**: `scala.jdk.CollectionConverters` → `scala.collection.JavaConverters` in test files (`jdk.CollectionConverters` requires Scala 2.13+).
+
+### Tests
+
+- Unit and integration tests for Trino INSERT INTO (`AilakePageSinkTest`, `AilakeIngestMetadataTest`, `AilakeWriteBatchIntegrationTest`).
+- Unit tests for Spark INSERT INTO (`AilakeWriteSupportTest`, `AilakeCatalogTest`, `AilakeWriteBatchIntegrationTest`).
+- `check_ailake_py.py` updated: covers legacy `TableWriter` API, fluent chain, `SearchQuery` repr + `_repr_html_`, context manager, async API, `asyncio.gather`.
+
+### CI
+
+- `test-jvm` job in `ci.yml` runs Trino and Spark plugin unit tests on every push.
+- `compat-ailake-py` job installs `mypy + pandas` and runs `mypy` type check before the compat script.
+- `compat-heavy.yml`: `AILAKE_WRITE_DIR` injected into Spark and Trino integration test steps.
+
+---
+
 ## [0.0.15] — 2026-06-09
 
 ### Fixed
