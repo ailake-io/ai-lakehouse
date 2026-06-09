@@ -5,7 +5,7 @@ package io.ailake.trino
 import io.trino.spi.connector.ConnectorInsertTableHandle
 import io.trino.spi.connector.ConnectorOutputTableHandle
 import io.trino.spi.connector.ConnectorPageSink
-import io.trino.spi.connector.ConnectorPageSinkContext
+import io.trino.spi.connector.ConnectorPageSinkId
 import io.trino.spi.connector.ConnectorPageSinkProvider
 import io.trino.spi.connector.ConnectorSession
 import io.trino.spi.connector.ConnectorTransactionHandle
@@ -16,13 +16,13 @@ class AilakePageSinkProvider : ConnectorPageSinkProvider {
         transactionHandle: ConnectorTransactionHandle,
         session: ConnectorSession,
         tableHandle: ConnectorOutputTableHandle,
-        pageSinkContext: ConnectorPageSinkContext,
+        pageSinkId: ConnectorPageSinkId,
     ): ConnectorPageSink = throw UnsupportedOperationException("CREATE TABLE AS SELECT not supported by AI-Lake connector")
 
     override fun createPageSink(
         transactionHandle: ConnectorTransactionHandle,
         session: ConnectorSession,
         tableHandle: ConnectorInsertTableHandle,
-        pageSinkContext: ConnectorPageSinkContext,
+        pageSinkId: ConnectorPageSinkId,
     ): ConnectorPageSink = AilakePageSink(tableHandle as AilakeIngestTableHandle)
 }
