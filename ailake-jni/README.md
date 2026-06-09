@@ -70,29 +70,6 @@ Writes a batch of records and their embeddings to an AI-Lake table.
 }
 ```
 
-Optional RaBitQ fields (omit to use default HNSW):
-
-```json
-{
-  "rabitq":          true,
-  "rabitq_seed":     42,
-  "rabitq_keep_raw": true
-}
-```
-
-`rabitq_keep_raw` defaults to `true` when omitted. Set to `false` for extreme storage compression (disables reranking).
-
-Optional Binary Hamming fields (32× smaller than F32; flat scan, no graph):
-
-```json
-{
-  "binary":          true,
-  "binary_keep_raw": true
-}
-```
-
-`binary_keep_raw` defaults to `true` when omitted (stores raw F16 vectors for exact reranking). Set to `false` for maximum storage compression (~`ceil(dim/8)` bytes/vector, disables reranking). Flag `FLAG_INDEX_BINARY = 0x0004` (bit 2).
-
 **Response JSON:** `{"ok": true, "snapshot_id": 7}` or `{"ok": false, "error": "..."}`.
 
 ---

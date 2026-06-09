@@ -11,6 +11,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.14] — 2026-06-09
+
+### Removed
+
+- **RaBitQ index** (`RaBitQIndex`, `RaBitQSerializer`, `RaBitQCodebook`, `RaBitQVec`, `ailake-vec/src/rabitq.rs`, `ailake-index/src/rabitq.rs`) removed from all layers. Recall ≈ 0 on general float embeddings (orthonormal rotation does not help without training data alignment); adds significant complexity for no practical benefit over HNSW or IVF-PQ.
+  - Removed `RaBitQConfig` from `ailake-core/src/schema.rs` and `rabitq` field from `VectorStoragePolicy`.
+  - Removed `FLAG_INDEX_RABITQ = 0x0002` from `ailake-file/src/footer.rs`.
+  - Removed `AnyIndex::RaBitQ` variant; `AnyIndex` now dispatches only `Hnsw` and `IvfPq`.
+  - Removed `IndexType::RaBitQ` from `ailake-file/src/writer.rs`.
+  - Removed `--rabitq`, `--rabitq-seed`, `--rabitq-keep-raw` CLI flags.
+  - Removed `rabitq=`, `rabitq_seed=`, `rabitq_keep_raw=` parameters from `ailake-py` `TableWriter`.
+  - Removed `"rabitq"`, `"rabitq_seed"`, `"rabitq_keep_raw"` from `ailake-jni` JSON API.
+  - Removed `rabitq.go`, `chacha12.go` from `ailake-go`; removed `FlagIndexRaBitQ`, `IsRaBitQ()`.
+  - Removed `rabitq.hpp`, `chacha12.hpp` from `ailake-cpp`; removed `kFlagIndexRaBitQ`, `is_rabitq()`, `rabitq_rerank_factor`.
+  - Removed `rabitq_write_search_returns_correct_top_result` integration test.
+
+- **Binary Hamming index** (`BinaryIndex`, `BinarySerializer`, `ailake-vec/src/binary_quant.rs`, `ailake-index/src/binary.rs`) removed from all layers. Recall 0.50–0.70 without reranking on general float embeddings is too low for production use; no advantage over IVF-PQ which achieves 0.90–0.95 recall at comparable or smaller storage.
+  - Removed `BinaryConfig` from `ailake-core/src/schema.rs` and `binary` field from `VectorStoragePolicy`.
+  - Removed `FLAG_INDEX_BINARY = 0x0004` from `ailake-file/src/footer.rs`.
+  - Removed `AnyIndex::Binary` variant.
+  - Removed `IndexType::Binary` from `ailake-file/src/writer.rs`.
+  - Removed `--binary`, `--binary-keep-raw` CLI flags.
+  - Removed `binary=`, `binary_keep_raw=` parameters from `ailake-py` `TableWriter`.
+  - Removed `"binary"`, `"binary_keep_raw"` from `ailake-jni` JSON API.
+  - Removed `binary.go` from `ailake-go`; removed `FlagIndexBinary`, `IsBinary()`.
+  - Removed `binary.hpp` from `ailake-cpp`; removed `kFlagIndexBinary`, `is_binary()`.
+  - Removed `ailake-cpp/tests/test_binary.cpp` (14 tests).
+
+- **`ailake-bench`** removed from workspace `Cargo.toml` members. Benchmarks live in the separate [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks) repository.
+
+### Changed
+
+- `AnyIndex` enum now contains only `Hnsw(HnswIndex)` and `IvfPq(IvfPqIndex)`.
+- `VectorStoragePolicy` index auto-selection: checks `policy.pq.is_some()` → `IvfPq`; default → `Hnsw`. Binary and RaBitQ checks removed.
+- `ailake-file` reader flag dispatch: `FLAG_INDEX_IVF_PQ = 0x0001` only; unknown flags default to HNSW.
+- File format spec §3 `flags` field: only bit 0 (`IVF-PQ`) defined; bits 1–15 reserved.
+- File format spec: removed §6.3 (RaBitQ Index Blob), §6.4 (Binary Hamming Index Blob), §15.4 (BinarySnapshot wire layout).
+- Cross-language table in file format spec reduced to Rust, C++17, Go columns for HNSW and IVF-PQ only.
+
+---
+
 ## [0.0.13] — 2026-06-08
 
 ### Added

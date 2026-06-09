@@ -25,7 +25,7 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 
 **Rust core, first-class Python and JVM.** The write/search path is pure Rust (zero GC pauses, no JVM heap pressure). Python gets zero-copy PyArrow `RecordBatch` results. Spark, Trino, and Flink get a JNA C-ABI bridge — four exported functions shared across all three JVM plugins.
 
-**Storage-efficient at scale.** F16 quantization halves vector storage vs. F32. Product Quantization (IVF-PQ) reduces the index footprint 10–100× for S3-resident workloads where sequential reads are cheap. **RaBitQ** achieves 16× compression over F16 (1 bit/dim = 200 bytes/vector at dim=1536) via modified Gram-Schmidt orthonormal rotation + XOR/popcount — better recall than naive binary quantization, with no graph construction overhead (~163k vec/s write throughput, SIFT-1M measured). **Binary Hamming** is a no-rotation flat index with the same 1 bit/dim footprint (192 bytes/vector at dim=1536, 32× smaller than F32) and write throughput exceeding 200k vec/s — the fastest write path when recall after reranking is acceptable. Reranking recovers precision with a second pass over the raw F16 column.
+**Storage-efficient at scale.** F16 quantization halves vector storage vs. F32. Product Quantization (IVF-PQ) reduces the index footprint 10–100× for S3-resident workloads where sequential reads are cheap.
 
 | | Iceberg alone | External vector DB | **AI-Lake** |
 |---|---|---|---|
@@ -169,9 +169,7 @@ ailake/
 │       ├── quantize.rs         # F32→F16→I8 scalar quantization
 │       ├── distance.rs         # Cosine, Euclidean, DotProduct, centroid computation
 │       ├── compress.rs         # BlockCompressor (zstd / lz4 / none)
-│       ├── pq.rs               # Product Quantization — PQCodebook, ADC distance
-│       ├── rabitq.rs           # RaBitQCodebook, RaBitQVec — random rotation + 1 bit/dim encoding
-│       └── binary_quant.rs     # BinaryQuantizer — sign binarization, MSB-first packing (no rotation)
+│       └── pq.rs               # Product Quantization — PQCodebook, ADC distance
 ├── ailake-file/
 │   ├── Cargo.toml
 │   └── src/
@@ -201,11 +199,9 @@ ailake/
 ├── ailake-index/
 │   ├── Cargo.toml
 │   └── src/
-│       ├── lib.rs              # AnyIndex enum — dispatches HNSW, IVF-PQ, RaBitQ, or Binary Hamming
+│       ├── lib.rs              # AnyIndex enum — dispatches HNSW or IVF-PQ
 │       ├── hnsw.rs             # hnsw_rs wrapper
 │       ├── ivf_pq.rs           # IvfPqIndex, IvfPqConfig, IvfPqCodebook, IvfPqSerializer
-│       ├── rabitq.rs           # RaBitQIndex, RaBitQConfig, RaBitQSerializer (1 bit/dim flat index)
-│       ├── binary.rs           # BinaryIndex, BinaryConfig, BinarySerializer (Hamming flat index)
 │       ├── gpu.rs              # NVIDIA CUDA (cuBLAS libloading) + AMD ROCm (hipBLAS libloading) GPU backends
 │       ├── hardware.rs         # HardwareProfile, HardwareBackend detection (CUDA / ROCm / CPU)
 │       ├── serialize.rs        # bincode serialization
@@ -263,9 +259,6 @@ ailake/
 │   ├── footer.go               # AI-Lake footer parser
 │   ├── hnsw.go                 # HNSW graph traversal
 │   ├── ivfpq.go                # IVF-PQ decoder + ADC search
-│   ├── rabitq.go               # RaBitQ 1-bit index + reranking
-│   ├── binary.go               # Binary Hamming flat index + reranking
-│   ├── chacha12.go             # ChaCha12 PRNG (rotation matrix, bit-identical with Rust)
 │   ├── hardware.go             # Hardware detection (CUDA / ROCm / CPU)
 │   ├── http_search.go          # HTTP client for `ailake serve` REST API
 │   ├── distance.go             # Distance kernels (cosine, euclidean, dot)
@@ -278,9 +271,6 @@ ailake/
 │   │   ├── footer.hpp          # AI-Lake footer parser
 │   │   ├── hnsw.hpp            # HNSW search
 │   │   ├── ivfpq.hpp           # IVF-PQ decoder
-│   │   ├── rabitq.hpp          # RaBitQ search
-│   │   ├── binary.hpp          # Binary Hamming flat index + SIMD Hamming distance
-│   │   ├── chacha12.hpp        # ChaCha12 PRNG (bit-identical with Rust)
 │   │   ├── distance.hpp        # Distance kernels
 │   │   ├── hardware.hpp        # Hardware detection
 │   │   ├── bincode.hpp         # bincode deserializer
@@ -339,6 +329,6 @@ cargo check --workspace
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector; **IVF-PQ shared codebook** (single k-means training across all shards — ADC distances comparable cross-shard); **`write_batch_ivf_pq_deferred`** (~250k vec/s write, async IVF-PQ build); **k-means++ O(n×k) fix** + rayon parallelism (17× speedup); **`HadoopCatalog` Replace fix** (`IndexStatus::Ready` convergence with concurrent background tasks) |
 | **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP REST server, Apache Airflow provider, idempotent writes, Compat Heavy CI (Spark+Iceberg, Trino+REST, BigQuery emulator), TruffleHog secret scanning, cloud deployment guides |
 | **Phase 6** | ✅ Complete | Public distribution pipeline — crates.io, PyPI (manylinux abi3 wheels), Airflow provider on PyPI, pre-built JVM JARs + `libailake_jni.so` on GitHub Releases, dynamic Python versioning |
-| **Phase 7** | 🚧 In progress | **Binary Hamming flat index** ✅ — 1 bit/dim MSB-first, 32× smaller than F32, >200k vec/s write throughput; SIMD Hamming kernels (AVX2+SSSE3/NEON/scalar); full support in Rust, Go, C++, JNI, Python; 14 C++ unit tests; `FLAG_INDEX_BINARY=0x0004`; optional F16 raw vectors for reranking. Remaining: `write_batch_auto_deferred` (~200k vec/s Auto engine deferred); DuckLake catalog backend; dbt integration guide |
+| **Phase 7** | 🚧 In progress | Remaining: `write_batch_auto_deferred` (~200k vec/s Auto engine deferred); DuckLake catalog backend; dbt integration guide |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.

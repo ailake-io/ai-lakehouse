@@ -8,17 +8,16 @@ AI-Lake files are write-once immutable. Every `write_batch` produces a new `.par
 - **S3 request cost**: each file requires at least two range GETs (Parquet footer + HNSW footer).
 - **Parquet read overhead**: many small row groups = poor predicate pushdown.
 
-Compaction merges N small files into one large file with a single unified index (HNSW, IVF-PQ, RaBitQ, or Binary Hamming — determined by the table's `VectorStoragePolicy`), eliminating fan-out.
+Compaction merges N small files into one large file with a single unified index (HNSW or IVF-PQ — determined by the table's `VectorStoragePolicy`), eliminating fan-out.
 
 ---
 
 ## Compaction is the index rebuild trigger
 
-During streaming ingest or batch micro-batches, new files arrive with per-batch indexes (HNSW, RaBitQ, or Binary Hamming). Compaction is the **only** moment a full-quality index is built for a merged set of records. This is by design:
+During streaming ingest or batch micro-batches, new files arrive with per-batch indexes (HNSW or IVF-PQ). Compaction is the **only** moment a full-quality index is built for a merged set of records. This is by design:
 
 - Write path stays O(N) — just append Parquet + compute centroid.
 - HNSW build is O(N log N) and CPU-heavy — happens once, asynchronously, at compaction time.
-- RaBitQ and Binary Hamming builds are O(N) one-pass — compaction still improves recall by merging many tiny flat indexes into one larger flat index with better coverage.
 
 Records in un-compacted files are still searchable (their indexes exist, just small), but recall may be lower for very small batches. The "blind window" is bounded by the compaction interval.
 
