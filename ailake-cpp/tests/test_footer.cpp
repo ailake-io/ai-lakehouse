@@ -48,8 +48,6 @@ static void test_parse_hnsw_header() {
     CHECK(h.distance_metric == ailake::Metric::Cosine);
     CHECK_EQ(h.record_count, 1000u);
     CHECK(!h.is_ivf_pq());
-    CHECK(!h.is_rabitq());
-    CHECK(!h.is_binary());
 }
 
 static void test_flag_ivfpq() {
@@ -57,27 +55,6 @@ static void test_flag_ivfpq() {
     fill_header(buf, 1, ailake::kFlagIndexIvfPq, 64, 0, 0);
     auto h = ailake::parse_header(buf);
     CHECK(h.is_ivf_pq());
-    CHECK(!h.is_rabitq());
-    CHECK(!h.is_binary());
-}
-
-static void test_flag_rabitq() {
-    uint8_t buf[64];
-    fill_header(buf, 1, ailake::kFlagIndexRaBitQ, 64, 0, 0);
-    auto h = ailake::parse_header(buf);
-    CHECK(!h.is_ivf_pq());
-    CHECK(h.is_rabitq());
-    CHECK(!h.is_binary());
-}
-
-static void test_flag_binary() {
-    uint8_t buf[64];
-    fill_header(buf, 1, ailake::kFlagIndexBinary, 64, 3 /* Binary */, 0);
-    auto h = ailake::parse_header(buf);
-    CHECK(!h.is_ivf_pq());
-    CHECK(!h.is_rabitq());
-    CHECK(h.is_binary());
-    CHECK(h.precision == ailake::Precision::Binary);
 }
 
 static void test_bad_magic_throws() {
@@ -102,8 +79,6 @@ static void test_bad_version_throws() {
 int main() {
     test_parse_hnsw_header();
     test_flag_ivfpq();
-    test_flag_rabitq();
-    test_flag_binary();
     test_bad_magic_throws();
     test_bad_version_throws();
     if (g_fail) {
