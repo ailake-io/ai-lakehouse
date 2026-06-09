@@ -28,6 +28,9 @@ object AilakeNative {
         /** JSON-envelope search. Returns `{"ok":true,"results":[...]}`. Caller must free. */
         fun ailake_search_json(requestJson: String): Pointer?
 
+        /** JSON-envelope write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
+        fun ailake_write_batch_json(requestJson: String): Pointer?
+
         fun ailake_free_string(ptr: Pointer)
     }
 
@@ -45,6 +48,59 @@ object AilakeNative {
     }
 
     private val mapper = jacksonObjectMapper()
+
+    /**
+     * Write a batch of rows to an AI-Lake table via the native library.
+     * Returns the snapshot_id on success, null on failure.
+     */
+    fun writeBatch(
+        tableUri: String,
+        namespace: String,
+        tableName: String,
+        vectorColumn: String,
+        dim: Int,
+        metric: String,
+        precision: String,
+        ids: List<Long>,
+        embeddings: List<List<Float>>,
+    ): Long? {
+        val native = lib ?: return null
+        if (ids.isEmpty()) return null
+
+        val requestJson = mapper.writeValueAsString(
+            mapOf(
+                "warehouse"  to tableUri,
+                "namespace"  to namespace,
+                "table"      to tableName,
+                "vec_col"    to vectorColumn,
+                "dim"        to dim,
+                "metric"     to metric,
+                "precision"  to precision,
+                "ids"        to ids,
+                "embeddings" to embeddings,
+            )
+        )
+
+        val ptr = native.ailake_write_batch_json(requestJson) ?: run {
+            log.warn("[ailake] ailake_write_batch_json returned null pointer for table={}", tableName)
+            return null
+        }
+
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) {
+                log.warn("[ailake] writeBatch ok=false for table={}: {}", tableName, resp["error"])
+                return null
+            }
+            (resp["snapshot_id"] as? Number)?.toLong()
+        } catch (e: Exception) {
+            log.error("[ailake] Failed to parse writeBatch response for table={}: {}", tableName, e.message, e)
+            null
+        } finally {
+            runCatching { native.ailake_free_string(ptr) }
+        }
+    }
 
     /**
      * Run a vector search via the native library.
