@@ -291,7 +291,7 @@ fn parse_metric(s: &str) -> PyResult<VectorMetric> {
 }
 
 #[pymodule]
-fn ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
     m.add_function(wrap_pyfunction!(search, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_context, m)?)?;
