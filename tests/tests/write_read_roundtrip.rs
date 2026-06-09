@@ -76,4 +76,3 @@ async fn write_10k_rows_search_top10() {
         results[0].distance
     );
 }
-
