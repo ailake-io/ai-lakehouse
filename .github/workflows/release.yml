@@ -49,6 +49,7 @@ jobs:
           git add $(find . -name "Cargo.toml" -not -path "*/target/*")
           git diff --cached --quiet || \
             git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
+          git pull --rebase origin main
           git push origin main
 
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
