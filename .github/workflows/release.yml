@@ -113,51 +113,27 @@ jobs:
 
       # Publish in dependency order (leaf crates first).
       # crates.io needs ~30 s after each publish before dependents can resolve it.
-
-      - name: Publish ailake-core
-        run: cargo publish -p ailake-core
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish ailake-vec
-        run: cargo publish -p ailake-vec
-
-      - name: Publish ailake-store
-        run: cargo publish -p ailake-store
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish ailake-parquet
-        run: cargo publish -p ailake-parquet
-
-      - name: Publish ailake-index
-        run: cargo publish -p ailake-index
-
-      - name: Publish ailake-catalog
-        run: cargo publish -p ailake-catalog
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish ailake-file
-        run: cargo publish -p ailake-file
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish ailake-query
-        run: cargo publish -p ailake-query
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish ailake-jni
-        run: cargo publish -p ailake-jni
-
-      - name: Publish ailake-cli
-        run: cargo publish -p ailake-cli
+      # Exit code 10 = crate version already exists on crates.io — safe to skip.
+      - name: Publish all crates
+        run: |
+          pub() {
+            cargo publish -p "$1" || { c=$?; [ $c -eq 10 ] && echo "$1 already published, skipping" || exit $c; }
+          }
+          pub ailake-core
+          sleep 30
+          pub ailake-vec
+          pub ailake-store
+          sleep 30
+          pub ailake-parquet
+          pub ailake-index
+          pub ailake-catalog
+          sleep 30
+          pub ailake-file
+          sleep 30
+          pub ailake-query
+          sleep 30
+          pub ailake-jni
+          pub ailake-cli
 
   publish-jvm:
     name: Build and upload JVM plugin JARs
