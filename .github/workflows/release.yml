@@ -64,14 +64,23 @@ jobs:
 
       - name: Create and push git tag
         run: |
-          git tag "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
-          git push origin "${{ steps.version.outputs.tag }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping"
+          else
+            git tag "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
 
       - name: Create GitHub Release
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" \
-            --title "AI-Lake ${{ steps.version.outputs.tag }}" \
-            --notes "## ${{ steps.version.outputs.tag }}
+          TAG="${{ steps.version.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub Release $TAG already exists, skipping"
+          else
+            gh release create "$TAG" \
+              --title "AI-Lake $TAG" \
+              --notes "## $TAG
 
           See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for full release notes.
 
@@ -87,7 +96,8 @@ jobs:
           ### JVM plugins
           Spark, Trino, and Flink fat-JARs and \`libailake_jni.so\` attached as release assets.
           " \
-            --draft=false
+              --draft=false
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
 
