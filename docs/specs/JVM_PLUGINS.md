@@ -56,7 +56,7 @@ Reference guide for the two JVM query-engine plugins that expose AI-Lake vector 
 Each GitHub Release includes pre-built artifacts uploaded by the `publish-jvm.yml` workflow. No Rust toolchain or Gradle required.
 
 ```bash
-VERSION=0.0.10   # replace with desired release
+VERSION=0.0.16   # replace with desired release
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
