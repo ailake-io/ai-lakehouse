@@ -54,6 +54,14 @@ jobs:
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$NEW_TAG"         >> "$GITHUB_OUTPUT"
 
+      - name: Sync version bump back to develop
+        run: |
+          git fetch origin develop
+          git checkout develop
+          git merge origin/main --no-edit
+          git push origin develop
+          git checkout main
+
       - name: Create and push git tag
         run: |
           git tag "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
