@@ -44,5 +44,62 @@ object implicits {
       val sparkRows = rows.map(r => Row(r.rowId, r.distance.toDouble, r.filePath))
       spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), plan.schema)
     }
+
+    /**
+     * Write a DataFrame to an AI-Lake table via the native library.
+     *
+     * The DataFrame must have columns: id (Long), embedding (Array[Double]).
+     *
+     * @param tableUri     AI-Lake table root URI
+     * @param df           DataFrame with (id, embedding) schema
+     * @param vectorColumn embedding column name in the DataFrame (default: "embedding")
+     * @param idColumn     id column name in the DataFrame (default: "id")
+     * @param metric       distance metric (default: "cosine")
+     * @param precision    storage precision (default: "f16")
+     * @param namespace    Iceberg namespace (default: "default")
+     * @param tableName    table name derived from tableUri by default
+     */
+    /**
+     * Write a DataFrame to an AI-Lake table via the native library.
+     *
+     * The DataFrame must have columns matching `idColumn` (Long) and
+     * `vectorColumn` (Array[Double]).
+     *
+     * @param tableUri     AI-Lake table root URI
+     * @param df           DataFrame with id + embedding columns
+     * @param vectorColumn embedding column name (default: "embedding")
+     * @param idColumn     id column name (default: "id")
+     * @param metric       distance metric (default: "cosine")
+     * @param precision    storage precision (default: "f16")
+     * @param namespace    Iceberg namespace (default: "default")
+     * @param tableName    table name; defaults to last segment of tableUri
+     */
+    def ailakeWrite(
+      tableUri:     String,
+      df:           DataFrame,
+      vectorColumn: String = "embedding",
+      idColumn:     String = "id",
+      metric:       String = "cosine",
+      precision:    String = "f16",
+      namespace:    String = "default",
+      tableName:    String = "",
+    ): Unit = {
+      val resolvedName = if (tableName.nonEmpty) tableName
+                         else tableUri.stripSuffix("/").split("/").last
+      val dimOpt = df.schema.find(_.name == vectorColumn).flatMap(_.dataType match {
+        case org.apache.spark.sql.types.ArrayType(_, _) => None  // inferred per-row by DataWriter
+        case _ => throw new IllegalArgumentException(s"Column $vectorColumn must be ArrayType")
+      })
+      df.write
+        .format("io.ailake.spark.AilakeDataSource")
+        .option("tableUri",     tableUri)
+        .option("namespace",    namespace)
+        .option("tableName",    resolvedName)
+        .option("vectorColumn", vectorColumn)
+        .option("idColumn",     idColumn)
+        .option("metric",       metric)
+        .option("precision",    precision)
+        .save()
+    }
   }
 }
