@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Iterable, Sequence, Union
 
 from ailake._ailake import (  # type: ignore[import]
@@ -112,6 +113,27 @@ class SearchQuery:
             return f"SearchQuery(top_k={self._top_k}, pending)"
         return f"SearchQuery({len(self._results)} results, top_k={self._top_k})"
 
+    # ── async ─────────────────────────────────────────────────────────────────
+
+    async def to_list_async(self) -> list[dict]:
+        """Async variant of :meth:`to_list` — runs search in a thread executor."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._execute)
+
+    async def to_pandas_async(self) -> "pd.DataFrame":
+        """Async variant of :meth:`to_pandas`."""
+        import pandas as pd  # noqa: PLC0415
+
+        return pd.DataFrame(await self.to_list_async())
+
+    async def to_polars_async(self) -> "pl.DataFrame":
+        """Async variant of :meth:`to_polars`."""
+        import polars as pl  # noqa: PLC0415
+
+        return pl.DataFrame(await self.to_list_async())
+
+    # ── display ───────────────────────────────────────────────────────────────
+
     def _repr_html_(self) -> str:
         if self._results is None:
             return (
@@ -209,6 +231,26 @@ class Table:
         Returns the new snapshot id.
         """
         return self._writer.commit()
+
+    async def insert_async(
+        self,
+        texts: list[str],
+        embeddings: _Embeddings,
+    ) -> "Table":
+        """Async variant of :meth:`insert` — runs write_batch in a thread executor."""
+        _emb: list[list[float]] = (
+            embeddings.tolist()  # type: ignore[union-attr]
+            if hasattr(embeddings, "tolist")
+            else [list(row) for row in embeddings]
+        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._writer.write_batch, texts, _emb)
+        return self
+
+    async def commit_async(self) -> int:
+        """Async variant of :meth:`commit`."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._writer.commit)
 
     # ── search ────────────────────────────────────────────────────────────────
 
