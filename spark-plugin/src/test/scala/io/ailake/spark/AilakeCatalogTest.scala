@@ -7,7 +7,7 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 
-import scala.jdk.CollectionConverters._
+import scala.collection.JavaConverters._
 
 class AilakeCatalogTest extends AnyFunSuite {
 
