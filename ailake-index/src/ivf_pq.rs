@@ -77,7 +77,7 @@ impl Default for IvfPqConfig {
 impl IvfPqConfig {
     /// Derive sensible defaults from vector dimensionality.
     pub fn for_dim(dim: usize) -> Self {
-        let pq_m = (dim / 16).clamp(4, 64);
+        let pq_m = (dim / 8).clamp(4, 96);
         Self {
             pq_m: find_valid_pq_m(pq_m, dim),
             ..Self::default()
@@ -91,7 +91,7 @@ impl IvfPqConfig {
     pub fn for_dataset(dim: usize, n_vectors: usize) -> Self {
         let nlist = ((n_vectors as f64).sqrt() as usize).clamp(16, 1024);
         let nprobe = (nlist / 4).max(1); // 25% coverage — better candidate quality than nlist/8
-        let pq_m_hint = (dim / 16).clamp(4, 64);
+        let pq_m_hint = (dim / 8).clamp(4, 96);
         Self {
             nlist,
             nprobe,

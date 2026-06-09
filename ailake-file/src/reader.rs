@@ -3,6 +3,7 @@ use ailake_core::{AilakeError, AilakeResult, Centroid, VectorMetric};
 use ailake_index::{
     AnyIndex, BinarySerializer, HnswIndex, IvfPqSerializer, MmapLoader, RaBitQSerializer,
 };
+use crate::footer::Precision;
 use ailake_parquet::ParquetVectorReader;
 use arrow_array::RecordBatch;
 use bytes::Bytes;
@@ -132,7 +133,11 @@ impl AilakeFileReader {
         if hnsw_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
         }
-        MmapLoader::from_bytes(&self.bytes[hnsw_start..hnsw_end])
+        let mut idx = MmapLoader::from_bytes(&self.bytes[hnsw_start..hnsw_end])?;
+        if header.precision == Precision::F16 {
+            idx.quantize_to_f16();
+        }
+        Ok(idx)
     }
 
     /// Load primary index as `AnyIndex`, dispatching on header flags.
@@ -170,7 +175,10 @@ impl AilakeFileReader {
             let idx = IvfPqSerializer::from_bytes(index_bytes)?;
             Ok(AnyIndex::IvfPq(idx))
         } else {
-            let idx = MmapLoader::from_bytes(index_bytes)?;
+            let mut idx = MmapLoader::from_bytes(index_bytes)?;
+            if header.precision == Precision::F16 {
+                idx.quantize_to_f16();
+            }
             Ok(AnyIndex::Hnsw(idx))
         }
     }
