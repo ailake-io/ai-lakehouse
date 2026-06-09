@@ -27,8 +27,12 @@ __all__ = [
     "search",
     "Table",
     "SearchQuery",
+    "TableWriter",
     "assemble_context",
 ]
+
+# Backward-compat re-export: ailake.TableWriter still works.
+TableWriter = _TableWriter
 
 # ── HTML helpers ──────────────────────────────────────────────────────────────
 
