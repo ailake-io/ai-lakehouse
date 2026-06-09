@@ -29,6 +29,29 @@ __all__ = [
     "assemble_context",
 ]
 
+# ── HTML helpers ──────────────────────────────────────────────────────────────
+
+_CARD_STYLE = (
+    "font-family:monospace;border:1px solid #ddd;border-radius:6px;"
+    "padding:14px 16px;max-width:520px;background:#fafafa;"
+    "box-shadow:0 1px 3px rgba(0,0,0,.06)"
+)
+_LABEL_STYLE = "color:#888;padding:3px 12px 3px 0;white-space:nowrap"
+_VALUE_STYLE = "padding:3px 0;word-break:break-all"
+_TH_STYLE = (
+    "text-align:left;color:#6c757d;padding:4px 10px 4px 0;"
+    "border-bottom:1px solid #e0e0e0;font-weight:normal;font-size:12px"
+)
+_TD_STYLE = "padding:3px 10px 3px 0;font-size:13px"
+
+
+def _kv_rows(items: list[tuple[str, object]]) -> str:
+    return "".join(
+        f'<tr><td style="{_LABEL_STYLE}">{k}</td>'
+        f'<td style="{_VALUE_STYLE}">{v}</td></tr>'
+        for k, v in items
+    )
+
 
 # ── SearchQuery ───────────────────────────────────────────────────────────────
 
@@ -86,8 +109,44 @@ class SearchQuery:
 
     def __repr__(self) -> str:
         if self._results is None:
-            return f"SearchQuery(top_k={self._top_k}, not yet executed)"
+            return f"SearchQuery(top_k={self._top_k}, pending)"
         return f"SearchQuery({len(self._results)} results, top_k={self._top_k})"
+
+    def _repr_html_(self) -> str:
+        if self._results is None:
+            return (
+                f'<span style="font-family:monospace;color:#888">'
+                f"SearchQuery(top_k={self._top_k}, <em>not yet executed</em>)"
+                f"</span>"
+            )
+        rows = self._results
+        header = (
+            f'<tr>'
+            f'<th style="{_TH_STYLE}">#</th>'
+            f'<th style="{_TH_STYLE}">row_id</th>'
+            f'<th style="{_TH_STYLE}">distance</th>'
+            f'<th style="{_TH_STYLE}">file</th>'
+            f'</tr>'
+        )
+        body = "".join(
+            f'<tr>'
+            f'<td style="{_TD_STYLE};color:#aaa">{i}</td>'
+            f'<td style="{_TD_STYLE}">{r["row_id"]}</td>'
+            f'<td style="{_TD_STYLE}">{r["distance"]:.6f}</td>'
+            f'<td style="{_TD_STYLE};color:#555;font-size:11px">{r["file"]}</td>'
+            f'</tr>'
+            for i, r in enumerate(rows)
+        )
+        return (
+            f'<div style="{_CARD_STYLE}">'
+            f'<div style="color:#6c757d;font-size:11px;margin-bottom:8px">'
+            f"SearchQuery — {len(rows)} result{'s' if len(rows) != 1 else ''}"
+            f"</div>"
+            f'<table style="border-collapse:collapse;width:100%">'
+            f"{header}{body}"
+            f"</table>"
+            f"</div>"
+        )
 
 
 # ── Table ─────────────────────────────────────────────────────────────────────
@@ -95,9 +154,32 @@ class SearchQuery:
 class Table:
     """Handle to an AI-Lake table supporting write and vector search."""
 
-    def __init__(self, path: str, **kwargs) -> None:
+    def __init__(
+        self,
+        path: str,
+        vector_column: str = "embedding",
+        dim: int = 1536,
+        metric: str = "cosine",
+        pre_normalize: bool = False,
+        hnsw_m: int | None = None,
+        hnsw_ef_construction: int | None = None,
+    ) -> None:
         self._path = path
-        self._writer = _TableWriter(path, **kwargs)
+        self._vector_column = vector_column
+        self._dim = dim
+        self._metric = metric
+        self._pre_normalize = pre_normalize
+        self._hnsw_m = hnsw_m
+        self._hnsw_ef = hnsw_ef_construction
+        self._writer = _TableWriter(
+            path,
+            vector_column=vector_column,
+            dim=dim,
+            metric=metric,
+            pre_normalize=pre_normalize,
+            hnsw_m=hnsw_m,
+            hnsw_ef_construction=hnsw_ef_construction,
+        )
 
     # ── write ─────────────────────────────────────────────────────────────────
 
@@ -152,8 +234,40 @@ class Table:
     def __exit__(self, *_) -> None:
         pass
 
+    # ── display ───────────────────────────────────────────────────────────────
+
     def __repr__(self) -> str:
-        return f"Table({self._path!r})"
+        return (
+            f"Table(path={self._path!r}, "
+            f"vector_column={self._vector_column!r}, "
+            f"dim={self._dim}, metric={self._metric!r})"
+        )
+
+    def _repr_html_(self) -> str:
+        hnsw_extra = ""
+        if self._hnsw_m is not None:
+            hnsw_extra += f"<tr><td style='{_LABEL_STYLE}'>hnsw_m</td><td style='{_VALUE_STYLE}'>{self._hnsw_m}</td></tr>"
+        if self._hnsw_ef is not None:
+            hnsw_extra += f"<tr><td style='{_LABEL_STYLE}'>hnsw_ef_construction</td><td style='{_VALUE_STYLE}'>{self._hnsw_ef}</td></tr>"
+
+        rows = _kv_rows([
+            ("vector_column", self._vector_column),
+            ("dim", self._dim),
+            ("metric", self._metric),
+            ("pre_normalize", self._pre_normalize),
+        ])
+
+        return (
+            f'<div style="{_CARD_STYLE}">'
+            f'<div style="color:#6c757d;font-size:11px;margin-bottom:6px">AI-Lake Table</div>'
+            f'<div style="font-weight:bold;margin-bottom:10px;word-break:break-all;font-size:14px">'
+            f"{self._path}"
+            f"</div>"
+            f'<table style="border-collapse:collapse;width:100%">'
+            f"{rows}{hnsw_extra}"
+            f"</table>"
+            f"</div>"
+        )
 
 
 # ── module-level helpers ──────────────────────────────────────────────────────
@@ -170,11 +284,18 @@ def open_table(
 ) -> Table:
     """Open or create an AI-Lake table at *path*.
 
-    Keyword arguments are forwarded to :class:`TableWriter`:
-    ``vector_column``, ``dim``, ``metric``, ``pre_normalize``,
-    ``hnsw_m``, ``hnsw_ef_construction``.
+    Args:
+        path: Local filesystem path or object-storage URI (``s3://``, ``gs://``, ``az://``).
+        vector_column: Name of the embedding column (default ``"embedding"``).
+        dim: Embedding dimension (default 1536).
+        metric: Distance metric — ``"cosine"``, ``"euclidean"``, ``"dot_product"``,
+                ``"normalized_cosine"``.
+        pre_normalize: Normalise vectors to unit-L2 at write time (~12-20 % search speedup).
+        hnsw_m: HNSW graph degree *M* per layer.
+        hnsw_ef_construction: HNSW build-time beam width.
     """
-    kwargs = dict(
+    return Table(
+        path,
         vector_column=vector_column,
         dim=dim,
         metric=metric,
@@ -182,7 +303,6 @@ def open_table(
         hnsw_m=hnsw_m,
         hnsw_ef_construction=hnsw_ef_construction,
     )
-    return Table(path, **{k: v for k, v in kwargs.items() if v is not None or k in ("pre_normalize",)})
 
 
 def search(path: str, query: _Vector, top_k: int = 10) -> SearchQuery:
