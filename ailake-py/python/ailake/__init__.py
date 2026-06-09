@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Iterable, Sequence, Union
 
 from ailake._ailake import (  # type: ignore[import]
     TableWriter as _TableWriter,
@@ -13,8 +13,13 @@ from ailake._ailake import (  # type: ignore[import]
 )
 
 if TYPE_CHECKING:
+    import numpy as np
     import pandas as pd
     import polars as pl
+
+# Accepted embedding input types — list, numpy array, or any array with .tolist()
+_Embeddings = Union[Sequence[Sequence[float]], "np.ndarray"]
+_Vector = Union[Sequence[float], "np.ndarray"]
 
 __all__ = [
     "open_table",
@@ -99,7 +104,7 @@ class Table:
     def insert(
         self,
         texts: list[str],
-        embeddings,
+        embeddings: _Embeddings,
     ) -> "Table":
         """Buffer a batch for writing.  Call ``commit()`` to persist.
 
@@ -108,9 +113,12 @@ class Table:
             embeddings: ``list[list[float]]`` or any array with a ``.tolist()``
                         method (numpy, torch, etc.).
         """
-        if hasattr(embeddings, "tolist"):
-            embeddings = embeddings.tolist()
-        self._writer.write_batch(texts, embeddings)
+        _emb: list[list[float]] = (
+            embeddings.tolist()  # type: ignore[union-attr]
+            if hasattr(embeddings, "tolist")
+            else [list(row) for row in embeddings]
+        )
+        self._writer.write_batch(texts, _emb)
         return self
 
     def commit(self) -> int:
@@ -122,16 +130,19 @@ class Table:
 
     # ── search ────────────────────────────────────────────────────────────────
 
-    def search(self, query, top_k: int = 10) -> SearchQuery:
+    def search(self, query: _Vector, top_k: int = 10) -> SearchQuery:
         """Return a chainable :class:`SearchQuery`.
 
         Args:
             query: embedding vector — ``list[float]`` or array with ``.tolist()``.
             top_k: maximum neighbours to return.
         """
-        if hasattr(query, "tolist"):
-            query = query.tolist()
-        return SearchQuery(self._path, query, top_k)
+        _q: list[float] = (
+            query.tolist()  # type: ignore[union-attr]
+            if hasattr(query, "tolist")
+            else list(query)
+        )
+        return SearchQuery(self._path, _q, top_k)
 
     # ── context manager ───────────────────────────────────────────────────────
 
@@ -147,17 +158,34 @@ class Table:
 
 # ── module-level helpers ──────────────────────────────────────────────────────
 
-def open_table(path: str, **kwargs) -> Table:
+def open_table(
+    path: str,
+    *,
+    vector_column: str = "embedding",
+    dim: int = 1536,
+    metric: str = "cosine",
+    pre_normalize: bool = False,
+    hnsw_m: int | None = None,
+    hnsw_ef_construction: int | None = None,
+) -> Table:
     """Open or create an AI-Lake table at *path*.
 
     Keyword arguments are forwarded to :class:`TableWriter`:
     ``vector_column``, ``dim``, ``metric``, ``pre_normalize``,
     ``hnsw_m``, ``hnsw_ef_construction``.
     """
-    return Table(path, **kwargs)
+    kwargs = dict(
+        vector_column=vector_column,
+        dim=dim,
+        metric=metric,
+        pre_normalize=pre_normalize,
+        hnsw_m=hnsw_m,
+        hnsw_ef_construction=hnsw_ef_construction,
+    )
+    return Table(path, **{k: v for k, v in kwargs.items() if v is not None or k in ("pre_normalize",)})
 
 
-def search(path: str, query, top_k: int = 10) -> SearchQuery:
+def search(path: str, query: _Vector, top_k: int = 10) -> SearchQuery:
     """Module-level search returning a chainable :class:`SearchQuery`.
 
     Example::
@@ -165,6 +193,9 @@ def search(path: str, query, top_k: int = 10) -> SearchQuery:
         results = ailake.search("s3://my-lake/docs/", query_vec, top_k=20)
         df = results.to_pandas()
     """
-    if hasattr(query, "tolist"):
-        query = query.tolist()
-    return SearchQuery(path, query, top_k)
+    _q: list[float] = (
+        query.tolist()  # type: ignore[union-attr]
+        if hasattr(query, "tolist")
+        else list(query)
+    )
+    return SearchQuery(path, _q, top_k)
