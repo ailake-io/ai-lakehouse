@@ -61,7 +61,7 @@ class AilakeWriteBatchIntegrationTest {
         val snapshotId = AilakeNative.writeBatch(
             tableUri     = tableUri,
             namespace    = "default",
-            tableName    = "integration_write_trino",
+            tableName    = "table",
             vectorColumn = "embedding",
             dim          = dim,
             metric       = "cosine",
