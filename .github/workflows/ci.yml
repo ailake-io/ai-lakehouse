@@ -174,3 +174,16 @@ jobs:
           cd ..
           /tmp/ailake-py-venv/bin/pip install ailake-py/dist/*.whl
           /tmp/ailake-py-venv/bin/python3 tests/compat/check_ailake_py.py
+
+  test-jvm:
+    name: test-jvm (trino + spark plugins)
+    runs-on: [self-hosted, Linux]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+      - name: Run Trino plugin unit tests
+        run: gradle -p trino-plugin test --no-daemon --no-configuration-cache
+      - name: Run Spark plugin unit tests
+        run: gradle -p spark-plugin test --no-daemon --no-configuration-cache
