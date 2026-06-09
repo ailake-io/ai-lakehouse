@@ -4,7 +4,7 @@
 mod fixtures;
 
 use ailake_catalog::{HadoopCatalog, TableIdent};
-use ailake_core::{RaBitQConfig, VectorMetric, VectorPrecision, VectorStoragePolicy};
+use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
 use ailake_query::{search, SearchConfig, TableWriter};
 use ailake_store::LocalStore;
 use std::sync::Arc;
@@ -31,8 +31,6 @@ async fn write_10k_rows_search_top10() {
         pre_normalize: false,
         hnsw_m: None,
         hnsw_ef_construction: None,
-        rabitq: None,
-        binary: None,
     };
 
     // Create table and write 10k rows split across 2 batches
@@ -79,70 +77,3 @@ async fn write_10k_rows_search_top10() {
     );
 }
 
-#[tokio::test]
-async fn rabitq_write_search_returns_correct_top_result() {
-    let dir = TempDir::new().unwrap();
-    let store = Arc::new(LocalStore::new(dir.path()));
-    let catalog = Arc::new(HadoopCatalog::new(
-        Arc::clone(&store) as Arc<dyn ailake_store::Store>,
-        "warehouse",
-    ));
-    let table = TableIdent::new("default", "rabitq_table");
-    let dim = 64u32;
-
-    let policy = VectorStoragePolicy {
-        column_name: "embedding".to_string(),
-        dim,
-        metric: VectorMetric::Cosine,
-        precision: VectorPrecision::F16,
-        pq: None,
-        keep_raw_for_reranking: false,
-        pre_normalize: false,
-        hnsw_m: None,
-        hnsw_ef_construction: None,
-        rabitq: Some(RaBitQConfig {
-            seed: 42,
-            keep_raw: true,
-        }),
-        binary: None,
-    };
-
-    let mut writer = TableWriter::create_or_open(
-        Arc::clone(&catalog) as Arc<dyn ailake_catalog::CatalogProvider>,
-        Arc::clone(&store) as Arc<dyn ailake_store::Store>,
-        policy.clone(),
-        table.clone(),
-    )
-    .await
-    .unwrap();
-
-    let (batch, embs) = fixtures::generate_batch(1000, dim as usize);
-    writer.write_batch(&batch, &embs).await.unwrap();
-    writer.commit().await.unwrap();
-
-    let query = embs[0].clone();
-    let results = search(
-        &table,
-        &query,
-        SearchConfig {
-            top_k: 10,
-            ef_search: 50,
-            pruning_threshold: f32::INFINITY,
-            rerank_factor: Some(3),
-        },
-        "embedding",
-        dim,
-        catalog as Arc<dyn ailake_catalog::CatalogProvider>,
-        store as Arc<dyn ailake_store::Store>,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(results.len(), 10);
-    // With keep_raw=true + rerank_factor=3, exact top result should be found
-    assert!(
-        results[0].distance < 0.05,
-        "RaBitQ top result distance too high: {}",
-        results[0].distance
-    );
-}

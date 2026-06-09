@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use ailake_core::{AilakeResult, Centroid, RowId, VectorStoragePolicy};
 use ailake_index::{
-    BinaryConfig, BinaryIndex, BinarySerializer, HnswBuilder, HnswConfig, HnswSerializer,
-    IvfPqCodebook, IvfPqConfig, IvfPqIndex, IvfPqSerializer, RaBitQConfig, RaBitQIndex,
-    RaBitQSerializer,
+    HnswBuilder, HnswConfig, HnswSerializer, IvfPqCodebook, IvfPqConfig, IvfPqIndex,
+    IvfPqSerializer,
 };
 use ailake_parquet::ParquetVectorWriter;
 use ailake_vec::compute_centroid_and_radius;
@@ -12,7 +11,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::footer::{
     AilakeHeader, AilakeTrailer, DistanceMetric, Precision, AILAKE_FORMAT_VERSION,
-    FLAG_INDEX_BINARY, FLAG_INDEX_IVF_PQ, FLAG_INDEX_RABITQ, HEADER_SIZE, TRAILER_SIZE,
+    FLAG_INDEX_IVF_PQ, HEADER_SIZE, TRAILER_SIZE,
 };
 
 /// Which index algorithm to embed in the AILK section.
@@ -27,15 +26,6 @@ pub enum IndexType {
     /// Chooses IVF-PQ when a GPU or ≥8 CPU cores are available AND the dataset
     /// has ≥5 000 vectors. Falls back to HNSW otherwise (local/low-power hardware).
     Auto,
-    /// RaBitQ flat index. Best when storage is the primary constraint:
-    /// 1 bit/dim = 16× smaller than F16. Better recall than naive binary
-    /// quantization via random rotation + unbiased IP estimator.
-    /// Recommended: use with `keep_raw = true` + `rerank_factor ≥ 3` at search time.
-    RaBitQ(RaBitQConfig),
-    /// Binary Hamming flat index. For models trained to produce binary-compatible
-    /// vectors (Cohere embed-v3 binary, Jina ColBERT). 32× smaller than F32.
-    /// Distance = popcount(a XOR b). For general float embeddings use RaBitQ.
-    Binary(BinaryConfig),
 }
 
 impl Default for IndexType {
@@ -59,21 +49,9 @@ pub struct AilakeFileWriter {
 
 impl AilakeFileWriter {
     pub fn new(policy: VectorStoragePolicy) -> Self {
-        let index_type = if let Some(bin) = &policy.binary {
-            IndexType::Binary(BinaryConfig {
-                keep_raw: bin.keep_raw,
-            })
-        } else if let Some(rb) = &policy.rabitq {
-            IndexType::RaBitQ(RaBitQConfig {
-                seed: rb.seed,
-                keep_raw: rb.keep_raw,
-            })
-        } else {
-            IndexType::default()
-        };
         Self {
             policy,
-            index_type,
+            index_type: IndexType::default(),
             shared_codebook: None,
         }
     }
@@ -293,22 +271,6 @@ fn build_ailk_section(
             };
             (IvfPqSerializer::to_bytes(&index)?, FLAG_INDEX_IVF_PQ)
         }
-        IndexType::RaBitQ(rb_config) => {
-            let row_ids: Vec<RowId> = (0..embeddings.len() as u64).map(RowId::new).collect();
-            let index = RaBitQIndex::build(
-                &row_ids,
-                embeddings,
-                hnsw_metric,
-                rb_config.clone(),
-                rb_config.keep_raw,
-            )?;
-            (RaBitQSerializer::to_bytes(&index)?, FLAG_INDEX_RABITQ)
-        }
-        IndexType::Binary(bin_config) => {
-            let row_ids: Vec<RowId> = (0..embeddings.len() as u64).map(RowId::new).collect();
-            let index = BinaryIndex::build(&row_ids, embeddings, hnsw_metric, bin_config.keep_raw)?;
-            (BinarySerializer::to_bytes(&index)?, FLAG_INDEX_BINARY)
-        }
         IndexType::Auto => unreachable!("Auto resolved above"),
     };
 
@@ -391,8 +353,6 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
-            rabitq: None,
-            binary: None,
         }
     }
 
@@ -433,8 +393,6 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
-            rabitq: None,
-            binary: None,
         };
 
         let writer = AilakeFileWriter::new(policy1.clone());

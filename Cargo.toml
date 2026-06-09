@@ -13,7 +13,6 @@ members = [
     "tests",
     "ailake-jni",
     "ailake-py",
-    "ailake-bench",
 ]
 
 [workspace.dependencies]
