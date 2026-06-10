@@ -120,7 +120,7 @@ class SearchQuery:
         import pyarrow as pa  # noqa: PLC0415
 
         data = self._execute()
-        return pa.RecordBatch.from_pydict({
+        return pa.table({
             "row_id":    [r["row_id"] for r in data],
             "_distance": [r["distance"] for r in data],
             "file":      [r["file"] for r in data],
