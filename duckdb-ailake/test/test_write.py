@@ -48,11 +48,11 @@ def setup_connection():
     return conn
 
 def make_table_dir():
-    if TMP_DIR:
-        p = pathlib.Path(TMP_DIR)
-        p.mkdir(parents=True, exist_ok=True)
-        return str(p)
-    return tempfile.mkdtemp(prefix="ailake_duck_")
+    # Always create a fresh unique dir — reusing the same warehouse across
+    # tests with different dims causes write_batch to return -1 (schema mismatch).
+    base = pathlib.Path(TMP_DIR) if TMP_DIR else pathlib.Path(tempfile.gettempdir())
+    base.mkdir(parents=True, exist_ok=True)
+    return tempfile.mkdtemp(prefix="ailake_", dir=str(base))
 
 def small_embeddings(n=3, dim=8):
     """Return n embeddings of dimension dim (simple deterministic values)."""
