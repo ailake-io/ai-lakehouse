@@ -62,7 +62,7 @@ set_target_properties(duckdb_ailake PROPERTIES
 
 # ── Post-build: append DuckDB 1.0+ extension metadata ────────────────────────
 # DuckDB 1.0+ requires a 512-byte metadata block at the end of every extension
-# binary (256-byte signature + 256-byte JSON), even for unsigned extensions.
+# binary (8×32-byte fields + 256-byte signature), even for unsigned extensions.
 # Without it DuckDB refuses to load the file regardless of allow_unsigned_extensions.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 

@@ -31,7 +31,10 @@ def require(cond, msg):
         sys.exit(1)
 
 def setup_connection():
-    conn = duckdb.connect(config={"allow_unsigned_extensions": True})
+    conn = duckdb.connect(config={
+        "allow_unsigned_extensions": True,
+        "allow_extensions_metadata_mismatch": True,
+    })
     ctypes.CDLL(LIB_PATH, ctypes.RTLD_GLOBAL)
     conn.execute(f"LOAD '{EXT_PATH}'")
     return conn
