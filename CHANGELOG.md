@@ -21,6 +21,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **DuckDB extension C++ ABI** — `CMakeLists.txt` adds `_GLIBCXX_USE_CXX11_ABI=0` to match DuckDB manylinux wheels; fixes `undefined symbol: _ZNK6duckdb28SimpleNamedParameterFunction8ToStringB5cxx11Ev`.
 - **DuckDB extension RTLD_DEFAULT** — `AilakeLib::load()` falls back to `dlsym(RTLD_DEFAULT, …)` when `dlopen` fails; resolves symbols pre-loaded via `ctypes.CDLL(lib, RTLD_GLOBAL)`; fixes `write_batch returned -1`.
 - **`LocalStore::new` file:// URI root** — `LocalStore::new("file:///abs/path")` now strips the `file://` scheme before constructing the root `PathBuf`; without this fix `PathBuf::from("file:///abs/path")` is a relative path and files written with relative sub-paths (e.g. `"data/part-00001.parquet"`) land in CWD instead of the intended directory.
+- **`HadoopCatalog::list_files` on fresh table** — `list_files` now returns an empty `Vec` when `current_snapshot_id` is `None` (table created but no batches committed yet); previously returned `Err("table has no snapshots")` which broke idempotent write logic on brand-new tables.
+- **HNSW F16 quantization disabled for NormalizedCosine** — `HnswIndex::quantize_to_f16` now skips the F16 downcast when the stored metric is `NormalizedCosine`; the F16 rounding error (~0.001) exceeded the true inter-vector distance for pre-normalized unit vectors (~0.0002), causing wrong nearest-neighbor results when `pre_normalize=True`. F32 vectors are kept in full precision for this metric.
+- **Python `SearchQuery` repr** — `repr(query)` no longer includes the mode string; pending state renders as `SearchQuery(top_k=N, pending)`, executed state as `SearchQuery(N results, top_k=K)`.
+- **Python `to_arrow()` pointer-only** — `SearchQuery.to_arrow()` in pointer-only mode now returns a `pyarrow.Table` (was `pyarrow.RecordBatch`); the distance column is named `distance` (was `_distance`); columns are `row_id, distance, file`.
 
 ### Tests
 
