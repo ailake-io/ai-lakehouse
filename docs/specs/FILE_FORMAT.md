@@ -111,7 +111,7 @@ regardless of this field.
 | `0`   | Cosine            | `1 - dot(a,b) / (\|a\| × \|b\|)` — range [0, 2] |
 | `1`   | Euclidean         | `sqrt(Σ (aᵢ - bᵢ)²)` |
 | `2`   | DotProduct        | `-dot(a, b)` — negated so lower = more similar |
-| `3`   | NormalizedCosine  | `1 - dot(a, b)` — requires pre-normalized unit vectors; equivalent to Cosine but no sqrt in the hot loop (~12-20% faster search on high-dim embeddings). Set `VectorStoragePolicy::pre_normalize = true` to enable automatically. |
+| `3`   | NormalizedCosine  | `1 - dot(a, b)` — requires pre-normalized unit vectors; equivalent to Cosine but no sqrt in the hot loop (~12-20% faster search on high-dim embeddings). Set `VectorStoragePolicy::pre_normalize = true` to enable automatically. **F16 vector quantization is disabled for this metric** — inter-vector distances for unit vectors (~0.0002) are smaller than F16 rounding error (~0.001), so vectors are kept in F32 during HNSW search to preserve correct nearest-neighbor order. |
 
 All distance functions follow the convention **lower value = more similar**.
 
