@@ -145,7 +145,7 @@ class SearchQuery:
         if self._fetch_data:
             import polars as pl  # noqa: PLC0415
 
-            return pl.from_arrow(self._execute_arrow())
+            return pl.from_arrow(self._execute_arrow())  # type: ignore[return-value]
         import polars as pl  # noqa: PLC0415
 
         return pl.DataFrame(self._execute())
@@ -195,7 +195,7 @@ class SearchQuery:
 
             loop = asyncio.get_running_loop()
             arrow = await loop.run_in_executor(None, self._execute_arrow)
-            return pl.from_arrow(arrow)
+            return pl.from_arrow(arrow)  # type: ignore[return-value]
         import polars as pl  # noqa: PLC0415
 
         return pl.DataFrame(await self.to_list_async())
