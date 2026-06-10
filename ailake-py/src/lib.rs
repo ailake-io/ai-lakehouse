@@ -224,7 +224,12 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
 /// Python side deserializes with: `pyarrow.ipc.open_file(io.BytesIO(bytes)).read_all()`
 #[pyfunction]
 #[pyo3(signature = (path, query, top_k=10))]
-fn search_with_data(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult<PyObject> {
+fn search_with_data(
+    py: Python<'_>,
+    path: &str,
+    query: Vec<f32>,
+    top_k: usize,
+) -> PyResult<PyObject> {
     let rt = rt()?;
     debug!(
         "ailake-py: search_with_data path={} dim={} top_k={}",

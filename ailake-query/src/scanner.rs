@@ -585,8 +585,8 @@ pub async fn fetch_rows(
     let row_batches: Vec<&RecordBatch> = collected.iter().map(|(_, _, b, _)| b).collect();
     let base_schema = collected[0].2.schema();
 
-    let combined = concat_batches(&base_schema, row_batches)
-        .map_err(|e| AilakeError::Arrow(e.to_string()))?;
+    let combined =
+        concat_batches(&base_schema, row_batches).map_err(|e| AilakeError::Arrow(e.to_string()))?;
 
     // Build FixedSizeList<Float32> column with decoded vectors (F32, not raw F16 bytes).
     let flat_vecs: Vec<f32> = collected
