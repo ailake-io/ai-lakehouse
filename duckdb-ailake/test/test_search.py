@@ -30,7 +30,19 @@ def require(cond, msg):
         print(f"FAIL: {msg}")
         sys.exit(1)
 
+def _promote_duckdb_global():
+    """Re-open _duckdb.so with RTLD_GLOBAL so extension symbols resolve at dlopen time."""
+    import ctypes, pathlib
+    duckdb_dir = pathlib.Path(duckdb.__file__).parent
+    for so in sorted(duckdb_dir.glob("_duckdb*.so*")):
+        try:
+            ctypes.CDLL(str(so), ctypes.RTLD_GLOBAL)
+            return
+        except OSError:
+            pass
+
 def setup_connection():
+    _promote_duckdb_global()
     conn = duckdb.connect(config={
         "allow_unsigned_extensions": True,
         "allow_extensions_metadata_mismatch": True,
@@ -125,6 +137,7 @@ def test_search_result_schema():
 
 def test_search_no_lib_returns_empty():
     """When lib is not loaded, search must return 0 rows (not error)."""
+    _promote_duckdb_global()
     conn = duckdb.connect(config={
         "allow_unsigned_extensions": True,
         "allow_extensions_metadata_mismatch": True,

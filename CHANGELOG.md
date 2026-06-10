@@ -17,6 +17,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **DuckDB extension metadata format** — `append_extension_metadata.py` now writes the correct 8×32-byte field layout (magic `"4"` + platform + duckdb_version + extension_version + `"CPP"` abi, all null-padded, stored in reversed file order) + 256-byte zero signature; fixes `InvalidInputException: metadata at the end of the file is invalid` when loading the extension. Test connections also set `allow_extensions_metadata_mismatch=True` to tolerate platform/version differences across environments.
+- **DuckDB extension RTLD_GLOBAL** — `test_write.py` / `test_search.py` now call `_promote_duckdb_global()` before `LOAD` to re-open `_duckdb.so` with `RTLD_GLOBAL`; fixes `undefined symbol: _ZTIN6duckdb28SimpleNamedParameterFunctionE` at dlopen time (`TableFunction` inherits `SimpleNamedParameterFunction` whose typeinfo must be in global symbol table for `RTLD_NOW` resolution).
 
 ### Tests
 
