@@ -14,6 +14,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Python full-read after search** — `ailake.search(..., fetch_data=True)` and `Table.search(..., fetch_data=True)` return a `SearchQuery` whose `.to_arrow()` / `.to_pandas()` / `.to_polars()` / async variants materialise a full `pyarrow.Table` with all columns including the embedding decoded as `FixedSizeList<Float32>` + `_distance: float32`. Backward-compatible: default `fetch_data=False` behaviour unchanged. Implemented via `ailake_query::fetch_rows` (groups results by file, reads Parquet once per file via `arrow_select::take`, re-attaches decoded F32 vectors as `FixedSizeList`) + new `search_with_data` PyO3 function (serialises `RecordBatch` to Arrow IPC bytes via `arrow-ipc`; Python side deserialises with `pyarrow.ipc.open_file`).
 - **DuckDB extension** (`duckdb-ailake`) — C++ community extension exposing `ailake_search(table_path, query FLOAT[], top_k) → TABLE(row_id, distance, file_path)` and `ailake_write_batch(table_path, ids BIGINT[], embeddings FLOAT[][]) → BIGINT`. Bridges DuckDB to `libailake_jni.so` via `dlopen`/C-ABI — same JSON-envelope protocol as Spark and Trino plugins, zero additional Rust code. Graceful degradation: search returns 0 rows when native lib not found. Named params `vec_col` and `ef_search` on `ailake_search`; 6-arg overload on `ailake_write_batch` for explicit metric/precision. CI workflow `ci-duckdb.yml` (cmake build + Python integration tests).
 
+### Tests
+
+- **`check_ailake_py.py` section 8** — full-read mode: verifies `fetch_data=True` returns `pyarrow.Table` with `text`, `embedding` (`FixedSizeList<float32>` dim=DIM), `_distance` (monotonically sorted); backward compat (pointer-only default unchanged); `to_pandas()`, `Table.search`, async `to_arrow_async()` variants.
+- **`tests/fixtures/write_fixture.py`** — new fixture writer for `ci-duckdb.yml`: uses JNI C-ABI to write 1 000 rows (dim=128, cosine, F16) to `{output_dir}/default/table/`; emits `fixture_query.bin` (128-dim F32), `fixture_files.txt`, `fixture_rows.txt`.
+
 ---
 
 ## [0.0.16] — 2026-06-09

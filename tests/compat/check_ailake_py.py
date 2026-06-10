@@ -232,5 +232,108 @@ except Exception as e:
     print(f"PASS (missing table error): {type(e).__name__}: {e}")
 
 
+# ── 8. fetch_data=True — full-read mode ──────────────────────────────────────
+
+try:
+    import pyarrow as pa
+    HAS_PYARROW = True
+except ImportError:
+    HAS_PYARROW = False
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = str(pathlib.Path(tmp) / "fullread_test")
+
+    writer = ailake.TableWriter(path, vector_column="embedding", dim=DIM, metric="cosine")
+    texts_fr = [f"fullread_doc_{i}" for i in range(N)]
+    embeddings_fr = [make_embedding(i) for i in range(N)]
+    writer.write_batch(texts_fr, embeddings_fr)
+    writer.commit()
+
+    q = make_embedding(5)
+
+    # backward compat: fetch_data=False still returns pointer-only dicts
+    results_ptr = ailake.search(path, q, top_k=5).to_list()
+    assert isinstance(results_ptr, list) and len(results_ptr) > 0
+    assert "row_id" in results_ptr[0], f"FAIL: row_id missing from pointer result {results_ptr[0]}"
+    assert "distance" in results_ptr[0], f"FAIL: distance missing"
+    assert "file" in results_ptr[0], f"FAIL: file missing"
+    assert "text" not in results_ptr[0], "FAIL: fetch_data=False should not return text"
+    print(f"PASS (fetch_data=False backward compat): {len(results_ptr)} pointer-only results")
+
+    if HAS_PYARROW:
+        # to_arrow() returns pyarrow.Table with all Parquet columns + _distance
+        table_result = ailake.search(path, q, top_k=5, fetch_data=True).to_arrow()
+        assert isinstance(table_result, pa.Table), (
+            f"FAIL: to_arrow() returned {type(table_result)}"
+        )
+        col_names = table_result.schema.names
+        assert "text" in col_names, f"FAIL: 'text' missing from {col_names}"
+        assert "_distance" in col_names, f"FAIL: '_distance' missing from {col_names}"
+        assert "embedding" in col_names, f"FAIL: 'embedding' missing from {col_names}"
+        assert len(table_result) == 5, f"FAIL: expected 5 rows, got {len(table_result)}"
+
+        # embedding column must be FixedSizeList<float32>
+        emb_type = table_result.schema.field("embedding").type
+        assert pa.types.is_fixed_size_list(emb_type), (
+            f"FAIL: embedding type should be fixed_size_list, got {emb_type}"
+        )
+        assert emb_type.value_type == pa.float32(), (
+            f"FAIL: embedding value type should be float32, got {emb_type.value_type}"
+        )
+        assert emb_type.list_size == DIM, (
+            f"FAIL: embedding list_size={emb_type.list_size}, expected {DIM}"
+        )
+
+        # _distance is monotonically non-decreasing (nearest first)
+        distances = table_result.column("_distance").to_pylist()
+        for i in range(len(distances) - 1):
+            assert distances[i] <= distances[i + 1] + 1e-6, (
+                f"FAIL: distances not sorted at index {i}: {distances[i]:.6f} > {distances[i+1]:.6f}"
+            )
+
+        texts_got = table_result.column("text").to_pylist()
+        assert all(isinstance(t, str) for t in texts_got), "FAIL: text column contains non-str"
+
+        print(
+            f"PASS (fetch_data=True to_arrow): {len(table_result)} rows, "
+            f"columns={col_names}, embedding_type={emb_type}, "
+            f"distances={[round(d, 4) for d in distances]}"
+        )
+
+        if HAS_PANDAS:
+            df_full = ailake.search(path, q, top_k=5, fetch_data=True).to_pandas()
+            assert "text" in df_full.columns, f"FAIL: 'text' missing from {list(df_full.columns)}"
+            assert "_distance" in df_full.columns, "FAIL: '_distance' missing from DataFrame"
+            assert "embedding" in df_full.columns, "FAIL: 'embedding' missing from DataFrame"
+            assert len(df_full) == 5, f"FAIL: expected 5 rows, got {len(df_full)}"
+            print(
+                f"PASS (fetch_data=True to_pandas): shape={df_full.shape}, "
+                f"columns={list(df_full.columns)}"
+            )
+
+        # Table.search with fetch_data=True
+        tbl_fr = ailake.open_table(path, dim=DIM)
+        arr_tbl = tbl_fr.search(q, top_k=3, fetch_data=True).to_arrow()
+        assert len(arr_tbl) == 3, f"FAIL: Table.search fetch_data=True returned {len(arr_tbl)} rows"
+        assert "_distance" in arr_tbl.schema.names, "FAIL: _distance missing from Table.search"
+        print(f"PASS (Table.search fetch_data=True): {len(arr_tbl)} rows")
+
+        # async full-read
+        async def _async_fullread(p: str):
+            return await ailake.search(p, q, top_k=3, fetch_data=True).to_arrow_async()
+
+        arr_async_fr = asyncio.run(_async_fullread(path))
+        assert len(arr_async_fr) == 3, (
+            f"FAIL: async to_arrow_async full-read returned {len(arr_async_fr)} rows"
+        )
+        assert "_distance" in arr_async_fr.schema.names, (
+            "FAIL: async full-read _distance missing"
+        )
+        print(f"PASS (fetch_data=True to_arrow_async): {len(arr_async_fr)} rows")
+
+    else:
+        print("SKIP (fetch_data=True): pyarrow not installed")
+
+
 print()
 print("PASS: ailake Python SDK — all checks passed.")

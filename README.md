@@ -114,6 +114,9 @@ table.commit()
 # Fluent search — chainable, DataFrame-native
 df = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20).to_pandas()
 
+# Full-read: all Parquet columns + embedding (FixedSizeList<float32>) + _distance
+df = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20, fetch_data=True).to_pandas()
+
 # Async
 df = await table.search(query_embedding).limit(10).to_pandas_async()
 ```
@@ -234,6 +237,17 @@ ailake/
 │   ├── Cargo.toml
 │   └── src/
 │       └── lib.rs              # C-ABI cdylib for Spark/Trino/Flink via JNA
+├── duckdb-ailake/              # C++ DuckDB community extension
+│   ├── CMakeLists.txt
+│   ├── include/
+│   │   └── ailake_extension.hpp  # AilakeLib singleton (dlopen + C-ABI bridge)
+│   ├── src/
+│   │   ├── ailake_extension.cpp  # Extension entry point + AilakeLib impl
+│   │   ├── ailake_search.cpp     # ailake_search() table function
+│   │   └── ailake_write.cpp      # ailake_write_batch() scalar function
+│   └── test/
+│       ├── test_search.py        # Search function integration tests
+│       └── test_write.py         # Write function integration tests
 ├── spark-plugin/               # Scala — Spark 3.5 Catalyst strategy (Gradle)
 │   ├── build.gradle.kts
 │   └── src/main/scala/io/ailake/spark/
@@ -334,6 +348,6 @@ cargo check --workspace
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector; **IVF-PQ shared codebook** (single k-means training across all shards — ADC distances comparable cross-shard); **`write_batch_ivf_pq_deferred`** (~250k vec/s write, async IVF-PQ build); **k-means++ O(n×k) fix** + rayon parallelism (17× speedup); **`HadoopCatalog` Replace fix** (`IndexStatus::Ready` convergence with concurrent background tasks) |
 | **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP REST server, Apache Airflow provider, idempotent writes, Compat Heavy CI (Spark+Iceberg, Trino+REST, BigQuery emulator), TruffleHog secret scanning, cloud deployment guides |
 | **Phase 6** | ✅ Complete | Public distribution pipeline — crates.io, PyPI (manylinux abi3 wheels), Airflow provider on PyPI, pre-built JVM JARs + `libailake_jni.so` on GitHub Releases, dynamic Python versioning |
-| **Phase 7** | 🚧 In progress | Remaining: `write_batch_auto_deferred` (~200k vec/s Auto engine deferred); DuckLake catalog backend; dbt integration guide |
+| **Phase 7** | 🚧 In progress | Done: DuckDB extension (`duckdb-ailake/`), Python full-read (`fetch_data=True`). Remaining: `write_batch_auto_deferred` (~200k vec/s Auto engine deferred); DuckLake catalog backend; dbt integration guide |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.
