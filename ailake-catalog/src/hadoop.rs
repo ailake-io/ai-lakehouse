@@ -231,9 +231,10 @@ impl CatalogProvider for HadoopCatalog {
         snapshot_id: Option<SnapshotId>,
     ) -> AilakeResult<Vec<DataFileEntry>> {
         let meta = self.load_raw_metadata(table).await?;
-        let snap_id = snapshot_id
-            .or(meta.current_snapshot_id)
-            .ok_or_else(|| AilakeError::Catalog("table has no snapshots".to_string()))?;
+        let snap_id = match snapshot_id.or(meta.current_snapshot_id) {
+            Some(id) => id,
+            None => return Ok(vec![]), // new table — no snapshots yet, no committed files
+        };
 
         let snap = meta
             .snapshots
