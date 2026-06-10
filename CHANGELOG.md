@@ -18,6 +18,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`check_ailake_py.py` section 8** — full-read mode: verifies `fetch_data=True` returns `pyarrow.Table` with `text`, `embedding` (`FixedSizeList<float32>` dim=DIM), `_distance` (monotonically sorted); backward compat (pointer-only default unchanged); `to_pandas()`, `Table.search`, async `to_arrow_async()` variants.
 - **`tests/fixtures/write_fixture.py`** — new fixture writer for `ci-duckdb.yml`: uses JNI C-ABI to write 1 000 rows (dim=128, cosine, F16) to `{output_dir}/default/table/`; emits `fixture_query.bin` (128-dim F32), `fixture_files.txt`, `fixture_rows.txt`.
+- **`check_ailake_py.py` §9–13** — expanded Python SDK write/read test suite: `write_batch_idempotent` (same batch_id no-op, new batch_id writes); `to_polars()` pointer-only + full-read + limit; multiple commits (data from all snapshots searchable); `pre_normalize=True` + `hnsw_m`/`hnsw_ef_construction` tuning; edge cases (`top_k > N`, `top_k=1`, distances sorted, `dot_product` metric); `to_arrow()` pointer-only column schema check.
 
 ---
 
