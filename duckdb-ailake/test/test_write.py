@@ -19,7 +19,15 @@ import pathlib
 import tempfile
 import shutil
 import ctypes
+
+# Force _duckdb.so to load with RTLD_GLOBAL so DuckDB extensions can resolve
+# its C++ typeinfo symbols (TableFunction → SimpleNamedParameterFunction).
+# Python's default dlopen flags are RTLD_LOCAL, which hides symbols from
+# subsequently loaded extensions at RTLD_NOW resolution time.
+_old_flags = sys.getdlopenflags()
+sys.setdlopenflags(_old_flags | os.RTLD_GLOBAL)
 import duckdb
+sys.setdlopenflags(_old_flags)
 
 EXT_PATH = os.environ.get("AILAKE_EXT", "./duckdb-ailake/build/ailake.duckdb_extension")
 LIB_PATH = os.environ.get("AILAKE_LIB", "./target/release/libailake_jni.so")
@@ -30,39 +38,7 @@ def require(cond, msg):
         print(f"FAIL: {msg}")
         sys.exit(1)
 
-def _promote_duckdb_global():
-    """Re-open _duckdb.so with RTLD_GLOBAL so extension symbols resolve at dlopen time.
-
-    The pip duckdb package places _duckdb*.so in site-packages/ (one level up
-    from duckdb/__init__.py), NOT inside the duckdb/ subdirectory.
-    """
-    duckdb_pkg  = pathlib.Path(duckdb.__file__).parent   # .../site-packages/duckdb/
-    site_pkgs   = duckdb_pkg.parent                      # .../site-packages/
-    for d in (site_pkgs, duckdb_pkg):
-        for so in sorted(d.glob("_duckdb*.so*")):
-            try:
-                ctypes.CDLL(str(so), ctypes.RTLD_GLOBAL)
-                return
-            except OSError:
-                pass
-    # Last-resort: scan /proc/self/maps for the already-loaded duckdb library
-    try:
-        with open("/proc/self/maps") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 6 and "_duckdb" in parts[-1]:
-                    p = parts[-1]
-                    if pathlib.Path(p).exists():
-                        try:
-                            ctypes.CDLL(p, ctypes.RTLD_GLOBAL)
-                            return
-                        except OSError:
-                            pass
-    except OSError:
-        pass
-
 def setup_connection():
-    _promote_duckdb_global()
     conn = duckdb.connect(config={
         "allow_unsigned_extensions": True,
         "allow_extensions_metadata_mismatch": True,
