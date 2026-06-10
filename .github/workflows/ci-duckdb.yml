@@ -47,25 +47,20 @@ jobs:
         run: pip install duckdb==$(echo ${{ env.DUCKDB_VERSION }} | tr -d 'v') pyarrow numpy
 
       - name: Generate write fixture
-        run: |
-          python tests/fixtures/write_fixture.py ./compat-fixture
+        run: python tests/fixtures/write_fixture.py ./compat-fixture
         env:
-          LD_LIBRARY_PATH: target/release:$LD_LIBRARY_PATH
+          AILAKE_LIB: target/release/libailake_jni.so
 
       - name: Run write tests
-        run: |
-          python duckdb-ailake/test/test_write.py
+        run: python duckdb-ailake/test/test_write.py
         env:
-          AILAKE_LIB:     target/release/libailake_jni.so
-          AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
-          AILAKE_TMPDIR:  /tmp/ailake_duck_write
-          LD_LIBRARY_PATH: target/release:$LD_LIBRARY_PATH
+          AILAKE_LIB:    target/release/libailake_jni.so
+          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_TMPDIR: /tmp/ailake_duck_write
 
       - name: Run search tests
-        run: |
-          python duckdb-ailake/test/test_search.py
+        run: python duckdb-ailake/test/test_search.py
         env:
           AILAKE_LIB:     target/release/libailake_jni.so
           AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_FIXTURE: ./compat-fixture
-          LD_LIBRARY_PATH: target/release:$LD_LIBRARY_PATH

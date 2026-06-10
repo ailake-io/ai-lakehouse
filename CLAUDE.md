@@ -406,7 +406,7 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] `ailake-vec`: `BlockCompressor` com zstd/lz4
 - [x] `ailake-query`: pruning via centróides — `VectorPruner` geométrico
 - [x] `ailake-query`: `ContextAssembler` — dedup, agrupamento por doc, budget de tokens, XML
-- [x] `ailake-py`: bindings PyO3 — `TableWriter`, `search()`, `assemble_context()`
+- [x] `ailake-py`: bindings PyO3 — `TableWriter`, `search()`, `assemble_context()`, `search_with_data()` (full-read via Arrow IPC; `fetch_data=True` em `SearchQuery`)
 - [x] Testes de compatibilidade: PyArrow, DuckDB, PyIceberg metadata JSON — validados localmente; Spark + Trino via `compat-heavy.yml` (workflow_dispatch)
 
 ### Fase 3 — Integração com Motores de Query
@@ -414,6 +414,7 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] Plugin Trino: `VectorScanConnector`
 - [x] Plugin Spark: `VectorScanStrategy`
 - [x] Suporte a múltiplas colunas vetoriais (`embedding` + `context_embedding`)
+- [x] `duckdb-ailake`: extensão C++ para DuckDB — `ailake_search()` + `ailake_write_batch()` via `dlopen`/C-ABI; mesmo protocolo JSON-envelope do Spark/Trino; degradação graciosa sem lib
 
 ### Fase 4 — Produção
 - [x] Benchmarks públicos vs. LanceDB, Deep Lake, pgvector (`ailake-bench`)

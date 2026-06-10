@@ -120,10 +120,10 @@ class SearchQuery:
         import pyarrow as pa  # noqa: PLC0415
 
         data = self._execute()
-        return pa.RecordBatch.from_pydict({
-            "row_id":    [r["row_id"] for r in data],
-            "_distance": [r["distance"] for r in data],
-            "file":      [r["file"] for r in data],
+        return pa.table({
+            "row_id":   [r["row_id"] for r in data],
+            "distance": [r["distance"] for r in data],
+            "file":     [r["file"] for r in data],
         })
 
     def to_pandas(self) -> "pd.DataFrame":
@@ -145,7 +145,7 @@ class SearchQuery:
         if self._fetch_data:
             import polars as pl  # noqa: PLC0415
 
-            return pl.from_arrow(self._execute_arrow())
+            return pl.from_arrow(self._execute_arrow())  # type: ignore[return-value]
         import polars as pl  # noqa: PLC0415
 
         return pl.DataFrame(self._execute())
@@ -159,12 +159,11 @@ class SearchQuery:
         return len(self._execute())
 
     def __repr__(self) -> str:
-        mode = "full-data" if self._fetch_data else "pointers"
         if self._results is None and self._arrow_batch is None:
-            return f"SearchQuery(top_k={self._top_k}, {mode}, pending)"
+            return f"SearchQuery(top_k={self._top_k}, pending)"
         n = self._arrow_batch.num_rows if self._fetch_data and self._arrow_batch is not None \
             else len(self._results or [])
-        return f"SearchQuery({n} results, top_k={self._top_k}, {mode})"
+        return f"SearchQuery({n} results, top_k={self._top_k})"
 
     # ── async ─────────────────────────────────────────────────────────────────
 
@@ -195,7 +194,7 @@ class SearchQuery:
 
             loop = asyncio.get_running_loop()
             arrow = await loop.run_in_executor(None, self._execute_arrow)
-            return pl.from_arrow(arrow)
+            return pl.from_arrow(arrow)  # type: ignore[return-value]
         import polars as pl  # noqa: PLC0415
 
         return pl.DataFrame(await self.to_list_async())

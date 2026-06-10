@@ -19,7 +19,16 @@ import sys
 import pathlib
 import struct
 import math
+import ctypes
+
+# Force _duckdb.so to load with RTLD_GLOBAL so DuckDB extensions can resolve
+# its C++ typeinfo symbols (TableFunction → SimpleNamedParameterFunction).
+# Python's default dlopen flags are RTLD_LOCAL, which hides symbols from
+# subsequently loaded extensions at RTLD_NOW resolution time.
+_old_flags = sys.getdlopenflags()
+sys.setdlopenflags(_old_flags | os.RTLD_GLOBAL)
 import duckdb
+sys.setdlopenflags(_old_flags)
 
 FIXTURE_DIR = pathlib.Path(os.environ.get("AILAKE_FIXTURE", "./compat-fixture"))
 EXT_PATH    = os.environ.get("AILAKE_EXT",   "./duckdb-ailake/build/ailake.duckdb_extension")
@@ -31,9 +40,10 @@ def require(cond, msg):
         sys.exit(1)
 
 def setup_connection():
-    conn = duckdb.connect()
-    # Pre-load the native lib so the extension finds it via RTLD_GLOBAL
-    import ctypes
+    conn = duckdb.connect(config={
+        "allow_unsigned_extensions": True,
+        "allow_extensions_metadata_mismatch": True,
+    })
     ctypes.CDLL(LIB_PATH, ctypes.RTLD_GLOBAL)
     conn.execute(f"LOAD '{EXT_PATH}'")
     return conn
@@ -122,7 +132,10 @@ def test_search_result_schema():
 
 def test_search_no_lib_returns_empty():
     """When lib is not loaded, search must return 0 rows (not error)."""
-    conn = duckdb.connect()
+    conn = duckdb.connect(config={
+        "allow_unsigned_extensions": True,
+        "allow_extensions_metadata_mismatch": True,
+    })
     try:
         conn.execute(f"LOAD '{EXT_PATH}'")
     except Exception:

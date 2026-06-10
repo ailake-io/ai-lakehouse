@@ -47,6 +47,11 @@ target_link_libraries(duckdb_ailake PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
+# DuckDB manylinux wheels are compiled with _GLIBCXX_USE_CXX11_ABI=0 (old ABI).
+# Our extension must match, otherwise std::string-bearing symbols get the
+# B5cxx11 ABI tag (e.g. ToString()B5cxx11) which the host .so doesn't export.
+target_compile_definitions(duckdb_ailake PRIVATE _GLIBCXX_USE_CXX11_ABI=0)
+
 # Extensions must NOT link against duckdb — symbols resolved from the host process at dlopen time.
 if(APPLE)
     target_link_options(duckdb_ailake PRIVATE -undefined dynamic_lookup)
@@ -58,6 +63,22 @@ set_target_properties(duckdb_ailake PROPERTIES
     PREFIX      ""
     OUTPUT_NAME "ailake"
     SUFFIX      ".duckdb_extension"
+)
+
+# ── Post-build: append DuckDB 1.0+ extension metadata ────────────────────────
+# DuckDB 1.0+ requires a 512-byte metadata block at the end of every extension
+# binary (8×32-byte fields + 256-byte signature), even for unsigned extensions.
+# Without it DuckDB refuses to load the file regardless of allow_unsigned_extensions.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+add_custom_command(TARGET duckdb_ailake POST_BUILD
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/append_extension_metadata.py"
+            "$<TARGET_FILE:duckdb_ailake>"
+            "${DUCKDB_VERSION}"
+            "${CMAKE_PROJECT_VERSION}"
+    COMMENT "Appending DuckDB extension metadata (512 bytes)"
+    VERBATIM
 )
 
 # ── Install ───────────────────────────────────────────────────────────────────

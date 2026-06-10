@@ -19,7 +19,15 @@ import pathlib
 import tempfile
 import shutil
 import ctypes
+
+# Force _duckdb.so to load with RTLD_GLOBAL so DuckDB extensions can resolve
+# its C++ typeinfo symbols (TableFunction → SimpleNamedParameterFunction).
+# Python's default dlopen flags are RTLD_LOCAL, which hides symbols from
+# subsequently loaded extensions at RTLD_NOW resolution time.
+_old_flags = sys.getdlopenflags()
+sys.setdlopenflags(_old_flags | os.RTLD_GLOBAL)
 import duckdb
+sys.setdlopenflags(_old_flags)
 
 EXT_PATH = os.environ.get("AILAKE_EXT", "./duckdb-ailake/build/ailake.duckdb_extension")
 LIB_PATH = os.environ.get("AILAKE_LIB", "./target/release/libailake_jni.so")
@@ -31,17 +39,20 @@ def require(cond, msg):
         sys.exit(1)
 
 def setup_connection():
-    conn = duckdb.connect()
+    conn = duckdb.connect(config={
+        "allow_unsigned_extensions": True,
+        "allow_extensions_metadata_mismatch": True,
+    })
     ctypes.CDLL(LIB_PATH, ctypes.RTLD_GLOBAL)
     conn.execute(f"LOAD '{EXT_PATH}'")
     return conn
 
 def make_table_dir():
-    if TMP_DIR:
-        p = pathlib.Path(TMP_DIR)
-        p.mkdir(parents=True, exist_ok=True)
-        return str(p)
-    return tempfile.mkdtemp(prefix="ailake_duck_")
+    # Always create a fresh unique dir — reusing the same warehouse across
+    # tests with different dims causes write_batch to return -1 (schema mismatch).
+    base = pathlib.Path(TMP_DIR) if TMP_DIR else pathlib.Path(tempfile.gettempdir())
+    base.mkdir(parents=True, exist_ok=True)
+    return tempfile.mkdtemp(prefix="ailake_", dir=str(base))
 
 def small_embeddings(n=3, dim=8):
     """Return n embeddings of dimension dim (simple deterministic values)."""

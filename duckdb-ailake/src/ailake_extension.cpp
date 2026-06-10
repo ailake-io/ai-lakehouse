@@ -26,26 +26,35 @@ AilakeLib &AilakeLib::get() {
 }
 
 bool AilakeLib::load(const std::string &lib_path) {
-    if (handle_) return true; // already loaded
+    if (search_fn_) return true; // already resolved
 
+    // Try path-based load first
     const char *path = lib_path.empty() ? AILAKE_LIB_NAME : lib_path.c_str();
-    handle_ = AILAKE_DLOPEN(path);
-    if (!handle_) {
+    void *h = AILAKE_DLOPEN(path);
+
+    // If dlopen failed, symbols may already be in the global table (pre-loaded
+    // via ctypes.CDLL(..., RTLD_GLOBAL)). On POSIX, dlsym(RTLD_DEFAULT, ...)
+    // searches the global namespace.
+#ifndef _WIN32
+    void *sym_handle = h ? h : RTLD_DEFAULT;
+#else
+    if (!h) return false;
+    void *sym_handle = h;
+#endif
+
+    auto s = reinterpret_cast<search_fn_t>(AILAKE_DLSYM(sym_handle, "ailake_search_json"));
+    auto w = reinterpret_cast<write_fn_t> (AILAKE_DLSYM(sym_handle, "ailake_write_batch_json"));
+    auto f = reinterpret_cast<free_fn_t>  (AILAKE_DLSYM(sym_handle, "ailake_free_string"));
+
+    if (!s || !w || !f) {
+        if (h) AILAKE_DLCLOSE(h);
         return false;
     }
 
-    search_fn_ = reinterpret_cast<search_fn_t>(AILAKE_DLSYM(handle_, "ailake_search_json"));
-    write_fn_  = reinterpret_cast<write_fn_t>(AILAKE_DLSYM(handle_, "ailake_write_batch_json"));
-    free_fn_   = reinterpret_cast<free_fn_t>(AILAKE_DLSYM(handle_, "ailake_free_string"));
-
-    if (!search_fn_ || !write_fn_ || !free_fn_) {
-        AILAKE_DLCLOSE(handle_);
-        handle_    = nullptr;
-        search_fn_ = nullptr;
-        write_fn_  = nullptr;
-        free_fn_   = nullptr;
-        return false;
-    }
+    handle_    = h;   // nullptr when resolved via RTLD_DEFAULT — is_ready() uses search_fn_
+    search_fn_ = s;
+    write_fn_  = w;
+    free_fn_   = f;
     return true;
 }
 

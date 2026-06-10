@@ -142,7 +142,7 @@ Lazy result set — no I/O until materialised.
 |---|---|
 | `limit(n) → SearchQuery` | Cap to *n* nearest neighbours (chainable). |
 | `to_list() → list[dict]` | Always pointer-only: `[{"row_id": int, "distance": float, "file": str}, ...]` |
-| `to_arrow() → pyarrow.Table` | Full row data (all columns + `_distance`) when `fetch_data=True`; pointer-only table otherwise. |
+| `to_arrow() → pyarrow.Table` | Full row data (all columns + `_distance`) when `fetch_data=True`; pointer-only `pyarrow.Table` with columns `row_id, distance, file` otherwise. |
 | `to_pandas() → pd.DataFrame` | Full row DataFrame when `fetch_data=True`; pointer-only otherwise. |
 | `to_polars() → pl.DataFrame` | Full row DataFrame when `fetch_data=True`; pointer-only otherwise. |
 | `to_list_async()` | Async variant. |

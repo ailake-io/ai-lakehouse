@@ -169,7 +169,7 @@ jobs:
         run: |
           rm -rf /tmp/ailake-py-venv
           python3 -m venv /tmp/ailake-py-venv
-          /tmp/ailake-py-venv/bin/pip install maturin mypy pandas
+          /tmp/ailake-py-venv/bin/pip install maturin mypy pandas pyarrow polars
           cd ailake-py && /tmp/ailake-py-venv/bin/maturin build --release --out dist --interpreter python3
           cd ..
           /tmp/ailake-py-venv/bin/pip install ailake-py/dist/*.whl
