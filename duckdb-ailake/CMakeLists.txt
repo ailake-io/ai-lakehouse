@@ -60,5 +60,21 @@ set_target_properties(duckdb_ailake PROPERTIES
     SUFFIX      ".duckdb_extension"
 )
 
+# ── Post-build: append DuckDB 1.0+ extension metadata ────────────────────────
+# DuckDB 1.0+ requires a 512-byte metadata block at the end of every extension
+# binary (256-byte signature + 256-byte JSON), even for unsigned extensions.
+# Without it DuckDB refuses to load the file regardless of allow_unsigned_extensions.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+add_custom_command(TARGET duckdb_ailake POST_BUILD
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/append_extension_metadata.py"
+            "$<TARGET_FILE:duckdb_ailake>"
+            "${DUCKDB_VERSION}"
+            "${CMAKE_PROJECT_VERSION}"
+    COMMENT "Appending DuckDB extension metadata (512 bytes)"
+    VERBATIM
+)
+
 # ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS duckdb_ailake DESTINATION lib/duckdb_extensions)
