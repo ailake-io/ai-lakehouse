@@ -529,13 +529,15 @@ pub async fn fetch_rows(
             .push((r.row_id.as_u64(), r.distance, i));
     }
 
-    // (original_index, distance, single-row RecordBatch)
-    let mut collected: Vec<(usize, f32, RecordBatch)> = Vec::with_capacity(results.len());
+    use arrow_array::FixedSizeListArray;
+
+    // (original_index, distance, single-row RecordBatch, decoded F32 vector)
+    let mut collected: Vec<(usize, f32, RecordBatch, Vec<f32>)> = Vec::with_capacity(results.len());
 
     for (file_path, rows) in &by_file {
         let bytes = store.get(file_path).await?;
         let reader = AilakeFileReader::new(bytes, vector_column, dim);
-        let (batch, _) = reader.read_parquet()?;
+        let (batch, vectors) = reader.read_parquet()?;
 
         for &(row_id, distance, pos) in rows {
             let idx = row_id as usize;
@@ -562,7 +564,13 @@ pub async fn fetch_rows(
             let row_batch = RecordBatch::try_new(batch.schema(), row_cols)
                 .map_err(|e| AilakeError::Arrow(e.to_string()))?;
 
-            collected.push((pos, distance, row_batch));
+            // Capture decoded F32 vector for this row (empty vec if not available).
+            let vec = vectors
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| vec![0.0f32; dim as usize]);
+
+            collected.push((pos, distance, row_batch, vec));
         }
     }
 
@@ -571,21 +579,37 @@ pub async fn fetch_rows(
     }
 
     // Restore original top-k order from the search results slice.
-    collected.sort_by_key(|(pos, _, _)| *pos);
+    collected.sort_by_key(|(pos, _, _, _)| *pos);
 
-    let distances: Vec<f32> = collected.iter().map(|(_, d, _)| *d).collect();
-    let row_batches: Vec<&RecordBatch> = collected.iter().map(|(_, _, b)| b).collect();
+    let distances: Vec<f32> = collected.iter().map(|(_, d, _, _)| *d).collect();
+    let row_batches: Vec<&RecordBatch> = collected.iter().map(|(_, _, b, _)| b).collect();
     let base_schema = collected[0].2.schema();
 
     let combined = concat_batches(&base_schema, row_batches)
         .map_err(|e| AilakeError::Arrow(e.to_string()))?;
 
-    // Append _distance column (Float32, non-nullable).
+    // Build FixedSizeList<Float32> column with decoded vectors (F32, not raw F16 bytes).
+    let flat_vecs: Vec<f32> = collected
+        .iter()
+        .flat_map(|(_, _, _, v)| v.iter().copied())
+        .collect();
+    let item_field = Arc::new(Field::new("item", DataType::Float32, false));
+    let values_arr = Arc::new(Float32Array::from(flat_vecs)) as ArrayRef;
+    let vec_col = FixedSizeListArray::new(item_field.clone(), dim as i32, values_arr, None);
+    let vec_field = Arc::new(Field::new(
+        vector_column,
+        DataType::FixedSizeList(item_field, dim as i32),
+        false,
+    ));
+
+    // Schema: tabular cols, then decoded vector col, then _distance.
     let mut fields: Vec<Arc<Field>> = base_schema.fields().to_vec();
+    fields.push(vec_field);
     fields.push(Arc::new(Field::new("_distance", DataType::Float32, false)));
     let new_schema = Arc::new(Schema::new(fields));
 
     let mut columns: Vec<ArrayRef> = combined.columns().to_vec();
+    columns.push(Arc::new(vec_col));
     columns.push(Arc::new(Float32Array::from(distances)));
 
     RecordBatch::try_new(new_schema, columns).map_err(|e| AilakeError::Arrow(e.to_string()))
