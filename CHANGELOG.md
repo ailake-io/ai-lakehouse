@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **DuckDB extension** (`duckdb-ailake`) — C++ community extension exposing `ailake_search(table_path, query FLOAT[], top_k) → TABLE(row_id, distance, file_path)` and `ailake_write_batch(table_path, ids BIGINT[], embeddings FLOAT[][]) → BIGINT`. Bridges DuckDB to `libailake_jni.so` via `dlopen`/C-ABI — same JSON-envelope protocol as Spark and Trino plugins, zero additional Rust code. Graceful degradation: search returns 0 rows when native lib not found. Named params `vec_col` and `ef_search` on `ailake_search`; 6-arg overload on `ailake_write_batch` for explicit metric/precision. CI workflow `ci-duckdb.yml` (cmake build + Python integration tests).
+
 ---
 
 ## [0.0.16] — 2026-06-09
