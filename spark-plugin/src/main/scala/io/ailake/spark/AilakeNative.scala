@@ -23,6 +23,9 @@ object AilakeNative {
     /** JSON-envelope search. Returns `{"ok":true,"results":[...]}`. Caller must free. */
     def ailake_search_json(requestJson: String): Pointer
 
+    /** JSON-envelope write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
+    def ailake_write_batch_json(requestJson: String): Pointer
+
     def ailake_free_string(ptr: Pointer): Unit
   }
 
@@ -44,6 +47,56 @@ object AilakeNative {
 
   // Single shared mapper; ObjectMapper is thread-safe after configuration.
   private val mapper = new ObjectMapper()
+
+  /**
+   * Write a batch of rows to an AI-Lake table via the native library.
+   * Returns the snapshot_id on success, None on failure.
+   */
+  def writeBatch(
+    tableUri:     String,
+    namespace:    String,
+    tableName:    String,
+    vectorColumn: String,
+    dim:          Int,
+    metric:       String,
+    precision:    String,
+    ids:          Seq[Long],
+    embeddings:   Seq[Seq[Float]],
+  ): Option[Long] = {
+    if (ids.isEmpty) return None
+    lib match {
+      case None => None
+      case Some(native) =>
+        val idsJson  = ids.mkString("[", ",", "]")
+        val embJson  = embeddings.map(_.mkString("[", ",", "]")).mkString("[", ",", "]")
+        val requestJson =
+          s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
+          s""""table":${jsonStr(tableName)},"vec_col":${jsonStr(vectorColumn)},""" +
+          s""""dim":$dim,"metric":${jsonStr(metric)},"precision":${jsonStr(precision)},""" +
+          s""""ids":$idsJson,"embeddings":$embJson}"""
+        val ptr = native.ailake_write_batch_json(requestJson)
+        if (ptr == null) {
+          log.warn(s"[ailake] ailake_write_batch_json returned null for table=$tableName")
+          return None
+        }
+        try {
+          val json = ptr.getString(0)
+          native.ailake_free_string(ptr)
+          val root = mapper.readTree(json)
+          if (!root.path("ok").asBoolean(false)) {
+            log.warn(s"[ailake] writeBatch ok=false for table=$tableName: ${root.path("error").asText()}")
+            return None
+          }
+          val sid = root.path("snapshot_id")
+          if (sid.isMissingNode) None else Some(sid.asLong())
+        } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Exception in writeBatch for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            None
+        }
+    }
+  }
 
   /**
    * Run a vector search via the native library.

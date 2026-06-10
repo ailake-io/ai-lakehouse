@@ -92,9 +92,9 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 **Rust** (add to `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.10"
-ailake-query = "0.0.10"   # search(), TableWriter, ContextAssembler
-ailake-store = "0.0.10"   # S3 / GCS / Azure / local backends
+ailake-core  = "0.0.16"
+ailake-query = "0.0.16"   # search(), TableWriter, ContextAssembler
+ailake-store = "0.0.16"   # S3 / GCS / Azure / local backends
 ```
 
 **Python**:
@@ -104,13 +104,18 @@ pip install ailake
 
 ```python
 import ailake
+import numpy as np
 
-writer = ailake.TableWriter("s3://my-lake/docs/")
-writer.write_batch(arrow_table, embeddings=np.array(..., dtype=np.float32))
-writer.commit()
+# Write
+table = ailake.open_table("s3://my-lake/docs/", dim=1536, metric="cosine")
+table.insert(texts, np.array(embeddings, dtype=np.float32))
+table.commit()
 
-results = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20)
-# returns a PyArrow RecordBatch — zero-copy to pandas / polars
+# Fluent search — chainable, DataFrame-native
+df = ailake.search("s3://my-lake/docs/", query_embedding, top_k=20).to_pandas()
+
+# Async
+df = await table.search(query_embedding).limit(10).to_pandas_async()
 ```
 
 **Apache Airflow**:
@@ -121,7 +126,7 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.10
+VERSION=0.0.16
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
