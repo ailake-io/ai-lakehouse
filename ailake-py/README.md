@@ -34,10 +34,13 @@ embeddings = np.random.rand(2, 1536).astype(np.float32)
 table.insert(texts, embeddings)   # accepts list or numpy array
 snapshot_id = table.commit()
 
-# Fluent search chain — no I/O until materialised
-df      = table.search(embeddings[0], top_k=10).to_pandas()
+# Pointer-only search (default — backward-compatible)
+df      = table.search(embeddings[0], top_k=10).to_pandas()   # row_id, distance, file
 lf      = table.search(embeddings[0]).limit(5).to_polars()
 results = table.search(embeddings[0]).to_list()   # list[dict]
+
+# Full row data — all Parquet columns + _distance
+df_full = table.search(embeddings[0], top_k=10, fetch_data=True).to_pandas()
 ```
 
 ### Async API
@@ -123,7 +126,7 @@ Opens or creates an AI-Lake table at `path`.
 |---|---|
 | `insert(texts, embeddings) → Table` | Buffer a batch. `embeddings`: `list[list[float]]` or numpy array. |
 | `commit() → int` | Persist as a new Iceberg snapshot; returns snapshot ID. |
-| `search(query, top_k=10) → SearchQuery` | Lazy, chainable search. `query`: `list[float]` or numpy array. |
+| `search(query, top_k=10, fetch_data=False) → SearchQuery` | Lazy, chainable search. `query`: `list[float]` or numpy array. Set `fetch_data=True` to return full row data. |
 | `insert_async(...)` | Async variant of `insert`. |
 | `commit_async() → int` | Async variant of `commit`. |
 
@@ -138,16 +141,36 @@ Lazy result set — no I/O until materialised.
 | Method | Description |
 |---|---|
 | `limit(n) → SearchQuery` | Cap to *n* nearest neighbours (chainable). |
-| `to_list() → list[dict]` | `[{"row_id": int, "distance": float, "file": str}, ...]` |
-| `to_pandas() → pd.DataFrame` | pandas DataFrame. |
-| `to_polars() → pl.DataFrame` | polars DataFrame. |
+| `to_list() → list[dict]` | Always pointer-only: `[{"row_id": int, "distance": float, "file": str}, ...]` |
+| `to_arrow() → pyarrow.Table` | Full row data (all columns + `_distance`) when `fetch_data=True`; pointer-only table otherwise. |
+| `to_pandas() → pd.DataFrame` | Full row DataFrame when `fetch_data=True`; pointer-only otherwise. |
+| `to_polars() → pl.DataFrame` | Full row DataFrame when `fetch_data=True`; pointer-only otherwise. |
 | `to_list_async()` | Async variant. |
+| `to_arrow_async()` | Async variant. |
 | `to_pandas_async()` | Async variant. |
 | `to_polars_async()` | Async variant. |
 
 In Jupyter, `results` renders as an HTML table when executed, pending state otherwise.
+When `fetch_data=True`, the HTML table shows all Parquet columns.
 
-### `search(path, query, top_k=10) → SearchQuery`
+#### Full-read mode
+
+```python
+# Pointer-only (default — backward-compatible)
+df = ailake.search("./my_table", query, top_k=10).to_pandas()
+# columns: row_id, distance, file
+
+# Full row data — all Parquet columns + _distance
+df = ailake.search("./my_table", query, top_k=10, fetch_data=True).to_pandas()
+# columns: text, embedding, ..., _distance
+
+# Same via Table handle
+df = table.search(query, top_k=10, fetch_data=True).to_pandas()
+```
+
+`fetch_data=True` reads each matching Parquet file once and uses `arrow_select::take` to extract only the matched rows — no full table scan.
+
+### `search(path, query, top_k=10, fetch_data=False) → SearchQuery`
 
 Module-level search returning the same chainable `SearchQuery`.
 

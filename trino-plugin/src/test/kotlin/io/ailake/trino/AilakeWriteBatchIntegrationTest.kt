@@ -49,10 +49,10 @@ class AilakeWriteBatchIntegrationTest {
         assumeTrue(libPresent)       { "libailake_jni.so not found — skipping" }
 
         val dim = 8
-        val n = 16
+        val n = dim   // one row per spike position — no duplicate vectors, no tie in HNSW
         val tableUri = "$writeDir/integration-write-trino"
 
-        // Build orthogonal-ish vectors: row i has a spike at position i%dim
+        // Build orthogonal-ish vectors: row i has a spike at position i
         val ids = (0 until n).map { it.toLong() }
         val embeddings = ids.map { id ->
             FloatArray(dim) { j -> if (j == (id % dim).toInt()) 1.0f else 0.01f }.toList()

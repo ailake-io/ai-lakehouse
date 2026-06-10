@@ -412,10 +412,14 @@ table.insert(
 snapshot_id = table.commit()
 print(f"Snapshot: {snapshot_id}")
 
-# Search — chainable, materialise to pandas / polars / list
+# Search — pointer-only (default, backward-compatible)
 query = np.random.rand(64).astype(np.float32)
 df = ailake.search("/tmp/ailake-test", query, top_k=5).to_pandas()
-print(df)
+print(df)  # columns: row_id, distance, file
+
+# Search — full row data (all Parquet columns + _distance)
+df_full = ailake.search("/tmp/ailake-test", query, top_k=5, fetch_data=True).to_pandas()
+print(df_full)  # columns: text, embedding, ..., _distance
 
 # Async (optional)
 import asyncio
