@@ -15,9 +15,16 @@ pub struct LocalStore {
 
 impl LocalStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
-        Self {
-            root: root.as_ref().to_path_buf(),
-        }
+        let path = root.as_ref();
+        // Strip file:// scheme if the caller passes a file:// URI.
+        // Without this, PathBuf::from("file:///abs/path") is a RELATIVE path
+        // starting with the literal segment "file:" — not an absolute path.
+        let clean = path
+            .to_str()
+            .and_then(|s| s.strip_prefix("file://"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf());
+        Self { root: clean }
     }
 
     fn full_path(&self, path: &str) -> PathBuf {
