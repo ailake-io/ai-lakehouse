@@ -161,7 +161,7 @@ class SearchQuery:
     def __repr__(self) -> str:
         mode = "full-data" if self._fetch_data else "pointers"
         if self._results is None and self._arrow_batch is None:
-            return f"SearchQuery(top_k={self._top_k}, {mode}, pending)"
+            return f"SearchQuery(top_k={self._top_k}, pending)"
         n = self._arrow_batch.num_rows if self._fetch_data and self._arrow_batch is not None \
             else len(self._results or [])
         return f"SearchQuery({n} results, top_k={self._top_k}, {mode})"
