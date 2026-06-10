@@ -31,15 +31,36 @@ def require(cond, msg):
         sys.exit(1)
 
 def _promote_duckdb_global():
-    """Re-open _duckdb.so with RTLD_GLOBAL so extension symbols resolve at dlopen time."""
+    """Re-open _duckdb.so with RTLD_GLOBAL so extension symbols resolve at dlopen time.
+
+    The pip duckdb package places _duckdb*.so in site-packages/ (one level up
+    from duckdb/__init__.py), NOT inside the duckdb/ subdirectory.
+    """
     import ctypes, pathlib
-    duckdb_dir = pathlib.Path(duckdb.__file__).parent
-    for so in sorted(duckdb_dir.glob("_duckdb*.so*")):
-        try:
-            ctypes.CDLL(str(so), ctypes.RTLD_GLOBAL)
-            return
-        except OSError:
-            pass
+    duckdb_pkg  = pathlib.Path(duckdb.__file__).parent   # .../site-packages/duckdb/
+    site_pkgs   = duckdb_pkg.parent                      # .../site-packages/
+    for d in (site_pkgs, duckdb_pkg):
+        for so in sorted(d.glob("_duckdb*.so*")):
+            try:
+                ctypes.CDLL(str(so), ctypes.RTLD_GLOBAL)
+                return
+            except OSError:
+                pass
+    # Last-resort: scan /proc/self/maps for the already-loaded duckdb library
+    try:
+        with open("/proc/self/maps") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 6 and "_duckdb" in parts[-1]:
+                    p = parts[-1]
+                    if pathlib.Path(p).exists():
+                        try:
+                            ctypes.CDLL(p, ctypes.RTLD_GLOBAL)
+                            return
+                        except OSError:
+                            pass
+    except OSError:
+        pass
 
 def setup_connection():
     _promote_duckdb_global()
