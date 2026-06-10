@@ -11,6 +11,7 @@ from ailake._ailake import (  # type: ignore[import]
     TableWriter as _TableWriter,
     assemble_context,
     search as _search_raw,
+    search_with_data as _search_with_data,
 )
 
 if TYPE_CHECKING:
@@ -63,22 +64,29 @@ def _kv_rows(items: list[tuple[str, object]]) -> str:
 class SearchQuery:
     """Lazy, chainable search result.
 
-    Execute by calling ``.to_list()``, ``.to_pandas()``, ``.to_polars()``,
-    or iterating over the object.
+    Execute by calling ``.to_list()``, ``.to_arrow()``, ``.to_pandas()``,
+    ``.to_polars()``, or iterating over the object.
+
+    When ``fetch_data=True``, ``.to_arrow()`` / ``.to_pandas()`` / ``.to_polars()``
+    return full row data (all Parquet columns + ``_distance``) instead of pointer-only
+    dicts.  ``.to_list()`` always returns ``[{row_id, distance, file}]`` regardless.
     """
 
-    def __init__(self, path: str, query: list[float], top_k: int) -> None:
+    def __init__(self, path: str, query: list[float], top_k: int, fetch_data: bool = False) -> None:
         self._path = path
         self._query = query
         self._top_k = top_k
-        self._results: list[dict] | None = None
+        self._fetch_data = fetch_data
+        self._results: list[dict] | None = None      # lazy — pointer-only
+        self._arrow_batch = None                      # lazy — full RecordBatch
 
     # ── chain ─────────────────────────────────────────────────────────────────
 
     def limit(self, n: int) -> "SearchQuery":
         """Cap results to *n* nearest neighbours."""
         self._top_k = n
-        self._results = None  # invalidate cache if already executed
+        self._results = None
+        self._arrow_batch = None
         return self
 
     # ── materialise ───────────────────────────────────────────────────────────
@@ -88,18 +96,56 @@ class SearchQuery:
             self._results = _search_raw(self._path, self._query, self._top_k)
         return self._results
 
+    def _execute_arrow(self):
+        if self._arrow_batch is None:
+            import io
+            import pyarrow as pa  # noqa: PLC0415
+            ipc_bytes: bytes = _search_with_data(self._path, self._query, self._top_k)
+            self._arrow_batch = pa.ipc.open_file(io.BytesIO(ipc_bytes)).read_all()
+        return self._arrow_batch
+
     def to_list(self) -> list[dict]:
-        """Return results as ``list[dict]`` with keys row_id, distance, file."""
+        """Return ``[{row_id, distance, file}]`` — pointer-only, regardless of fetch_data."""
         return self._execute()
 
+    def to_arrow(self):
+        """Return results as a ``pyarrow.Table``.
+
+        When ``fetch_data=True``: all Parquet columns + ``_distance`` (Float32).
+        When ``fetch_data=False``: pointer-only table with ``row_id``, ``_distance``,
+        ``file`` columns (no I/O beyond the index search).
+        """
+        if self._fetch_data:
+            return self._execute_arrow()
+        import pyarrow as pa  # noqa: PLC0415
+
+        data = self._execute()
+        return pa.RecordBatch.from_pydict({
+            "row_id":    [r["row_id"] for r in data],
+            "_distance": [r["distance"] for r in data],
+            "file":      [r["file"] for r in data],
+        })
+
     def to_pandas(self) -> "pd.DataFrame":
-        """Return results as a ``pandas.DataFrame``."""
+        """Return results as a ``pandas.DataFrame``.
+
+        Full row data when ``fetch_data=True``, pointer-only otherwise.
+        """
+        if self._fetch_data:
+            return self._execute_arrow().to_pandas()
         import pandas as pd  # noqa: PLC0415
 
         return pd.DataFrame(self._execute())
 
     def to_polars(self) -> "pl.DataFrame":
-        """Return results as a ``polars.DataFrame``."""
+        """Return results as a ``polars.DataFrame``.
+
+        Full row data when ``fetch_data=True``, pointer-only otherwise.
+        """
+        if self._fetch_data:
+            import polars as pl  # noqa: PLC0415
+
+            return pl.from_arrow(self._execute_arrow())
         import polars as pl  # noqa: PLC0415
 
         return pl.DataFrame(self._execute())
@@ -113,9 +159,12 @@ class SearchQuery:
         return len(self._execute())
 
     def __repr__(self) -> str:
-        if self._results is None:
-            return f"SearchQuery(top_k={self._top_k}, pending)"
-        return f"SearchQuery({len(self._results)} results, top_k={self._top_k})"
+        mode = "full-data" if self._fetch_data else "pointers"
+        if self._results is None and self._arrow_batch is None:
+            return f"SearchQuery(top_k={self._top_k}, {mode}, pending)"
+        n = self._arrow_batch.num_rows if self._fetch_data and self._arrow_batch is not None \
+            else len(self._results or [])
+        return f"SearchQuery({n} results, top_k={self._top_k}, {mode})"
 
     # ── async ─────────────────────────────────────────────────────────────────
 
@@ -124,14 +173,29 @@ class SearchQuery:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._execute)
 
+    async def to_arrow_async(self):
+        """Async variant of :meth:`to_arrow`."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.to_arrow)
+
     async def to_pandas_async(self) -> "pd.DataFrame":
         """Async variant of :meth:`to_pandas`."""
+        if self._fetch_data:
+            loop = asyncio.get_running_loop()
+            arrow = await loop.run_in_executor(None, self._execute_arrow)
+            return arrow.to_pandas()
         import pandas as pd  # noqa: PLC0415
 
         return pd.DataFrame(await self.to_list_async())
 
     async def to_polars_async(self) -> "pl.DataFrame":
         """Async variant of :meth:`to_polars`."""
+        if self._fetch_data:
+            import polars as pl  # noqa: PLC0415
+
+            loop = asyncio.get_running_loop()
+            arrow = await loop.run_in_executor(None, self._execute_arrow)
+            return pl.from_arrow(arrow)
         import polars as pl  # noqa: PLC0415
 
         return pl.DataFrame(await self.to_list_async())
@@ -139,35 +203,56 @@ class SearchQuery:
     # ── display ───────────────────────────────────────────────────────────────
 
     def _repr_html_(self) -> str:
-        if self._results is None:
+        pending = self._results is None and self._arrow_batch is None
+        if pending:
+            mode = "full-data" if self._fetch_data else "pointers"
             return (
                 f'<span style="font-family:monospace;color:#888">'
-                f"SearchQuery(top_k={self._top_k}, <em>not yet executed</em>)"
+                f"SearchQuery(top_k={self._top_k}, {mode}, <em>not yet executed</em>)"
                 f"</span>"
             )
-        rows = self._results
-        header = (
-            f'<tr>'
-            f'<th style="{_TH_STYLE}">#</th>'
-            f'<th style="{_TH_STYLE}">row_id</th>'
-            f'<th style="{_TH_STYLE}">distance</th>'
-            f'<th style="{_TH_STYLE}">file</th>'
-            f'</tr>'
-        )
-        body = "".join(
-            f'<tr>'
-            f'<td style="{_TD_STYLE};color:#aaa">{i}</td>'
-            f'<td style="{_TD_STYLE}">{r["row_id"]}</td>'
-            f'<td style="{_TD_STYLE}">{r["distance"]:.6f}</td>'
-            f'<td style="{_TD_STYLE};color:#555;font-size:11px">{r["file"]}</td>'
-            f'</tr>'
-            for i, r in enumerate(rows)
-        )
+
+        # Full-data mode: render all columns from the Arrow batch.
+        if self._fetch_data and self._arrow_batch is not None:
+            batch = self._arrow_batch
+            col_names = batch.schema.names
+            header = "".join(f'<th style="{_TH_STYLE}">{c}</th>' for c in col_names)
+            header = f'<tr><th style="{_TH_STYLE}">#</th>{header}</tr>'
+            body_rows = []
+            for i in range(batch.num_rows):
+                cells = "".join(
+                    f'<td style="{_TD_STYLE}">{batch.column(j)[i].as_py()}</td>'
+                    for j in range(len(col_names))
+                )
+                body_rows.append(f'<tr><td style="{_TD_STYLE};color:#aaa">{i}</td>{cells}</tr>')
+            body = "".join(body_rows)
+            n = batch.num_rows
+            label = f"SearchQuery — {n} result{'s' if n != 1 else ''} (full data)"
+        else:
+            rows = self._results or []
+            header = (
+                f'<tr>'
+                f'<th style="{_TH_STYLE}">#</th>'
+                f'<th style="{_TH_STYLE}">row_id</th>'
+                f'<th style="{_TH_STYLE}">distance</th>'
+                f'<th style="{_TH_STYLE}">file</th>'
+                f'</tr>'
+            )
+            body = "".join(
+                f'<tr>'
+                f'<td style="{_TD_STYLE};color:#aaa">{i}</td>'
+                f'<td style="{_TD_STYLE}">{r["row_id"]}</td>'
+                f'<td style="{_TD_STYLE}">{r["distance"]:.6f}</td>'
+                f'<td style="{_TD_STYLE};color:#555;font-size:11px">{r["file"]}</td>'
+                f'</tr>'
+                for i, r in enumerate(rows)
+            )
+            n = len(rows)
+            label = f"SearchQuery — {n} result{'s' if n != 1 else ''}"
+
         return (
             f'<div style="{_CARD_STYLE}">'
-            f'<div style="color:#6c757d;font-size:11px;margin-bottom:8px">'
-            f"SearchQuery — {len(rows)} result{'s' if len(rows) != 1 else ''}"
-            f"</div>"
+            f'<div style="color:#6c757d;font-size:11px;margin-bottom:8px">{label}</div>'
             f'<table style="border-collapse:collapse;width:100%">'
             f"{header}{body}"
             f"</table>"
@@ -258,19 +343,23 @@ class Table:
 
     # ── search ────────────────────────────────────────────────────────────────
 
-    def search(self, query: _Vector, top_k: int = 10) -> SearchQuery:
+    def search(self, query: _Vector, top_k: int = 10, fetch_data: bool = False) -> SearchQuery:
         """Return a chainable :class:`SearchQuery`.
 
         Args:
             query: embedding vector — ``list[float]`` or array with ``.tolist()``.
             top_k: maximum neighbours to return.
+            fetch_data: when ``True``, ``.to_arrow()`` / ``.to_pandas()`` / ``.to_polars()``
+                        return full row data (all Parquet columns + ``_distance``).
+                        When ``False`` (default), only ``row_id``, ``distance``, and
+                        ``file`` are returned — matches the original behaviour.
         """
         _q: list[float] = (
             query.tolist()  # type: ignore[union-attr]
             if hasattr(query, "tolist")
             else list(query)
         )
-        return SearchQuery(self._path, _q, top_k)
+        return SearchQuery(self._path, _q, top_k, fetch_data=fetch_data)
 
     # ── context manager ───────────────────────────────────────────────────────
 
@@ -351,17 +440,30 @@ def open_table(
     )
 
 
-def search(path: str, query: _Vector, top_k: int = 10) -> SearchQuery:
+def search(path: str, query: _Vector, top_k: int = 10, fetch_data: bool = False) -> SearchQuery:
     """Module-level search returning a chainable :class:`SearchQuery`.
+
+    Args:
+        path: Table root path or URI.
+        query: Query embedding — ``list[float]`` or array with ``.tolist()``.
+        top_k: Maximum neighbours to return (default 10).
+        fetch_data: When ``True``, ``.to_arrow()`` / ``.to_pandas()`` / ``.to_polars()``
+                    return full row data (all Parquet columns + ``_distance``).
+                    When ``False`` (default), only ``row_id``, ``distance``, ``file``.
 
     Example::
 
+        # Pointer-only (default — backward-compatible)
         results = ailake.search("s3://my-lake/docs/", query_vec, top_k=20)
-        df = results.to_pandas()
+        df = results.to_pandas()  # columns: row_id, distance, file
+
+        # Full row data
+        results = ailake.search("s3://my-lake/docs/", query_vec, top_k=20, fetch_data=True)
+        df = results.to_pandas()  # columns: id, text, embedding, ..., _distance
     """
     _q: list[float] = (
         query.tolist()  # type: ignore[union-attr]
         if hasattr(query, "tolist")
         else list(query)
     )
-    return SearchQuery(path, _q, top_k)
+    return SearchQuery(path, _q, top_k, fetch_data=fetch_data)

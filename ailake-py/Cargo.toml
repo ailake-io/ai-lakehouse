@@ -21,6 +21,7 @@ tokio          = { workspace = true }
 tracing        = { workspace = true }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
+arrow-ipc      = "52"
 # Force vendored OpenSSL: targets openssl-sys directly so Cargo feature
 # unification activates vendored on the exact package that fails in manylinux
 # containers (where openssl-devel is absent and pkg-config can't find openssl).

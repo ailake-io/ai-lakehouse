@@ -5,11 +5,12 @@ use rayon::prelude::*;
 use tracing::{debug, error};
 
 use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
-use ailake_core::{AilakeResult, RowId, VectorMetric};
+use ailake_core::{AilakeError, AilakeResult, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
 use ailake_index::AnyIndex;
 use ailake_store::Store;
 use ailake_vec::exact_distance;
+use arrow_array::RecordBatch;
 use bytes::Bytes;
 
 use crate::pruner::VectorPruner;
@@ -493,6 +494,101 @@ impl SearchSession {
         all_results.truncate(config.top_k);
         all_results
     }
+}
+
+/// Fetch full row data for a slice of search results.
+///
+/// Groups results by Parquet file, reads each file once, extracts the matching rows
+/// via `arrow_select::take`, then concatenates everything back in original top-k order
+/// with a `_distance: Float32` column appended.
+///
+/// Use this immediately after `search()` to retrieve the actual text / metadata
+/// columns (e.g. `chunk_text`, `document_title`) alongside the distance scores.
+pub async fn fetch_rows(
+    results: &[SearchResult],
+    store: Arc<dyn Store>,
+    vector_column: &str,
+    dim: u32,
+) -> AilakeResult<RecordBatch> {
+    use std::collections::HashMap;
+
+    use arrow_array::{ArrayRef, Float32Array, UInt32Array};
+    use arrow_schema::{DataType, Field, Schema};
+    use arrow_select::{concat::concat_batches, take::take};
+
+    if results.is_empty() {
+        return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
+    }
+
+    // Group by file path; preserve original position for re-sorting.
+    let mut by_file: HashMap<&str, Vec<(u64, f32, usize)>> = HashMap::new();
+    for (i, r) in results.iter().enumerate() {
+        by_file
+            .entry(r.file_path.as_str())
+            .or_default()
+            .push((r.row_id.as_u64(), r.distance, i));
+    }
+
+    // (original_index, distance, single-row RecordBatch)
+    let mut collected: Vec<(usize, f32, RecordBatch)> = Vec::with_capacity(results.len());
+
+    for (file_path, rows) in &by_file {
+        let bytes = store.get(file_path).await?;
+        let reader = AilakeFileReader::new(bytes, vector_column, dim);
+        let (batch, _) = reader.read_parquet()?;
+
+        for &(row_id, distance, pos) in rows {
+            let idx = row_id as usize;
+            if idx >= batch.num_rows() {
+                tracing::warn!(
+                    "fetch_rows: row_id {} out of bounds (file_rows={}, file={}), skipping",
+                    idx,
+                    batch.num_rows(),
+                    file_path
+                );
+                continue;
+            }
+
+            let indices = UInt32Array::from(vec![idx as u32]);
+            let row_cols: Vec<ArrayRef> = batch
+                .columns()
+                .iter()
+                .map(|col| {
+                    take(col.as_ref(), &indices, None)
+                        .map_err(|e| AilakeError::Arrow(e.to_string()))
+                })
+                .collect::<AilakeResult<Vec<_>>>()?;
+
+            let row_batch = RecordBatch::try_new(batch.schema(), row_cols)
+                .map_err(|e| AilakeError::Arrow(e.to_string()))?;
+
+            collected.push((pos, distance, row_batch));
+        }
+    }
+
+    if collected.is_empty() {
+        return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
+    }
+
+    // Restore original top-k order from the search results slice.
+    collected.sort_by_key(|(pos, _, _)| *pos);
+
+    let distances: Vec<f32> = collected.iter().map(|(_, d, _)| *d).collect();
+    let row_batches: Vec<&RecordBatch> = collected.iter().map(|(_, _, b)| b).collect();
+    let base_schema = collected[0].2.schema();
+
+    let combined = concat_batches(&base_schema, row_batches)
+        .map_err(|e| AilakeError::Arrow(e.to_string()))?;
+
+    // Append _distance column (Float32, non-nullable).
+    let mut fields: Vec<Arc<Field>> = base_schema.fields().to_vec();
+    fields.push(Arc::new(Field::new("_distance", DataType::Float32, false)));
+    let new_schema = Arc::new(Schema::new(fields));
+
+    let mut columns: Vec<ArrayRef> = combined.columns().to_vec();
+    columns.push(Arc::new(Float32Array::from(distances)));
+
+    RecordBatch::try_new(new_schema, columns).map_err(|e| AilakeError::Arrow(e.to_string()))
 }
 
 #[cfg(test)]

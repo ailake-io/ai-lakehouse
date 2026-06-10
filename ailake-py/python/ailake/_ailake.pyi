@@ -99,6 +99,31 @@ def search(
     ...
 
 
+def search_with_data(
+    path: str,
+    query: Sequence[float],
+    top_k: int = 10,
+) -> bytes:
+    """Search and return full row data serialized as Arrow IPC bytes.
+
+    Deserialize in Python with::
+
+        import io, pyarrow as pa
+        table = pa.ipc.open_file(io.BytesIO(search_with_data(...))).read_all()
+
+    Args:
+        path: Table root — same value used when writing.
+        query: Query embedding as a flat list of floats.
+        top_k: Number of neighbours to return (default 10).
+
+    Returns:
+        Arrow IPC file-format bytes.  Deserialize to a ``pyarrow.Table``
+        containing all Parquet columns plus ``_distance: float32``,
+        ordered by ascending distance.
+    """
+    ...
+
+
 def assemble_context(
     chunks: list[dict[str, object]],
     max_tokens: int = 4096,
