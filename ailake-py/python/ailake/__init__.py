@@ -121,9 +121,9 @@ class SearchQuery:
 
         data = self._execute()
         return pa.table({
-            "row_id":    [r["row_id"] for r in data],
-            "_distance": [r["distance"] for r in data],
-            "file":      [r["file"] for r in data],
+            "row_id":   [r["row_id"] for r in data],
+            "distance": [r["distance"] for r in data],
+            "file":     [r["file"] for r in data],
         })
 
     def to_pandas(self) -> "pd.DataFrame":
