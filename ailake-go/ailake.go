@@ -145,7 +145,7 @@ func searchFile(
 	// Resolve absolute path
 	filePath := entry.Path
 	if !filepath.IsAbs(filePath) {
-		filePath = filepath.Join(warehouse, namespace+".db", table, filePath)
+		filePath = filepath.Join(warehouse, namespace, table, filePath)
 	}
 
 	if entry.HnswOffset == nil || entry.HnswLen == nil {
