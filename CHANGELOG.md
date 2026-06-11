@@ -9,32 +9,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.16] — 2026-06-11
+
 ### Added
 
-- **Python full-read after search** — `ailake.search(..., fetch_data=True)` and `Table.search(..., fetch_data=True)` return a `SearchQuery` whose `.to_arrow()` / `.to_pandas()` / `.to_polars()` / async variants materialise a full `pyarrow.Table` with all columns including the embedding decoded as `FixedSizeList<Float32>` + `_distance: float32`. Backward-compatible: default `fetch_data=False` behaviour unchanged. Implemented via `ailake_query::fetch_rows` (groups results by file, reads Parquet once per file via `arrow_select::take`, re-attaches decoded F32 vectors as `FixedSizeList`) + new `search_with_data` PyO3 function (serialises `RecordBatch` to Arrow IPC bytes via `arrow-ipc`; Python side deserialises with `pyarrow.ipc.open_file`).
-- **DuckDB extension** (`duckdb-ailake`) — C++ community extension exposing `ailake_search(table_path, query FLOAT[], top_k) → TABLE(row_id, distance, file_path)` and `ailake_write_batch(table_path, ids BIGINT[], embeddings FLOAT[][]) → BIGINT`. Bridges DuckDB to `libailake_jni.so` via `dlopen`/C-ABI — same JSON-envelope protocol as Spark and Trino plugins, zero additional Rust code. Graceful degradation: search returns 0 rows when native lib not found. Named params `vec_col` and `ef_search` on `ailake_search`; 6-arg overload on `ailake_write_batch` for explicit metric/precision. CI workflow `ci-duckdb.yml` (cmake build + Python integration tests).
+- **Python full-read after search** — `ailake.search(..., fetch_data=True)` and `Table.search(..., fetch_data=True)` return a `SearchQuery` whose `.to_arrow()` / `.to_pandas()` / `.to_polars()` / async variants materialise a full `pyarrow.Table` with all columns including the embedding decoded as `FixedSizeList<Float32>` + `_distance: float32`. Backward-compatible: default `fetch_data=False` behaviour unchanged.
+- **DuckDB extension** (`duckdb-ailake`) — C++ community extension exposing `ailake_search(table_path, query FLOAT[], top_k) → TABLE(row_id, distance, file_path)` and `ailake_write_batch(table_path, ids BIGINT[], embeddings FLOAT[][]) → BIGINT`. Bridges DuckDB to `libailake_jni.so` via `dlopen`/C-ABI — same JSON-envelope protocol as Spark and Trino plugins. Graceful degradation: search returns 0 rows when native lib not found. CI workflow `ci-duckdb.yml`.
 
 ### Fixed
 
-- **DuckDB extension metadata format** — `append_extension_metadata.py` now writes the correct 8×32-byte field layout (magic `"4"` + platform + duckdb_version + extension_version + `"CPP"` abi, all null-padded, stored in reversed file order) + 256-byte zero signature; fixes `InvalidInputException: metadata at the end of the file is invalid` when loading the extension. Test connections also set `allow_extensions_metadata_mismatch=True` to tolerate platform/version differences across environments.
-- **DuckDB extension RTLD_GLOBAL** — `test_write.py` / `test_search.py` now set `sys.setdlopenflags(RTLD_GLOBAL)` before `import duckdb` so `_duckdb.so` loads with global symbol visibility; fixes `undefined symbol: _ZTIN6duckdb28SimpleNamedParameterFunctionE` at dlopen time (`TableFunction` inherits `SimpleNamedParameterFunction` whose typeinfo must be in global symbol table for `RTLD_NOW` resolution).
-- **DuckDB extension C++ ABI** — `CMakeLists.txt` adds `_GLIBCXX_USE_CXX11_ABI=0` to match DuckDB manylinux wheels; fixes `undefined symbol: _ZNK6duckdb28SimpleNamedParameterFunction8ToStringB5cxx11Ev`.
-- **DuckDB extension RTLD_DEFAULT** — `AilakeLib::load()` falls back to `dlsym(RTLD_DEFAULT, …)` when `dlopen` fails; resolves symbols pre-loaded via `ctypes.CDLL(lib, RTLD_GLOBAL)`; fixes `write_batch returned -1`.
-- **`LocalStore::new` file:// URI root** — `LocalStore::new("file:///abs/path")` now strips the `file://` scheme before constructing the root `PathBuf`; without this fix `PathBuf::from("file:///abs/path")` is a relative path and files written with relative sub-paths (e.g. `"data/part-00001.parquet"`) land in CWD instead of the intended directory.
-- **`HadoopCatalog::list_files` on fresh table** — `list_files` now returns an empty `Vec` when `current_snapshot_id` is `None` (table created but no batches committed yet); previously returned `Err("table has no snapshots")` which broke idempotent write logic on brand-new tables.
-- **HNSW F16 quantization disabled for NormalizedCosine** — `HnswIndex::quantize_to_f16` now skips the F16 downcast when the stored metric is `NormalizedCosine`; the F16 rounding error (~0.001) exceeded the true inter-vector distance for pre-normalized unit vectors (~0.0002), causing wrong nearest-neighbor results when `pre_normalize=True`. F32 vectors are kept in full precision for this metric.
-- **Python `SearchQuery` repr** — `repr(query)` no longer includes the mode string; pending state renders as `SearchQuery(top_k=N, pending)`, executed state as `SearchQuery(N results, top_k=K)`.
-- **Python `to_arrow()` pointer-only** — `SearchQuery.to_arrow()` in pointer-only mode now returns a `pyarrow.Table` (was `pyarrow.RecordBatch`); the distance column is named `distance` (was `_distance`); columns are `row_id, distance, file`.
+- **DuckDB extension metadata format** — `append_extension_metadata.py` now writes the correct 8×32-byte field layout; fixes `InvalidInputException: metadata at the end of the file is invalid` when loading the extension.
+- **DuckDB extension RTLD_GLOBAL / RTLD_DEFAULT** — `AilakeLib::load()` falls back to `dlsym(RTLD_DEFAULT, …)`; test files set `sys.setdlopenflags(RTLD_GLOBAL)` before `import duckdb`; fixes `undefined symbol` errors at dlopen time.
+- **DuckDB extension C++ ABI** — `CMakeLists.txt` adds `_GLIBCXX_USE_CXX11_ABI=0` to match DuckDB manylinux wheels; fixes ABI mismatch undefined symbols.
+- **`LocalStore::new` file:// URI root** — strips the `file://` scheme before constructing the root `PathBuf`; fixes files landing in CWD instead of the intended directory.
+- **`HadoopCatalog::list_files` on fresh table** — returns empty `Vec` when `current_snapshot_id` is `None`; previously errored on brand-new tables before any commit.
+- **HNSW F16 quantization disabled for NormalizedCosine** — `HnswIndex::quantize_to_f16` skips F16 downcast for `NormalizedCosine`; F16 rounding error exceeded true inter-vector distance for pre-normalized unit vectors.
+- **Python `SearchQuery` repr** — pending state renders as `SearchQuery(top_k=N, pending)`, executed state as `SearchQuery(N results, top_k=K)`.
+- **Python `to_arrow()` pointer-only** — returns `pyarrow.Table` (was `RecordBatch`); distance column is `distance` (was `_distance`); columns are `row_id, distance, file`.
 
 ### Tests
 
-- **`check_ailake_py.py` section 8** — full-read mode: verifies `fetch_data=True` returns `pyarrow.Table` with `text`, `embedding` (`FixedSizeList<float32>` dim=DIM), `_distance` (monotonically sorted); backward compat (pointer-only default unchanged); `to_pandas()`, `Table.search`, async `to_arrow_async()` variants.
-- **`tests/fixtures/write_fixture.py`** — new fixture writer for `ci-duckdb.yml`: uses JNI C-ABI to write 1 000 rows (dim=128, cosine, F16) to `{output_dir}/default/table/`; emits `fixture_query.bin` (128-dim F32), `fixture_files.txt`, `fixture_rows.txt`.
-- **`check_ailake_py.py` §9–13** — expanded Python SDK write/read test suite: `write_batch_idempotent` (same batch_id no-op, new batch_id writes); `to_polars()` pointer-only + full-read + limit; multiple commits (data from all snapshots searchable); `pre_normalize=True` + `hnsw_m`/`hnsw_ef_construction` tuning; edge cases (`top_k > N`, `top_k=1`, distances sorted, `dot_product` metric); `to_arrow()` pointer-only column schema check.
+- **`check_ailake_py.py` §8–13** — full-read mode (`fetch_data=True`), `write_batch_idempotent`, `to_polars()`, multiple commits, `pre_normalize=True`, HNSW tuning, edge cases, pointer-only column schema.
+- **`tests/fixtures/write_fixture.py`** — fixture writer for `ci-duckdb.yml`: 1 000 rows dim=128 cosine F16.
+- **Docker demo (`tests/docker/`)** — all 5 notebooks (`01_ailake_demo` through `05_bigquery`) execute cleanly via `nbconvert`; verified with Spark 3.5 local mode, Trino 446 + Nessie, and goccy BigQuery emulator.
+
+### CI
+
+- `ci-duckdb.yml`: cmake build + Python integration tests for DuckDB extension.
 
 ---
 
-## [0.0.16] — 2026-06-09
+## [0.0.15] — 2026-06-09
 
 ### Added
 
@@ -52,6 +59,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Trino SPI 430**: `ConnectorPageSinkContext` → `ConnectorPageSinkId` in `AilakePageSinkProvider` (removed in Trino 430+).
 - **Spark/Scala 2.12**: `def buildForBatch()` → `override def buildForBatch()` — Scala 2.12 requires explicit `override` for concrete Java default methods.
 - **Scala 2.12 compat**: `scala.jdk.CollectionConverters` → `scala.collection.JavaConverters` in test files (`jdk.CollectionConverters` requires Scala 2.13+).
+- **`release.yml`: sync version bump back to develop** — after bumping `Cargo.toml` on `main`, the action now merges `origin/main → develop` automatically.
+- **`release.yml`: idempotent `publish-crates`** — exit code 10 (crate already exists on crates.io) treated as success; re-runs skip already-published crates.
+- **`release.yml`: idempotent tag + GitHub Release creation** — both steps check for existing tag/release and skip if already present.
+- **`release.yml`: non-fast-forward push rejection** — `git pull --rebase origin main` before push in version bump step.
 
 ### Tests
 
@@ -64,18 +75,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `test-jvm` job in `ci.yml` runs Trino and Spark plugin unit tests on every push.
 - `compat-ailake-py` job installs `mypy + pandas` and runs `mypy` type check before the compat script.
 - `compat-heavy.yml`: `AILAKE_WRITE_DIR` injected into Spark and Trino integration test steps.
-
----
-
-## [0.0.15] — 2026-06-09
-
-### Fixed
-
-- **`release.yml`: sync version bump back to develop** — after bumping `Cargo.toml` on `main`, the action now merges `origin/main → develop` automatically so `develop` always tracks the same version as `main`.
-- **`release.yml`: idempotent `publish-crates` on re-run** — each `cargo publish` call treats exit code 10 (crate version already exists on crates.io) as success; re-running a partially-failed publish job skips already-published crates and continues with the remaining ones.
-- **`release.yml`: idempotent tag creation** — `git tag` step checks `git rev-parse` first; skips if tag already exists on remote.
-- **`release.yml`: idempotent GitHub Release creation** — `gh release create` step checks `gh release view` first; skips if release already exists.
-- **`release.yml`: non-fast-forward push rejection** — added `git pull --rebase origin main` before `git push origin main` in the version bump step; prevents rejection when PRs are merged to `main` after the action checks out but before it pushes the bump commit.
 
 ---
 
