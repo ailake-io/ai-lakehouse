@@ -42,17 +42,19 @@ bool AilakeLib::load(const std::string &lib_path) {
     void *sym_handle = h;
 #endif
 
-    auto s = reinterpret_cast<search_fn_t>(AILAKE_DLSYM(sym_handle, "ailake_search_json"));
-    auto w = reinterpret_cast<write_fn_t> (AILAKE_DLSYM(sym_handle, "ailake_write_batch_json"));
-    auto f = reinterpret_cast<free_fn_t>  (AILAKE_DLSYM(sym_handle, "ailake_free_string"));
+    auto s  = reinterpret_cast<search_fn_t>(AILAKE_DLSYM(sym_handle, "ailake_search_json"));
+    auto sc = reinterpret_cast<scan_fn_t>  (AILAKE_DLSYM(sym_handle, "ailake_scan_json"));
+    auto w  = reinterpret_cast<write_fn_t> (AILAKE_DLSYM(sym_handle, "ailake_write_batch_json"));
+    auto f  = reinterpret_cast<free_fn_t>  (AILAKE_DLSYM(sym_handle, "ailake_free_string"));
 
     if (!s || !w || !f) {
         if (h) AILAKE_DLCLOSE(h);
         return false;
     }
 
-    handle_    = h;   // nullptr when resolved via RTLD_DEFAULT — is_ready() uses search_fn_
+    handle_    = h;
     search_fn_ = s;
+    scan_fn_   = sc;  // may be nullptr for older libailake_jni builds — is_scan_ready() guards
     write_fn_  = w;
     free_fn_   = f;
     return true;
@@ -172,9 +174,162 @@ int64_t AilakeLib::write_batch(
     }
 }
 
+ScanResult AilakeLib::scan(
+    const std::string        &warehouse,
+    const std::string        &table_name,
+    const std::string        &vec_col,
+    const std::vector<float> &query,
+    int                       top_k,
+    int                       ef_search
+) const {
+    ScanResult result;
+    if (!scan_fn_ || !free_fn_ || query.empty()) {
+        result.error = "ailake_scan_json not available";
+        return result;
+    }
+
+    // Build query array JSON
+    std::string q_json = "[";
+    for (size_t i = 0; i < query.size(); ++i) {
+        if (i > 0) q_json += ',';
+        q_json += std::to_string(query[i]);
+    }
+    q_json += ']';
+
+    std::string req =
+        "{\"warehouse\":"  + json_escape(warehouse)   +
+        ",\"namespace\":\"default\""                  +
+        ",\"table\":"      + json_escape(table_name)  +
+        ",\"vec_col\":"    + json_escape(vec_col)      +
+        ",\"dim\":"        + std::to_string(query.size()) +
+        ",\"query\":"      + q_json                   +
+        ",\"top_k\":"      + std::to_string(top_k)    +
+        ",\"ef_search\":"  + std::to_string(ef_search) +
+        "}";
+
+    char *raw = scan_fn_(req.c_str());
+    if (!raw) {
+        result.error = "ailake_scan_json returned null";
+        return result;
+    }
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    try {
+        auto j = nlohmann::json::parse(resp);
+        if (!j.value("ok", false)) {
+            result.error = j.value("error", "unknown error");
+            return result;
+        }
+
+        result.num_rows = j.value("num_rows", int64_t(0));
+        const auto &cols_json = j["columns"];
+
+        for (auto &schema_entry : j["schema"]) {
+            const std::string col_name = schema_entry["name"].get<std::string>();
+            const std::string col_type = schema_entry["type"].get<std::string>();
+
+            ScanColumn col;
+            col.name = col_name;
+            col.is_null.resize(result.num_rows, false);
+
+            const auto &arr = cols_json[col_name];
+
+            if (col_type == "int64") {
+                col.type = ScanColType::INT64;
+                col.int_vals.reserve(result.num_rows);
+                for (size_t i = 0; i < (size_t)result.num_rows; ++i) {
+                    if (arr[i].is_null()) {
+                        col.is_null[i] = true;
+                        col.int_vals.push_back(0);
+                    } else {
+                        col.int_vals.push_back(arr[i].get<int64_t>());
+                    }
+                }
+            } else if (col_type == "float32") {
+                col.type = ScanColType::FLOAT32;
+                col.float_vals.reserve(result.num_rows);
+                for (size_t i = 0; i < (size_t)result.num_rows; ++i) {
+                    if (arr[i].is_null()) {
+                        col.is_null[i] = true;
+                        col.float_vals.push_back(0.0f);
+                    } else {
+                        col.float_vals.push_back(arr[i].get<float>());
+                    }
+                }
+            } else if (col_type == "float64") {
+                col.type = ScanColType::FLOAT64;
+                col.double_vals.reserve(result.num_rows);
+                for (size_t i = 0; i < (size_t)result.num_rows; ++i) {
+                    if (arr[i].is_null()) {
+                        col.is_null[i] = true;
+                        col.double_vals.push_back(0.0);
+                    } else {
+                        col.double_vals.push_back(arr[i].get<double>());
+                    }
+                }
+            } else if (col_type == "utf8") {
+                col.type = ScanColType::VARCHAR;
+                col.str_vals.reserve(result.num_rows);
+                for (size_t i = 0; i < (size_t)result.num_rows; ++i) {
+                    if (arr[i].is_null()) {
+                        col.is_null[i] = true;
+                        col.str_vals.push_back("");
+                    } else {
+                        col.str_vals.push_back(arr[i].get<std::string>());
+                    }
+                }
+            } else if (col_type == "bool") {
+                col.type = ScanColType::BOOL;
+                col.bool_vals.reserve(result.num_rows);
+                for (size_t i = 0; i < (size_t)result.num_rows; ++i) {
+                    if (arr[i].is_null()) {
+                        col.is_null[i] = true;
+                        col.bool_vals.push_back(false);
+                    } else {
+                        col.bool_vals.push_back(arr[i].get<bool>());
+                    }
+                }
+            } else if (col_type == "list_float32") {
+                col.type = ScanColType::LIST_FLOAT32;
+                col.list_vals.reserve(result.num_rows);
+                for (size_t i = 0; i < (size_t)result.num_rows; ++i) {
+                    if (arr[i].is_null()) {
+                        col.is_null[i] = true;
+                        col.list_vals.push_back({});
+                    } else {
+                        std::vector<float> floats;
+                        floats.reserve(arr[i].size());
+                        for (auto &f : arr[i]) {
+                            floats.push_back(f.is_null() ? 0.0f : f.get<float>());
+                        }
+                        col.list_vals.push_back(std::move(floats));
+                    }
+                }
+            } else {
+                // Unknown type — skip column.
+                continue;
+            }
+
+            result.columns.push_back(std::move(col));
+        }
+
+        result.ok = true;
+    } catch (const std::exception &ex) {
+        result.error = ex.what();
+    } catch (...) {
+        result.error = "unknown exception in scan()";
+    }
+    return result;
+}
+
 } // namespace ailake
 
 // ── Extension entry points ────────────────────────────────────────────────────
+
+// Forward declarations
+void RegisterAilakeScan(duckdb::DatabaseInstance &db);
 
 extern "C" {
 
@@ -185,6 +340,7 @@ DUCKDB_EXTENSION_API void ailake_init(DatabaseInstance &db) {
 
     RegisterAilakeSearch(db);
     RegisterAilakeWrite(db);
+    RegisterAilakeScan(db);
 }
 
 DUCKDB_EXTENSION_API const char *ailake_version() {

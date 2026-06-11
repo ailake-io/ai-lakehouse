@@ -14,8 +14,8 @@ use std::{
 use ailake_catalog::{HadoopCatalog, TableIdent};
 use ailake_core::VectorMetric;
 use ailake_query::{
-    search as rs_search, Chunk, ContextAssembler, ContextAssemblerConfig, SearchConfig,
-    SearchResult,
+    fetch_rows as rs_fetch_rows, search as rs_search, Chunk, ContextAssembler,
+    ContextAssemblerConfig, SearchConfig, SearchResult,
 };
 use ailake_store::LocalStore;
 use serde::Serialize;
@@ -456,6 +456,345 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
 pub unsafe extern "C" fn ailake_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         drop(CString::from_raw(ptr));
+    }
+}
+
+// ── ailake_scan_json — search + fetch full rows ───────────────────────────────
+
+/// Serialize a RecordBatch to the JSON columnar format consumed by the DuckDB extension.
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "schema": [{"name":"id","type":"int64"}, ...],
+///   "num_rows": N,
+///   "columns": {"id": [...], "text": [...], "_distance": [...]}
+/// }
+/// ```
+/// Supported Arrow types → JSON type tag:
+///   Int*/UInt* → "int64"  |  Float32 → "float32"  |  Float64 → "float64"
+///   Utf8/LargeUtf8 → "utf8"  |  Boolean → "bool"
+///   FixedSizeList<Float32> → "list_float32"   (skipped silently otherwise)
+fn record_batch_to_scan_json(
+    batch: &arrow_array::RecordBatch,
+) -> Result<String, String> {
+    use arrow_array::{
+        Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+        Int8Array, LargeStringArray, StringArray, UInt16Array, UInt32Array, UInt64Array,
+        UInt8Array,
+    };
+    use arrow_schema::DataType;
+    use serde_json::{Map, Value};
+
+    // Serialize any integer-like array as Vec<Option<i64>>.
+    macro_rules! int_vals {
+        ($col:expr, $T:ty, $num_rows:expr) => {{
+            let arr = $col
+                .as_any()
+                .downcast_ref::<$T>()
+                .ok_or(concat!("downcast ", stringify!($T), " failed"))?;
+            (0..$num_rows)
+                .map(|i| {
+                    if arr.is_null(i) {
+                        Value::Null
+                    } else {
+                        Value::Number((arr.value(i) as i64).into())
+                    }
+                })
+                .collect::<Vec<_>>()
+        }};
+    }
+
+    let num_rows = batch.num_rows();
+    let mut schema_arr: Vec<serde_json::Value> = Vec::new();
+    let mut columns_map: Map<String, Value> = Map::new();
+
+    for (field, col) in batch.schema().fields().iter().zip(batch.columns()) {
+        let name = field.name().clone();
+
+        match field.data_type() {
+            DataType::Int8 => {
+                let vals = int_vals!(col, Int8Array, num_rows);
+                schema_arr.push(serde_json::json!({"name": name, "type": "int64"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+            DataType::Int16 => {
+                let vals = int_vals!(col, Int16Array, num_rows);
+                schema_arr.push(serde_json::json!({"name": name, "type": "int64"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+            DataType::Int32 | DataType::Date32 => {
+                let vals = int_vals!(col, Int32Array, num_rows);
+                schema_arr.push(serde_json::json!({"name": name, "type": "int64"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+            DataType::Int64
+            | DataType::Date64
+            | DataType::Timestamp(_, _)
+            | DataType::Duration(_) => {
+                let vals = int_vals!(col, Int64Array, num_rows);
+                schema_arr.push(serde_json::json!({"name": name, "type": "int64"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+            DataType::UInt8 => {
+                let vals = int_vals!(col, UInt8Array, num_rows);
+                schema_arr.push(serde_json::json!({"name": name, "type": "int64"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+            DataType::UInt16 => {
+                let vals = int_vals!(col, UInt16Array, num_rows);
+                schema_arr.push(serde_json::json!({"name": name, "type": "int64"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+            DataType::UInt32 => {
+                let vals = int_vals!(col, UInt32Array, num_rows);
+                schema_arr.push(serde_json::json!({"name": name, "type": "int64"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+            DataType::UInt64 => {
+                let vals = int_vals!(col, UInt64Array, num_rows);
+                schema_arr.push(serde_json::json!({"name": name, "type": "int64"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+
+            DataType::Float32 => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .ok_or("downcast Float32Array")?;
+                let vals: Vec<Value> = (0..num_rows)
+                    .map(|i| {
+                        if arr.is_null(i) {
+                            Value::Null
+                        } else {
+                            let v = arr.value(i);
+                            serde_json::Number::from_f64(v as f64)
+                                .map(Value::Number)
+                                .unwrap_or(Value::Null)
+                        }
+                    })
+                    .collect();
+                schema_arr.push(serde_json::json!({"name": name, "type": "float32"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+
+            DataType::Float64 => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or("downcast Float64Array")?;
+                let vals: Vec<Value> = (0..num_rows)
+                    .map(|i| {
+                        if arr.is_null(i) {
+                            Value::Null
+                        } else {
+                            serde_json::Number::from_f64(arr.value(i))
+                                .map(Value::Number)
+                                .unwrap_or(Value::Null)
+                        }
+                    })
+                    .collect();
+                schema_arr.push(serde_json::json!({"name": name, "type": "float64"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+
+            DataType::Utf8 => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or("downcast StringArray")?;
+                let vals: Vec<Value> = (0..num_rows)
+                    .map(|i| {
+                        if arr.is_null(i) {
+                            Value::Null
+                        } else {
+                            Value::String(arr.value(i).to_string())
+                        }
+                    })
+                    .collect();
+                schema_arr.push(serde_json::json!({"name": name, "type": "utf8"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+
+            DataType::LargeUtf8 => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<LargeStringArray>()
+                    .ok_or("downcast LargeStringArray")?;
+                let vals: Vec<Value> = (0..num_rows)
+                    .map(|i| {
+                        if arr.is_null(i) {
+                            Value::Null
+                        } else {
+                            Value::String(arr.value(i).to_string())
+                        }
+                    })
+                    .collect();
+                schema_arr.push(serde_json::json!({"name": name, "type": "utf8"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+
+            DataType::Boolean => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .ok_or("downcast BooleanArray")?;
+                let vals: Vec<Value> = (0..num_rows)
+                    .map(|i| {
+                        if arr.is_null(i) {
+                            Value::Null
+                        } else {
+                            Value::Bool(arr.value(i))
+                        }
+                    })
+                    .collect();
+                schema_arr.push(serde_json::json!({"name": name, "type": "bool"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+
+            DataType::FixedSizeList(inner_field, _) if matches!(inner_field.data_type(), DataType::Float32) => {
+                use arrow_array::FixedSizeListArray;
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<FixedSizeListArray>()
+                    .ok_or("downcast FixedSizeListArray")?;
+                let vals: Vec<Value> = (0..num_rows)
+                    .map(|i| {
+                        if arr.is_null(i) {
+                            return Value::Null;
+                        }
+                        let list_val = arr.value(i);
+                        let fa = list_val
+                            .as_any()
+                            .downcast_ref::<Float32Array>()
+                            .map(|fa| {
+                                (0..fa.len())
+                                    .map(|j| {
+                                        serde_json::Number::from_f64(fa.value(j) as f64)
+                                            .map(Value::Number)
+                                            .unwrap_or(Value::Null)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        Value::Array(fa)
+                    })
+                    .collect();
+                schema_arr.push(serde_json::json!({"name": name, "type": "list_float32"}));
+                columns_map.insert(name, Value::Array(vals));
+            }
+
+            // Unsupported types silently skipped — downstream sees fewer columns.
+            _ => {}
+        }
+    }
+
+    let resp = serde_json::json!({
+        "ok": true,
+        "schema": schema_arr,
+        "num_rows": num_rows,
+        "columns": Value::Object(columns_map),
+    });
+    serde_json::to_string(&resp).map_err(|e| e.to_string())
+}
+
+/// Scan an AI-Lake table: vector search + full row fetch in one call.
+///
+/// `request_json` — same format as `ailake_search_json` (warehouse/namespace/table/
+/// vec_col/dim/query/top_k/ef_search).
+///
+/// Returns JSON:
+/// ```json
+/// {
+///   "ok": true,
+///   "schema": [{"name":"id","type":"int64"}, ...],
+///   "num_rows": N,
+///   "columns": {"id": [...], "_distance": [...], ...}
+/// }
+/// ```
+///
+/// The vector column is included as `list_float32` (F32-decoded values, not raw F16 bytes).
+/// `_distance` is always the last column.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    struct Req {
+        warehouse: String,
+        #[serde(default = "scan_default_ns")]
+        namespace: String,
+        table: String,
+        #[serde(default = "scan_default_col")]
+        vec_col: String,
+        dim: u32,
+        query: Vec<f32>,
+        #[serde(default = "scan_default_topk")]
+        top_k: u32,
+        #[serde(default = "scan_default_ef")]
+        ef_search: u32,
+    }
+    fn scan_default_ns() -> String { "default".into() }
+    fn scan_default_col() -> String { "embedding".into() }
+    fn scan_default_topk() -> u32 { 10 }
+    fn scan_default_ef() -> u32 { 50 }
+
+    if request_json.is_null() {
+        return cstr_err_json("null request_json");
+    }
+    let json_str = match CStr::from_ptr(request_json).to_str() {
+        Ok(s) => s,
+        Err(e) => return cstr_err_json(e),
+    };
+    let req: Req = match serde_json::from_str(json_str) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("ailake_scan_json: JSON parse error: {}", e);
+            return cstr_err_json(e);
+        }
+    };
+
+    debug!(
+        "ailake_scan_json: warehouse={} table={}.{} dim={} top_k={}",
+        req.warehouse, req.namespace, req.table, req.dim, req.top_k
+    );
+
+    let results = match do_search(
+        req.warehouse.clone(),
+        &req.namespace,
+        &req.table,
+        &req.vec_col,
+        req.dim,
+        req.query,
+        req.top_k,
+        req.ef_search,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("ailake_scan_json: search failed: {}", e);
+            return cstr_err_json(e);
+        }
+    };
+
+    // Separate store for fetching row data (do_search owns its own store internally).
+    let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+
+    let batch = match rt().block_on(rs_fetch_rows(&results, store, &req.vec_col, req.dim)) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("ailake_scan_json: fetch_rows failed: {}", e);
+            return cstr_err_json(e);
+        }
+    };
+
+    match record_batch_to_scan_json(&batch) {
+        Ok(json) => CString::new(json).unwrap_or_default().into_raw(),
+        Err(e) => {
+            warn!("ailake_scan_json: serialization failed: {}", e);
+            cstr_err_json(e)
+        }
     }
 }
 
