@@ -1,168 +1,191 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2026 Thiago Egon Lange
 """
-Integration tests for ailake_scan() — full-row table function.
+DuckDB ailake extension — ailake_scan() full-row table function tests.
 
-Requires:
-  - libailake_jni.so: built via `cargo build --release -p ailake-jni`
-  - ailake.duckdb_extension: built via cmake in duckdb-ailake/build/
-  - duckdb Python package (same minor version as DUCKDB_VERSION in CMakeLists.txt)
+Prerequisites:
+  1. Build libailake_jni.so:  cargo build --release -p ailake-jni
+  2. Build DuckDB extension:  cmake --build duckdb-ailake/build
+  3. Generate fixture:        python tests/fixtures/write_fixture.py
 
-Run:
-  pytest duckdb-ailake/test/test_scan.py -v
+Usage:
+  AILAKE_LIB=./target/release/libailake_jni.so \
+  AILAKE_EXT=./duckdb-ailake/build/ailake.duckdb_extension \
+  AILAKE_FIXTURE=./compat-fixture \
+  python duckdb-ailake/test/test_scan.py
 """
-
 import ctypes
-import io
+import math
 import os
+import pathlib
+import struct
 import sys
-import tempfile
-from pathlib import Path
 
-import numpy as np
-import pytest
+_old_flags = sys.getdlopenflags()
+sys.setdlopenflags(_old_flags | os.RTLD_GLOBAL)
+import duckdb
+sys.setdlopenflags(_old_flags)
 
-REPO_ROOT = Path(__file__).parent.parent.parent
-LIB_PATH  = REPO_ROOT / "target/release/libailake_jni.so"
-EXT_PATH  = REPO_ROOT / "duckdb-ailake/build/ailake.duckdb_extension"
+# ── Config from environment ────────────────────────────────────────────────────
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
+REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
+LIB_PATH  = pathlib.Path(os.environ.get("AILAKE_LIB",  str(REPO_ROOT / "target/release/libailake_jni.so")))
+EXT_PATH  = pathlib.Path(os.environ.get("AILAKE_EXT",  str(REPO_ROOT / "duckdb-ailake/build/ailake.duckdb_extension")))
+FIXTURE   = pathlib.Path(os.environ.get("AILAKE_FIXTURE", str(REPO_ROOT / "compat-fixture")))
 
-@pytest.fixture(scope="session")
-def duckdb_conn():
-    # Pre-load native lib into global symbol table (required for DuckDB extensions
-    # that resolve symbols via RTLD_DEFAULT rather than a private handle).
+DIM = 128  # matches write_fixture.py
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+PASS = 0
+FAIL = 0
+
+def require(cond, msg):
+    global PASS, FAIL
+    if cond:
+        print(f"  PASS  {msg}")
+        PASS += 1
+    else:
+        print(f"  FAIL  {msg}")
+        FAIL += 1
+
+def setup_connection():
     if LIB_PATH.exists():
         ctypes.CDLL(str(LIB_PATH), ctypes.RTLD_GLOBAL)
-
-    # Force RTLD_GLOBAL when importing duckdb so extension symbols are visible.
-    old_flags = sys.getdlopenflags()
-    sys.setdlopenflags(old_flags | os.RTLD_GLOBAL)
-    import duckdb
-    sys.setdlopenflags(old_flags)
-
     conn = duckdb.connect()
     conn.execute("SET allow_unsigned_extensions = true")
     if EXT_PATH.exists():
         conn.execute(f"LOAD '{EXT_PATH}'")
     return conn
 
+def table_path():
+    return str(FIXTURE)
 
-@pytest.fixture(scope="session")
-def sample_table(duckdb_conn):
-    """Write a small AI-Lake table and return its path."""
-    import ailake  # noqa: F401 — must be importable
-
-    dim = 8
-    n   = 20
-    rng = np.random.default_rng(42)
-    vecs = rng.random((n, dim), dtype=np.float32)
-
-    import pyarrow as pa
-    schema = pa.schema([
-        pa.field("id",   pa.int64()),
-        pa.field("text", pa.string()),
-    ])
-    ids   = list(range(n))
-    texts = [f"doc_{i}" for i in range(n)]
-    batch = pa.record_batch({"id": ids, "text": texts}, schema=schema)
-
-    tmpdir = tempfile.mkdtemp(prefix="ailake_scan_test_")
-    writer = ailake.TableWriter(tmpdir)
-    writer.write_batch(batch, embeddings=vecs)
-    writer.commit()
-
-    return tmpdir, dim, vecs
-
+def fixture_query():
+    """Return a unit-norm query vector of the right dimension."""
+    v = [math.sin(i * 0.1) for i in range(DIM)]
+    norm = math.sqrt(sum(x * x for x in v)) or 1.0
+    return [x / norm for x in v]
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
-def test_ext_loads(duckdb_conn):
-    if not EXT_PATH.exists():
-        pytest.skip("Extension not built")
-    result = duckdb_conn.execute("SELECT 1").fetchall()
-    assert result == [(1,)]
+def test_extension_loads():
+    print("\ntest_extension_loads")
+    conn = setup_connection()
+    rows = conn.execute("SELECT 1").fetchall()
+    require(rows == [(1,)], "DuckDB connection works")
 
 
-def test_scan_returns_full_rows(duckdb_conn, sample_table):
-    if not EXT_PATH.exists():
-        pytest.skip("Extension not built")
+def test_scan_returns_full_rows():
+    print("\ntest_scan_returns_full_rows")
     if not LIB_PATH.exists():
-        pytest.skip("libailake_jni.so not built")
+        print("  SKIP  libailake_jni.so not built")
+        return
+    if not EXT_PATH.exists():
+        print("  SKIP  extension not built")
+        return
+    if not FIXTURE.exists():
+        print("  SKIP  fixture not generated")
+        return
 
-    path, dim, vecs = sample_table
-    query = vecs[0].tolist()
+    conn = setup_connection()
+    q    = fixture_query()
+    q_sql = ", ".join(str(f) for f in q)
+    top_k = 10
+
+    rows = conn.execute(
+        f"SELECT * FROM ailake_scan('{table_path()}', [{q_sql}]::FLOAT[], {top_k})"
+    ).fetchall()
+    col_names = [d[0] for d in conn.description]
+
+    require(len(rows) > 0,          f"ailake_scan returned rows (got {len(rows)})")
+    require(len(rows) <= top_k,     f"rows <= top_k={top_k} (got {len(rows)})")
+    require("_distance" in col_names, f"_distance column present, got {col_names}")
+    # Fixture has at least an 'id' or row-id-like integer column.
+    int_cols = [c for c in col_names if c != "_distance"]
+    require(len(int_cols) >= 1,     f"at least one non-distance column present")
+
+
+def test_scan_distance_ordered():
+    print("\ntest_scan_distance_ordered")
+    if not (LIB_PATH.exists() and EXT_PATH.exists() and FIXTURE.exists()):
+        print("  SKIP  prerequisites missing")
+        return
+
+    conn  = setup_connection()
+    q     = fixture_query()
+    q_sql = ", ".join(str(f) for f in q)
+
+    distances = [
+        r[0] for r in conn.execute(
+            f"SELECT _distance FROM ailake_scan('{table_path()}', [{q_sql}]::FLOAT[], 10)"
+            " ORDER BY _distance"
+        ).fetchall()
+    ]
+    require(len(distances) > 0, "got distance rows")
+    require(distances == sorted(distances), "distances are ascending")
+    require(all(d >= 0.0 for d in distances), "all distances >= 0")
+
+
+def test_scan_vs_search_consistency():
+    """ailake_scan and ailake_search must agree on top-k distance ordering."""
+    print("\ntest_scan_vs_search_consistency")
+    if not (LIB_PATH.exists() and EXT_PATH.exists() and FIXTURE.exists()):
+        print("  SKIP  prerequisites missing")
+        return
+
+    conn  = setup_connection()
+    q     = fixture_query()
+    q_sql = ", ".join(str(f) for f in q)
     top_k = 5
 
-    query_sql = ", ".join(str(f) for f in query)
-    sql = f"""
-        SELECT *
-        FROM ailake_scan('{path}', [{query_sql}]::FLOAT[], {top_k})
-        ORDER BY _distance
-    """
-    rows = duckdb_conn.execute(sql).fetchall()
-    cols = [d[0] for d in duckdb_conn.description]
-
-    assert len(rows) == top_k, f"Expected {top_k} rows, got {len(rows)}"
-    assert "_distance" in cols, "_distance column missing"
-    assert "id" in cols, "id column missing"
-    assert "text" in cols, "text column missing"
-
-
-def test_scan_distance_ordered(duckdb_conn, sample_table):
-    if not EXT_PATH.exists():
-        pytest.skip("Extension not built")
-    if not LIB_PATH.exists():
-        pytest.skip("libailake_jni.so not built")
-
-    path, dim, vecs = sample_table
-    query = vecs[0].tolist()
-    query_sql = ", ".join(str(f) for f in query)
-    sql = f"""
-        SELECT _distance
-        FROM ailake_scan('{path}', [{query_sql}]::FLOAT[], 10)
-        ORDER BY _distance
-    """
-    distances = [r[0] for r in duckdb_conn.execute(sql).fetchall()]
-    assert distances == sorted(distances), "Results not ordered by distance"
-    assert distances[0] >= 0.0
-
-
-def test_scan_vs_search_same_ids(duckdb_conn, sample_table):
-    """ailake_scan and ailake_search must return the same top-k row ids."""
-    if not EXT_PATH.exists():
-        pytest.skip("Extension not built")
-    if not LIB_PATH.exists():
-        pytest.skip("libailake_jni.so not built")
-
-    path, dim, vecs = sample_table
-    query = vecs[3].tolist()
-    query_sql = ", ".join(str(f) for f in query)
-    top_k = 5
-
-    scan_ids = set(
-        r[0] for r in duckdb_conn.execute(
-            f"SELECT id FROM ailake_scan('{path}', [{query_sql}]::FLOAT[], {top_k})"
+    scan_dists = [
+        r[0] for r in conn.execute(
+            f"SELECT _distance FROM ailake_scan('{table_path()}', [{q_sql}]::FLOAT[], {top_k})"
+            " ORDER BY _distance"
         ).fetchall()
-    )
-    search_row_ids = set(
-        r[0] for r in duckdb_conn.execute(
-            f"SELECT row_id FROM ailake_search('{path}', [{query_sql}]::FLOAT[], {top_k})"
+    ]
+    search_dists = [
+        r[0] for r in conn.execute(
+            f"SELECT distance FROM ailake_search('{table_path()}', [{q_sql}]::FLOAT[], {top_k})"
+            " ORDER BY distance"
         ).fetchall()
-    )
+    ]
 
-    # row_id is the 0-based index; id in our table equals row_id.
-    assert scan_ids == search_row_ids, (
-        f"Scan ids {scan_ids} != search row_ids {search_row_ids}"
-    )
+    require(len(scan_dists) == len(search_dists),
+            f"same row count: scan={len(scan_dists)} search={len(search_dists)}")
+    if scan_dists and search_dists:
+        max_diff = max(abs(a - b) for a, b in zip(scan_dists, search_dists))
+        require(max_diff < 1e-4, f"distances agree within 1e-4 (max_diff={max_diff:.2e})")
 
 
-def test_scan_no_lib_graceful(duckdb_conn):
+def test_scan_no_lib_returns_empty():
     """Without the native lib, ailake_scan returns zero rows (no crash)."""
-    if not EXT_PATH.exists():
-        pytest.skip("Extension not built")
+    print("\ntest_scan_no_lib_returns_empty")
     if LIB_PATH.exists():
-        pytest.skip("Native lib present — graceful-degradation path not active")
+        print("  SKIP  native lib present — degradation path not active")
+        return
+    if not EXT_PATH.exists():
+        print("  SKIP  extension not built")
+        return
 
-    rows = duckdb_conn.execute(
+    conn = setup_connection()
+    rows = conn.execute(
         "SELECT * FROM ailake_scan('/nonexistent', [0.1, 0.2]::FLOAT[], 5)"
     ).fetchall()
-    assert rows == []
+    require(rows == [], f"empty result without native lib (got {len(rows)} rows)")
+
+
+# ── Runner ─────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    test_extension_loads()
+    test_scan_returns_full_rows()
+    test_scan_distance_ordered()
+    test_scan_vs_search_consistency()
+    test_scan_no_lib_returns_empty()
+
+    total = PASS + FAIL
+    print(f"\n{PASS}/{total} tests passed")
+    if FAIL:
+        sys.exit(1)

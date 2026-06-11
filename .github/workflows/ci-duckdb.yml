@@ -64,3 +64,10 @@ jobs:
           AILAKE_LIB:     target/release/libailake_jni.so
           AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_FIXTURE: ./compat-fixture
+
+      - name: Run scan tests
+        run: python duckdb-ailake/test/test_scan.py
+        env:
+          AILAKE_LIB:     target/release/libailake_jni.so
+          AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_FIXTURE: ./compat-fixture
