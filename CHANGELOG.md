@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Go `Scan()` — full-row fetch** (`ailake-go/scan.go`) — `Scan(catalog, namespace, table, query, opts)` = `Search()` + `FetchRows()`; reads Parquet rows for HNSW hits via `parquet-go` (pure Go, zero CGO); skips row groups with no target row IDs; auto-decodes F16 vector column to `[]float32`; returns `[]ScanRow{RowID, Distance, FilePath, Fields map[string]any}`.
+- **Go unit tests for all packages** — `footer_test.go` (9 tests: ParseHeaderBytes/ParseHeader/ParseTrailerBytes/ParseCentroid), `ailake_test.go` (10 tests: DecodeF16Vector/metricFromString/KV hints + 3 integration tests), `distance_test.go` (6 tests: all distance functions), `catalog_test.go` (4 tests: asInt64/decodeCentroid/tableDir), `scan_test.go` (6 unit + 2 integration tests).
+
+### CI
+
+- `ci-go.yml`: unit step runs `go test ./...` (integration tests auto-skip without `AILAKE_FIXTURE`); integration step runs all tests with `AILAKE_FIXTURE` set.
+
 ---
 
 ## [0.0.16] — 2026-06-11
