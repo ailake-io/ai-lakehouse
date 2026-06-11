@@ -33,17 +33,16 @@ func TestAsInt64(t *testing.T) {
 // ── decodeCentroid ────────────────────────────────────────────────────────────
 
 func TestDecodeCentroid_Valid(t *testing.T) {
-	// Build centroid bytes: [1.0, -0.5] + radius 0.25, then base64-encode.
+	// Rust encodes only the vector floats (dim*4 bytes). Radius is a separate JSON field.
 	dim := 2
-	buf := make([]byte, (dim+1)*4)
+	buf := make([]byte, dim*4)
 	vecs := []float32{1.0, -0.5}
 	for i, v := range vecs {
 		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(v))
 	}
-	binary.LittleEndian.PutUint32(buf[dim*4:], math.Float32bits(0.25))
 	b64 := base64.StdEncoding.EncodeToString(buf)
 
-	vec, radius, err := decodeCentroid(b64)
+	vec, err := decodeCentroid(b64)
 	if err != nil {
 		t.Fatalf("decodeCentroid: %v", err)
 	}
@@ -56,22 +55,19 @@ func TestDecodeCentroid_Valid(t *testing.T) {
 	if math.Abs(float64(vec[1]+0.5)) > 1e-6 {
 		t.Errorf("vec[1]: got %v, want -0.5", vec[1])
 	}
-	if math.Abs(float64(radius-0.25)) > 1e-6 {
-		t.Errorf("radius: got %v, want 0.25", radius)
-	}
 }
 
 func TestDecodeCentroid_BadBase64(t *testing.T) {
-	if _, _, err := decodeCentroid("!!!not-base64!!!"); err == nil {
+	if _, err := decodeCentroid("!!!not-base64!!!"); err == nil {
 		t.Error("decodeCentroid bad base64: expected error, got nil")
 	}
 }
 
 func TestDecodeCentroid_TooShort(t *testing.T) {
-	// Only 3 bytes — not a multiple of 4 with at least 8 bytes.
+	// 3 bytes — not a multiple of 4.
 	b64 := base64.StdEncoding.EncodeToString([]byte{1, 2, 3})
-	if _, _, err := decodeCentroid(b64); err == nil {
-		t.Error("decodeCentroid too short: expected error, got nil")
+	if _, err := decodeCentroid(b64); err == nil {
+		t.Error("decodeCentroid not multiple of 4: expected error, got nil")
 	}
 }
 
