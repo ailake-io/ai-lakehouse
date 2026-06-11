@@ -61,7 +61,7 @@ def setup_connection():
     return conn
 
 def table_path():
-    return str(FIXTURE)
+    return str(FIXTURE.resolve())
 
 def fixture_query():
     """Return a unit-norm query vector of the right dimension."""
