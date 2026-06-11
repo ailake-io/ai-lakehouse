@@ -84,7 +84,7 @@ services:
       MINIO_SECRET_KEY: minioadmin
       NESSIE_URI: "http://nessie:19120/api/v1"
       DEMO_TABLE_PATH: /data/ailake_demo
-      DEMO_DIM: "16"
+      DEMO_DIM: "32"
       # Engine endpoints — consumed by notebooks 04/05 when engines profile is active.
       # Values match container names so they also work without the profile
       # (notebooks show a clear error if the services are not running).
@@ -109,10 +109,11 @@ services:
       - "8080:8080"
     volumes:
       - ./demo/trino-catalog:/etc/trino/catalog:ro
-      # Trino needs to write its var/ directory under /data/trino.
-      # The volume is not :ro so Trino can initialise its working state.
-      # Trino does not modify AI-Lake Parquet files.
+      # AI-Lake Parquet files at the same path jupyter writes them
       - demo-data:/data
+      # Trino var/ dir overlays the same /data mount so Trino user can write
+      # to /data/trino without conflicting with the demo-data content
+      - trino-var:/data/trino
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/info | grep -q '\"starting\":false'"]
       interval: 10s
@@ -139,3 +140,4 @@ services:
 volumes:
   minio-data:
   demo-data:
+  trino-var:
