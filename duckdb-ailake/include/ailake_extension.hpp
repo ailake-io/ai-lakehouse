@@ -30,11 +30,40 @@ struct SearchRow {
     std::string file_path;
 };
 
+// ── ailake_scan column types ──────────────────────────────────────────────────
+
+enum class ScanColType { INT64, FLOAT32, FLOAT64, VARCHAR, BOOL, LIST_FLOAT32, UNKNOWN };
+
+// Pre-parsed column data for ailake_scan results (one of the value vectors is active).
+struct ScanColumn {
+    std::string  name;
+    ScanColType  type = ScanColType::UNKNOWN;
+
+    // Active member depends on type:
+    std::vector<int64_t>              int_vals;    // INT64
+    std::vector<float>                float_vals;  // FLOAT32
+    std::vector<double>               double_vals; // FLOAT64
+    std::vector<std::string>          str_vals;    // VARCHAR
+    std::vector<bool>                 bool_vals;   // BOOL
+    std::vector<std::vector<float>>   list_vals;   // LIST_FLOAT32
+    std::vector<bool>                 is_null;     // parallel null bitmap (all types)
+};
+
+struct ScanResult {
+    bool                     ok        = false;
+    std::string              error;
+    int64_t                  num_rows  = 0;
+    std::vector<ScanColumn>  columns;
+};
+
+// ── AilakeLib singleton ───────────────────────────────────────────────────────
+
 // Singleton holding dlopen handle and resolved C-ABI function pointers.
 // Thread-safe after Load() completes.
 class AilakeLib {
 public:
     using search_fn_t = char *(*)(const char *);
+    using scan_fn_t   = char *(*)(const char *);
     using write_fn_t  = char *(*)(const char *);
     using free_fn_t   = void (*)(char *);
 
@@ -44,10 +73,21 @@ public:
     // Safe to call multiple times — no-ops after first successful load.
     bool load(const std::string &lib_path = "");
 
-    bool is_ready() const { return search_fn_ != nullptr; }
+    bool is_ready()      const { return search_fn_ != nullptr; }
+    bool is_scan_ready() const { return scan_fn_  != nullptr; }
 
     // Execute ailake_search_json. Returns empty on any error.
     std::vector<SearchRow> search(
+        const std::string        &warehouse,
+        const std::string        &table_name,
+        const std::string        &vec_col,
+        const std::vector<float> &query,
+        int                       top_k,
+        int                       ef_search = 50
+    ) const;
+
+    // Execute ailake_scan_json. Returns pre-parsed columnar data.
+    ScanResult scan(
         const std::string        &warehouse,
         const std::string        &table_name,
         const std::string        &vec_col,
@@ -74,6 +114,7 @@ private:
 
     void        *handle_     = nullptr;
     search_fn_t  search_fn_  = nullptr;
+    scan_fn_t    scan_fn_    = nullptr;
     write_fn_t   write_fn_   = nullptr;
     free_fn_t    free_fn_    = nullptr;
 };

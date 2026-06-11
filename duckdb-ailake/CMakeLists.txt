@@ -35,6 +35,7 @@ add_library(duckdb_ailake MODULE
     src/ailake_extension.cpp
     src/ailake_search.cpp
     src/ailake_write.cpp
+    src/ailake_scan_table.cpp
 )
 
 target_include_directories(duckdb_ailake PRIVATE
