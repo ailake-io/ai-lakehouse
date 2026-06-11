@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+use crate::footer::Precision;
 use ailake_core::{AilakeError, AilakeResult, Centroid, VectorMetric};
-use ailake_index::{AnyIndex, HnswIndex, IvfPqSerializer, MmapLoader, RaBitQSerializer};
+use ailake_index::{AnyIndex, HnswIndex, IvfPqSerializer, MmapLoader};
 use ailake_parquet::ParquetVectorReader;
 use arrow_array::RecordBatch;
 use bytes::Bytes;
 
-use crate::footer::{
-    AilakeHeader, DistanceMetric, FLAG_INDEX_IVF_PQ, FLAG_INDEX_RABITQ, HEADER_SIZE,
-};
+use crate::footer::{AilakeHeader, DistanceMetric, FLAG_INDEX_IVF_PQ, HEADER_SIZE};
 
 pub struct AilakeFileReader {
     bytes: Bytes,
@@ -129,7 +128,11 @@ impl AilakeFileReader {
         if hnsw_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
         }
-        MmapLoader::from_bytes(&self.bytes[hnsw_start..hnsw_end])
+        let mut idx = MmapLoader::from_bytes(&self.bytes[hnsw_start..hnsw_end])?;
+        if header.precision == Precision::F16 {
+            idx.quantize_to_f16();
+        }
+        Ok(idx)
     }
 
     /// Load primary index as `AnyIndex`, dispatching on header flags.
@@ -157,14 +160,14 @@ impl AilakeFileReader {
         }
         let index_bytes = &self.bytes[index_start..index_end];
 
-        if header.flags & FLAG_INDEX_RABITQ != 0 {
-            let idx = RaBitQSerializer::from_bytes(index_bytes)?;
-            Ok(AnyIndex::RaBitQ(idx))
-        } else if header.flags & FLAG_INDEX_IVF_PQ != 0 {
+        if header.flags & FLAG_INDEX_IVF_PQ != 0 {
             let idx = IvfPqSerializer::from_bytes(index_bytes)?;
             Ok(AnyIndex::IvfPq(idx))
         } else {
-            let idx = MmapLoader::from_bytes(index_bytes)?;
+            let mut idx = MmapLoader::from_bytes(index_bytes)?;
+            if header.precision == Precision::F16 {
+                idx.quantize_to_f16();
+            }
             Ok(AnyIndex::Hnsw(idx))
         }
     }
@@ -228,7 +231,6 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
-            rabitq: None,
         }
     }
 

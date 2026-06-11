@@ -4,6 +4,7 @@ package io.ailake.trino
 
 import io.trino.spi.connector.Connector
 import io.trino.spi.connector.ConnectorMetadata
+import io.trino.spi.connector.ConnectorPageSinkProvider
 import io.trino.spi.connector.ConnectorRecordSetProvider
 import io.trino.spi.connector.ConnectorSession
 import io.trino.spi.connector.ConnectorSplitManager
@@ -15,11 +16,16 @@ class VectorScanConnector(
     private val tableUri: String,
     private val vectorColumn: String,
     private val dim: Int,
+    private val metric: String,
+    private val precision: String,
+    private val namespace: String,
+    private val tableName: String,
 ) : Connector {
 
-    private val metadata = VectorScanMetadata(tableUri, vectorColumn, dim)
+    private val metadata = VectorScanMetadata(tableUri, vectorColumn, dim, metric, precision, namespace, tableName)
     private val splitManager = VectorScanSplitManager()
     private val recordSetProvider = VectorScanRecordSetProvider()
+    private val pageSinkProvider = AilakePageSinkProvider()
 
     override fun beginTransaction(
         isolationLevel: IsolationLevel,
@@ -35,6 +41,8 @@ class VectorScanConnector(
     override fun getSplitManager(): ConnectorSplitManager = splitManager
 
     override fun getRecordSetProvider(): ConnectorRecordSetProvider = recordSetProvider
+
+    override fun getPageSinkProvider(): ConnectorPageSinkProvider = pageSinkProvider
 
     /**
      * Session properties consumed by this connector:

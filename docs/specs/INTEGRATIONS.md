@@ -20,7 +20,7 @@ AI-Lake tables are read-compatible with any engine that supports Apache Iceberg 
 | **Trino 430** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `trino-plugin/` | — |
 | **Apache Flink 1.18+** | ✅ Iceberg connector | ✅ `ailake-flink` sink | ✅ `ailake-flink` source | ✅ `AilakeSinkFunction` |
 | **Apache Beam 2.56+** | ✅ Managed IcebergIO | ✅ Managed IcebergIO | via SDK direct | ✅ Streaming read/write |
-| **DuckDB 0.10+** | ✅ Iceberg extension | Read-only | — | — |
+| **DuckDB 0.10+** | ✅ Iceberg extension | ✅ `duckdb-ailake/` extension | ✅ `ailake_search()` + `ailake_write_batch()` | — |
 | **PyIceberg 0.6+** | ✅ | ✅ | via SDK direct | — |
 | **AWS Athena** | ✅ Glue catalog | Limited | — | — |
 | **AWS EMR** | ✅ Spark/Trino on EMR | ✅ | Phase 3 | ✅ |
@@ -31,8 +31,11 @@ AI-Lake tables are read-compatible with any engine that supports Apache Iceberg 
 | **GCP Dataflow** | ✅ Beam IcebergIO | ✅ Beam IcebergIO | via SDK direct | ✅ |
 | **Snowflake** | ✅ Iceberg tables | Limited | — | — |
 | **Databricks (general)** | ✅ | ✅ | Phase 3 | ✅ |
+| **Python (`ailake-py`)** | ✅ PyArrow | ✅ `open_table` + `Table.insert` | ✅ `SearchQuery` fluent chain | ✅ `write_batch_idempotent`, async API |
+| **Go (`ailake-go`)** | ✅ AilakeReader | ✅ AilakeWriter | ✅ VectorSearch | — |
+| **C++17 (`ailake-cpp`)** | ✅ header-only | ✅ header-only | ✅ header-only | — |
 
-**SDK direct** = use the `ailake-py` Python SDK or `ailake-jni` JVM SDK to run vector search directly, outside of the engine's SQL planner.
+**SDK direct** = use the `ailake-py` Python SDK, `ailake-go` Go SDK, `ailake-cpp` C++ SDK, or `ailake-jni` JVM SDK to run vector search directly, outside of the engine's SQL planner.
 
 ---
 
@@ -137,7 +140,7 @@ spark.sql("CALL glue_catalog.system.rewrite_data_files("
 ailake_compact("s3://my-bucket/warehouse/db/my_ailake_table/")
 ```
 
-**Important**: during streaming, new files produced by the stream writer have no HNSW (or RaBitQ) in their AI-Lake footer. They are still readable as standard Iceberg files. Vector search returns only chunks from files that have been compacted (with an index). Run compaction frequently to minimize the "blind window." RaBitQ is a faster compaction choice than HNSW for high-ingest tables — one-pass O(n) encoding, no graph construction.
+**Important**: during streaming, new files produced by the stream writer have no HNSW index in their AI-Lake footer. They are still readable as standard Iceberg files. Vector search returns only chunks from files that have been compacted (with an index). Run compaction frequently to minimize the "blind window."
 
 ---
 
@@ -468,11 +471,104 @@ Or set `ailake.native.lib` system property or `AILAKE_NATIVE_LIB` env var to poi
 | `vector.metric` | | `euclidean` | `cosine` / `euclidean` / `dot_product` |
 | `vector.precision` | | `f16` | `f16` / `f32` / `i8` |
 | `search.top-k` | | `10` | Results per query |
-| `search.ef` | | `50` | HNSW ef_search parameter |
+| `search.ef` | | `50` | HNSW ef_search parameter (ignored for IVF-PQ index type) |
+| `search.rerank-factor` | | `1` | Rerank multiplier for IVF-PQ (fetches `top_k × factor` candidates, reranks with exact distances). Ignored for HNSW. |
 
 ---
 
-## 5. Cloud Providers
+## 5. DuckDB Extension (`duckdb-ailake`)
+
+### What it does
+
+`duckdb-ailake/` is a C++ DuckDB community extension that bridges DuckDB SQL to `libailake_jni.so` via `dlopen`. It exposes two table/scalar functions:
+
+| Function | Signature | Description |
+|---|---|---|
+| `ailake_search` | `(table_path VARCHAR, query FLOAT[], top_k INTEGER) → TABLE(row_id BIGINT, distance FLOAT, file_path VARCHAR)` | Vector nearest-neighbor search |
+| `ailake_write_batch` | `(table_path VARCHAR, ids BIGINT[], embeddings FLOAT[][]) → BIGINT` | Write a batch; returns snapshot ID or -1 on error |
+
+The extension uses the same JSON-envelope C-ABI protocol as the Spark and Trino plugins — no additional Rust code required.
+
+### Build
+
+```bash
+# Prerequisites: CMake ≥ 3.28, C++17 compiler
+cargo build --release -p ailake-jni          # build native lib first
+
+cmake -S duckdb-ailake -B duckdb-ailake/build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DDUCKDB_VERSION=v1.1.3
+cmake --build duckdb-ailake/build --parallel
+
+# Artifact: duckdb-ailake/build/ailake.duckdb_extension
+```
+
+### Load and use
+
+```python
+import ctypes, duckdb
+
+# Pre-load native lib (RTLD_GLOBAL so DuckDB's dlopen finds symbols)
+ctypes.CDLL("./target/release/libailake_jni.so", ctypes.RTLD_GLOBAL)
+
+conn = duckdb.connect()
+conn.execute("LOAD './duckdb-ailake/build/ailake.duckdb_extension'")
+
+# Vector search
+rows = conn.execute("""
+    SELECT row_id, distance, file_path
+    FROM ailake_search(
+        '/path/to/table',
+        [0.021, -0.043, 0.118, ...]::FLOAT[],
+        10
+    )
+    ORDER BY distance
+""").fetchall()
+
+# Write a batch
+snap_id = conn.execute("""
+    SELECT ailake_write_batch(
+        'file:///path/to/table',
+        [0, 1, 2]::BIGINT[],
+        [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+    )
+""").fetchone()[0]
+```
+
+### Named parameters
+
+```sql
+-- explicit vector column and ef_search
+SELECT * FROM ailake_search(
+    '/path/to/table',
+    [0.1, 0.2, 0.3]::FLOAT[],
+    5,
+    vec_col='context_embedding',
+    ef_search=100
+);
+
+-- explicit metric and precision
+SELECT ailake_write_batch(
+    'file:///path/to/table',
+    [0, 1]::BIGINT[],
+    [[0.1, 0.2], [0.3, 0.4]],
+    'embedding',   -- vec_col
+    'cosine',      -- metric
+    'f16'          -- precision
+);
+```
+
+### Graceful degradation
+
+When `libailake_jni.so` is not found or not pre-loaded, `ailake_search` returns 0 rows instead of raising an error — the same behaviour as the Spark and Trino plugins. `ailake_write_batch` returns -1.
+
+### CI
+
+`ci-duckdb.yml` (`workflow_dispatch`) builds the extension, generates a fixture via `tests/fixtures/write_fixture.py`, then runs `duckdb-ailake/test/test_write.py` and `duckdb-ailake/test/test_search.py`.
+
+---
+
+## 6. Cloud Providers
 
 ### 4A — Amazon Web Services (AWS)
 
@@ -701,7 +797,7 @@ writer = ailake.TableWriter(
 
 ---
 
-## 6. Catalog compatibility summary
+## 7. Catalog compatibility summary
 
 | Catalog | Protocol | AWS | GCP | Azure | Self-hosted |
 |---|---|---|---|---|---|
@@ -717,7 +813,7 @@ writer = ailake.TableWriter(
 
 ---
 
-## 7. `ailake-catalog` crate — catalog abstraction
+## 8. `ailake-catalog` crate — catalog abstraction
 
 The `ailake-catalog` crate provides a `CatalogProvider` trait that all catalog backends implement. The `ailake-query` layer uses only this trait — switching catalogs requires only a config change, not code changes.
 
@@ -786,7 +882,7 @@ writer = ailake.TableWriter(
 
 ---
 
-## 8. AI-Lake-specific SQL UDF (Phase 3)
+## 9. AI-Lake-specific SQL UDF (Phase 3)
 
 When the AI-Lake plugin is loaded in Spark or Trino, the following SQL surface is exposed:
 
@@ -816,7 +912,7 @@ The `ailake_embed` / `ailake.system.embed` function calls a configured embedding
 
 ---
 
-## 9. Compatibility tests (CI)
+## 10. Compatibility tests (CI)
 
 All integration tests use Docker Compose to spin up required services.
 

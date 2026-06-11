@@ -7,7 +7,6 @@ pub mod compress;
 pub mod distance;
 pub mod pq;
 pub mod quantize;
-pub mod rabitq;
 
 pub use compress::{BlockCompressor, CompressionCodec};
 pub use distance::{

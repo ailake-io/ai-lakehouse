@@ -2,8 +2,8 @@ name: Release
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
+  # push:
+  #   branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,27 +22,58 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # full history so tag push works
+          fetch-depth: 0  # full history needed to read latest tag
 
-      - name: Read version from Cargo.toml
+      - name: Bump patch version from latest tag
         id: version
-        run: |
-          VERSION=$(grep '^version' ailake-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Create and push git tag
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
-          git push origin "${{ steps.version.outputs.tag }}"
+
+          # Derive next version from latest semver tag (patch+1).
+          # Falls back to v0.0.0 when no tags exist yet.
+          LATEST=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
+          LATEST=${LATEST:-v0.0.0}
+          MAJOR=$(echo "${LATEST#v}" | cut -d. -f1)
+          MINOR=$(echo "${LATEST#v}" | cut -d. -f2)
+          PATCH=$(echo "${LATEST#v}" | cut -d. -f3)
+          NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          NEW_TAG="v$NEW_VERSION"
+
+          # Bump every Cargo.toml (crate versions + inter-crate deps).
+          # Quotes ensure we don't partial-match e.g. "0.0.9" inside "0.0.10".
+          OLD_VERSION="${LATEST#v}"
+          find . -name "Cargo.toml" -not -path "*/target/*" \
+            -exec sed -i "s/\"$OLD_VERSION\"/\"$NEW_VERSION\"/g" {} \;
+
+          git add $(find . -name "Cargo.toml" -not -path "*/target/*")
+          git diff --cached --quiet || \
+            git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
+          git pull --rebase origin main
+          git push origin main
+
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$NEW_TAG"         >> "$GITHUB_OUTPUT"
+
+      - name: Create and push git tag
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping"
+          else
+            git tag "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
 
       - name: Create GitHub Release
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" \
-            --title "AI-Lake ${{ steps.version.outputs.tag }}" \
-            --notes "## ${{ steps.version.outputs.tag }}
+          TAG="${{ steps.version.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub Release $TAG already exists, skipping"
+          else
+            gh release create "$TAG" \
+              --title "AI-Lake $TAG" \
+              --notes "## $TAG
 
           See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for full release notes.
 
@@ -58,7 +89,8 @@ jobs:
           ### JVM plugins
           Spark, Trino, and Flink fat-JARs and \`libailake_jni.so\` attached as release assets.
           " \
-            --draft=false
+              --draft=false
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -68,6 +100,8 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.tag }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -82,51 +116,27 @@ jobs:
 
       # Publish in dependency order (leaf crates first).
       # crates.io needs ~30 s after each publish before dependents can resolve it.
-
-      - name: Publish ailake-core
-        run: cargo publish -p ailake-core
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish ailake-vec
-        run: cargo publish -p ailake-vec
-
-      - name: Publish ailake-store
-        run: cargo publish -p ailake-store
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish ailake-parquet
-        run: cargo publish -p ailake-parquet
-
-      - name: Publish ailake-index
-        run: cargo publish -p ailake-index
-
-      - name: Publish ailake-catalog
-        run: cargo publish -p ailake-catalog
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish ailake-file
-        run: cargo publish -p ailake-file
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish ailake-query
-        run: cargo publish -p ailake-query
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish ailake-jni
-        run: cargo publish -p ailake-jni
-
-      - name: Publish ailake-cli
-        run: cargo publish -p ailake-cli
+      # Exit code 10 = crate version already exists on crates.io — safe to skip.
+      - name: Publish all crates
+        run: |
+          pub() {
+            cargo publish -p "$1" || { c=$?; [ $c -eq 10 ] && echo "$1 already published, skipping" || exit $c; }
+          }
+          pub ailake-core
+          sleep 30
+          pub ailake-vec
+          pub ailake-store
+          sleep 30
+          pub ailake-parquet
+          pub ailake-index
+          pub ailake-catalog
+          sleep 30
+          pub ailake-file
+          sleep 30
+          pub ailake-query
+          sleep 30
+          pub ailake-jni
+          pub ailake-cli
 
   publish-jvm:
     name: Build and upload JVM plugin JARs
@@ -139,6 +149,8 @@ jobs:
       TAG: ${{ needs.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -166,10 +178,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$TAG" \
-            "spark-plugin/build/libs/spark-plugin-${VERSION}-plugin.jar" \
-            "trino-plugin/build/libs/trino-plugin-${VERSION}-plugin.jar" \
-            "ailake-flink/build/libs/ailake-flink-${VERSION}-plugin.jar" \
-            "target/release/libailake_jni.so" \
+            spark-plugin/build/libs/spark-plugin-*-plugin.jar \
+            trino-plugin/build/libs/trino-plugin-*-plugin.jar \
+            ailake-flink/build/libs/ailake-flink-*-plugin.jar \
+            target/release/libailake_jni.so \
             --clobber
 
   publish-airflow:
@@ -182,6 +194,8 @@ jobs:
       TAG: ${{ needs.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.tag }}
 
       - uses: actions/setup-python@v5
         with:
@@ -212,7 +226,7 @@ jobs:
 
   pypi-linux:
     name: Build Python wheel — Linux (${{ matrix.target }})
-    needs: publish-airflow
+    needs: [release, publish-airflow]
     runs-on: [self-hosted, Linux, X64]
     strategy:
       matrix:
@@ -226,6 +240,7 @@ jobs:
 
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.release.outputs.tag }}
           clean: false
 
       - uses: PyO3/maturin-action@v1
@@ -255,7 +270,7 @@ jobs:
     # (e.g. [self-hosted, macOS, ARM64]), and add `pypi-macos` to pypi-publish needs.
     name: Build Python wheel — macOS (${{ matrix.target }})
     if: false
-    needs: pypi-linux
+    needs: [release, pypi-linux]
     runs-on: macos-latest
     strategy:
       matrix:
@@ -263,6 +278,8 @@ jobs:
       max-parallel: 1
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.tag }}
 
       - uses: actions/setup-python@v5
         with:
@@ -288,21 +305,26 @@ jobs:
 
   pypi-windows:
     name: Build Python wheel — Windows (x86_64)
-    needs: pypi-macos
+    needs: [release, pypi-linux]
     runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.tag }}
 
-      - name: Add Cargo to PATH
+      - name: Install Rust (Windows)
         shell: pwsh
         run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            $tmp = "$env:TEMP\rustup-init.exe"
+            Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $tmp
+            Start-Process -FilePath $tmp -ArgumentList '-y','--default-toolchain','stable','--target','x86_64-pc-windows-msvc' -Wait -NoNewWindow
+            Remove-Item $tmp
+          } else {
+            rustup toolchain install stable --target x86_64-pc-windows-msvc
+            rustup default stable
+          }
           "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Install Rust stable
-        shell: pwsh
-        run: |
-          rustup toolchain install stable --target x86_64-pc-windows-msvc
-          rustup default stable
 
       - name: Add Strawberry Perl to PATH
         shell: pwsh
@@ -329,7 +351,7 @@ jobs:
 
   pypi-sdist:
     name: Build Python sdist
-    needs: pypi-windows
+    needs: [release, pypi-linux]
     runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Fix Docker-owned file permissions
@@ -339,7 +361,10 @@ jobs:
 
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.release.outputs.tag }}
           clean: false
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-python@v5
         with:
@@ -357,7 +382,7 @@ jobs:
 
   pypi-publish:
     name: Publish Python wheel to PyPI
-    needs: [release, pypi-linux, pypi-macos, pypi-windows, pypi-sdist]
+    needs: [release, pypi-linux, pypi-windows, pypi-sdist]
     runs-on: [self-hosted, Linux, X64]
     permissions:
       actions: read

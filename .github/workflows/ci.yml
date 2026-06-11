@@ -2,10 +2,10 @@ name: CI
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
+  # push:
+  #   branches: [main, develop]
+  # pull_request:
+  #   branches: [main, develop]
 
 env:
   CARGO_TERM_COLOR: always
@@ -169,8 +169,23 @@ jobs:
         run: |
           rm -rf /tmp/ailake-py-venv
           python3 -m venv /tmp/ailake-py-venv
-          /tmp/ailake-py-venv/bin/pip install maturin
+          /tmp/ailake-py-venv/bin/pip install maturin mypy pandas pyarrow polars
           cd ailake-py && /tmp/ailake-py-venv/bin/maturin build --release --out dist --interpreter python3
           cd ..
           /tmp/ailake-py-venv/bin/pip install ailake-py/dist/*.whl
+          /tmp/ailake-py-venv/bin/python3 -m mypy ailake-py/python/ailake/ \
+            --ignore-missing-imports --no-strict-optional
           /tmp/ailake-py-venv/bin/python3 tests/compat/check_ailake_py.py
+
+  test-jvm:
+    name: test-jvm (trino + spark plugins)
+    runs-on: [self-hosted, Linux]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+      - name: Run Trino plugin unit tests
+        run: gradle -p trino-plugin test --no-daemon --no-configuration-cache
+      - name: Run Spark plugin unit tests
+        run: gradle -p spark-plugin test --no-daemon --no-configuration-cache

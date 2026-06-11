@@ -285,6 +285,17 @@ cmake --build ailake-cpp/build --parallel
 ctest --test-dir ailake-cpp/build --output-on-failure
 ```
 
+Unit tests live in `ailake-cpp/tests/`:
+
+| File | What it covers |
+|---|---|
+| `test_footer.cpp` | AILK header parsing, all flag bits (`is_hnsw`, `is_ivfpq`, `is_rabitq`, `is_binary`), bad magic/version rejection |
+| `test_hnsw.cpp` | Flat HNSW search (Euclidean, Cosine, top-k capped, empty index) |
+| `test_ivfpq.cpp` | IVF-PQ nearest-cell search, top-k limit, zero nprobe |
+| `test_binary.cpp` | `f32_to_bits` MSB-first packing, `hamming_distance` (single byte, multibyte, 32-byte SIMD), `binary_search` (top-1, top-k cap, F16 rerank, empty, zero top_k) |
+
+All test binaries are compiled via `foreach(_test footer hnsw ivfpq binary)` in `CMakeLists.txt` and run via `ctest`. New index types require a corresponding `test_<name>.cpp`.
+
 Key rules:
 - Header-only where possible — implementations in `include/ailake/*.hpp`
 - No exceptions in public API headers (`noexcept` on search + parse functions)
@@ -400,7 +411,7 @@ feat(ailake-index): add IVF-PQ adaptive nlist selection
 ### What happens after merge
 
 - `develop` receives the PR.
-- When ready for release, maintainers bump versions, update CHANGELOG, run CI and Compat Heavy, then merge to `main` — `release.yml` fires automatically on the merge and publishes crates, JVM plugins, Airflow provider, and Python wheels in a sequential chain (see [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md#manual-actions-trigger-order-pre-release)).
+- When ready for release, maintainers update CHANGELOG, run CI and Compat Heavy, then merge to `main` — `release.yml` fires automatically, auto-bumps the patch version in all `Cargo.toml` files, creates the git tag, and publishes crates, JVM plugins, Airflow provider, and Python wheels in a sequential chain. No manual version edits needed (see [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md#manual-actions-trigger-order-pre-release)).
 
 ---
 

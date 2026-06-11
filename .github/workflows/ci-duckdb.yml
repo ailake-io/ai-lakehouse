@@ -1,0 +1,73 @@
+name: CI DuckDB Extension
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  DUCKDB_VERSION: "v1.1.3"
+
+jobs:
+  build-and-test:
+    name: build + test (Linux x86_64)
+    runs-on: [self-hosted, Linux, X64]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.28"
+
+      - name: Build libailake_jni.so
+        run: cargo build --release -p ailake-jni
+
+      - name: Configure DuckDB extension
+        run: |
+          cmake -S duckdb-ailake -B duckdb-ailake/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDUCKDB_VERSION=${{ env.DUCKDB_VERSION }}
+
+      - name: Build DuckDB extension
+        run: cmake --build duckdb-ailake/build --parallel
+
+      - name: Verify extension artifact
+        run: |
+          ls -lh duckdb-ailake/build/ailake.duckdb_extension
+          file duckdb-ailake/build/ailake.duckdb_extension
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: pip install duckdb==$(echo ${{ env.DUCKDB_VERSION }} | tr -d 'v') pyarrow numpy
+
+      - name: Generate write fixture
+        run: python tests/fixtures/write_fixture.py ./compat-fixture
+        env:
+          AILAKE_LIB: target/release/libailake_jni.so
+
+      - name: Run write tests
+        run: python duckdb-ailake/test/test_write.py
+        env:
+          AILAKE_LIB:    target/release/libailake_jni.so
+          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_TMPDIR: /tmp/ailake_duck_write
+
+      - name: Run search tests
+        run: python duckdb-ailake/test/test_search.py
+        env:
+          AILAKE_LIB:     target/release/libailake_jni.so
+          AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_FIXTURE: ./compat-fixture
+
+      - name: Run scan tests
+        run: python duckdb-ailake/test/test_scan.py
+        env:
+          AILAKE_LIB:     target/release/libailake_jni.so
+          AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_FIXTURE: ./compat-fixture

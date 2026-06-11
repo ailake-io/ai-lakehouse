@@ -12,108 +12,71 @@ Requires Python ≥ 3.9. Dependencies: `pyarrow >= 14.0`, `numpy >= 1.24`.
 
 ## Quickstart
 
-### Write
+### Write + search — fluent API (recommended)
 
 ```python
 import ailake
 import numpy as np
 
-writer = ailake.TableWriter(
-    path="./my_table",
-    vector_column="embedding",  # default
-    dim=1536,                   # default
-    metric="cosine",            # cosine | euclidean | dot_product
-    pre_normalize=True,         # normalize to unit L2 at write time (recommended for cosine)
-                                # enables NormalizedCosine fast path: 1-dot(a,b), no sqrt
-    hnsw_m=16,                  # HNSW connections per node (default 16; 32 = higher recall)
-    hnsw_ef_construction=150,   # HNSW build quality (default 150; 400 = max quality)
+# Open or create a table
+table = ailake.open_table(
+    "./my_table",
+    dim=1536,
+    metric="cosine",          # cosine | euclidean | dot_product | normalized_cosine
+    pre_normalize=True,       # normalize at write time; enables fast 1-dot(a,b) path
+    hnsw_m=16,                # HNSW connections per node (default 16)
+    hnsw_ef_construction=150,
 )
 
 texts = ["Document about AI", "Another document"]
-embeddings = np.random.rand(2, 1536).astype(np.float32).tolist()
+embeddings = np.random.rand(2, 1536).astype(np.float32)
 
-writer.write_batch(texts=texts, embeddings=embeddings)
-snapshot_id = writer.commit()
+table.insert(texts, embeddings)   # accepts list or numpy array
+snapshot_id = table.commit()
+
+# Pointer-only search (default — backward-compatible)
+df      = table.search(embeddings[0], top_k=10).to_pandas()   # row_id, distance, file
+lf      = table.search(embeddings[0]).limit(5).to_polars()
+results = table.search(embeddings[0]).to_list()   # list[dict]
+
+# Full row data — all Parquet columns + _distance
+df_full = table.search(embeddings[0], top_k=10, fetch_data=True).to_pandas()
 ```
 
-### TableWriter parameters
+### Async API
 
-| Parameter | Default | Description |
-|---|---|---|
-| `path` | required | Table root path (local or `s3://`, `gs://`, `az://`) |
-| `vector_column` | `"embedding"` | Vector column name |
-| `dim` | `1536` | Vector dimension |
-| `metric` | `"cosine"` | `cosine`, `euclidean`, `dot_product` |
-| `pre_normalize` | `False` | Normalize to unit L2 at write time (recommended for cosine). Enables `1-dot(a,b)` fast path. |
-| `hnsw_m` | `None` (=16) | HNSW connections per node. Higher → better recall, more memory. |
-| `hnsw_ef_construction` | `None` (=150) | HNSW build pool size. Higher → better quality, slower build. |
-| `rabitq` | `False` | Use RaBitQ flat index instead of HNSW: 1 bit/dim = 16× smaller than F16. Better recall than naive binary quantization. Use with `rerank_factor ≥ 3` at search. |
-| `rabitq_seed` | `0` | Seed for RaBitQ random rotation matrix. |
-| `rabitq_keep_raw` | `True` | Keep raw F16 vectors for exact reranking (recommended). |
+```python
+import ailake, asyncio
+import numpy as np
 
-HNSW tuning guide:
+async def main():
+    table = ailake.open_table("./my_table", dim=1536)
+    await table.insert_async(texts, embeddings)
+    await table.commit_async()
 
-| Goal | `hnsw_m` | `hnsw_ef_construction` |
-|---|---|---|
-| Low latency / high QPS | 8 | 100 |
-| General purpose (default) | 16 | 150 |
-| High recall (RAG) | 24 | 200 |
-| Max recall (medical, legal) | 32 | 400 |
+    # fluent async chain
+    df = await table.search(query_vec).limit(10).to_pandas_async()
 
-### RaBitQ — extreme compression (1 bit/dim)
+    # parallel searches via asyncio.gather
+    r1, r2 = await asyncio.gather(
+        table.search(q1).to_list_async(),
+        table.search(q2).to_list_async(),
+    )
 
-RaBitQ is a flat index with no graph construction: 1 bit/dim after a **modified Gram-Schmidt orthonormal rotation**, yielding better recall than naive binary quantization via an unbiased XOR/popcount IP estimator. Write throughput ~163k vec/s (no k-means, no graph; SIFT-1M measured). Storage: 200 bytes/vector at dim=1536 (15× smaller than F16). Search is sequential O(N) flat scan; shard-level parallelism handled automatically.
+asyncio.run(main())
+```
 
-Use when storage is the primary constraint or write throughput matters more than recall. Designed for **cosine** workloads — recall on Euclidean datasets is lower (~0.67 at rerank=3 on SIFT-1M). Pair with `rerank_factor ≥ 3` (cosine) or `≥ 10` (Euclidean/complex) to recover precision using the stored raw F16 vectors.
+### Module-level search
 
 ```python
 import ailake
 import numpy as np
 
-# Write with RaBitQ (keep_raw=True stores F16 vectors for reranking)
-writer = ailake.TableWriter(
-    path="./rabitq_table",
-    dim=1536,
-    metric="cosine",
-    rabitq=True,
-    rabitq_seed=42,       # same seed across all shards → comparable distances
-    rabitq_keep_raw=True, # recommended: enables reranking
-)
-writer.write_batch(texts=texts, embeddings=embeddings)
-writer.commit()
+query = np.random.rand(1536).astype(np.float32)
 
-# Search with reranking for best recall
-results = ailake.search(
-    path="./rabitq_table",
-    query=query,
-    top_k=10,
-    rerank_factor=10,  # recommended: ≥ 3 for most cosine, ≥ 10 for complex datasets
-)
-```
-
-| Index | Bytes/vector (dim=1536) | Recall@10 cosine (rerank≥3) | Write (vec/s) |
-|---|---|---|---|
-| HNSW (F16) | ~3 200 | ≥ 0.95 | ~50k |
-| IVF-PQ (M=48) | ~50 | 0.90–0.95 | ~200k |
-| RaBitQ (no raw) | **192** | 0.70–0.85 | **~163k** |
-| RaBitQ + raw F16 | ~3 264 | **0.85–0.95** | **~163k** |
-
-### Search
-
-```python
-import ailake
-import numpy as np
-
-query = np.random.rand(1536).astype(np.float32).tolist()
-
-results = ailake.search(
-    path="./my_table",
-    query=query,
-    top_k=10,
-)
-
-for r in results:
-    print(r["row_id"], r["distance"], r["file"])
+df     = ailake.search("./my_table", query, top_k=10).to_pandas()
+lf     = ailake.search("./my_table", query).limit(5).to_polars()
+items  = ailake.search("./my_table", query).to_list()
 ```
 
 ### Assemble context for LLMs
@@ -138,32 +101,107 @@ context_xml = ailake.assemble_context(
     max_tokens=4096,       # token budget (4 chars ≈ 1 token)
     dedup_threshold=0.05,  # drop near-duplicate chunks
 )
-
 # Pass context_xml directly to Claude / GPT-4 as a user message
 ```
 
-## API
+## API reference
 
-### `TableWriter(path, vector_column="embedding", dim=1536, metric="cosine")`
+### `open_table(path, *, ...) → Table`
 
-Opens or creates an AI-Lake table at `path`. Local filesystem only in this release.
+Opens or creates an AI-Lake table at `path`.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `path` | required | Table root (local, `s3://`, `gs://`, `az://`) |
+| `vector_column` | `"embedding"` | Vector column name |
+| `dim` | `1536` | Embedding dimension |
+| `metric` | `"cosine"` | `cosine`, `euclidean`, `dot_product`, `normalized_cosine` |
+| `pre_normalize` | `False` | Normalize to unit L2 at write; enables `1-dot(a,b)` fast path (~12-20 % speedup) |
+| `hnsw_m` | `None` (=16) | HNSW connections per node |
+| `hnsw_ef_construction` | `None` (=150) | HNSW build pool size |
+
+### `Table`
 
 | Method | Description |
 |---|---|
-| `write_batch(texts, embeddings)` | Stage a batch of rows. `texts: list[str]`, `embeddings: list[list[float]]` |
-| `commit() -> int` | Commit staged batches as a new Iceberg snapshot. Returns snapshot ID. |
+| `insert(texts, embeddings) → Table` | Buffer a batch. `embeddings`: `list[list[float]]` or numpy array. |
+| `commit() → int` | Persist as a new Iceberg snapshot; returns snapshot ID. |
+| `search(query, top_k=10, fetch_data=False) → SearchQuery` | Lazy, chainable search. `query`: `list[float]` or numpy array. Set `fetch_data=True` to return full row data. |
+| `insert_async(...)` | Async variant of `insert`. |
+| `commit_async() → int` | Async variant of `commit`. |
 
-### `search(path, query, top_k=10) -> list[dict]`
+`Table` is a context manager: `with ailake.open_table(...) as t: ...`
 
-Returns up to `top_k` nearest neighbours. Each result: `{"row_id": int, "distance": float, "file": str}`.
+In Jupyter, `table` renders a styled HTML card showing path and vector config.
 
-### `assemble_context(chunks, max_tokens=4096, dedup_threshold=0.05) -> str`
+### `SearchQuery`
 
-Assembles a list of chunk dicts into structured XML ready for LLM input. Deduplicates near-identical chunks and respects the token budget.
+Lazy result set — no I/O until materialised.
+
+| Method | Description |
+|---|---|
+| `limit(n) → SearchQuery` | Cap to *n* nearest neighbours (chainable). |
+| `to_list() → list[dict]` | Always pointer-only: `[{"row_id": int, "distance": float, "file": str}, ...]` |
+| `to_arrow() → pyarrow.Table` | Full row data (all columns + `_distance`) when `fetch_data=True`; pointer-only `pyarrow.Table` with columns `row_id, distance, file` otherwise. |
+| `to_pandas() → pd.DataFrame` | Full row DataFrame when `fetch_data=True`; pointer-only otherwise. |
+| `to_polars() → pl.DataFrame` | Full row DataFrame when `fetch_data=True`; pointer-only otherwise. |
+| `to_list_async()` | Async variant. |
+| `to_arrow_async()` | Async variant. |
+| `to_pandas_async()` | Async variant. |
+| `to_polars_async()` | Async variant. |
+
+In Jupyter, `results` renders as an HTML table when executed, pending state otherwise.
+When `fetch_data=True`, the HTML table shows all Parquet columns.
+
+#### Full-read mode
+
+```python
+# Pointer-only (default — backward-compatible)
+df = ailake.search("./my_table", query, top_k=10).to_pandas()
+# columns: row_id, distance, file
+
+# Full row data — all Parquet columns + _distance
+df = ailake.search("./my_table", query, top_k=10, fetch_data=True).to_pandas()
+# columns: text, embedding, ..., _distance
+
+# Same via Table handle
+df = table.search(query, top_k=10, fetch_data=True).to_pandas()
+```
+
+`fetch_data=True` reads each matching Parquet file once and uses `arrow_select::take` to extract only the matched rows — no full table scan.
+
+### `search(path, query, top_k=10, fetch_data=False) → SearchQuery`
+
+Module-level search returning the same chainable `SearchQuery`.
+
+### `TableWriter` (legacy — still supported)
+
+```python
+writer = ailake.TableWriter(path, vector_column="embedding", dim=1536, metric="cosine")
+writer.write_batch(texts, embeddings)
+snapshot_id = writer.commit()
+```
+
+### `assemble_context(chunks, max_tokens=4096, dedup_threshold=0.05) → str`
+
+Assembles chunk dicts into structured XML for LLM input. Deduplicates near-identical chunks within the token budget.
+
+## HNSW tuning guide
+
+| Goal | `hnsw_m` | `hnsw_ef_construction` |
+|---|---|---|
+| Low latency / high QPS | 8 | 100 |
+| General purpose (default) | 16 | 150 |
+| High recall (RAG) | 24 | 200 |
+| Max recall (medical, legal) | 32 | 400 |
+
+## Type checking
+
+Ships `py.typed` (PEP 561) and `ailake/_ailake.pyi` stubs. `mypy` and `pyright` work out of the box with no configuration.
 
 ## Iceberg compatibility
 
-Tables written by `ailake` are valid Apache Iceberg Spec v2 tables. Any Iceberg-compatible engine (Spark, Trino, DuckDB, PyIceberg) reads the tabular columns normally. The HNSW index lives in an AI-Lake extension section that standard Parquet readers silently ignore.
+Tables are valid Apache Iceberg Spec v2. Spark, Trino, DuckDB, and PyIceberg read tabular columns normally; the HNSW index lives in an extension section that standard Parquet readers silently ignore.
 
 ## License
 

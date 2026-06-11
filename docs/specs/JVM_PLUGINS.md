@@ -56,7 +56,7 @@ Reference guide for the two JVM query-engine plugins that expose AI-Lake vector 
 Each GitHub Release includes pre-built artifacts uploaded by the `publish-jvm.yml` workflow. No Rust toolchain or Gradle required.
 
 ```bash
-VERSION=0.0.10   # replace with desired release
+VERSION=0.0.16   # replace with desired release
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
@@ -102,9 +102,7 @@ char* ailake_search_json(const char* request_json);
 
 // request_json: {"warehouse":"...","namespace":"default","table":"...",
 //                "dim":1536,"ids":[...],"embeddings":[[...],...],
-//                "metric":"cosine","precision":"f16",
-//                "rabitq":true,"rabitq_seed":42,"rabitq_keep_raw":true}
-// rabitq fields are optional — omit for default HNSW index.
+//                "metric":"cosine","precision":"f16"}
 // Returns: {"ok":true,"snapshot_id":N}
 char* ailake_write_batch_json(const char* request_json);
 

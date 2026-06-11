@@ -11,10 +11,168 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.16] — 2026-06-11
+
+### Added
+
+- **Python full-read after search** — `ailake.search(..., fetch_data=True)` and `Table.search(..., fetch_data=True)` return a `SearchQuery` whose `.to_arrow()` / `.to_pandas()` / `.to_polars()` / async variants materialise a full `pyarrow.Table` with all columns including the embedding decoded as `FixedSizeList<Float32>` + `_distance: float32`. Backward-compatible: default `fetch_data=False` behaviour unchanged.
+- **DuckDB extension** (`duckdb-ailake`) — C++ community extension exposing `ailake_search(table_path, query FLOAT[], top_k) → TABLE(row_id, distance, file_path)` and `ailake_write_batch(table_path, ids BIGINT[], embeddings FLOAT[][]) → BIGINT`. Bridges DuckDB to `libailake_jni.so` via `dlopen`/C-ABI — same JSON-envelope protocol as Spark and Trino plugins. Graceful degradation: search returns 0 rows when native lib not found. CI workflow `ci-duckdb.yml`.
+- **DuckDB `ailake_scan()` — full-row table function** — `ailake_scan(path, query FLOAT[], top_k) → TABLE(col1, col2, ..., _distance)` returns all Parquet columns alongside distance. Schema inferred at bind time; streams STANDARD_VECTOR_SIZE chunks; graceful degradation when native lib not loaded. Backed by new `ailake_scan_json` C-ABI in `ailake-jni`.
+- **Go `Scan()` — full-row fetch** (`ailake-go/scan.go`) — `Scan(catalog, namespace, table, query, opts)` = `Search()` + `FetchRows()`; reads Parquet rows for HNSW hits via `parquet-go` (pure Go, zero CGO); skips row groups with no target row IDs; auto-decodes F16 vector column to `[]float32`; returns `[]ScanRow{RowID, Distance, FilePath, Fields map[string]any}`.
+- **Go unit tests for all packages** — `footer_test.go` (9 tests), `ailake_test.go` (10 unit + 3 integration tests), `distance_test.go` (6 tests), `catalog_test.go` (4 tests), `scan_test.go` (6 unit + 2 integration tests). 33 unit tests pass without fixture; 5 integration tests require `AILAKE_FIXTURE`.
+
+### Fixed
+
+- **DuckDB extension metadata format** — `append_extension_metadata.py` now writes the correct 8×32-byte field layout; fixes `InvalidInputException: metadata at the end of the file is invalid` when loading the extension.
+- **DuckDB extension RTLD_GLOBAL / RTLD_DEFAULT** — `AilakeLib::load()` falls back to `dlsym(RTLD_DEFAULT, …)`; test files set `sys.setdlopenflags(RTLD_GLOBAL)` before `import duckdb`; fixes `undefined symbol` errors at dlopen time.
+- **DuckDB extension C++ ABI** — `CMakeLists.txt` adds `_GLIBCXX_USE_CXX11_ABI=0` to match DuckDB manylinux wheels; fixes ABI mismatch undefined symbols.
+- **DuckDB `allow_unsigned_extensions`** — must be passed via `duckdb.connect(config={...})`, not `SET` after connection starts.
+- **DuckDB fixture path** — `FIXTURE.resolve()` now called in `test_scan.py` to convert relative env var to absolute path.
+- **`LocalStore::new` file:// URI root** — strips the `file://` scheme before constructing the root `PathBuf`; fixes files landing in CWD instead of the intended directory.
+- **`HadoopCatalog::list_files` on fresh table** — returns empty `Vec` when `current_snapshot_id` is `None`; previously errored on brand-new tables before any commit.
+- **HNSW F16 quantization disabled for NormalizedCosine** — `HnswIndex::quantize_to_f16` skips F16 downcast for `NormalizedCosine`; F16 rounding error exceeded true inter-vector distance for pre-normalized unit vectors.
+- **Python `SearchQuery` repr** — pending state renders as `SearchQuery(top_k=N, pending)`, executed state as `SearchQuery(N results, top_k=K)`.
+- **Python `to_arrow()` pointer-only** — returns `pyarrow.Table` (was `RecordBatch`); distance column is `distance` (was `_distance`); columns are `row_id, distance, file`.
+- **Go `HadoopCatalog.tableDir`** — removed `.db` suffix; standard Iceberg HadoopCatalog uses `{warehouse}/{namespace}/{table}` not `{namespace}.db`.
+- **Go `searchFile` path resolution** — same `.db` bug fixed in relative path fallback.
+- **Go `key_metadata` Avro union** — `goavro` v2 returns `["null","bytes"]` union as `map[string]interface{}{"bytes": []byte{...}}`; raw `[]byte` assertion always failed → `HnswOffset` nil → all files silently skipped.
+- **Go `decodeCentroid`** — Rust encodes `centroid_b64` as dim×4 bytes (vector only); radius is a separate JSON field. Old code stripped last float as radius → centroid had dim-1 elements → index-out-of-range panic.
+- **Go `searchFile` AILK header offset** — `key_metadata.hnsw_offset` is absolute position of HNSW blob (after header + centroid); Go was reading header at blob position → "bad magic". Fixed: `ailk_header = hnsw_offset - HeaderSize - (dim+1)*4`.
+
+### Tests
+
+- **`check_ailake_py.py` §8–13** — full-read mode (`fetch_data=True`), `write_batch_idempotent`, `to_polars()`, multiple commits, `pre_normalize=True`, HNSW tuning, edge cases, pointer-only column schema.
+- **`tests/fixtures/write_fixture.py`** — fixture writer for `ci-duckdb.yml`: 1 000 rows dim=128 cosine F16.
+- **Docker demo (`tests/docker/`)** — all 5 notebooks (`01_ailake_demo` through `05_bigquery`) execute cleanly via `nbconvert`; verified with Spark 3.5 local mode, Trino 446 + Nessie, and goccy BigQuery emulator.
+
+### CI
+
+- `ci-duckdb.yml`: cmake build + Python integration tests for DuckDB extension + `ailake_scan` integration tests.
+- `ci-go.yml`: unit step runs `go test ./...` (integration tests auto-skip without `AILAKE_FIXTURE`); integration step runs all tests with fixture.
+
+---
+
+## [0.0.15] — 2026-06-09
+
+### Added
+
+- **Python fluent API** — `open_table(path, **kwargs) → Table`, `Table.insert(texts, embeddings)`, `Table.search(query, top_k) → SearchQuery`, `SearchQuery.limit(n)`, `.to_list()`, `.to_pandas()`, `.to_polars()`. Chainable, DataFrame-native; accepts numpy arrays anywhere a vector is expected.
+- **Python async API** — `Table.insert_async`, `Table.commit_async`, `SearchQuery.to_list_async`, `to_pandas_async`, `to_polars_async`; backed by `run_in_executor` so asyncio event loop is never blocked; supports `asyncio.gather` for parallel searches.
+- **Python Jupyter repr** — `Table._repr_html_()` renders a styled card with path and vector config; `SearchQuery._repr_html_()` renders pending state or results table inline in notebooks.
+- **Python type stubs** (`ailake/_ailake.pyi`) — full stubs for `TableWriter`, `search`, `assemble_context` with `Sequence`-based input types; `_Embeddings`/`_Vector` aliases in `__init__.py`; `py.typed` PEP 561 marker; `mypy` passes with zero errors.
+- **Python mixed module layout** — Rust extension compiled as `ailake._ailake`; public Python surface at `ailake-py/python/ailake/__init__.py`; maturin `python-source = "python"` picks up the layout automatically; wheels include both Rust extension and Python wrapper.
+- **`ailake.TableWriter` backward-compat re-export** — existing code using `ailake.TableWriter(path, ...)` continues to work unchanged.
+- **Spark INSERT INTO** (`ailake-spark`) — `AilakeWriteBuilder`, `AilakeBatchWrite`, `AilakeDataWriter`, `AilakeDataWriterFactory` via Spark DataSourceV2 `WriteBuilder`; `AilakeCatalog` implements `StagingTableCatalog`; `INSERT INTO ailake_table SELECT ...` triggers native write path.
+- **Trino INSERT INTO** (`ailake-trino`) — `AilakePageSink`, `AilakePageSinkProvider`, `AilakeIngestTableHandle` via Trino SPI `ConnectorPageSink`; `INSERT INTO` DML routes through `ailake_write_batch_json` JNA bridge.
+
+### Fixed
+
+- **Trino SPI 430**: `ConnectorPageSinkContext` → `ConnectorPageSinkId` in `AilakePageSinkProvider` (removed in Trino 430+).
+- **Spark/Scala 2.12**: `def buildForBatch()` → `override def buildForBatch()` — Scala 2.12 requires explicit `override` for concrete Java default methods.
+- **Scala 2.12 compat**: `scala.jdk.CollectionConverters` → `scala.collection.JavaConverters` in test files (`jdk.CollectionConverters` requires Scala 2.13+).
+- **`release.yml`: sync version bump back to develop** — after bumping `Cargo.toml` on `main`, the action now merges `origin/main → develop` automatically.
+- **`release.yml`: idempotent `publish-crates`** — exit code 10 (crate already exists on crates.io) treated as success; re-runs skip already-published crates.
+- **`release.yml`: idempotent tag + GitHub Release creation** — both steps check for existing tag/release and skip if already present.
+- **`release.yml`: non-fast-forward push rejection** — `git pull --rebase origin main` before push in version bump step.
+
+### Tests
+
+- Unit and integration tests for Trino INSERT INTO (`AilakePageSinkTest`, `AilakeIngestMetadataTest`, `AilakeWriteBatchIntegrationTest`).
+- Unit tests for Spark INSERT INTO (`AilakeWriteSupportTest`, `AilakeCatalogTest`, `AilakeWriteBatchIntegrationTest`).
+- `check_ailake_py.py` updated: covers legacy `TableWriter` API, fluent chain, `SearchQuery` repr + `_repr_html_`, context manager, async API, `asyncio.gather`.
+
+### CI
+
+- `test-jvm` job in `ci.yml` runs Trino and Spark plugin unit tests on every push.
+- `compat-ailake-py` job installs `mypy + pandas` and runs `mypy` type check before the compat script.
+- `compat-heavy.yml`: `AILAKE_WRITE_DIR` injected into Spark and Trino integration test steps.
+
+---
+
+## [0.0.14] — 2026-06-09
+
+### Removed
+
+- **RaBitQ index** (`RaBitQIndex`, `RaBitQSerializer`, `RaBitQCodebook`, `RaBitQVec`, `ailake-vec/src/rabitq.rs`, `ailake-index/src/rabitq.rs`) removed from all layers. Recall ≈ 0 on general float embeddings (orthonormal rotation does not help without training data alignment); adds significant complexity for no practical benefit over HNSW or IVF-PQ.
+  - Removed `RaBitQConfig` from `ailake-core/src/schema.rs` and `rabitq` field from `VectorStoragePolicy`.
+  - Removed `FLAG_INDEX_RABITQ = 0x0002` from `ailake-file/src/footer.rs`.
+  - Removed `AnyIndex::RaBitQ` variant; `AnyIndex` now dispatches only `Hnsw` and `IvfPq`.
+  - Removed `IndexType::RaBitQ` from `ailake-file/src/writer.rs`.
+  - Removed `--rabitq`, `--rabitq-seed`, `--rabitq-keep-raw` CLI flags.
+  - Removed `rabitq=`, `rabitq_seed=`, `rabitq_keep_raw=` parameters from `ailake-py` `TableWriter`.
+  - Removed `"rabitq"`, `"rabitq_seed"`, `"rabitq_keep_raw"` from `ailake-jni` JSON API.
+  - Removed `rabitq.go`, `chacha12.go` from `ailake-go`; removed `FlagIndexRaBitQ`, `IsRaBitQ()`.
+  - Removed `rabitq.hpp`, `chacha12.hpp` from `ailake-cpp`; removed `kFlagIndexRaBitQ`, `is_rabitq()`, `rabitq_rerank_factor`.
+  - Removed `rabitq_write_search_returns_correct_top_result` integration test.
+
+- **Binary Hamming index** (`BinaryIndex`, `BinarySerializer`, `ailake-vec/src/binary_quant.rs`, `ailake-index/src/binary.rs`) removed from all layers. Recall 0.50–0.70 without reranking on general float embeddings is too low for production use; no advantage over IVF-PQ which achieves 0.90–0.95 recall at comparable or smaller storage.
+  - Removed `BinaryConfig` from `ailake-core/src/schema.rs` and `binary` field from `VectorStoragePolicy`.
+  - Removed `FLAG_INDEX_BINARY = 0x0004` from `ailake-file/src/footer.rs`.
+  - Removed `AnyIndex::Binary` variant.
+  - Removed `IndexType::Binary` from `ailake-file/src/writer.rs`.
+  - Removed `--binary`, `--binary-keep-raw` CLI flags.
+  - Removed `binary=`, `binary_keep_raw=` parameters from `ailake-py` `TableWriter`.
+  - Removed `"binary"`, `"binary_keep_raw"` from `ailake-jni` JSON API.
+  - Removed `binary.go` from `ailake-go`; removed `FlagIndexBinary`, `IsBinary()`.
+  - Removed `binary.hpp` from `ailake-cpp`; removed `kFlagIndexBinary`, `is_binary()`.
+  - Removed `ailake-cpp/tests/test_binary.cpp` (14 tests).
+
+- **`ailake-bench`** removed from workspace `Cargo.toml` members. Benchmarks live in the separate [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks) repository.
+
+### Changed
+
+- `AnyIndex` enum now contains only `Hnsw(HnswIndex)` and `IvfPq(IvfPqIndex)`.
+- `VectorStoragePolicy` index auto-selection: checks `policy.pq.is_some()` → `IvfPq`; default → `Hnsw`. Binary and RaBitQ checks removed.
+- `ailake-file` reader flag dispatch: `FLAG_INDEX_IVF_PQ = 0x0001` only; unknown flags default to HNSW.
+- File format spec §3 `flags` field: only bit 0 (`IVF-PQ`) defined; bits 1–15 reserved.
+- File format spec: removed §6.3 (RaBitQ Index Blob), §6.4 (Binary Hamming Index Blob), §15.4 (BinarySnapshot wire layout).
+- Cross-language table in file format spec reduced to Rust, C++17, Go columns for HNSW and IVF-PQ only.
+
+---
+
+## [0.0.13] — 2026-06-08
+
+### Added
+- **Binary Hamming flat index** — `IndexType::Binary` / `FLAG_INDEX_BINARY = 0x0004`. Binarizes each vector dimension via sign (positive = 1), packs to `ceil(dim/8)` bytes. Distance = Hamming (`popcount(a XOR b)`). 32× smaller than F32 (1 bit/dim vs 32 bits/dim). Designed for models trained to produce binary-compatible vectors (Cohere embed-v3 binary, Jina ColBERT). For general float embeddings use RaBitQ — it applies a random rotation before binarization and achieves much better recall at the same storage cost.
+  - **`ailake-vec/src/binary_quant.rs`**: `f32_to_bits` (sign packing, MSB-first), `hamming_distance` with AVX2/SSSE3 Mula nibble-LUT + PSADBW (32 bytes/iter), NEON `vcntq_u8` (16 bytes/iter), scalar u64-chunk fallback (maps to `popcnt`).
+  - **`ailake-index/src/binary.rs`**: `BinaryIndex` flat scan, `BinarySerializer` (bincode). Optional `keep_raw: bool` for exact F16 reranking; partial-select O(N) top-k with optional rerank. `rerank_factor ≥ 3` recommended.
+  - **`ailake-file`**: `FLAG_INDEX_BINARY = 0x0004` in footer; writer builds `BinaryIndex` when `policy.binary.is_some()`; reader dispatches on `FLAG_INDEX_BINARY` before RaBitQ/IVF-PQ/HNSW checks.
+  - **`ailake-core/src/schema.rs`**: `BinaryConfig { keep_raw: bool }` added to `VectorStoragePolicy`.
+  - **CLI**: `ailake create --binary [--binary-keep-raw]`.
+  - **Python**: `TableWriter(binary=True, binary_keep_raw=True)`.
+  - **JVM plugins** (Trino / Spark / Flink): search dispatches automatically via `AnyIndex::search()` — no plugin code changes needed. `ailake_write_batch_json` in `ailake-jni` now accepts `"binary":true,"binary_keep_raw":true` so JVM plugins can write Binary tables.
+  - **Go SDK** (`ailake-go/binary.go`): `BinaryIndex`, `DeserializeBinary` (bincode wire format), `hammingBinary` (u64-chunk XOR + `bits.OnesCount64` → POPCNT on x86_64 / VCNT+UADDLV on aarch64), `f32ToBits` (MSB-first), `BinaryIndex.Search` (Hamming scan + optional F16 rerank). `FlagIndexBinary = 0x0004` and `IsBinary()` in `footer.go`; dispatch in `searchFile()` before RaBitQ check.
+  - **C++ SDK** (`ailake-cpp/include/ailake/binary.hpp`): `BinaryIndex`, `deserialize_binary`, `f32_to_bits`, `hamming_distance` (AVX2+SSSE3 nibble-LUT / NEON `vcntq_u8` / scalar `__builtin_popcountll`), `binary_search` (O(N) scan + `std::nth_element` + optional F16 reranking). `kFlagIndexBinary = 0x0004` and `is_binary()` in `footer.hpp`; dispatch in `search_file()` before RaBitQ check.
+  - **C++ SDK tests** (`ailake-cpp/tests/`): `test_binary.cpp` — 14 tests covering `f32_to_bits` MSB-first packing, `hamming_distance` (single byte / multibyte / 32-byte AVX2 chunk), `binary_search` top-k, F16 reranking, and edge cases. Also created `test_footer.cpp`, `test_hnsw.cpp`, `test_ivfpq.cpp` (first C++ unit test suite — CMakeLists previously referenced non-existent files). `CMakeLists.txt` updated to per-module `foreach` loop.
+
+---
+
+## [0.0.12] — 2026-06-07
+
+### Fixed
+- `.github/workflows/publish-pypi.yml`: remove duplicate `runs-on` key in `linux` job
+- `.github/workflows/release.yml`: all downstream jobs (`publish-crates`, `publish-jvm`, `publish-airflow`, `pypi-linux/macos/windows/sdist`) now checkout `ref: ${{ needs.release.outputs.tag }}` — prevents publishing stale pre-bump version to crates.io/PyPI
+- `.github/workflows/release.yml`: fix cascade-skip — `pypi-windows` and `pypi-sdist` depended on `pypi-macos` (`if: false`); skipped job propagated to Windows, sdist, and `pypi-publish`, blocking PyPI release entirely; both now depend on `pypi-linux` instead; removed `pypi-macos` from `pypi-publish` needs
+- `.github/workflows/release.yml`, `publish-pypi.yml`: Windows Rust install — `dtolnay/rust-toolchain` uses bash internally (fails on Windows self-hosted); replaced with inline PowerShell that downloads `rustup-init.exe` if rustup absent, otherwise runs `rustup toolchain install`
+- `.github/workflows/release.yml` (`pypi-sdist`), `publish-pypi.yml` (`sdist`): add `dtolnay/rust-toolchain@stable` before `maturin sdist` — `maturin sdist` runs natively on Linux runner (no manylinux Docker), so cargo must be in PATH explicitly
+- `tests/docker/demo/Dockerfile`: remove `COPY ailake-bench` (crate lives in separate repo; line caused Docker build failure)
+- `notebooks/04_trino.ipynb`, `notebooks/05_bigquery.ipynb`: fix pre-flight error message — wrong `-f compose-demo-engines.yml` replaced with `--profile engines`
+
+### Changed
+- `.github/workflows/ci.yml`: disable automatic push/PR triggers — manual `workflow_dispatch` only while repo is private
+- `.github/workflows/release.yml`: manual-only trigger (`workflow_dispatch`); fix JAR glob pattern
+
+### Docs
+- `README.md`: remove duplicate `ailake-cli/` lines in repo layout; add `ailake-go/`, `ailake-cpp/`, `airflow-providers-ailake/` to directory tree
+- `docs/architecture/WORKSPACE.md`: document `axum = "0.7"` workspace dependency (`ailake serve` REST server)
+- `docs/specs/INTEGRATIONS.md`: add Python, Go, and C++ SDK rows to compatibility matrix
+
+---
+
 ## [0.0.11] — 2026-06-05
 
 ### Changed
-- **`release.yml`**: Restructured into a single sequential publish chain — `release` → `publish-crates` → `publish-jvm` → `publish-airflow` → `pypi-linux` (max-parallel:1) → `pypi-macos` (disabled) → `pypi-windows` → `pypi-sdist` → `pypi-publish`. All publish jobs run automatically after the release job using `needs:` — no separate manual triggers needed. `publish-pypi.yml`, `publish-jvm.yml`, and `publish-airflow-provider.yml` demoted to manual fallback workflows for re-publishing without rerunning the full pipeline. Triggers: `push: branches: [main]` (automatic on merge) and `workflow_dispatch` (manual).
+- **`release.yml`**: Restructured into a single sequential publish chain — `release` → `publish-crates` → `publish-jvm` → `publish-airflow` → `pypi-linux` (max-parallel:1) → `pypi-macos` (disabled) → `pypi-windows` → `pypi-sdist` → `pypi-publish`. All publish jobs run automatically after the release job using `needs:` — no separate manual triggers needed. `publish-pypi.yml`, `publish-jvm.yml`, and `publish-airflow-provider.yml` demoted to manual fallback workflows for re-publishing without rerunning the full pipeline. Triggers: `push: branches: [main]` (automatic on merge) and `workflow_dispatch` (manual). The `release` job auto-bumps the patch version by reading the latest git tag (`v*.*.*`) and incrementing the patch component, updating all `Cargo.toml` files and committing with `[skip ci]` before tagging — no manual version edits required.
 - **`.github/workflows/compat-heavy.yml` (`compat-spark`)**: `pip install pyspark` now uses `--index-url https://pypi.org/simple/` to bypass the runner's pip mirror configuration.
 
 ### Fixed

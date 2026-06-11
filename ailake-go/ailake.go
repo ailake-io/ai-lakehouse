@@ -145,7 +145,7 @@ func searchFile(
 	// Resolve absolute path
 	filePath := entry.Path
 	if !filepath.IsAbs(filePath) {
-		filePath = filepath.Join(warehouse, namespace+".db", table, filePath)
+		filePath = filepath.Join(warehouse, namespace, table, filePath)
 	}
 
 	if entry.HnswOffset == nil || entry.HnswLen == nil {
@@ -160,9 +160,16 @@ func searchFile(
 	}
 	defer f.Close()
 
-	// Read AILK header at hnsw_offset
+	// key_metadata.hnsw_offset is the ABSOLUTE file position of the HNSW blob,
+	// NOT the AILK header. The AILK header sits before the centroid and blob:
+	//   ailk_header_pos = hnsw_offset - HeaderSize - (dim+1)*4
+	// (dim+1)*4 = centroid bytes (dim F32 values) + radius (1 F32 value)
+	dim := uint64(entry.VectorDim)
+	centroidBytes := (dim + 1) * 4
+	ailkHeaderPos := *entry.HnswOffset - uint64(HeaderSize) - centroidBytes
+
 	headerBuf := make([]byte, HeaderSize)
-	if _, err := f.ReadAt(headerBuf, int64(*entry.HnswOffset)); err != nil {
+	if _, err := f.ReadAt(headerBuf, int64(ailkHeaderPos)); err != nil {
 		return nil, fmt.Errorf("read AILK header: %w", err)
 	}
 	header, err := ParseHeaderBytes(headerBuf)
@@ -170,10 +177,9 @@ func searchFile(
 		return nil, err
 	}
 
-	// Read index blob
-	indexStart := int64(*entry.HnswOffset) + int64(header.HnswOffset)
-	indexBuf := make([]byte, header.HnswLen)
-	if _, err := f.ReadAt(indexBuf, indexStart); err != nil {
+	// Read index blob directly at the stored absolute offset
+	indexBuf := make([]byte, *entry.HnswLen)
+	if _, err := f.ReadAt(indexBuf, int64(*entry.HnswOffset)); err != nil {
 		return nil, fmt.Errorf("read index blob: %w", err)
 	}
 
@@ -182,14 +188,7 @@ func searchFile(
 	// - IVF-PQ + CPU only       → CPU ADC (pure Go)
 	// - HNSW                    → CPU greedy graph traversal (sequential by nature)
 	var hits []SearchResult
-	if header.IsRaBitQ() {
-		// RaBitQ flat index: brute-force binary search with optional F16 reranking.
-		idx, err := DeserializeRaBitQ(indexBuf)
-		if err != nil {
-			return nil, fmt.Errorf("deserialize RaBitQ: %w", err)
-		}
-		hits = idx.Search(query, opts.TopK, len(idx.RawF16) > 0)
-	} else if header.IsIvfPq() {
+	if header.IsIvfPq() {
 		idx, err := DeserializeIvfPq(indexBuf)
 		if err != nil {
 			return nil, fmt.Errorf("deserialize IVF-PQ: %w", err)

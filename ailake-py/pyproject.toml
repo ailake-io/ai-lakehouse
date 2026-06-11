@@ -29,4 +29,5 @@ Repository    = "https://github.com/ThiagoLange/ai-lakehouse"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-module-name = "ailake"
+module-name = "ailake._ailake"
+python-source = "python"

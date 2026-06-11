@@ -83,9 +83,12 @@ endif()
 # ── Tests ─────────────────────────────────────────────────────────────────────
 if(AILAKE_TESTS)
   enable_testing()
-  add_executable(ailake_test tests/test_footer.cpp tests/test_hnsw.cpp tests/test_ivfpq.cpp)
-  target_link_libraries(ailake_test PRIVATE ailake)
-  add_test(NAME ailake_unit COMMAND ailake_test)
+
+  foreach(_test footer hnsw ivfpq)
+    add_executable(ailake_test_${_test} tests/test_${_test}.cpp)
+    target_link_libraries(ailake_test_${_test} PRIVATE ailake)
+    add_test(NAME test_${_test} COMMAND ailake_test_${_test})
+  endforeach()
 endif()
 
 # ── Install ───────────────────────────────────────────────────────────────────

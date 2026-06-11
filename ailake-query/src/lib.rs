@@ -16,5 +16,5 @@ pub use compaction::{CompactionConfig, CompactionExecutor, CompactionMode, Compa
 pub use context_assembler::{AssembledContext, Chunk, ContextAssembler, ContextAssemblerConfig};
 pub use mem_table::{MemTableConfig, MemTableWriter};
 pub use pruner::VectorPruner;
-pub use scanner::{search, SearchConfig, SearchResult, SearchSession};
+pub use scanner::{fetch_rows, search, SearchConfig, SearchResult, SearchSession};
 pub use writer::{MultiVectorBatch, TableWriter};

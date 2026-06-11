@@ -61,7 +61,7 @@ type HadoopCatalog struct {
 }
 
 func (c *HadoopCatalog) tableDir(namespace, name string) string {
-	return filepath.Join(c.Warehouse, namespace+".db", name)
+	return filepath.Join(c.Warehouse, namespace, name)
 }
 
 // LoadTable reads table metadata and returns TableInfo + current snapshot ID.
@@ -238,10 +238,21 @@ func readManifestFile(path string) ([]DataFileEntry, error) {
 		recordCount := uint64(asInt64(dfRec["record_count"]))
 		fileSize := uint64(asInt64(dfRec["file_size_in_bytes"]))
 
-		// Recover AI-Lake extension from key_metadata (bytes JSON)
+		// Recover AI-Lake extension from key_metadata (bytes JSON).
+		// goavro v2 returns Avro union ["null","bytes"] as map[string]interface{}
+		// with key "bytes", not as raw []byte.
 		var ext ailakeEntryExt
 		if km := dfRec["key_metadata"]; km != nil {
-			if kmBytes, ok := km.([]byte); ok {
+			var kmBytes []byte
+			switch v := km.(type) {
+			case []byte:
+				kmBytes = v
+			case map[string]interface{}:
+				if b, ok := v["bytes"].([]byte); ok {
+					kmBytes = b
+				}
+			}
+			if len(kmBytes) > 0 {
 				_ = json.Unmarshal(kmBytes, &ext)
 			}
 		}
@@ -253,9 +264,8 @@ func readManifestFile(path string) ([]DataFileEntry, error) {
 			IndexStatus:   ext.IndexStatus,
 		}
 		if ext.CentroidB64 != nil {
-			if centroid, radius, err := decodeCentroid(*ext.CentroidB64); err == nil {
+			if centroid, err := decodeCentroid(*ext.CentroidB64); err == nil {
 				entry.Centroid = centroid
-				entry.Radius = radius
 			}
 		}
 		if ext.Radius != nil {
@@ -277,22 +287,24 @@ func readManifestFile(path string) ([]DataFileEntry, error) {
 	return entries, ocf.Err()
 }
 
-func decodeCentroid(b64 string) ([]float32, float32, error) {
+// decodeCentroid decodes centroid_b64 from key_metadata.
+// The Rust writer encodes only the vector floats (dim*4 bytes).
+// Radius is a separate JSON field and is NOT included in these bytes.
+func decodeCentroid(b64 string) ([]float32, error) {
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	if len(raw)%4 != 0 || len(raw) < 4 {
-		return nil, 0, errors.New("centroid: unexpected length")
+	if len(raw) == 0 || len(raw)%4 != 0 {
+		return nil, errors.New("centroid: unexpected length")
 	}
-	n := len(raw)/4 - 1 // last element is radius
+	n := len(raw) / 4
 	vec := make([]float32, n)
 	for i := range vec {
 		bits := binary.LittleEndian.Uint32(raw[i*4:])
 		vec[i] = math.Float32frombits(bits)
 	}
-	radiusBits := binary.LittleEndian.Uint32(raw[n*4:])
-	return vec, math.Float32frombits(radiusBits), nil
+	return vec, nil
 }
 
 func asInt64(v any) int64 {

@@ -330,16 +330,20 @@ jobs:
 
       - name: Spark plugin integration test
         run: |
+          mkdir -p /tmp/ailake-write-test
           LD_LIBRARY_PATH=$(pwd)/target/release \
           AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
           AILAKE_LIB_PATH=$(pwd)/target/release \
+          AILAKE_WRITE_DIR=/tmp/ailake-write-test \
             gradle -p spark-plugin test --no-daemon --no-configuration-cache
 
       - name: Trino plugin integration test
         run: |
+          mkdir -p /tmp/ailake-write-test
           LD_LIBRARY_PATH=$(pwd)/target/release \
           AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
           AILAKE_LIB_PATH=$(pwd)/target/release \
+          AILAKE_WRITE_DIR=/tmp/ailake-write-test \
             gradle -p trino-plugin test --no-daemon --no-configuration-cache
 
   compat-bigquery:

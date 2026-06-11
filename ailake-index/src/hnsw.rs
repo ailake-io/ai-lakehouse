@@ -590,7 +590,14 @@ impl HnswIndex {
     /// per distance call vs F32). Pair with `rerank_factor` in `SearchConfig` to
     /// recover the precision lost by F16 approximation.
     /// F32 vectors are retained for brute-force fallback.
+    ///
+    /// No-op for `NormalizedCosine`: F16 quantization error (~0.001 per unit vector)
+    /// can exceed the true `1-dot` distance between very similar pre-normalized vectors
+    /// (~0.0002 for consecutive embeddings), causing wrong nearest-neighbour results.
     pub fn quantize_to_f16(&mut self) {
+        if self.metric == VectorMetric::NormalizedCosine {
+            return;
+        }
         let f16_vecs: Vec<f16> = self.flat_vecs.iter().map(|&x| f16::from_f32(x)).collect();
         self.flat_vecs_f16 = Some(f16_vecs);
     }

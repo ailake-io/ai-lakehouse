@@ -5,7 +5,9 @@ TABLE_PATH="${DEMO_TABLE_PATH:-/data/ailake_demo}"
 VERSION_HINT="${TABLE_PATH}/default/table/metadata/version-hint.text"
 
 if [ -f "${VERSION_HINT}" ]; then
-    echo "=== Demo data already present — skipping init ==="
+    echo "=== Demo data already present — skipping fixture generation ==="
+    # Re-register in Nessie on every startup (Nessie is in-memory; loses state on restart)
+    python /opt/init_demo.py --nessie-only 2>&1 || true
 else
     echo "=== AI-Lake Demo: generating fixture data ==="
     python /opt/init_demo.py

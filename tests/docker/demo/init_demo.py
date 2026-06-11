@@ -5,7 +5,7 @@ Writes a local AI-Lake table to DEMO_TABLE_PATH (default /data/ailake_demo).
 Runs once at container startup via entrypoint.sh; skipped on restart if
 version-hint.text already exists.
 
-No numpy required — uses stdlib math only.
+Uses the fluent open_table() / Table API introduced in v0.0.14.
 """
 
 import json
@@ -16,7 +16,7 @@ import random
 import sys
 
 TABLE_PATH = os.environ.get("DEMO_TABLE_PATH", "/data/ailake_demo")
-DIM = int(os.environ.get("DEMO_DIM", "16"))
+DIM = int(os.environ.get("DEMO_DIM", "32"))
 N_DOCS = 500
 METRIC = "cosine"
 
@@ -67,9 +67,10 @@ def main() -> None:
         texts.append(template.format(topic=topic) + f" (doc_id={i})")
         embeddings.append(rand_unit_vec(DIM, seed=i))
 
-    writer = ailake.TableWriter(TABLE_PATH, vector_column="embedding", dim=DIM, metric=METRIC)
-    writer.write_batch(texts, embeddings)
-    snap_id = writer.commit()
+    # Fluent API: open_table() + insert() + commit()
+    table = ailake.open_table(TABLE_PATH, dim=DIM, metric=METRIC)
+    table.insert(texts, embeddings)
+    snap_id = table.commit()
     print(f"Committed snapshot_id={snap_id}  rows={N_DOCS}")
 
     # Persist the first document's embedding as a demo query vector so notebooks
@@ -168,4 +169,7 @@ def _maybe_register_nessie(table_path: str) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if "--nessie-only" in sys.argv:
+        _maybe_register_nessie(os.environ.get("DEMO_TABLE_PATH", "/data/ailake_demo"))
+    else:
+        main()

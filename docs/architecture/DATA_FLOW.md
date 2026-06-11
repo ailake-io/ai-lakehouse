@@ -126,56 +126,6 @@ TableWriter (fast path — Parquet only)
 
 ---
 
-## RaBitQ write path (flat index, one-pass O(n))
-
-`write_batch` with `policy.rabitq = Some(RaBitQConfig)` — no background task, no graph construction.
-
-```
-Caller
-  │
-  │  write_batch(batch, embeddings)   ← policy.rabitq set
-  ▼
-AilakeFileWriter::new(policy)
-  │   ↳ auto-selects IndexType::RaBitQ from policy.rabitq
-  │
-  ├─► ailake-vec / RaBitQCodebook::new(dim, seed)
-  │     │  1. generate dim×dim modified Gram-Schmidt orthonormal matrix P (P^T·P = I)
-  │     │     (deterministic from seed — not stored on disk)
-  │     └─► returns: RaBitQCodebook
-  │
-  ├─► [for each vector v]
-  │     │  2. normalize v to unit L2 → v̂
-  │     │  3. project: P·v̂ → rotated (F32 vector)
-  │     │  4. sign bits → packed byte code (ceil(dim/8) bytes)
-  │     │  5. store norm(v) and scale = sum(|P·v̂|)/sqrt(dim)
-  │     └─► returns: RaBitQVec { code, norm, scale }
-  │
-  ├─► [if keep_raw=true]
-  │     │  6. quantize v → F16, store alongside codes
-  │     └─► enables exact reranking at search time
-  │
-  ├─► ailake-file: append AILK section
-  │     │  7. header: flags=0x0002 (FLAG_INDEX_RABITQ)
-  │     │  8. centroid blob
-  │     │  9. RaBitQ blob: bincode(RaBitQIndex { seed, entries, row_ids, raw_f16 })
-  │     │     NOTE: rotation matrix P is NOT stored — only seed is stored.
-  │     │           Readers regenerate P from seed before searching.
-  │     └─► returns: file bytes
-  │
-  └─► catalog commit (same flow as HNSW)
-```
-
-**Throughput**: ~163k vec/s (SIFT-1M measured; no k-means, no graph — encoding is one-pass). Search is sequential O(N) flat scan; outer shard parallelism handles concurrency.
-
-**Storage** (dim=1536 per vector):
-- Binary codes: `ceil(1536/8)` = 192 bytes
-- norm + scale: 8 bytes
-- raw F16 (optional): 3072 bytes
-- Total (keep_raw=true): ~3280 bytes — comparable to HNSW, but write is 6× faster.
-- Total (keep_raw=false): 200 bytes — 15× smaller than F16.
-
----
-
 ## Read path — vector search
 
 ```mermaid
@@ -184,7 +134,7 @@ flowchart TD
     CAT["ailake-catalog\n1. read metadata.json → snapshot\n2. read snap-NNN.avro → DataFileEntry list\n3. decode centroid_b64, radius per file"]
     PRUNE["ailake-query / VectorPruner\n4. dist(query, centroid) - radius > threshold?\n   YES → skip file (zero S3 I/O)"]
     STORE["ailake-store\n5a. GET range [hnsw_offset, +hnsw_len)"]
-    MMAP["ailake-index / MmapLoader\n5b. write to tempfile\n5c. mmap → bincode::deserialize\n    HnswIndex or IvfPqIndex"]
+    MMAP["ailake-index / MmapLoader\n5b. write to tempfile\n5c. mmap → bincode::deserialize\n    HnswIndex or IvfPqIndex\n    (dispatched by AnyIndex from flags field)"]
     SEARCH["ailake-index\n5d. index.search(query, candidate_k)"]
     MERGE["merge all per-file results\nglobal top-k sort"]
     FETCH["ailake-parquet / ParquetVectorReader\n6. read specific row groups for winners\n   with predicate pushdown"]
@@ -225,22 +175,16 @@ ailake-query / VectorScanner
   │   │     │  5b. write bytes to temp file
   │   │     └─► returns: tmp_file_path
   │   │
-  │   ├─► ailake-index / MmapLoader or RaBitQSerializer
-  │   │     │  6a. open tmp_file (HNSW: via memmap2::Mmap; RaBitQ: load full blob)
+  │   ├─► ailake-index / MmapLoader
+  │   │     │  6a. open tmp_file via memmap2::Mmap
   │   │     │  6b. parse AI-Lake header flags:
-  │   │     │       flags & 0x0002 → RaBitQSerializer::from_bytes (rebuilds proj)
   │   │     │       flags & 0x0001 → IvfPqSerializer::from_bytes
   │   │     │       default         → MmapLoader::from_bytes (HNSW mmap)
-  │   │     └─► returns: AnyIndex (Hnsw | IvfPq | RaBitQ)
+  │   │     └─► returns: AnyIndex (Hnsw | IvfPq)
   │   │
   │   └─► AnyIndex::search(query, top_k, ef)
   │         │  HNSW:   greedy graph traversal, candidate heap
   │         │  IVF-PQ: coarse quantize, nprobe cells, ADC distance
-  │         │  RaBitQ: normalize query → project → binarize query once (estimate_ip_binary) →
-  │         │            sequential scan: XOR + popcount → IP estimate per entry →
-  │         │            O(N) select_nth_unstable_by for top candidates →
-  │         │            if raw_f16 present + rerank_factor > 1:
-  │         │              top (rerank_factor × k) candidates reranked with exact F16 distances
   │         └─► returns: Vec<(RowId, f32)>
   │
   ├─► merge results across all surviving files, global top-k sort

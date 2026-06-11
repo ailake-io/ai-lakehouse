@@ -11,20 +11,21 @@
 use std::sync::Arc;
 
 use arrow_array::{RecordBatch, StringArray};
+use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use tracing::{debug, warn};
 
 use ailake_catalog::{
     hadoop::HadoopCatalog,
     provider::{CatalogProvider, TableIdent},
 };
-use ailake_core::{schema::RaBitQConfig as CoreRaBitQConfig, VectorMetric, VectorStoragePolicy};
+use ailake_core::{VectorMetric, VectorStoragePolicy};
 use ailake_query::{
-    search as rs_search, Chunk, ContextAssembler, ContextAssemblerConfig, SearchConfig,
-    TableWriter as RsTableWriter,
+    fetch_rows as rs_fetch_rows, search as rs_search, Chunk, ContextAssembler,
+    ContextAssemblerConfig, SearchConfig, TableWriter as RsTableWriter,
 };
 use ailake_store::{store::Store, LocalStore};
 
@@ -58,8 +59,7 @@ pub struct TableWriter {
 impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, rabitq=false, rabitq_seed=0, rabitq_keep_raw=true))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None))]
     fn new(
         path: &str,
         vector_column: &str,
@@ -68,26 +68,17 @@ impl TableWriter {
         pre_normalize: bool,
         hnsw_m: Option<u32>,
         hnsw_ef_construction: Option<u32>,
-        rabitq: bool,
-        rabitq_seed: u64,
-        rabitq_keep_raw: bool,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
-            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} rabitq={}",
-            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction, rabitq
+            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?}",
+            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction
         );
         let mut policy =
             VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
         policy.pre_normalize = pre_normalize;
         policy.hnsw_m = hnsw_m;
         policy.hnsw_ef_construction = hnsw_ef_construction;
-        if rabitq {
-            policy.rabitq = Some(CoreRaBitQConfig {
-                seed: rabitq_seed,
-                keep_raw: rabitq_keep_raw,
-            });
-        }
         let (catalog, store) = local_catalog_store(path);
         let table = TableIdent::new("default", "table");
 
@@ -224,6 +215,88 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
     Ok(list.into())
 }
 
+/// Search a table and fetch the full row data for top-k results.
+///
+/// Returns IPC-serialized bytes of a RecordBatch containing all Parquet columns for
+/// the matched rows, plus a `_distance: float32` column appended at the end.
+/// Rows are ordered by ascending distance (nearest first).
+///
+/// Python side deserializes with: `pyarrow.ipc.open_file(io.BytesIO(bytes)).read_all()`
+#[pyfunction]
+#[pyo3(signature = (path, query, top_k=10))]
+fn search_with_data(
+    py: Python<'_>,
+    path: &str,
+    query: Vec<f32>,
+    top_k: usize,
+) -> PyResult<PyObject> {
+    let rt = rt()?;
+    debug!(
+        "ailake-py: search_with_data path={} dim={} top_k={}",
+        path,
+        query.len(),
+        top_k
+    );
+
+    let (catalog, store) = local_catalog_store(path);
+    let table = TableIdent::new("default", "table");
+
+    let meta = rt
+        .block_on(catalog.load_table(&table))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let dim: u32 = meta
+        .properties
+        .get("ailake.vector-dim")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(query.len() as u32);
+    let vector_column = meta
+        .properties
+        .get("ailake.vector-column")
+        .cloned()
+        .unwrap_or_else(|| "embedding".into());
+
+    let config = SearchConfig {
+        top_k,
+        ef_search: 50,
+        pruning_threshold: f32::INFINITY,
+        rerank_factor: None,
+    };
+
+    let results = rt
+        .block_on(rs_search(
+            &table,
+            &query,
+            config,
+            &vector_column,
+            dim,
+            Arc::clone(&catalog),
+            Arc::clone(&store),
+        ))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let batch = rt
+        .block_on(rs_fetch_rows(&results, store, &vector_column, dim))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let ipc_bytes = record_batch_to_ipc(&batch)?;
+    Ok(PyBytes::new(py, &ipc_bytes).into())
+}
+
+fn record_batch_to_ipc(batch: &RecordBatch) -> PyResult<Vec<u8>> {
+    let mut buf = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut buf, batch.schema_ref())
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        writer
+            .write(batch)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        writer
+            .finish()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    }
+    Ok(buf)
+}
+
 /// Assemble a list of text chunks into structured XML context for LLM input.
 ///
 /// Args:
@@ -301,9 +374,10 @@ fn parse_metric(s: &str) -> PyResult<VectorMetric> {
 }
 
 #[pymodule]
-fn ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
     m.add_function(wrap_pyfunction!(search, m)?)?;
+    m.add_function(wrap_pyfunction!(search_with_data, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_context, m)?)?;
     Ok(())
 }
