@@ -238,10 +238,21 @@ func readManifestFile(path string) ([]DataFileEntry, error) {
 		recordCount := uint64(asInt64(dfRec["record_count"]))
 		fileSize := uint64(asInt64(dfRec["file_size_in_bytes"]))
 
-		// Recover AI-Lake extension from key_metadata (bytes JSON)
+		// Recover AI-Lake extension from key_metadata (bytes JSON).
+		// goavro v2 returns Avro union ["null","bytes"] as map[string]interface{}
+		// with key "bytes", not as raw []byte.
 		var ext ailakeEntryExt
 		if km := dfRec["key_metadata"]; km != nil {
-			if kmBytes, ok := km.([]byte); ok {
+			var kmBytes []byte
+			switch v := km.(type) {
+			case []byte:
+				kmBytes = v
+			case map[string]interface{}:
+				if b, ok := v["bytes"].([]byte); ok {
+					kmBytes = b
+				}
+			}
+			if len(kmBytes) > 0 {
 				_ = json.Unmarshal(kmBytes, &ext)
 			}
 		}
