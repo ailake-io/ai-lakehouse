@@ -476,9 +476,7 @@ pub unsafe extern "C" fn ailake_free_string(ptr: *mut c_char) {
 ///   Int*/UInt* → "int64"  |  Float32 → "float32"  |  Float64 → "float64"
 ///   Utf8/LargeUtf8 → "utf8"  |  Boolean → "bool"
 ///   FixedSizeList<Float32> → "list_float32"   (skipped silently otherwise)
-fn record_batch_to_scan_json(
-    batch: &arrow_array::RecordBatch,
-) -> Result<String, String> {
+fn record_batch_to_scan_json(batch: &arrow_array::RecordBatch) -> Result<String, String> {
     use arrow_array::{
         Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
         Int8Array, LargeStringArray, StringArray, UInt16Array, UInt32Array, UInt64Array,
@@ -490,10 +488,11 @@ fn record_batch_to_scan_json(
     // Serialize any integer-like array as Vec<Option<i64>>.
     macro_rules! int_vals {
         ($col:expr, $T:ty, $num_rows:expr) => {{
-            let arr = $col
-                .as_any()
-                .downcast_ref::<$T>()
-                .ok_or(concat!("downcast ", stringify!($T), " failed"))?;
+            let arr = $col.as_any().downcast_ref::<$T>().ok_or(concat!(
+                "downcast ",
+                stringify!($T),
+                " failed"
+            ))?;
             (0..$num_rows)
                 .map(|i| {
                     if arr.is_null(i) {
@@ -653,7 +652,9 @@ fn record_batch_to_scan_json(
                 columns_map.insert(name, Value::Array(vals));
             }
 
-            DataType::FixedSizeList(inner_field, _) if matches!(inner_field.data_type(), DataType::Float32) => {
+            DataType::FixedSizeList(inner_field, _)
+                if matches!(inner_field.data_type(), DataType::Float32) =>
+            {
                 use arrow_array::FixedSizeListArray;
                 let arr = col
                     .as_any()
@@ -736,10 +737,18 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         #[serde(default = "scan_default_ef")]
         ef_search: u32,
     }
-    fn scan_default_ns() -> String { "default".into() }
-    fn scan_default_col() -> String { "embedding".into() }
-    fn scan_default_topk() -> u32 { 10 }
-    fn scan_default_ef() -> u32 { 50 }
+    fn scan_default_ns() -> String {
+        "default".into()
+    }
+    fn scan_default_col() -> String {
+        "embedding".into()
+    }
+    fn scan_default_topk() -> u32 {
+        10
+    }
+    fn scan_default_ef() -> u32 {
+        50
+    }
 
     if request_json.is_null() {
         return cstr_err_json("null request_json");
