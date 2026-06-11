@@ -9,15 +9,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- **Go `Scan()` — full-row fetch** (`ailake-go/scan.go`) — `Scan(catalog, namespace, table, query, opts)` = `Search()` + `FetchRows()`; reads Parquet rows for HNSW hits via `parquet-go` (pure Go, zero CGO); skips row groups with no target row IDs; auto-decodes F16 vector column to `[]float32`; returns `[]ScanRow{RowID, Distance, FilePath, Fields map[string]any}`.
-- **Go unit tests for all packages** — `footer_test.go` (9 tests: ParseHeaderBytes/ParseHeader/ParseTrailerBytes/ParseCentroid), `ailake_test.go` (10 tests: DecodeF16Vector/metricFromString/KV hints + 3 integration tests), `distance_test.go` (6 tests: all distance functions), `catalog_test.go` (4 tests: asInt64/decodeCentroid/tableDir), `scan_test.go` (6 unit + 2 integration tests).
-
-### CI
-
-- `ci-go.yml`: unit step runs `go test ./...` (integration tests auto-skip without `AILAKE_FIXTURE`); integration step runs all tests with `AILAKE_FIXTURE` set.
-
 ---
 
 ## [0.0.16] — 2026-06-11
@@ -26,17 +17,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Python full-read after search** — `ailake.search(..., fetch_data=True)` and `Table.search(..., fetch_data=True)` return a `SearchQuery` whose `.to_arrow()` / `.to_pandas()` / `.to_polars()` / async variants materialise a full `pyarrow.Table` with all columns including the embedding decoded as `FixedSizeList<Float32>` + `_distance: float32`. Backward-compatible: default `fetch_data=False` behaviour unchanged.
 - **DuckDB extension** (`duckdb-ailake`) — C++ community extension exposing `ailake_search(table_path, query FLOAT[], top_k) → TABLE(row_id, distance, file_path)` and `ailake_write_batch(table_path, ids BIGINT[], embeddings FLOAT[][]) → BIGINT`. Bridges DuckDB to `libailake_jni.so` via `dlopen`/C-ABI — same JSON-envelope protocol as Spark and Trino plugins. Graceful degradation: search returns 0 rows when native lib not found. CI workflow `ci-duckdb.yml`.
+- **DuckDB `ailake_scan()` — full-row table function** — `ailake_scan(path, query FLOAT[], top_k) → TABLE(col1, col2, ..., _distance)` returns all Parquet columns alongside distance. Schema inferred at bind time; streams STANDARD_VECTOR_SIZE chunks; graceful degradation when native lib not loaded. Backed by new `ailake_scan_json` C-ABI in `ailake-jni`.
+- **Go `Scan()` — full-row fetch** (`ailake-go/scan.go`) — `Scan(catalog, namespace, table, query, opts)` = `Search()` + `FetchRows()`; reads Parquet rows for HNSW hits via `parquet-go` (pure Go, zero CGO); skips row groups with no target row IDs; auto-decodes F16 vector column to `[]float32`; returns `[]ScanRow{RowID, Distance, FilePath, Fields map[string]any}`.
+- **Go unit tests for all packages** — `footer_test.go` (9 tests), `ailake_test.go` (10 unit + 3 integration tests), `distance_test.go` (6 tests), `catalog_test.go` (4 tests), `scan_test.go` (6 unit + 2 integration tests). 33 unit tests pass without fixture; 5 integration tests require `AILAKE_FIXTURE`.
 
 ### Fixed
 
 - **DuckDB extension metadata format** — `append_extension_metadata.py` now writes the correct 8×32-byte field layout; fixes `InvalidInputException: metadata at the end of the file is invalid` when loading the extension.
 - **DuckDB extension RTLD_GLOBAL / RTLD_DEFAULT** — `AilakeLib::load()` falls back to `dlsym(RTLD_DEFAULT, …)`; test files set `sys.setdlopenflags(RTLD_GLOBAL)` before `import duckdb`; fixes `undefined symbol` errors at dlopen time.
 - **DuckDB extension C++ ABI** — `CMakeLists.txt` adds `_GLIBCXX_USE_CXX11_ABI=0` to match DuckDB manylinux wheels; fixes ABI mismatch undefined symbols.
+- **DuckDB `allow_unsigned_extensions`** — must be passed via `duckdb.connect(config={...})`, not `SET` after connection starts.
+- **DuckDB fixture path** — `FIXTURE.resolve()` now called in `test_scan.py` to convert relative env var to absolute path.
 - **`LocalStore::new` file:// URI root** — strips the `file://` scheme before constructing the root `PathBuf`; fixes files landing in CWD instead of the intended directory.
 - **`HadoopCatalog::list_files` on fresh table** — returns empty `Vec` when `current_snapshot_id` is `None`; previously errored on brand-new tables before any commit.
 - **HNSW F16 quantization disabled for NormalizedCosine** — `HnswIndex::quantize_to_f16` skips F16 downcast for `NormalizedCosine`; F16 rounding error exceeded true inter-vector distance for pre-normalized unit vectors.
 - **Python `SearchQuery` repr** — pending state renders as `SearchQuery(top_k=N, pending)`, executed state as `SearchQuery(N results, top_k=K)`.
 - **Python `to_arrow()` pointer-only** — returns `pyarrow.Table` (was `RecordBatch`); distance column is `distance` (was `_distance`); columns are `row_id, distance, file`.
+- **Go `HadoopCatalog.tableDir`** — removed `.db` suffix; standard Iceberg HadoopCatalog uses `{warehouse}/{namespace}/{table}` not `{namespace}.db`.
+- **Go `searchFile` path resolution** — same `.db` bug fixed in relative path fallback.
+- **Go `key_metadata` Avro union** — `goavro` v2 returns `["null","bytes"]` union as `map[string]interface{}{"bytes": []byte{...}}`; raw `[]byte` assertion always failed → `HnswOffset` nil → all files silently skipped.
+- **Go `decodeCentroid`** — Rust encodes `centroid_b64` as dim×4 bytes (vector only); radius is a separate JSON field. Old code stripped last float as radius → centroid had dim-1 elements → index-out-of-range panic.
+- **Go `searchFile` AILK header offset** — `key_metadata.hnsw_offset` is absolute position of HNSW blob (after header + centroid); Go was reading header at blob position → "bad magic". Fixed: `ailk_header = hnsw_offset - HeaderSize - (dim+1)*4`.
 
 ### Tests
 
@@ -46,7 +47,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### CI
 
-- `ci-duckdb.yml`: cmake build + Python integration tests for DuckDB extension.
+- `ci-duckdb.yml`: cmake build + Python integration tests for DuckDB extension + `ailake_scan` integration tests.
+- `ci-go.yml`: unit step runs `go test ./...` (integration tests auto-skip without `AILAKE_FIXTURE`); integration step runs all tests with fixture.
 
 ---
 
