@@ -80,7 +80,7 @@ func TestDecodeCentroid_TooShort(t *testing.T) {
 func TestTableDir(t *testing.T) {
 	c := &HadoopCatalog{Warehouse: "/data/warehouse"}
 	got := c.tableDir("default", "docs")
-	want := "/data/warehouse/default.db/docs"
+	want := "/data/warehouse/default/docs"
 	if got != want {
 		t.Errorf("tableDir: got %q, want %q", got, want)
 	}

@@ -61,7 +61,7 @@ type HadoopCatalog struct {
 }
 
 func (c *HadoopCatalog) tableDir(namespace, name string) string {
-	return filepath.Join(c.Warehouse, namespace+".db", name)
+	return filepath.Join(c.Warehouse, namespace, name)
 }
 
 // LoadTable reads table metadata and returns TableInfo + current snapshot ID.
