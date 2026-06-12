@@ -20,6 +20,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **deny.toml** — removed stale `MPL-2.0` license allowance and `RUSTSEC-2021-0153` ignore entry; both were transitive via `lancedb` which moved to the separate `ailake-benchmark` repository.
 - **`keep_raw_for_reranking` default corrected** — all production paths (CLI insert/compact/serve, JNI write, demo, integration tests, compat fixture) now correctly default to `true`; `false` is only set when `--pq-only` / `pq_only=True` is explicitly requested. Fixes compat CI failure where the `embedding` column was missing from the fixture Parquet file.
 - **clippy `too_many_arguments`** — suppressed via `#[allow(clippy::too_many_arguments)]` on `TableWriter::new` in `ailake-py` (8 params required by PyO3 `#[new]` signature).
+- **clippy `print_literal`** — `"Recall@10"` moved from `println!` argument into format string literal in `ailake estimate` table header; satisfies `-D clippy::print_literal` (CI was failing).
 
 ---
 

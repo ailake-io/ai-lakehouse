@@ -783,6 +783,40 @@ cargo build --release
 
 ---
 
+## 8F-2. Storage estimator (`ailake estimate`)
+
+`ailake estimate` computes storage requirements with zero I/O — pure math, no S3 access needed. Use it before provisioning a table to compare index modes.
+
+```bash
+# Basic — 10M rows, dim=1536 (text-embedding-3-small)
+ailake estimate --rows 10M --dim 1536
+
+# Custom HNSW M and PQ sub-vectors
+ailake estimate --rows 10M --dim 1536 --hnsw-m 32 --pq-m 48
+
+# JSON output (for scripting / CI)
+ailake estimate --rows 10M --dim 1536 --format json
+```
+
+Example output (text format):
+
+```
+ailake estimate — 10,000,000 rows × dim=1536  HNSW M=16  PQ M=48
+
+  Mode                        Vectors        Index       Total  Reduct.  Recall@10
+  ──────────────────────────────────────────────────────────────────────────────────
+  F32 (baseline)             57.2 GiB     10.1 GiB    67.4 GiB    1.0×    ~99%
+  F16 (default)              28.6 GiB     10.1 GiB    38.7 GiB    1.7×    ~99%
+  I8                         14.3 GiB     10.1 GiB    24.4 GiB    2.8×    ~97%
+  F16 + IVF-PQ index         28.6 GiB    457.8 MiB    29.0 GiB   23.2×    ~99%
+  I8  + IVF-PQ index         14.3 GiB    457.8 MiB    14.8 GiB   45.5×    ~97%
+  PQ-only (no raw)          457.8 MiB    457.8 MiB   915.5 MiB  75.4×    ~93%
+```
+
+Row-count suffixes: `1000`, `500K`, `10M`, `1B` all accepted.
+
+---
+
 ## 8G. HNSW M/ef tuning (`--hnsw-m`, `--hnsw-ef`)
 
 HNSW M and ef_construction are now per-table parameters stored in Iceberg metadata.
