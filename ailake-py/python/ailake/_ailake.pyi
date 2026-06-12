@@ -17,6 +17,8 @@ class TableWriter:
         pre_normalize: bool = False,
         hnsw_m: Optional[int] = None,
         hnsw_ef_construction: Optional[int] = None,
+        pq_only: bool = False,
+        ivf_residual: bool = False,
     ) -> None:
         """Open or create an AI-Lake table at *path*.
 
@@ -32,6 +34,14 @@ class TableWriter:
                     per-table default stored in Iceberg metadata.
             hnsw_ef_construction: HNSW build-time beam width.  ``None`` uses
                                   the per-table default.
+            pq_only: When ``True``, only PQ-compressed codes are stored —
+                     raw F16 vectors are discarded after index build.  Saves
+                     ~95-99 % vector storage at the cost of no exact reranking.
+                     Default ``False`` (keep raw for reranking).
+            ivf_residual: When ``True``, IVF-PQ encodes residuals from each
+                          cluster centroid rather than raw vectors.  Improves
+                          recall@10 by ~2-4 pp at the same PQ budget.
+                          Default ``False``.
         """
         ...
 
@@ -46,6 +56,23 @@ class TableWriter:
             texts: One string per row.
             embeddings: One embedding (list of floats) per row; length must
                         match *texts*.
+        """
+        ...
+
+    def write_batch_auto_deferred(
+        self,
+        texts: Sequence[str],
+        embeddings: Sequence[Sequence[float]],
+    ) -> None:
+        """Deferred-index write — Parquet persisted immediately (~200k vec/s).
+
+        Selects IVF-PQ when a GPU or ≥8 CPU cores are detected and the batch
+        has ≥5 000 vectors; falls back to HNSW otherwise.  Index is built in a
+        background thread — shard is served via flat scan until the index is ready.
+
+        Args:
+            texts: One string per row.
+            embeddings: One embedding (list of floats) per row.
         """
         ...
 

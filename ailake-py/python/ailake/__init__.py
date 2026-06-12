@@ -273,6 +273,8 @@ class Table:
         pre_normalize: bool = False,
         hnsw_m: int | None = None,
         hnsw_ef_construction: int | None = None,
+        pq_only: bool = False,
+        ivf_residual: bool = False,
     ) -> None:
         self._path = path
         self._vector_column = vector_column
@@ -281,6 +283,8 @@ class Table:
         self._pre_normalize = pre_normalize
         self._hnsw_m = hnsw_m
         self._hnsw_ef = hnsw_ef_construction
+        self._pq_only = pq_only
+        self._ivf_residual = ivf_residual
         self._writer = _TableWriter(
             path,
             vector_column=vector_column,
@@ -289,6 +293,8 @@ class Table:
             pre_normalize=pre_normalize,
             hnsw_m=hnsw_m,
             hnsw_ef_construction=hnsw_ef_construction,
+            pq_only=pq_only,
+            ivf_residual=ivf_residual,
         )
 
     # ── write ─────────────────────────────────────────────────────────────────
@@ -319,6 +325,44 @@ class Table:
         Returns the new snapshot id.
         """
         return self._writer.commit()
+
+    def write_batch_auto_deferred(
+        self,
+        texts: list[str],
+        embeddings: _Embeddings,
+    ) -> "Table":
+        """Deferred-index write — Parquet persisted immediately (~200k vec/s).
+
+        Selects IVF-PQ when a GPU or ≥8 CPU cores are detected and the batch
+        has ≥5 000 vectors; falls back to HNSW otherwise.  Index is built in a
+        background thread — shard is served via flat scan until the index is ready.
+
+        Args:
+            texts: one string per row.
+            embeddings: ``list[list[float]]`` or any array with a ``.tolist()`` method.
+        """
+        _emb: list[list[float]] = (
+            embeddings.tolist()  # type: ignore[union-attr]
+            if hasattr(embeddings, "tolist")
+            else [list(row) for row in embeddings]
+        )
+        self._writer.write_batch_auto_deferred(texts, _emb)
+        return self
+
+    async def write_batch_auto_deferred_async(
+        self,
+        texts: list[str],
+        embeddings: _Embeddings,
+    ) -> "Table":
+        """Async variant of :meth:`write_batch_auto_deferred`."""
+        _emb: list[list[float]] = (
+            embeddings.tolist()  # type: ignore[union-attr]
+            if hasattr(embeddings, "tolist")
+            else [list(row) for row in embeddings]
+        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._writer.write_batch_auto_deferred, texts, _emb)
+        return self
 
     async def insert_async(
         self,
@@ -415,6 +459,8 @@ def open_table(
     pre_normalize: bool = False,
     hnsw_m: int | None = None,
     hnsw_ef_construction: int | None = None,
+    pq_only: bool = False,
+    ivf_residual: bool = False,
 ) -> Table:
     """Open or create an AI-Lake table at *path*.
 
@@ -436,6 +482,8 @@ def open_table(
         pre_normalize=pre_normalize,
         hnsw_m=hnsw_m,
         hnsw_ef_construction=hnsw_ef_construction,
+        pq_only=pq_only,
+        ivf_residual=ivf_residual,
     )
 
 
