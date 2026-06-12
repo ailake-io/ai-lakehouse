@@ -56,19 +56,19 @@ Reference guide for the two JVM query-engine plugins that expose AI-Lake vector 
 Each GitHub Release includes pre-built artifacts uploaded by the `publish-jvm.yml` workflow. No Rust toolchain or Gradle required.
 
 ```bash
-VERSION=0.0.10   # replace with desired release
+VERSION=0.0.17   # replace with desired release
 
 # Spark plugin
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
 
 # Trino plugin
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/trino-plugin-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/trino-plugin-${VERSION}-plugin.jar
 
 # Flink connector
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/ailake-flink-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/ailake-flink-${VERSION}-plugin.jar
 
 # Native library (required by all three)
-wget https://github.com/ThiagoLange/iceberg-ai-deltalakehouse/releases/download/v${VERSION}/libailake_jni.so
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/libailake_jni.so
 ```
 
 Place `libailake_jni.so` in a directory accessible to the JVM (see [Native library deployment](#native-library-deployment)).
@@ -101,7 +101,8 @@ The library exports C-ABI symbols consumed by JNA. All three plugins use the JSO
 char* ailake_search_json(const char* request_json);
 
 // request_json: {"warehouse":"...","namespace":"default","table":"...",
-//                "dim":1536,"ids":[...],"embeddings":[[...],...]}
+//                "dim":1536,"ids":[...],"embeddings":[[...],...],
+//                "metric":"cosine","precision":"f16"}
 // Returns: {"ok":true,"snapshot_id":N}
 char* ailake_write_batch_json(const char* request_json);
 

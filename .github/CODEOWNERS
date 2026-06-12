@@ -19,9 +19,9 @@
 /ailake-py/      @ThiagoLange
 /ailake-jni/     @ThiagoLange
 
-# CLI and benchmarks
+# CLI
 /ailake-cli/     @ThiagoLange
-/ailake-bench/   @ThiagoLange
+# ailake-bench lives in the separate ailake-benchmark repository
 
 # CI and release
 /.github/        @ThiagoLange

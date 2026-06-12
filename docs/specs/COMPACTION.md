@@ -8,18 +8,20 @@ AI-Lake files are write-once immutable. Every `write_batch` produces a new `.par
 - **S3 request cost**: each file requires at least two range GETs (Parquet footer + HNSW footer).
 - **Parquet read overhead**: many small row groups = poor predicate pushdown.
 
-Compaction merges N small files into one large file with a single unified HNSW, eliminating fan-out.
+Compaction merges N small files into one large file with a single unified index (HNSW or IVF-PQ — determined by the table's `VectorStoragePolicy`), eliminating fan-out.
 
 ---
 
-## Compaction is the HNSW rebuild trigger
+## Compaction is the index rebuild trigger
 
-During streaming ingest or batch micro-batches, new files arrive without HNSW (or with tiny per-batch HNSWs). Compaction is the **only** moment a full-quality HNSW is built for a set of records. This is by design:
+During streaming ingest or batch micro-batches, new files arrive with per-batch indexes (HNSW or IVF-PQ). Compaction is the **only** moment a full-quality index is built for a merged set of records. This is by design:
 
 - Write path stays O(N) — just append Parquet + compute centroid.
 - HNSW build is O(N log N) and CPU-heavy — happens once, asynchronously, at compaction time.
 
-Records in un-compacted files are still searchable (their HNSWs exist, just small), but recall may be lower for very small batches. The "blind window" is bounded by the compaction interval.
+Records in un-compacted files are still searchable (their indexes exist, just small), but recall may be lower for very small batches. The "blind window" is bounded by the compaction interval.
+
+> **Tip**: `write_batch_auto_deferred` (Python / Rust SDK) builds the per-shard index in a background Tokio task immediately after Parquet commit. New shards are served via flat scan until `IndexStatus::Ready`, then switch to HNSW/IVF-PQ automatically. This narrows the blind window to the index build time (~30-165 s per shard) without waiting for the compaction job.
 
 ---
 

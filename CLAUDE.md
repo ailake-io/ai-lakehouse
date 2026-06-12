@@ -406,7 +406,7 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] `ailake-vec`: `BlockCompressor` com zstd/lz4
 - [x] `ailake-query`: pruning via centróides — `VectorPruner` geométrico
 - [x] `ailake-query`: `ContextAssembler` — dedup, agrupamento por doc, budget de tokens, XML
-- [x] `ailake-py`: bindings PyO3 — `TableWriter`, `search()`, `assemble_context()`
+- [x] `ailake-py`: bindings PyO3 — `TableWriter`, `search()`, `assemble_context()`, `search_with_data()` (full-read via Arrow IPC; `fetch_data=True` em `SearchQuery`)
 - [x] Testes de compatibilidade: PyArrow, DuckDB, PyIceberg metadata JSON — validados localmente; Spark + Trino via `compat-heavy.yml` (workflow_dispatch)
 
 ### Fase 3 — Integração com Motores de Query
@@ -414,6 +414,7 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] Plugin Trino: `VectorScanConnector`
 - [x] Plugin Spark: `VectorScanStrategy`
 - [x] Suporte a múltiplas colunas vetoriais (`embedding` + `context_embedding`)
+- [x] `duckdb-ailake`: extensão C++ para DuckDB — `ailake_search()` + `ailake_write_batch()` via `dlopen`/C-ABI; mesmo protocolo JSON-envelope do Spark/Trino; degradação graciosa sem lib
 
 ### Fase 4 — Produção
 - [x] Benchmarks públicos vs. LanceDB, Deep Lake, pgvector (`ailake-bench`)
@@ -425,6 +426,28 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] `MemTable` write buffer para ingestão streaming
 - [x] AVX-512 + FMA + F16C SIMD para kernels de distância
 - [x] Flink connector (`VectorScanSource` + `VectorScanTableFactory`)
+- [x] **IVF-PQ shared codebook** — `IvfPqCodebook` treinado uma vez no primeiro shard e reutilizado em todos os shards subsequentes via `Arc<tokio::sync::OnceCell>`; distâncias ADC comparáveis cross-shard sem reranking por codebook incompatível
+- [x] **`write_batch_ivf_pq_deferred`** — variante async de IVF-PQ: persiste Parquet imediatamente (~200k vec/s), treina índice IVF-PQ em background (mesmo padrão do HNSW deferred); `IndexStatus::Indexing → Ready`
+- [x] **Fix k-means++ O(n×k²) → O(n×k)** — `kmeans_pp_init` usa min-dist incremental; parallelismo via `rayon::par_iter` no assignment loop e no init; speedup 17× em IVF-PQ SIFT-1M
+- [x] **Fix `HadoopCatalog::commit_snapshot`** — operações `Replace`/`Overwrite` não herdam manifests anteriores; corrige bug onde `IndexStatus::Ready` nunca convergia com múltiplos background tasks concorrentes
+- [x] **`hnsw_m` + `hnsw_ef_construction` per tabela** — `VectorStoragePolicy::hnsw_m` e `hnsw_ef_construction` permitem tunar M e ef por tabela sem mudar o código; armazenados como `ailake.hnsw-m` / `ailake.hnsw-ef-construction` em propriedades Iceberg; sobrepõem os defaults do `HnswConfig` no write. Exposto via CLI (`--hnsw-m`, `--hnsw-ef`) e Python (`hnsw_m=`, `hnsw_ef_construction=`). `None` = usa defaults (backwards-compatible).
+- [x] **`VectorMetric::NormalizedCosine` + `pre_normalize`** — `VectorStoragePolicy::pre_normalize = true` normaliza vetores para L2 unitário na escrita e usa `1-dot(a,b)` no hot loop do HNSW em vez de cosine completo (sem sqrt). ~12-20% speedup em search para dim=1536. Query normalizada automaticamente em todos os bindings (Rust, Python, Go, C++). Exposto via `ailake create --pre-normalize` (CLI) e `TableWriter(pre_normalize=True)` (Python).
+
+### Fase 5 — Próximos Passos
+
+- [ ] **`write_batch_auto_deferred`** — variante deferred do engine Auto: detecta hardware em runtime e delega para `write_batch_deferred` (HNSW, CPU) ou `write_batch_ivf_pq_deferred` (IVF-PQ, GPU). Eleva throughput do Auto de 6.3k vec/s (inline bloqueante) para ~200k vec/s (Parquet-only imediato, índice async). Implementação: método em `TableWriter` que resolve `IndexType::Auto` → chama o deferred correspondente. Adicionar `--engine ailake-auto-deferred` ao bench para validar.
+- [ ] **DuckLake catalog backend** — `DuckLakeCatalog` em `ailake-catalog/` implementando `CatalogProvider` sobre catálogo DuckDB (dep: crate `duckdb`); mapeamento de metadados vetoriais (`centroid`, `radius`, `footer-offset`) para tabelas internas DuckLake; modelo de commit via INSERT no catálogo DuckDB. *Aguardar estabilização da spec DuckLake (anunciada mai/2025) antes de implementar.*
+- [ ] **dbt integration guide** — documentar fluxo `dbt (transform) → AI-Lake SDK (ingest + HNSW)` para dbt-spark e dbt-trino com plugins AI-Lake carregados
+
+### Fase 6 — Qualidade de Recall e Developer Experience
+
+- [x] **`VectorMetric::NormalizedCosine` + `pre_normalize`** — `VectorStoragePolicy::pre_normalize = true` normaliza vetores para L2 unitário na escrita e usa `1-dot(a,b)` no hot loop do HNSW em vez de cosine completo (sem sqrt). ~12-20% speedup em search para dim=1536. Query normalizada automaticamente em todos os bindings (Rust, Python, Go, C++). Exposto via `ailake create --pre-normalize` (CLI) e `TableWriter(pre_normalize=True)` (Python).
+- [x] **`hnsw_m` + `hnsw_ef_construction` por tabela** — `VectorStoragePolicy::hnsw_m` e `hnsw_ef_construction` permitem tunar M e ef por tabela sem mudar o código; armazenados como `ailake.hnsw-m` / `ailake.hnsw-ef-construction` em propriedades Iceberg. Exposto via CLI (`--hnsw-m`, `--hnsw-ef`) e Python (`hnsw_m=`, `hnsw_ef_construction=`).
+- [x] **MRL / dimension truncation documentado** — modelos Matryoshka (OpenAI text-embedding-3-*, Cohere embed-v3, Jina v3, Nomic v1.5) permitem truncar dimensão sem retreinamento; AI-Lake suporta nativamente via `dim` menor na criação da tabela. Documentado em `ailake-py/README.md` e `SETUP.md §8H` com tabela recall×storage (1536→512 = 3× menos storage, ~97% recall@10).
+
+### Fase 7 — Compressão Extrema e Novos Tipos de Índice
+
+> **Nota (v0.0.14)**: RaBitQ e Binary Hamming foram removidos do codebase. Recall ≈ 0 em embeddings float gerais sem alinhamento de treinamento; complexidade não justificada vs. HNSW/IVF-PQ.
 
 ---
 
@@ -437,7 +460,7 @@ ailake/
 ├── ailake-core/          # Tipos, traits, schema VECTOR, LlmContextSchema, RowId
 ├── ailake-parquet/       # Leitor/escritor Parquet com tipo VECTOR
 ├── ailake-vec/           # Quantização F32/F16/I8/PQ
-├── ailake-index/         # HNSW via hnsw_rs, serialização bincode, mmap
+├── ailake-index/         # HNSW via hnsw_rs, IVF-PQ — serialização bincode, mmap
 ├── ailake-file/          # Arquivo unificado: Parquet + rodapé AI-Lake
 ├── ailake-catalog/       # Catálogo Iceberg: metadata.json, manifestos Avro
 ├── ailake-store/         # Abstração de object storage via object_store

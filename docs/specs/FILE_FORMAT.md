@@ -79,7 +79,7 @@ Starts at byte 0 of every AILK section. All integer fields little-endian.
 |--------|------|-------|-------------------|-------------|
 | 0      | 4    | bytes | `magic`           | `AILK` (0x41 0x49 0x4C 0x4B) |
 | 4      | 2    | u16   | `format_version`  | Must be `1` for this spec |
-| 6      | 2    | u16   | `flags`           | Bit 0: index type — `0` = HNSW (default), `1` = IVF-PQ. Bits 1–15 reserved, must be `0`. |
+| 6      | 2    | u16   | `flags`           | Bit 0: `1` = IVF-PQ index. If bit 0 is `0`, index is HNSW (default). Bits 1–15 reserved, must be `0`. |
 | 8      | 4    | u32   | `dim`             | Vector dimensionality |
 | 12     | 1    | u8    | `precision`       | See §3.1 |
 | 13     | 1    | u8    | `distance_metric` | See §3.2 |
@@ -106,11 +106,12 @@ regardless of this field.
 
 ### 3.2 `distance_metric` values
 
-| Value | Metric      | Distance definition |
-|-------|-------------|---------------------|
-| `0`   | Cosine      | `1 - dot(a,b) / (\|a\| × \|b\|)` — range [0, 2] |
-| `1`   | Euclidean   | `sqrt(Σ (aᵢ - bᵢ)²)` |
-| `2`   | DotProduct  | `-dot(a, b)` — negated so lower = more similar |
+| Value | Metric            | Distance definition |
+|-------|-------------------|---------------------|
+| `0`   | Cosine            | `1 - dot(a,b) / (\|a\| × \|b\|)` — range [0, 2] |
+| `1`   | Euclidean         | `sqrt(Σ (aᵢ - bᵢ)²)` |
+| `2`   | DotProduct        | `-dot(a, b)` — negated so lower = more similar |
+| `3`   | NormalizedCosine  | `1 - dot(a, b)` — requires pre-normalized unit vectors; equivalent to Cosine but no sqrt in the hot loop (~12-20% faster search on high-dim embeddings). Set `VectorStoragePolicy::pre_normalize = true` to enable automatically. **F16 vector quantization is disabled for this metric** — inter-vector distances for unit vectors (~0.0002) are smaller than F16 rounding error (~0.001), so vectors are kept in F32 during HNSW search to preserve correct nearest-neighbor order. |
 
 All distance functions follow the convention **lower value = more similar**.
 
@@ -158,15 +159,23 @@ downloading or opening the file beyond the manifest.
 Starts at `hnsw_offset` relative to AILK section start
 (= `HEADER_SIZE + centroid_len = 64 + dim × 4 + 4`).
 
-The index type is determined by `header.flags & 0x0001`:
-- `0` → HNSW (§6.1)
-- `1` → IVF-PQ (§6.2)
+The index type is determined by the `flags` field:
+
+| `flags` value | Index type |
+|---|---|
+| `0x0000` | HNSW (§6.1) |
+| `0x0001` | IVF-PQ (§6.2) |
 
 ### 6.1 HNSW Index Blob (`flags & 0x0001 == 0`)
 
 The blob is a **bincode v1** serialization of an `hnsw_rs::Hnsw` graph
 wrapped in `ailake_index::HnswIndex`. Internal layout (opaque to readers
 outside `ailake-index`):
+
+> **Tuning**: `max_m` and `ef_construction` in the blob come from
+> `VectorStoragePolicy::hnsw_m` and `hnsw_ef_construction` when set
+> (stored as `ailake.hnsw-m` / `ailake.hnsw-ef-construction` in Iceberg
+> metadata properties). Defaults: M=16, ef_construction=150.
 
 ```
 [ bincode header ]
@@ -204,6 +213,8 @@ in by the OS — critical for large indexes on S3-backed storage.
 
 The blob is a **bincode v1** serialization of `ailake_index::IvfPqIndex`
 via `IvfPqSerializer`. Internal structure (`IvfPqSnapshot`):
+
+> **Shared codebook**: when multiple shards are written via `write_batch_ivf_pq_deferred` or `write_batch_ivf_pq`, all shards after the first reuse the same `coarse_centroids` and `pq_codebook` trained on the first shard. The serialized blob for each file still contains the full codebook (self-contained file guarantee), but the values are identical across shards — ADC distances are numerically comparable during multi-shard merge.
 
 ```
 [ config: IvfPqConfig
@@ -245,6 +256,7 @@ Search algorithm:
 over HNSW when `hardware_profile.recommend_ivf_pq(n_vectors)` returns true
 (currently: dataset ≥ 100 000 vectors on a GPU-capable host, or when the
 caller explicitly calls `writer.with_ivf_pq(IvfPqConfig)`).
+
 
 ---
 
@@ -567,8 +579,8 @@ AI-Lake files by implementing §15's bincode decoder and the AILK header parser
 | Language | Module | AILK header | Bincode decoder | HNSW search | IVF-PQ search |
 |----------|--------|-------------|-----------------|-------------|---------------|
 | **Rust** | `ailake-file`, `ailake-index` | `AilakeHeader::from_bytes` | `HnswSerializer`, `IvfPqSerializer` | `HnswIndex::search` | `IvfPqIndex::search` |
-| **C++17** | `ailake-cpp/include/ailake/` | `footer.hpp` → `AilakeHeader::parse` | `bincode.hpp` → `BincodeReader` | `hnsw.hpp` → `deserialize_hnsw` + `hnsw_search` | `ivfpq.hpp` → `deserialize_ivfpq` + `ivfpq_search` |
-| **Go** | `ailake-go/` | `footer.go` → `ParseHeaderBytes` | `bincode.go` → `bincodeReader` | `hnsw.go` → `DeserializeHnsw` + `(HnswIndex).Search` | `ivfpq.go` → `DeserializeIvfPq` + `(IvfPqIndex).Search` |
+| **C++17** | `ailake-cpp/include/ailake/` | `footer.hpp` → `is_ivf_pq()` | `bincode.hpp` → `BincodeReader` | `hnsw.hpp` → `hnsw_search` | `ivfpq.hpp` → `ivfpq_search` |
+| **Go** | `ailake-go/` | `footer.go` → `IsIvfPq()` | `bincode.go` → `bincodeReader` | `hnsw.go` → `(HnswIndex).Search` | `ivfpq.go` → `(IvfPqIndex).Search` |
 
 All three implementations follow the same read algorithm (§9) and enforce the
 same integrity invariants (§10). The C++ and Go SDKs were independently

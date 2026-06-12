@@ -1,6 +1,6 @@
 # ailake-jni
 
-C-ABI cdylib that exposes the [AI-Lake](https://github.com/ThiagoLange/iceberg-ai-deltalakehouse) vector search engine to JVM runtimes (Spark, Trino, Flink) via [JNA](https://github.com/java-native-access/jna).
+C-ABI cdylib that exposes the [AI-Lake](https://github.com/ThiagoLange/ai-lakehouse) vector search engine to JVM runtimes (Spark, Trino, Flink) via [JNA](https://github.com/java-native-access/jna).
 
 ## Overview
 
@@ -58,17 +58,21 @@ Writes a batch of records and their embeddings to an AI-Lake table.
 
 ```json
 {
-  "warehouse": "/path/to/warehouse",
-  "namespace": "default",
-  "table":     "my_table",
-  "vec_col":   "embedding",
-  "dim":       1536,
-  "metric":    "cosine",
-  "precision": "f16",
-  "ids":        [1, 2, 3],
-  "embeddings": [[0.1, 0.2, "..."], [0.3, 0.4, "..."], [0.5, 0.6, "..."]]
+  "warehouse":    "/path/to/warehouse",
+  "namespace":    "default",
+  "table":        "my_table",
+  "vec_col":      "embedding",
+  "dim":          1536,
+  "metric":       "cosine",
+  "precision":    "f16",
+  "ids":          [1, 2, 3],
+  "embeddings":   [[0.1, 0.2, "..."], [0.3, 0.4, "..."], [0.5, 0.6, "..."]],
+  "ivf_residual": false
 }
 ```
+
+Optional fields (all default `false`):
+- `ivf_residual` — enable residual PQ encoding (`vec - cluster_centroid`); improves recall@10 by ~2-4 pp at same storage.
 
 **Response JSON:** `{"ok": true, "snapshot_id": 7}` or `{"ok": false, "error": "..."}`.
 

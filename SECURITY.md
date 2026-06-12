@@ -40,4 +40,4 @@ In scope:
 Out of scope:
 - Denial-of-service via intentionally large inputs (no SLA for resource exhaustion)
 - Issues in transitive dependencies not triggered by AI-Lake code paths
-- Vulnerabilities in benchmark or test tooling (`ailake-bench`, `tests/`)
+- Vulnerabilities in benchmark or test tooling ([`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks), `tests/`)

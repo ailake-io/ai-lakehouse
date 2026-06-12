@@ -34,6 +34,11 @@ COPY ailake-catalog   ailake-catalog/
 COPY ailake-store     ailake-store/
 COPY ailake-query     ailake-query/
 COPY ailake-py        ailake-py/
+# Workspace members not needed for the wheel build, but cargo metadata requires
+# all members listed in the root Cargo.toml to exist in the build context.
+COPY ailake-cli       ailake-cli/
+COPY ailake-jni       ailake-jni/
+COPY tests            tests/
 
 WORKDIR /ailake-py
 RUN maturin build --release --out /wheels
@@ -55,7 +60,7 @@ COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir \
         /wheels/*.whl \
         jupyterlab \
-        "pyiceberg[pyarrow,s3fs]" \
+        "pyiceberg[pyarrow,sql-sqlite]" \
         duckdb \
         "pyspark<4.0" \
         trino \
@@ -64,8 +69,20 @@ RUN pip install --no-cache-dir \
         pandas \
         numpy \
         pyarrow \
+        polars \
         boto3 \
     && rm -rf /wheels
+
+# Pre-download Iceberg Spark runtime JAR — avoids Ivy/Maven download at notebook runtime.
+# Placed in /opt/iceberg/ so spark.jars can reference a deterministic path.
+RUN python3 -c "
+import urllib.request, pathlib, sys
+jar_url = 'https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.5.2/iceberg-spark-runtime-3.5_2.12-1.5.2.jar'
+dest = pathlib.Path('/opt/iceberg/iceberg-spark-runtime-3.5_2.12-1.5.2.jar')
+dest.parent.mkdir(parents=True, exist_ok=True)
+urllib.request.urlretrieve(jar_url, str(dest))
+print(f'Iceberg JAR: {dest.stat().st_size} bytes', flush=True)
+"
 
 COPY tests/docker/demo/init_demo.py   /opt/init_demo.py
 COPY tests/docker/demo/entrypoint.sh  /entrypoint.sh

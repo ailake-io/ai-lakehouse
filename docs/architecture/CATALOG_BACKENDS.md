@@ -183,6 +183,17 @@ impl HadoopCatalog {
 
 **Commit**: writes a new `vN.metadata.json` and updates `version-hint.text` (S3 `PUT` semantics). Manifest files are Avro OCF with verbatim schema JSON so field-ids survive round-trips (apache-avro 0.16 strips unknown schema properties). Safe for single-writer workloads.
 
+**`SnapshotOperation` semantics** — critical for deferred index builds:
+
+| Operation | Manifest list behavior |
+|---|---|
+| `Append` | New manifest appended to previous snapshot's manifest list |
+| `Delete` | New manifest appended to previous snapshot's manifest list |
+| `Replace` | New manifest list contains **only** the new manifest — no inheritance |
+| `Overwrite` | Same as `Replace` |
+
+`Replace` is used by deferred HNSW/IVF-PQ background tasks to transition `IndexStatus::Indexing → Ready`. Since the new manifest already contains the complete file set, inheriting old manifests would create duplicate `DataFileEntry` records in `list_files` results — preventing the `ready >= num_shards` convergence check from working correctly.
+
 ```rust
 // Local dev
 let store = Arc::new(LocalStore::new("/tmp/warehouse"));

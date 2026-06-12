@@ -84,6 +84,48 @@ Invariant after commit:
 
 ---
 
+## Deferred write path (HNSW and IVF-PQ)
+
+`write_batch_deferred` (HNSW) and `write_batch_ivf_pq_deferred` (IVF-PQ) decouple Parquet write latency from index build time.
+
+```
+Caller
+  │
+  │  write_batch_deferred(batch, embeddings)
+  ▼
+TableWriter (fast path — Parquet only)
+  │
+  ├─► AilakeFileWriter::write_parquet_only()
+  │     → Parquet bytes, no AILK section
+  │
+  ├─► store.put(file_path, parquet_bytes)
+  │     → S3 PUT, returns in ~4s for 200k vec/s
+  │
+  ├─► catalog entry: IndexStatus::Indexing
+  │
+  └─► tokio::spawn (background task)
+        │
+        ├─► [IVF-PQ only] OnceCell::get_or_try_init
+        │     → first task trains codebook (k-means)
+        │     → subsequent tasks await and reuse shared codebook
+        │
+        ├─► build HNSW or IvfPqIndex::build_with_codebook
+        │
+        ├─► AilakeFileWriter::write (rewrite file with AILK section)
+        │
+        ├─► store.put (overwrite Parquet-only file with full AILK file)
+        │
+        └─► CAS retry loop:
+              load current snapshot → mark file Ready → commit Replace snapshot
+              verify Ready survived (sibling tasks may race) → retry if not
+```
+
+**Throughput**: write returns after the Parquet PUT — ~200k vec/s for both engines. Index builds in background without blocking ingestion.
+
+**`IndexStatus` lifecycle**: `Indexing` (set at commit time) → `Ready` (set by background task after AILK section is written and catalog updated). The `SearchSession` serves `Indexing` shards via flat scan (exact brute-force) until the transition completes. `Replace` commits overwrite the manifest list with the new complete state to avoid duplicate entries.
+
+---
+
 ## Read path — vector search
 
 ```mermaid
@@ -92,7 +134,7 @@ flowchart TD
     CAT["ailake-catalog\n1. read metadata.json → snapshot\n2. read snap-NNN.avro → DataFileEntry list\n3. decode centroid_b64, radius per file"]
     PRUNE["ailake-query / VectorPruner\n4. dist(query, centroid) - radius > threshold?\n   YES → skip file (zero S3 I/O)"]
     STORE["ailake-store\n5a. GET range [hnsw_offset, +hnsw_len)"]
-    MMAP["ailake-index / MmapLoader\n5b. write to tempfile\n5c. mmap → bincode::deserialize\n    HnswIndex or IvfPqIndex"]
+    MMAP["ailake-index / MmapLoader\n5b. write to tempfile\n5c. mmap → bincode::deserialize\n    HnswIndex or IvfPqIndex\n    (dispatched by AnyIndex from flags field)"]
     SEARCH["ailake-index\n5d. index.search(query, candidate_k)"]
     MERGE["merge all per-file results\nglobal top-k sort"]
     FETCH["ailake-parquet / ParquetVectorReader\n6. read specific row groups for winners\n   with predicate pushdown"]
@@ -134,14 +176,15 @@ ailake-query / VectorScanner
   │   │     └─► returns: tmp_file_path
   │   │
   │   ├─► ailake-index / MmapLoader
-  │   │     │  6a. open tmp_file with memmap2::Mmap
-  │   │     │  6b. parse AI-Lake header (first 64 bytes)
-  │   │     │  6c. deserialize HNSW from graph section via bincode
-  │   │     │       (mmap-backed — only touched pages are loaded)
-  │   │     └─► returns: HnswIndex
+  │   │     │  6a. open tmp_file via memmap2::Mmap
+  │   │     │  6b. parse AI-Lake header flags:
+  │   │     │       flags & 0x0001 → IvfPqSerializer::from_bytes
+  │   │     │       default         → MmapLoader::from_bytes (HNSW mmap)
+  │   │     └─► returns: AnyIndex (Hnsw | IvfPq)
   │   │
-  │   └─► ailake-index / HnswIndex.search()
-  │         │  6d. run HNSW search: query → top_k × oversampling candidates
+  │   └─► AnyIndex::search(query, top_k, ef)
+  │         │  HNSW:   greedy graph traversal, candidate heap
+  │         │  IVF-PQ: coarse quantize, nprobe cells, ADC distance
   │         └─► returns: Vec<(RowId, f32)>
   │
   ├─► merge results across all surviving files, global top-k sort

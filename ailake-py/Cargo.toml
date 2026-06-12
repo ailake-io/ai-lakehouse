@@ -1,10 +1,10 @@
 [package]
 name        = "ailake-py"
-version     = "0.0.10"
+version = "0.0.17"
 edition     = "2021"
 description = "Python bindings for AI-Lake (distributed via PyPI, not crates.io)"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 publish     = false
 
 [lib]

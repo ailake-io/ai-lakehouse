@@ -9,7 +9,8 @@ use std::sync::{
 use ailake_core::{RowId, VectorMetric};
 use ailake_vec::{
     cosine_distance, cosine_distance_f16, dot_product, dot_product_f16, euclidean_distance,
-    euclidean_distance_f16,
+    euclidean_distance_f16, normalize_l2, normalized_cosine_distance,
+    normalized_cosine_distance_f16,
 };
 use half::f16;
 use rand::Rng;
@@ -85,6 +86,22 @@ impl DistFn for DotProductDist {
     #[inline(always)]
     fn dist_f16(a: &[f32], b: &[f16]) -> f32 {
         -dot_product_f16(a, b)
+    }
+}
+
+/// Pre-normalized cosine: 1 - dot(a, b). No sqrt — requires unit-length vectors.
+/// ~2× faster than CosineDist in the HNSW edge-traversal hot loop.
+#[derive(Clone, Copy)]
+struct NormalizedCosineDist;
+impl DistFn for NormalizedCosineDist {
+    const METRIC: VectorMetric = VectorMetric::NormalizedCosine;
+    #[inline(always)]
+    fn dist(a: &[f32], b: &[f32]) -> f32 {
+        normalized_cosine_distance(a, b)
+    }
+    #[inline(always)]
+    fn dist_f16(a: &[f32], b: &[f16]) -> f32 {
+        normalized_cosine_distance_f16(a, b)
     }
 }
 
@@ -193,9 +210,9 @@ impl HnswBuilder {
             }
             VectorMetric::NormalizedCosine => {
                 if parallel {
-                    self.build_parallel_typed::<CosineDist>()
+                    self.build_parallel_typed::<NormalizedCosineDist>()
                 } else {
-                    self.build_serial_typed::<CosineDist>()
+                    self.build_serial_typed::<NormalizedCosineDist>()
                 }
             }
         }
@@ -473,12 +490,17 @@ pub struct HnswIndex {
 
 impl HnswIndex {
     /// Dispatch on `self.metric` once; all inner search logic is monomorphic.
+    /// For NormalizedCosine, the query is normalized here before traversal so
+    /// callers do not need to pre-normalize manually.
     pub fn search(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
         match self.metric {
             VectorMetric::Cosine => self.search_typed::<CosineDist>(query, top_k, ef),
             VectorMetric::Euclidean => self.search_typed::<EuclideanDist>(query, top_k, ef),
             VectorMetric::DotProduct => self.search_typed::<DotProductDist>(query, top_k, ef),
-            VectorMetric::NormalizedCosine => self.search_typed::<CosineDist>(query, top_k, ef),
+            VectorMetric::NormalizedCosine => {
+                let q_norm = normalize_l2(query);
+                self.search_typed::<NormalizedCosineDist>(&q_norm, top_k, ef)
+            }
         }
     }
 
@@ -568,7 +590,14 @@ impl HnswIndex {
     /// per distance call vs F32). Pair with `rerank_factor` in `SearchConfig` to
     /// recover the precision lost by F16 approximation.
     /// F32 vectors are retained for brute-force fallback.
+    ///
+    /// No-op for `NormalizedCosine`: F16 quantization error (~0.001 per unit vector)
+    /// can exceed the true `1-dot` distance between very similar pre-normalized vectors
+    /// (~0.0002 for consecutive embeddings), causing wrong nearest-neighbour results.
     pub fn quantize_to_f16(&mut self) {
+        if self.metric == VectorMetric::NormalizedCosine {
+            return;
+        }
         let f16_vecs: Vec<f16> = self.flat_vecs.iter().map(|&x| f16::from_f32(x)).collect();
         self.flat_vecs_f16 = Some(f16_vecs);
     }

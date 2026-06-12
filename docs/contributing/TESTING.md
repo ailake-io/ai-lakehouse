@@ -533,33 +533,37 @@ Scripts:
 
 ## Benchmarks
 
-### `ailake-bench` — SIFT-1M end-to-end
+### SIFT-1M end-to-end (external repo)
 
-`ailake-bench` is the canonical public benchmark. Measures write throughput, search QPS, latency percentiles, and Recall@10 against SIFT-1M ground truth.
+Benchmarks live at **https://github.com/ThiagoLange/ailake-benchmarks**.
 
 ```bash
-# Download dataset (~164 MB)
-bash ailake-bench/scripts/download_sift1m.sh
-
-# Run (uses --release automatically via cargo run --release)
-cargo run --release -p ailake-bench -- --dataset-dir data/sift1m
+git clone https://github.com/ThiagoLange/ailake-benchmarks.git
+cd ailake-benchmarks
+bash scripts/download_sift1m.sh /data/sift1m
+cargo run --release -- --dataset-dir /data/sift1m
 ```
 
 What it measures:
 - **Write phase**: 10 shards × 100k vectors, wall time + vec/s throughput
+- **Index build**: time for background HNSW/IVF-PQ builds to reach `IndexStatus::Ready`
 - **Index load**: time to `SearchSession::load()` all shards into memory
 - **Search phase** (top_k=10, ef=50): Recall@10, QPS, mean/p50/p95/p99 latency
 
-Reference results (x86_64 with AVX2, 10-core CPU):
+Reference results (SIFT-1M, x86_64 AVX2, 8 cores):
 
-| Metric | Value |
-|--------|-------|
-| Write throughput | ~2400 vec/s |
-| Index load (10 shards) | ~3 s |
-| Recall@10 | ~0.96 |
-| QPS | ~450 |
-| Latency mean | ~2.2 ms |
-| Latency p99 | ~4.5 ms |
+| Engine | Write | Index build | Recall@10 | QPS | p99 |
+|--------|-------|-------------|-----------|-----|-----|
+| `ailake` (HNSW deferred) | 199k vec/s | 165s (async) | 0.9963 | 1365 | 1.96ms |
+| `ailake-ivf-pq-deferred` | 251k vec/s | 42.7s (async) | 0.9065 | 252 | 5.53ms |
+| `ailake-auto` (HNSW) | 6.3k vec/s | 159s (inline) | 0.9960 | 1485 | 1.67ms |
+| `lancedb` | 530k vec/s | 55s (inline) | 0.8805 | 745 | 63.34ms |
+
+Engine selection guide:
+- `ailake` — best recall, streaming ingestion (deferred build)
+- `ailake-ivf-pq-deferred` — 100× smaller index; use when RAM is limited
+- `ailake-auto` — hardware-adaptive; use in heterogeneous deployments
+- `lancedb` — comparison baseline only
 
 ### `ailake-file/benches/write.rs`
 
@@ -643,17 +647,46 @@ cargo bench --workspace
 | `compat-pyiceberg` | `write_fixture` + `pip install pyiceberg[pyarrow]` + `check_pyiceberg.py` | PyIceberg `StaticTable.scan()` |
 | `test-airflow-provider` | `pip install apache-airflow pytest` + `pytest tests/` | Airflow provider unit tests (2.x/3.x) |
 | `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context |
-| `bench-build` | `cargo build -p ailake-bench` | bench crate compiles |
 
 ### `ci-gpu.yml` — manual dispatch (`workflow_dispatch`)
 
-Runs `ailake-index` tests on a `[self-hosted, Windows, X64]` runner with NVIDIA or AMD GPU drivers installed.
+Runs `ailake-index` unit + integration tests on a `[self-hosted, Windows, X64]` runner with NVIDIA or AMD GPU drivers installed.
 
 | Job | Runner | What it covers |
 |---|---|---|
-| `index-gpu-windows` | Windows self-hosted | Detects CUDA (`cudart64_*.dll`) or ROCm (`amdhip64.dll`) at runtime; runs the full `ailake-index` test suite via the active GPU backend |
+| `index-gpu-windows` | Windows self-hosted | Detects CUDA (`cudart64_*.dll`) or ROCm (`amdhip64.dll`) via `Find-Dll` (PATH search); runs the full `ailake-index` test suite including GPU unit tests in `src/gpu.rs` |
+
+**GPU unit tests** (`ailake-index/src/gpu.rs`, gated on `AILAKE_GPU_BACKEND`):
+
+| Test | Dataset | Assert |
+|---|---|---|
+| `gpu_search_batch_cosine_top1_exact` | 64 vecs × dim 16 | top-1 == query at dist ≈ 0 |
+| `gpu_search_batch_euclidean_top1_exact` | 32 vecs × dim 8 | top-1 euclidean == anchor at dist = 0 |
+| `gpu_kmeans_returns_k_centroids` | 4 clusters × 10 vecs, dim 8 | returns exactly k centroids of correct dim |
+
+All three skip (not fail) when `AILAKE_GPU_BACKEND=none`.
 
 **Runner requirements**: Windows 10/11 or Server 2019+, NVIDIA CUDA Toolkit 11/12 or AMD ROCm for Windows, Rust stable toolchain.
+
+### `ci-gpu-data.yml` — manual dispatch (`workflow_dispatch`)
+
+Runs GPU **data integration** tests on a `[self-hosted, Windows, X64]` runner. Fires real cuBLAS / hipBLAS SGEMM kernels against realistic-sized synthetic datasets.
+
+| Job | Runner | What it covers |
+|---|---|---|
+| `index-gpu-data-windows` | Windows self-hosted | `cargo test -p ailake-index --test gpu_data` — 3 tests in `ailake-index/tests/gpu_data.rs` |
+
+**GPU data integration tests** (`ailake-index/tests/gpu_data.rs`, gated on `AILAKE_GPU_BACKEND`):
+
+| Test | Dataset | Assert |
+|---|---|---|
+| `gpu_search_recall_vs_cpu_baseline` | 2 000 vecs × dim 128, 20 queries | GPU recall@10 ≥ 99% vs CPU brute-force |
+| `gpu_search_exact_hit_in_large_db` | 5 000 vecs × dim 64, query == db[1337] | top-1 == row 1337, cosine dist ≈ 0 |
+| `gpu_kmeans_converges_on_clustered_data` | 8 clusters × 50 vecs, dim 32 | each centroid maps unique cluster, dist < 1.0 |
+
+All three skip when `AILAKE_GPU_BACKEND=none`.
+
+**Runner requirements**: same as `ci-gpu.yml`.
 
 ### `ci-go.yml` — manual dispatch (`workflow_dispatch`)
 
@@ -684,22 +717,21 @@ Runs `ailake-index` tests on a `[self-hosted, Windows, X64]` runner with NVIDIA 
 | `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests |
 | `compat-bigquery` | BigQuery: `fsouza/fake-gcs-server` + `goccy/bigquery-emulator:0.6.6`; pyarrow reads AILK Parquet + BQ streaming inserts (`insertAll`); validates row count, schema, `MIN`/`MAX(id)` |
 
-### `publish-jvm.yml` — manual dispatch (`workflow_dispatch`)
+### `publish-jvm.yml` — manual fallback (`workflow_dispatch`)
 
-Builds and uploads JVM plugin fat-JARs + `libailake_jni.so` to an existing GitHub Release.
+Re-builds and re-uploads JVM plugin fat-JARs + `libailake_jni.so` to an existing GitHub Release **without** rerunning the full release pipeline. The canonical publish-jvm job now lives inside `release.yml` (see below).
 
 | Input | Description |
 |---|---|
-| `tag` | Release tag to attach artifacts to (e.g. `v0.1.0`) |
+| `tag` | Release tag to attach artifacts to (e.g. `v0.1.0`). Optional — derived from `Cargo.toml` when omitted. |
 
-Artifacts uploaded:
-- `spark-plugin-{VERSION}-plugin.jar`
-- `trino-plugin-{VERSION}-plugin.jar`
-- `ailake-flink-{VERSION}-plugin.jar`
-- `libailake_jni.so`
+### `publish-pypi.yml` — manual fallback (`workflow_dispatch`)
 
-> Run after `compat-heavy.yml` passes and the GitHub Release exists (created by `release.yml`).
-> TODO: switch trigger to `on: release: types: [published]` when repo goes public.
+Re-builds and re-publishes `ailake` wheels to PyPI + attaches to an existing GitHub Release **without** rerunning the full release pipeline. The canonical build+publish chain lives inside `release.yml`.
+
+### `publish-airflow-provider.yml` — manual fallback (`workflow_dispatch`)
+
+Re-builds and re-publishes `apache-airflow-providers-ailake` to PyPI + attaches to an existing GitHub Release. The canonical publish-airflow job lives inside `release.yml`.
 
 ### Failure policy
 
@@ -708,24 +740,55 @@ Artifacts uploaded:
 | `fmt`, `clippy` | Every PR |
 | `unit`, `integration`, `compat-parquet` | Every PR |
 | `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg`, `compat-ailake-py` | Every PR |
-| `compat-spark`, `compat-trino`, `compat-jvm-plugins`, `compat-bigquery` | Release (manual dispatch before publish) |
-| `publish-jvm` | Release (run after `compat-heavy` passes and GitHub Release exists) |
+| `compat-spark`, `compat-trino`, `compat-jvm-plugins`, `compat-bigquery` | Release (manual dispatch before triggering `release.yml`) |
 
 ---
 
 ## Manual Actions trigger order (pre-release)
 
-All workflows are `workflow_dispatch`. Trigger in this order — each step must succeed before the next.
+All CI workflows are `workflow_dispatch`. Trigger in this order — each step must succeed before the next.
 
 | Step | Workflow | What it does | Blocks on |
 |---|---|---|---|
-| 1 | **CI** (`ci.yml`) | Rust fmt/clippy/deny, unit, integration, compat Python/DuckDB/PyIceberg/ailake-py, Airflow provider tests, bench-build | Must pass |
+| 1 | **CI** (`ci.yml`) | Rust fmt/clippy/deny, unit, integration, compat Python/DuckDB/PyIceberg/ailake-py, Airflow provider tests | Must pass |
 | 2 | **CI Go** (`ci-go.yml`) | Go SDK build + vet | Must pass |
 | 3 | **CI C++** (`ci-cpp.yml`) | C++17 cmake build | Must pass |
-| 4 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
-| 5 | **Release** (`release.yml`) | Creates git tag + GitHub Release + publishes all Rust crates to crates.io | Steps 1–4 green |
-| 6 | **Publish Python** (`publish-pypi.yml`) | Builds ailake-py wheels (Linux x86_64/aarch64 + sdist), publishes to PyPI, attaches to GitHub Release | Step 5 complete |
-| 7 | **Publish Airflow Provider** (`publish-airflow-provider.yml`) | Builds wheel + sdist, publishes to PyPI, attaches to GitHub Release | Step 5 complete |
-| 8 | **Publish JVM Plugins** (`publish-jvm.yml`) | Builds fat-JARs (Spark/Trino/Flink) + `libailake_jni.so`, uploads to GitHub Release | Step 5 complete |
+| 4 | **CI GPU** (`ci-gpu.yml`) | GPU unit tests on Windows self-hosted runner (CUDA/ROCm); skips gracefully if `AILAKE_GPU_BACKEND=none` | Must pass (on GPU runner) |
+| 5 | **CI GPU Data** (`ci-gpu-data.yml`) | GPU data integration tests on Windows self-hosted runner — recall@10 ≥ 99% vs CPU brute-force | Must pass (on GPU runner) |
+| 6 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
+| 7 | **Release** (`release.yml`) | Triggered automatically on merge to `main` — runs all publishing steps sequentially (see chain below). Can also be triggered manually via `workflow_dispatch`. | Steps 1–6 green |
 
-Steps 6, 7, 8 can run in parallel after step 5 completes.
+Steps 4 and 5 require the Windows self-hosted GPU runner — can run in parallel with steps 2 and 3.
+
+### `release.yml` sequential chain
+
+`release.yml` triggers on `push: branches: [main]` (automatic) and `workflow_dispatch` (manual).
+
+The `release` job auto-bumps the patch version before tagging — **no manual version edits required**:
+
+1. Reads the latest semver tag (`v*.*.*`) and increments the patch component (`v0.0.11` → `v0.0.12`).
+2. Updates every `Cargo.toml` (crate version + inter-crate deps) via `sed`.
+3. Commits the bump with `[skip ci]` and pushes to `main` — `[skip ci]` prevents a second workflow run.
+4. Creates the git tag and GitHub Release on the bumped commit.
+5. Runs the full publish chain sequentially.
+
+```
+merge develop → main  (or workflow_dispatch)
+  └── release job
+        ├── patch+1 from latest tag → bump all Cargo.toml → commit [skip ci] → push main
+        ├── git tag vX.Y.Z → push
+        ├── gh release create
+        └── publish-crates → publish-jvm → publish-airflow
+              └── pypi-linux (x86_64 → aarch64) → pypi-macos [disabled] → pypi-windows
+                    └── pypi-sdist → pypi-publish
+```
+
+If any publish job fails, re-run only that job and its dependents — the tag and GitHub Release already exist.
+
+**Fallback workflows** (re-publish without rerunning the full chain):
+
+| Workflow | When to use |
+|---|---|
+| `publish-jvm.yml` | Re-upload JARs to existing release |
+| `publish-airflow-provider.yml` | Re-publish Airflow provider to existing release |
+| `publish-pypi.yml` | Re-build + re-publish Python wheels to existing release |

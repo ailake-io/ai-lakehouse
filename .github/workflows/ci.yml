@@ -2,61 +2,65 @@ name: CI
 
 on:
   workflow_dispatch:
+  # push:
+  #   branches: [main, develop]
+  # pull_request:
+  #   branches: [main, develop]
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   fmt:
     name: fmt
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - run: cargo fmt --all -- --check
 
   clippy:
     name: clippy
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   deny:
     name: deny (licenses + advisories)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses advisories sources
 
   unit:
     name: unit
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - run: cargo test --workspace --lib --bins
 
   integration:
     name: integration
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - run: cargo test -p ailake-tests -- --test-threads=1
 
   # Runs ailake-index unit tests on a CPU-only Linux runner.
@@ -65,11 +69,11 @@ jobs:
   # GPU tests live in ci-gpu.yml (Windows self-hosted runner with CUDA).
   index-cpu-fallback:
     name: index — cpu fallback (no GPU)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - name: Verify no GPU libraries on runner
         run: |
           if ldconfig -p 2>/dev/null | grep -qE "libcuda\.so\.1|libamdhip64\.so"; then
@@ -82,21 +86,22 @@ jobs:
 
   compat-parquet:
     name: compat-parquet
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
+      # - uses: actions/setup-python@v5  # not needed on self-hosted
       - run: cargo test -p ailake-tests --test parquet_trailing_bytes
       - run: cargo test -p ailake-tests --test positional_invariant
 
   compat-pyarrow:
     name: compat-pyarrow
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
       - name: Install PyArrow and check
@@ -108,11 +113,11 @@ jobs:
 
   compat-duckdb:
     name: compat-duckdb
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
       - name: Install DuckDB and check
@@ -124,11 +129,11 @@ jobs:
 
   compat-pyiceberg:
     name: compat-pyiceberg
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
       - name: Install PyIceberg and check
@@ -140,48 +145,47 @@ jobs:
 
   test-airflow-provider:
     name: test-airflow-provider
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
+      - uses: actions/checkout@v6
+      # - uses: actions/setup-python@v5  # not needed on self-hosted
       - name: Install test dependencies
         run: |
           pip install apache-airflow pytest
-
       - name: Run Airflow provider unit tests
         run: |
           cd airflow-providers-ailake
           python -m pytest tests/ -v
 
-  bench-build:
-    name: bench-build
-    runs-on: [self-hosted, Linux, X64]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p ailake-bench
-
   compat-ailake-py:
     name: compat-ailake-py
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
+      # - uses: actions/setup-python@v5  # not needed on self-hosted
       - name: Install maturin, build and check
         run: |
           rm -rf /tmp/ailake-py-venv
           python3 -m venv /tmp/ailake-py-venv
-          /tmp/ailake-py-venv/bin/pip install maturin
-          cd ailake-py && /tmp/ailake-py-venv/bin/maturin build --release --out dist --interpreter python3.12
+          /tmp/ailake-py-venv/bin/pip install maturin mypy pandas pyarrow polars
+          cd ailake-py && /tmp/ailake-py-venv/bin/maturin build --release --out dist --interpreter python3
           cd ..
           /tmp/ailake-py-venv/bin/pip install ailake-py/dist/*.whl
+          /tmp/ailake-py-venv/bin/python3 -m mypy ailake-py/python/ailake/ \
+            --ignore-missing-imports --no-strict-optional
           /tmp/ailake-py-venv/bin/python3 tests/compat/check_ailake_py.py
+
+  test-jvm:
+    name: test-jvm (trino + spark plugins)
+    runs-on: [self-hosted, Linux]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+      - name: Run Trino plugin unit tests
+        run: gradle -p trino-plugin test --no-daemon --no-configuration-cache
+      - name: Run Spark plugin unit tests
+        run: gradle -p spark-plugin test --no-daemon --no-configuration-cache

@@ -8,15 +8,17 @@ env:
 
 jobs:
   build:
-    name: go build + vet
+    name: go build + vet + test
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: ailake-go/go.mod
           cache-dependency-path: ailake-go/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Build
         working-directory: ailake-go
@@ -25,3 +27,29 @@ jobs:
       - name: Vet
         working-directory: ailake-go
         run: go vet ./...
+
+      - name: Unit tests (no fixture required)
+        working-directory: ailake-go
+        run: go test ./... -v -timeout 60s
+
+      - name: Build libailake_jni.so (fixture generation)
+        run: cargo build --release -p ailake-jni
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: pip install numpy
+
+      - name: Generate fixture
+        run: python tests/fixtures/write_fixture.py ./compat-fixture
+        env:
+          AILAKE_LIB: target/release/libailake_jni.so
+
+      - name: Integration tests
+        working-directory: ailake-go
+        run: go test ./... -v -timeout 120s
+        env:
+          AILAKE_FIXTURE: ../compat-fixture

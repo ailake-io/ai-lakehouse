@@ -1,16 +1,16 @@
 [package]
 name        = "ailake-index"
-version     = "0.0.10"
+version = "0.0.17"
 edition     = "2021"
 description = "HNSW and IVF-PQ vector indexes with GPU acceleration for AI-Lake"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["hnsw", "vector-search", "ann", "embedding", "ivf"]
 categories  = ["algorithms", "database", "science"]
 
 [dependencies]
-ailake-core  = { path = "../ailake-core", version     = "0.0.10" }
-ailake-vec   = { path = "../ailake-vec", version     = "0.0.10" }
+ailake-core  = { path = "../ailake-core", version = "0.0.17" }
+ailake-vec   = { path = "../ailake-vec", version = "0.0.17" }
 half         = { workspace = true }
 serde        = { workspace = true }
 bincode      = { workspace = true }
@@ -24,8 +24,3 @@ tracing      = { workspace = true }
 
 [dev-dependencies]
 rand        = { workspace = true }
-criterion   = { workspace = true }
-
-[[bench]]
-name = "search"
-harness = false

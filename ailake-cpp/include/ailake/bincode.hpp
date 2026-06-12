@@ -22,6 +22,7 @@ public:
     size_t remaining() const { return size_ - pos_; }
 
     uint8_t  read_u8()  { return read_raw<uint8_t>(); }
+    uint16_t read_u16() { return read_le<uint16_t>(); }
     uint32_t read_u32() { return read_le<uint32_t>(); }
     uint64_t read_u64() { return read_le<uint64_t>(); }
     uint64_t read_usize() { return read_u64(); } // Rust usize = u64 in bincode v1
@@ -75,6 +76,24 @@ public:
         uint8_t tag = read_u8();
         if (tag == 0) return std::nullopt;
         return read_usize();
+    }
+
+    // Flat Vec<u8> — bincode: u64 length + n bytes
+    std::vector<uint8_t> read_u8_vec_flat() {
+        auto n = read_usize();
+        std::vector<uint8_t> out(n);
+        check(n);
+        std::memcpy(out.data(), data_ + pos_, n);
+        pos_ += n;
+        return out;
+    }
+
+    // Vec<u16> — bincode: u64 length + n u16 LE values (used for raw F16 storage)
+    std::vector<uint16_t> read_u16_vec() {
+        auto n = read_usize();
+        std::vector<uint16_t> out(n);
+        for (auto& v : out) v = read_le<uint16_t>();
+        return out;
     }
 
     // Vec<Vec<uint8_t>> — flat PQ codes per inverted list

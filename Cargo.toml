@@ -12,7 +12,6 @@ members = [
     "ailake-cli",
     "tests",
     "ailake-jni",
-    "ailake-bench",
     "ailake-py",
 ]
 
@@ -57,7 +56,7 @@ zstd        = "0.13"
 
 
 # Bindings
-pyo3        = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+pyo3        = { version = "0.29", features = ["extension-module", "abi3-py39"] }
 
 # CLI
 clap        = { version = "4", features = ["derive", "env"] }
@@ -68,7 +67,6 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Dev/test
-criterion   = { version = "0.5", features = ["html_reports"] }
 tempfile    = "3"
 proptest    = "1"
 rand        = "0.8"

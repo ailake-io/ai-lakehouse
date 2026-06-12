@@ -1,36 +1,36 @@
 name: Publish JVM Plugins
 
-# Manual trigger for now.
-# TODO: when repo goes public, replace with:
-#   on:
-#     release:
-#       types: [published]
+# Manual fallback only. The canonical publish-jvm job lives in release.yml
+# (needs: release) where it has direct access to the release job outputs.
+# Use this workflow to re-upload JARs to an existing release without re-running
+# the full release pipeline.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to attach JARs to (e.g. v0.1.0)"
-        required: true
+        description: "Release tag to attach JARs to (e.g. v0.1.0). Leave empty to derive from Cargo.toml."
+        required: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   publish-jvm:
-    name: Build and upload JVM plugin JARs
+    name: Build and upload JVM plugin JARs (manual)
     runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag }}
+      - uses: actions/checkout@v6
 
-      - name: Read version from tag
+      - name: Resolve version and tag
         id: version
         run: |
           VERSION=$(grep '^version' ailake-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          TAG="${{ github.event.inputs.tag }}"
+          [ -z "$TAG" ] && TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -57,11 +57,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TAG="${{ github.event.inputs.tag }}"
+          TAG="${{ steps.version.outputs.tag }}"
           gh release upload "$TAG" \
-            "spark-plugin/build/libs/spark-plugin-${VERSION}-plugin.jar" \
-            "trino-plugin/build/libs/trino-plugin-${VERSION}-plugin.jar" \
-            "ailake-flink/build/libs/ailake-flink-${VERSION}-plugin.jar" \
-            "target/release/libailake_jni.so" \
+            spark-plugin/build/libs/spark-plugin-*-plugin.jar \
+            trino-plugin/build/libs/trino-plugin-*-plugin.jar \
+            ailake-flink/build/libs/ailake-flink-*-plugin.jar \
+            target/release/libailake_jni.so \
             --clobber

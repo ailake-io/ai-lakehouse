@@ -18,7 +18,7 @@ jobs:
     name: compat-spark
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-java@v4
@@ -36,7 +36,9 @@ jobs:
         run: |
           rm -rf /tmp/spark-venv
           python3.12 -m venv /tmp/spark-venv
-          /tmp/spark-venv/bin/pip install "pyspark<4.0" pyarrow
+          /tmp/spark-venv/bin/pip install \
+            --index-url https://pypi.org/simple/ \
+            "pyspark<4.0" pyarrow
 
       - name: Check Spark Parquet compatibility (direct read)
         run: |
@@ -148,7 +150,7 @@ jobs:
     name: compat-trino
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -293,7 +295,7 @@ jobs:
     name: compat-jvm-plugins
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-java@v4
@@ -328,23 +330,27 @@ jobs:
 
       - name: Spark plugin integration test
         run: |
+          mkdir -p /tmp/ailake-write-test
           LD_LIBRARY_PATH=$(pwd)/target/release \
           AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
           AILAKE_LIB_PATH=$(pwd)/target/release \
+          AILAKE_WRITE_DIR=/tmp/ailake-write-test \
             gradle -p spark-plugin test --no-daemon --no-configuration-cache
 
       - name: Trino plugin integration test
         run: |
+          mkdir -p /tmp/ailake-write-test
           LD_LIBRARY_PATH=$(pwd)/target/release \
           AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
           AILAKE_LIB_PATH=$(pwd)/target/release \
+          AILAKE_WRITE_DIR=/tmp/ailake-write-test \
             gradle -p trino-plugin test --no-daemon --no-configuration-cache
 
   compat-bigquery:
     name: compat-bigquery
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 

@@ -18,6 +18,9 @@ dependencies {
     compileOnly("io.airlift:slice:2.2")
     compileOnly("com.fasterxml.jackson.core:jackson-annotations:2.15.2")
 
+    // SLF4J — provided at runtime by the Trino server; needed for compile resolution
+    compileOnly("org.slf4j:slf4j-api:2.0.9")
+
     // JNA — bundled in the plugin fat-jar
     implementation("net.java.dev.jna:jna:5.14.0")
 
@@ -29,6 +32,7 @@ dependencies {
     testImplementation("io.airlift:slice:2.2")
     testImplementation("org.mockito.kotlin:mockito-kotlin:5.2.1")
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
+    testRuntimeOnly("org.slf4j:slf4j-simple:2.0.9")
 }
 
 tasks.shadowJar {

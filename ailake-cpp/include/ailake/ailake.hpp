@@ -37,10 +37,10 @@ namespace ailake {
 // ---------------------------------------------------------------------------
 
 struct SearchOptions {
-    int   top_k             = 10;
-    int   ef_search         = 0;   // 0 → top_k * 5
-    float pruning_threshold = 0.8f;
-    bool  use_flat_fallback = true; // flat scan when HNSW graph is empty
+    int   top_k                = 10;
+    int   ef_search            = 0;    // 0 → top_k * 5
+    float pruning_threshold    = 0.8f;
+    bool  use_flat_fallback    = true; // flat scan when HNSW graph is empty
 
     // Hardware profile override.
     // When nullptr (default), detect_hardware() is called automatically.
@@ -174,21 +174,36 @@ search(HadoopCatalog& catalog,
     auto entries = catalog.list_files(ns, tbl);
     auto metric  = metric_from_str(info.vector_metric);
 
+    // NormalizedCosine requires unit-length query — normalize here so callers
+    // don't need to pre-normalize manually.
+    std::vector<float> norm_query;
+    const float* q = query;
+    if (metric == Metric::NormalizedCosine) {
+        float sq = 0.0f;
+        for (size_t i = 0; i < dim; ++i) sq += query[i] * query[i];
+        if (sq > 1e-12f) {
+            float inv = 1.0f / std::sqrt(sq);
+            norm_query.resize(dim);
+            for (size_t i = 0; i < dim; ++i) norm_query[i] = query[i] * inv;
+            q = norm_query.data();
+        }
+    }
+
     // Geometric pruning
     std::vector<DataFileEntry> survivors;
     for (auto& e : entries) {
         if (e.centroid.empty()) { survivors.push_back(e); continue; }
-        float d = compute_distance(metric, query, e.centroid.data(), e.centroid.size());
+        float d = compute_distance(metric, q, e.centroid.data(), e.centroid.size());
         if (d - e.radius <= opts.pruning_threshold)
             survivors.push_back(e);
     }
 
-    // Per-file HNSW/IVF-PQ search
+    // Per-file IVF-PQ / HNSW search
     std::vector<FileSearchResult> all;
     for (auto& e : survivors) {
         std::string abs = catalog.resolve_path(ns, tbl, e.path);
         try {
-            auto hits = search_file(abs, e, query, opts);
+            auto hits = search_file(abs, e, q, opts);
             for (auto& h : hits)
                 all.push_back({h.row_id, h.distance, e.path});
         } catch (const std::exception& ex) {

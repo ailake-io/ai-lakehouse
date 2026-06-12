@@ -54,7 +54,7 @@ Vector data transformations. No I/O.
 
 - `Quantizer::f32_to_f16_bytes(&[f32]) -> Vec<u8>` — half-precision cast
 - `Quantizer::f32_to_i8(&[f32]) -> (Vec<i8>, ScalingParams)` — symmetric min-max
-- `PQCodebook::train(vectors, M, k, max_iter) -> PQCodebook` — k-means++ per subspace
+- `PQCodebook::train(vectors, M, k, max_iter) -> PQCodebook` — k-means++ per subspace; init is O(n × k) via incremental min-dist update (not O(n × k²))
 - `PQCodebook::encode(&[f32]) -> Vec<u8>` — M bytes, one code per subspace
 - `PQCodebook::compute_adc_table(query) -> Vec<Vec<f32>>` — precomputed ADC table for fast batch search
 - `PQCodebook::adc_distance(codes, table) -> f32` — O(M) approximate distance
@@ -77,8 +77,10 @@ HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) 
   - Visited tracking: thread-local generation bitmap — O(1) reset by incrementing generation counter; no per-query allocation
   - `search(query: &[f32], top_k: usize, ef_search: usize) -> Vec<(RowId, f32)>`
   - CPU fallback: `brute_force()` via `rayon::par_iter()` — activated only when `neighbors` is empty
-- `IvfPqIndex` / `IvfPqConfig` / `IvfPqSerializer` — inverted file index with Product Quantization
-  - `IvfPqConfig::for_dataset(dim, n)` — scales `nlist` to √n clamped [16, 1024]
+- `IvfPqIndex` / `IvfPqConfig` / `IvfPqSerializer` / `IvfPqCodebook` — inverted file index with Product Quantization
+  - `IvfPqConfig::for_dataset(dim, n)` — scales `nlist` to √n clamped [16, 1024]; `nprobe = nlist/4` (25% coverage)
+  - `IvfPqIndex::train_codebook(vectors, metric, config) -> IvfPqCodebook` — trains coarse quantizer + PQ without building inverted lists; call once and reuse across shards
+  - `IvfPqIndex::build_with_codebook(row_ids, vectors, codebook)` — assigns and encodes using pre-trained codebook; O(n) only, no k-means
   - `kmeans_dispatch()` — priority: CUDA → ROCm → CPU rayon
 - `AnyIndex` — enum dispatching search to `HnswIndex` or `IvfPqIndex`
 - `HnswSerializer` — bincode-based serialization of the full HNSW graph
@@ -101,14 +103,16 @@ HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) 
 
 - `AilakeFileWriter` — high-level writer:
   1. Writes RecordBatch via `ailake-parquet`
-  2. Builds HNSW via `ailake-index`
-  3. Serializes HNSW + centroid + radius into the AI-Lake footer
+  2. Auto-selects index type from `VectorStoragePolicy`:
+     - `policy.pq.is_some()` → `IndexType::IvfPq`
+     - default → `IndexType::Hnsw`
+  3. Builds and serializes the index (HNSW or IVF-PQ) into the AI-Lake footer
   4. Appends footer to the file after the final PAR1 marker
   5. Updates Parquet `key_value_metadata` with `ailake.hnsw_offset` and `ailake.hnsw_len`
 - `AilakeFileReader` — high-level reader:
   - `read_parquet()` → returns Parquet data only (via `ailake-parquet`)
-  - `load_index()` → reads AI-Lake footer, returns `HnswIndex` via mmap
-  - `get_centroid()` → reads centroid + radius from footer header (cheap, no HNSW load)
+  - `load_index()` → reads AI-Lake footer flags, dispatches to correct deserializer, returns `AnyIndex`
+  - `get_centroid()` → reads centroid + radius from footer header (cheap, no index load)
 - `FooterLayout` — binary layout spec of the AI-Lake footer (see `FILE_FORMAT.md`)
 
 See [`docs/specs/FILE_FORMAT.md`](../specs/FILE_FORMAT.md) for the binary layout.
@@ -167,13 +171,20 @@ Object storage abstraction. Thin wrapper over the `object_store` crate.
 ### `ailake-query`
 Query planning and execution. The integration layer — depends on all data-plane crates.
 
-- `TableWriter` — `write_batch(batch, embeddings)` + `commit()` → Iceberg snapshot
+- `TableWriter` — write path for all index types:
+  - `write_batch(batch, embeddings)` — HNSW inline
+  - `write_batch_deferred(batch, embeddings)` — Parquet immediately (~200k vec/s); HNSW built async in background tokio task
+  - `write_batch_ivf_pq(batch, embeddings, config)` — IVF-PQ inline; shared codebook cached after first shard (`cached_ivf_codebook`)
+  - `write_batch_ivf_pq_deferred(batch, embeddings, config)` — Parquet immediately; IVF-PQ built async; shared codebook via `Arc<tokio::sync::OnceCell<IvfPqCodebook>>` ensures k-means runs once across all concurrent background tasks
+  - `write_batch_auto(batch, embeddings)` — detects hardware, delegates to HNSW or IVF-PQ (inline, blocking)
+  - `write_batch_auto_deferred(batch, embeddings)` — hardware-aware deferred: Parquet committed immediately, index (HNSW or IVF-PQ) built in background; shard served via flat scan until `IndexStatus::Ready`; ~200k vec/s throughput
+  - `commit() -> SnapshotId` — writes Iceberg snapshot
 - `VectorPruner::prune(files, query, metric, threshold)` — filters `Vec<DataFileEntry>` using centroid geometry; works on catalog metadata only, zero file I/O for pruned files
-- `search(table, query, config, ...)` — full pipeline: list catalog → prune → load HNSW → global top-k merge; `SearchConfig.pruning_threshold` controls prune aggressiveness; `SearchConfig.rerank_factor` enables reranking after PQ (fetch `top_k × factor` candidates, recompute exact distances from raw vectors, re-sort)
-- `SearchSession` — pre-loads all shard HNSW indexes once, serves many queries without I/O per query:
+- `search(table, query, config, ...)` — full pipeline: list catalog → prune → load index → global top-k merge; `SearchConfig.pruning_threshold` controls prune aggressiveness; `SearchConfig.rerank_factor` enables reranking after PQ (fetch `top_k × factor` candidates, recompute exact distances from raw vectors, re-sort)
+- `SearchSession` — pre-loads all shard indexes once, serves many queries without I/O per query:
   - `SearchSession::load(table, vector_column, dim, catalog, store, load_raw) -> AilakeResult<Self>`
   - `SearchSession::search_query(query, config) -> Vec<SearchResult>` — sync, no I/O
-  - Used by `ailake-bench` to achieve ~450 QPS on SIFT-1M
+  - `load_raw=true` loads raw F32 vectors for exact reranking (required for multi-shard IVF-PQ with per-shard codebooks; optional when shared codebook is used)
 - `CompactionPlanner::plan(files)` — selects files smaller than `target_file_size_bytes`
 - `CompactionExecutor::compact(files, output_path)` — merges N files into one via Arrow `concat_batches`, rebuilds HNSW, returns new `DataFileEntry`
 - `CompactionExecutor::run(planner, table, catalog, prefix)` — full cycle: plan + compact + commit + delete old files
@@ -190,8 +201,9 @@ PyO3 extension module (`cdylib`). Thin async-to-sync bridge — all logic lives 
 Deps: `ailake-query`, `ailake-catalog`, `ailake-store`, `ailake-core` + `openssl-sys[vendored]` (forces hermetic OpenSSL compilation in manylinux wheel builds; no system headers required).
 
 Exports:
-- `TableWriter(path, vector_column, dim, metric)` — open or create table
-- `TableWriter.write_batch(texts, embeddings)` — stage a batch
+- `TableWriter(path, vector_column, dim, metric, pq_only, ivf_residual, ...)` — open or create table; `pq_only=True` discards raw F16 after index build (~98% storage reduction); `ivf_residual=True` encodes residual vectors per IVF cell (~2-4 pp recall gain)
+- `TableWriter.write_batch(texts, embeddings)` — stage a batch (HNSW inline)
+- `TableWriter.write_batch_auto_deferred(texts, embeddings)` — hardware-aware deferred write; Parquet committed immediately, index built in background; exposed in Python as `Table.write_batch_auto_deferred()`
 - `TableWriter.commit() → int` — flush to Parquet + HNSW, return snapshot id
 - `search(path, query, top_k) → list[dict]` — vector search
 - `assemble_context(chunks, max_tokens, dedup_threshold) → str` — LLM context XML
@@ -224,7 +236,6 @@ members = [
     "ailake-cli",
     "tests",
     "ailake-jni",
-    "ailake-bench",
     "ailake-py",
 ]
 
@@ -273,8 +284,9 @@ zstd        = "0.13"
 pyo3        = { version = "0.24", features = ["extension-module"] }
 # uniffi removed — all JVM bindings use C-ABI + JNA
 
-# CLI
+# CLI + HTTP server
 clap        = { version = "4", features = ["derive", "env"] }
+axum        = "0.7"                   # `ailake serve` REST JSON server (ailake-cli)
 
 # Observability
 tracing            = "0.1"
@@ -367,8 +379,8 @@ Delivered in Phase 4:
 - Real HNSW graph: custom implementation in `ailake-index` (Malkov & Yashunin 2018); generation bitmap visited tracker; contiguous `flat_vecs` layout
 - SIMD distance functions: AVX2 + NEON in `ailake-vec/src/distance.rs`; runtime detection; 2× unrolled AVX2 for dot/euclidean
 - `SearchSession` in `ailake-query`: pre-loaded multi-query search, eliminates per-query I/O
-- `ailake-bench` crate: SIFT-1M benchmark (128D Euclidean, 1M vectors)
-  - Results: 2394 vec/s write, 453 QPS, Recall@10 = 99.6%, mean latency 2.2 ms
+- [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks) (external repo): SIFT-1M benchmark (128D Euclidean, 1M vectors)
+  - Results: 199k vec/s write (deferred), 1365 QPS, Recall@10 = 99.63%, p99 1.96ms
 - HNSW performance optimizations in `ailake-index`:
   - **Neighbor prefetch**: `_mm_prefetch T0` in `search_layer` hot loop — hides random DRAM latency on x86_64
   - **SELECT-NEIGHBORS-HEURISTIC** (Algorithm 4, Malkov & Yashunin 2018): diversity-enforcing neighbor selection replaces simple nearest-M prune; improves recall@10 by ~2-5% at same throughput
@@ -376,7 +388,7 @@ Delivered in Phase 4:
   - **Metric monomorphization**: `DistFn` trait with `CosineDist`/`EuclideanDist`/`DotProductDist` ZSTs; dispatch on metric once at entry, all inner fns generic `<M: DistFn>` — eliminates per-call `match` from hot loop, allows LLVM to inline distance functions
   - SIFT-1M HNSW build: 218.9 s → 155.8 s (−29%)
 - Multi-engine comparison benchmark (`--engine all`): AI-Lake vs LanceDB vs pgvector
-  - `ailake-bench`: new `pgvector-bench` feature — `pgvector_bench.rs` uses text COPY + HNSW index; `Engine::Pgvector` + `Engine::All` updated
+  - `ailake-benchmarks`: `pgvector-bench` feature — `pgvector_bench.rs` uses text COPY + HNSW index; `Engine::Pgvector` + `Engine::All`
   - `bench_result::print_multi_comparison` — N-engine side-by-side table, highlights fastest QPS
   - Deep Lake: `scripts/deeplake_bench.py` (Python) — exact kNN on subset; ANN requires paid Deep Memory plan (no Rust SDK available)
 
@@ -386,8 +398,8 @@ Phase 4 complete.
 
 Delivered in Phase 5:
 
-- **`ailake-go`** — Native Go SDK: Iceberg `metadata.json` reading, Parquet scan via `parquet-go`, vector search over pre-built indexes, `SearchSession` multi-query mode
-- **`ailake-cpp`** — C++17 header-only SDK: `AilakeReader`, `AilakeWriter`, `VectorSearch`; hardware detection matching Rust (CUDA → ROCm → CPU SIMD); `ailake-cpp/src/catalog.cpp` + `search.cpp`
+- **`ailake-go`** — Native Go SDK: Iceberg `metadata.json` reading, Parquet scan via `parquet-go`, vector search over pre-built indexes, `SearchSession` multi-query mode.
+- **`ailake-cpp`** — C++17 header-only SDK: `AilakeReader`, `AilakeWriter`, `VectorSearch`; hardware detection matching Rust (CUDA → ROCm → CPU SIMD); `ailake-cpp/src/catalog.cpp` + `search.cpp`.
 - **`ailake-cli`: `ailake serve`** — HTTP JSON server exposing write/search/catalog over REST; enables universal access from any language without FFI
 - **`apache-airflow-providers-ailake`** — Airflow 2.x/3.x provider package:
   - `AilakeHook` — connection to AI-Lake table on object storage

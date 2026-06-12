@@ -21,14 +21,14 @@ pub use serialize::HnswSerializer;
 
 use ailake_core::RowId;
 
-/// Unified index type: dispatches search to either HNSW or IVF-PQ.
+/// Unified index type: dispatches search to HNSW or IVF-PQ.
 pub enum AnyIndex {
     Hnsw(HnswIndex),
     IvfPq(IvfPqIndex),
 }
 
 impl AnyIndex {
-    /// Search with HNSW `ef` parameter (ignored for IVF-PQ, which uses `config.nprobe`).
+    /// Search. `ef` is used for HNSW; ignored for IVF-PQ.
     pub fn search(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
         match self {
             AnyIndex::Hnsw(idx) => idx.search(query, top_k, ef),

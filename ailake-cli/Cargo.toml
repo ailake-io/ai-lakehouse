@@ -1,10 +1,10 @@
 [package]
 name        = "ailake-cli"
-version     = "0.0.10"
+version = "0.0.17"
 edition     = "2021"
 description = "AI-Lake Format — administrative CLI (create, insert, search, compact, info)"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/ThiagoLange/iceberg-ai-deltalakehouse"
+repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["cli", "iceberg", "vector", "lakehouse", "vector-search"]
 categories  = ["command-line-utilities", "database"]
 
@@ -13,11 +13,11 @@ name = "ailake"
 path = "src/main.rs"
 
 [dependencies]
-ailake-core    = { path = "../ailake-core", version     = "0.0.10" }
-ailake-store   = { path = "../ailake-store", version     = "0.0.10", features = ["store-s3", "store-gcs", "store-azure"] }
-ailake-catalog = { path = "../ailake-catalog", version     = "0.0.10" }
-ailake-parquet = { path = "../ailake-parquet", version     = "0.0.10" }
-ailake-query   = { path = "../ailake-query", version     = "0.0.10" }
+ailake-core    = { path = "../ailake-core", version = "0.0.17" }
+ailake-store   = { path = "../ailake-store", version = "0.0.17", features = ["store-s3", "store-gcs", "store-azure"] }
+ailake-catalog = { path = "../ailake-catalog", version = "0.0.17" }
+ailake-parquet = { path = "../ailake-parquet", version = "0.0.17" }
+ailake-query   = { path = "../ailake-query", version = "0.0.17" }
 bytes          = { workspace = true }
 clap           = { workspace = true }
 tokio          = { workspace = true }

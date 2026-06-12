@@ -10,7 +10,15 @@ import org.mockito.kotlin.mock
 
 class VectorScanConnectorTest {
 
-    private val connector = VectorScanConnector("s3://bucket/table/", "embedding", 1536)
+    private val connector = VectorScanConnector(
+        tableUri = "s3://bucket/table/",
+        vectorColumn = "embedding",
+        dim = 1536,
+        metric = "cosine",
+        precision = "f16",
+        namespace = "default",
+        tableName = "table",
+    )
     private val session = mock<ConnectorSession>()
 
     @Test

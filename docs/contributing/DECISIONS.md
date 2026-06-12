@@ -284,3 +284,107 @@ Detection priority: AMD ROCm first, then NVIDIA CUDA, then CPU. AMD is checked f
 - AMD via `candle-core` ROCm feature: `candle-core/rocm` is not a stable feature; requires build-time dependency.
 - AMD via cuVS FFI: cuVS is NVIDIA-only by design; rejected.
 - HIP CUDA compatibility layer reliance: AMD ROCm ships `libcuda.so.1` as a compat shim, but relying on it would break vendor identification and could silently use the wrong code path.
+
+---
+
+## ADR-013: IVF-PQ shared codebook across shards
+
+**Date**: 2026-06  
+**Status**: Accepted
+
+**Context**: The original multi-shard IVF-PQ design trained an independent PQ codebook per shard (100k vectors each). Each codebook produces ADC distances on a different numerical scale. When search results from 10 shards are merged globally (sorted by distance), the comparison is between values from 10 incomparable scales — systematically biasing the merge toward shards with lower ADC values regardless of true distance. `Recall@10 = 0.32` on SIFT-1M despite correct `nlist/nprobe` parameters.
+
+**Decision**: Train the codebook once on the first shard and reuse it across all shards via `Arc<tokio::sync::OnceCell<IvfPqCodebook>>`. All shards built from the same codebook produce ADC distances that are numerically comparable — cross-shard merge by distance is correct.
+
+New public API:
+- `IvfPqCodebook` struct (coarse centroids + PQ)
+- `IvfPqIndex::train_codebook(vectors, metric, config) -> IvfPqCodebook`
+- `IvfPqIndex::build_with_codebook(row_ids, vectors, codebook) -> IvfPqIndex`
+- `AilakeFileWriter::with_shared_ivf_codebook(Arc<IvfPqCodebook>)`
+
+**Consequences**:
+- `Recall@10` with `nprobe=nlist/4` and `rerank_factor=3`: 0.32 → 0.91.
+- k-means training runs once (first shard) instead of N times. Write speedup: ~4× for inline, ~30× when combined with deferred build.
+- Codebook is trained on 100k vectors (first shard). For datasets where shard 0 has an atypical distribution, recall may be slightly lower than a globally-trained codebook. Mitigated by the IVF assignment being robust to moderate distributional drift.
+
+**Rejected alternatives**:
+- Global codebook from all shards combined: requires two-pass write (first scan all shards for training, then write with built indexes). Breaks the streaming single-pass write model.
+- Per-shard codebook with exact reranking only: still works (reranking corrects the merge), but adds memory overhead for raw vectors and latency for exact distance computation.
+
+---
+
+## ADR-014: Deferred IVF-PQ index build
+
+**Date**: 2026-06  
+**Status**: Accepted
+
+**Context**: IVF-PQ k-means training is the bottleneck for write throughput (~7k vec/s inline vs ~200k vec/s for Parquet-only writes). HNSW already had a deferred build path (`write_batch_deferred`) that writes Parquet immediately and builds the HNSW in a background tokio task. The same pattern can apply to IVF-PQ.
+
+**Decision**: `write_batch_ivf_pq_deferred` writes Parquet-only first (same fast path as HNSW deferred), then spawns a background task that:
+1. Gets or trains the shared codebook via `Arc<tokio::sync::OnceCell<IvfPqCodebook>>` — first task trains, all others await and reuse.
+2. Calls `IvfPqIndex::build_with_codebook` (O(n) assign+encode, no k-means for shards 2-N).
+3. Rewrites the file with the AILK section.
+4. Transitions `IndexStatus::Indexing → Ready` via the same CAS retry loop used by HNSW deferred.
+
+**Consequences**:
+- Write throughput: ~200k vec/s (limited by Parquet writes) vs ~7k vec/s inline.
+- Index build time: 42.7s for 1M vectors in background vs 130s inline blocking write.
+- Search during the build window: `SearchSession` serves `Indexing` shards via flat scan (exact brute-force). Acceptable for most workloads — HNSW deferred has the same behavior.
+- `OnceCell` ensures exactly one k-means training run regardless of how many shards are written concurrently.
+
+**Rejected alternatives**:
+- Global k-means before any shard writes: breaks streaming ingestion model; requires knowing all vectors upfront.
+- Train on each shard independently (no sharing): works but no write speedup benefit, and cross-shard ADC distances remain incomparable.
+
+---
+
+## ADR-015: Residual PQ — encode residuals, not raw vectors
+
+**Date**: 2026-06  
+**Status**: Accepted
+
+**Context**: Standard IVF-PQ encodes raw vectors. The PQ codebook is trained on the distribution of all vectors across all clusters. For each cluster, the intra-cluster variance is smaller than the global variance — a codebook trained on all vectors wastes representational capacity encoding inter-cluster distances that IVF already captures (the hard assignment to the nearest cluster centroid).
+
+**Decision**: When `ivf_residual = true`, encode `residual = vec - coarse_centroid` instead of `vec`. The PQ codebook is trained on residuals, not raw vectors — it focuses all M sub-codebooks on intra-cluster variance.
+
+Implementation notes:
+- On-disk: single trailing byte after the bincode payload (`0x01` = residual, `0x00` / absent = standard). Compatible with existing files (absence defaults to `false`).
+- ADC at search time: subtract `cluster_centroid` from query before building the per-cluster LUT. Go, C++, and Rust all have per-cluster LUT logic gated on the residual flag.
+- Bincode v1 positional serialization excludes `residual` from the struct (would break existing files); trailing byte is the portable extension point.
+
+**Consequences**:
+- ~2-4 pp recall@10 improvement at identical code size (M bytes/vector) and storage cost.
+- Encoding/search overhead: one vector subtraction per ADC table build — negligible.
+- Bincode backward compat maintained: old files (no trailing byte) still decode correctly.
+- All bindings (Rust, Python, Go, C++) automatically use per-cluster LUT when the flag is detected at deserialization time; caller change is not required.
+
+**Rejected alternatives**:
+- Retrain codebook on residuals without changing the on-disk format: would produce wrong ADC distances when old files (non-residual) and new files (residual) coexist in the same table — distance scales incomparable.
+- Field in the bincode struct: breaks bincode v1 positional deserialization for files without the field.
+
+---
+
+## ADR-016: `write_batch_auto_deferred` as the default high-throughput write path
+
+**Date**: 2026-06  
+**Status**: Accepted
+
+**Context**: `write_batch` (HNSW inline) achieves ~6-10k vec/s. `write_batch_deferred` and `write_batch_ivf_pq_deferred` achieve ~200k vec/s each, but require callers to choose the index type explicitly. Most callers want "best index for this hardware" without specifying IVF-PQ vs HNSW.
+
+**Decision**: `write_batch_auto_deferred` combines hardware detection with deferred index build:
+1. Write Parquet immediately (same fast path as all deferred variants — ~200k vec/s).
+2. Detect hardware: CUDA GPU / AMD ROCm / ≥8 CPU cores + batch ≥5k vectors → IVF-PQ deferred; else → HNSW deferred.
+3. Spawn background Tokio task for index build.
+
+Exposed in: Rust (`TableWriter::write_batch_auto_deferred`), Python (`Table.write_batch_auto_deferred()` + `write_batch_auto_deferred_async()`), CLI (`ailake insert --engine auto-deferred`).
+
+**Consequences**:
+- Callers get near-optimal index selection (GPU/many-core → IVF-PQ; otherwise HNSW) without specifying hardware.
+- Throughput: ~200k vec/s on all hardware — same as HNSW deferred.
+- During the index build window, shards are served via flat scan (exact brute-force). Acceptable; identical to HNSW/IVF-PQ deferred behavior.
+- Hardware detection result is cached per process (`OnceLock`); no per-call overhead.
+
+**Rejected alternatives**:
+- Always IVF-PQ deferred: wrong choice on single-core machines; IVF-PQ quality degrades with <1k training vectors per cluster.
+- Always HNSW deferred: misses GPU acceleration available on ML infra nodes.
+- Caller-specified engine: puts the burden of hardware knowledge on every application developer.
