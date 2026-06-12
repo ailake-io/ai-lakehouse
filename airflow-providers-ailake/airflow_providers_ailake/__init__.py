@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """Apache Airflow provider for AI-Lake Format."""
 
-__version__ = "0.0.16"
+__version__ = "0.0.17"
 
 
 def get_provider_info():
