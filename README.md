@@ -5,6 +5,8 @@
 [![PyPI](https://img.shields.io/pypi/v/ailake.svg)](https://pypi.org/p/ailake)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
 
+> 🇧🇷 [Leia em Português brasileiro →](./README.pt-BR.md)
+
 Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 
 **Single self-contained file**: tabular data, embeddings, and HNSW index live together in one Parquet-extended file at the S3 layer. ACID transactions via Iceberg. Any Iceberg-compatible framework reads AI-Lake tables without modification — the vector index in the file footer is invisible to standard Parquet readers.
