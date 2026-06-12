@@ -803,8 +803,8 @@ fn run_estimate(
                 pq_m
             );
             println!(
-                "  {:<26} {:>10}  {:>12}  {:>10}  {:>8}  {}",
-                "Mode", "Vectors", "Index", "Total", "Reduct.", "Recall@10"
+                "  {:<26} {:>10}  {:>12}  {:>10}  {:>8}  Recall@10",
+                "Mode", "Vectors", "Index", "Total", "Reduct."
             );
             println!("  {}", "-".repeat(82));
 
