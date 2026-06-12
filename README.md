@@ -366,6 +366,16 @@ PQ-only mode trades reranking precision for 98% storage reduction. Recall@10 ~93
 
 ---
 
+## Code examples
+
+| Language | Location | Run |
+|---|---|---|
+| **Rust** (write + search) | [`ailake-query/examples/demo.rs`](./ailake-query/examples/demo.rs) | `cargo run --example demo -p ailake-query` |
+| **Python** (fluent API, async, RAG) | [`ailake-py/README.md`](./ailake-py/README.md) | `python -c "import ailake; ..."` |
+| **Go** (search, scan) | [`ailake-go/examples/search/main.go`](./ailake-go/examples/search/main.go) | `go run . -warehouse /data/warehouse -table default.docs` |
+| **C++** (search, CUDA) | [`ailake-cpp/examples/search.cpp`](./ailake-cpp/examples/search.cpp) | `./build/ailake_search -w /data/warehouse -t default.docs` |
+| **Multi-engine** (Spark + Trino + DuckDB) | [`tests/docker/`](./tests/docker/) | `docker compose -f tests/docker/compose-demo.yml up -d` |
+
 ## Build
 
 ```bash
