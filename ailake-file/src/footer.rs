@@ -114,23 +114,23 @@ impl AilakeHeader {
 
     pub fn from_bytes(b: &[u8; HEADER_SIZE]) -> AilakeResult<Self> {
         if b[0..4] != AILAKE_MAGIC {
-            return Err(AilakeError::InvalidAilakeMagic(b[0..4].try_into().unwrap()));
+            return Err(AilakeError::InvalidAilakeMagic([b[0], b[1], b[2], b[3]]));
         }
-        let format_version = u16::from_le_bytes(b[4..6].try_into().unwrap());
+        let format_version = u16::from_le_bytes([b[4], b[5]]);
         if format_version != AILAKE_FORMAT_VERSION {
             return Err(AilakeError::UnsupportedFormatVersion(format_version));
         }
         Ok(AilakeHeader {
             format_version,
-            flags: u16::from_le_bytes(b[6..8].try_into().unwrap()),
-            dim: u32::from_le_bytes(b[8..12].try_into().unwrap()),
-            precision: Precision::try_from(b[12])?,
+            flags:           u16::from_le_bytes([b[6],  b[7]]),
+            dim:             u32::from_le_bytes([b[8],  b[9],  b[10], b[11]]),
+            precision:       Precision::try_from(b[12])?,
             distance_metric: DistanceMetric::try_from(b[13])?,
-            record_count: u64::from_le_bytes(b[16..24].try_into().unwrap()),
-            centroid_offset: u64::from_le_bytes(b[24..32].try_into().unwrap()),
-            centroid_len: u64::from_le_bytes(b[32..40].try_into().unwrap()),
-            hnsw_offset: u64::from_le_bytes(b[40..48].try_into().unwrap()),
-            hnsw_len: u64::from_le_bytes(b[48..56].try_into().unwrap()),
+            record_count:    u64::from_le_bytes([b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23]]),
+            centroid_offset: u64::from_le_bytes([b[24], b[25], b[26], b[27], b[28], b[29], b[30], b[31]]),
+            centroid_len:    u64::from_le_bytes([b[32], b[33], b[34], b[35], b[36], b[37], b[38], b[39]]),
+            hnsw_offset:     u64::from_le_bytes([b[40], b[41], b[42], b[43], b[44], b[45], b[46], b[47]]),
+            hnsw_len:        u64::from_le_bytes([b[48], b[49], b[50], b[51], b[52], b[53], b[54], b[55]]),
         })
     }
 }
@@ -157,15 +157,13 @@ impl AilakeTrailer {
 
     pub fn from_bytes(b: &[u8; TRAILER_SIZE]) -> AilakeResult<Self> {
         if b[20..24] != AILAKE_MAGIC {
-            return Err(AilakeError::InvalidAilakeMagic(
-                b[20..24].try_into().unwrap(),
-            ));
+            return Err(AilakeError::InvalidAilakeMagic([b[20], b[21], b[22], b[23]]));
         }
         Ok(AilakeTrailer {
-            footer_offset: u64::from_le_bytes(b[0..8].try_into().unwrap()),
-            footer_len: u64::from_le_bytes(b[8..16].try_into().unwrap()),
-            format_version: u16::from_le_bytes(b[16..18].try_into().unwrap()),
-            flags: u16::from_le_bytes(b[18..20].try_into().unwrap()),
+            footer_offset:  u64::from_le_bytes([b[0],  b[1],  b[2],  b[3],  b[4],  b[5],  b[6],  b[7]]),
+            footer_len:     u64::from_le_bytes([b[8],  b[9],  b[10], b[11], b[12], b[13], b[14], b[15]]),
+            format_version: u16::from_le_bytes([b[16], b[17]]),
+            flags:          u16::from_le_bytes([b[18], b[19]]),
         })
     }
 }

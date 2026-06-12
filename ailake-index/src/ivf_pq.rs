@@ -330,11 +330,11 @@ impl IvfPqIndex {
             .enumerate()
             .map(|(i, c)| (i, l2_sq(q, c)))
             .collect();
-        c_dists.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        c_dists.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
         c_dists.truncate(nprobe);
 
         // Non-residual: precompute one global ADC table for the full query.
-        // Residual: compute per-cluster ADC table (query residual differs per centroid).
+        // Residual: per-cluster ADC table — query residual differs per centroid.
         let global_adc = if !self.residual {
             Some(self.pq.compute_adc_table(q))
         } else {
@@ -358,7 +358,8 @@ impl IvfPqIndex {
                 cluster_adc = self.pq.compute_adc_table(&q_res);
                 &cluster_adc
             } else {
-                global_adc.as_ref().unwrap()
+                // SAFETY: global_adc is Some when !self.residual (set above).
+                global_adc.as_ref().expect("global_adc must be Some for non-residual path")
             };
 
             for (j, &rid) in row_ids.iter().enumerate() {
@@ -368,7 +369,7 @@ impl IvfPqIndex {
             }
         }
 
-        candidates.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        candidates.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
         candidates.truncate(top_k);
         candidates
     }
@@ -501,7 +502,7 @@ fn nearest_idx(v: &[f32], centroids: &[Vec<f32>]) -> usize {
         .iter()
         .enumerate()
         .map(|(i, c)| (i, l2_sq(v, c)))
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
         .unwrap_or(0)
 }
