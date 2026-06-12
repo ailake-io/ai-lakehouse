@@ -359,7 +359,9 @@ impl TableWriter {
             self.cached_ivf_codebook = Some(Arc::new(codebook));
         }
         // SAFETY: set to Some in the block above (either pre-existing or just trained).
-        let codebook = self.cached_ivf_codebook.as_ref()
+        let codebook = self
+            .cached_ivf_codebook
+            .as_ref()
             .expect("IVF-PQ codebook must be Some after training block")
             .clone();
 
@@ -959,7 +961,7 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
-        ivf_residual: false,
+            ivf_residual: false,
         }
     }
 
@@ -1143,11 +1145,8 @@ mod tests {
             .await
             .unwrap();
 
-        let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
-            "text",
-            DataType::Utf8,
-            false,
-        )]));
+        let schema =
+            std::sync::Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
         let batch = arrow_array::RecordBatch::try_new(
             schema,
             vec![std::sync::Arc::new(arrow_array::StringArray::from(vec![

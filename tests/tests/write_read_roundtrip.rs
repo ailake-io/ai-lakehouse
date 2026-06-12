@@ -31,7 +31,7 @@ async fn write_10k_rows_search_top10() {
         pre_normalize: false,
         hnsw_m: None,
         hnsw_ef_construction: None,
-    ivf_residual: false,
+        ivf_residual: false,
     };
 
     // Create table and write 10k rows split across 2 batches

@@ -353,13 +353,14 @@ impl IvfPqIndex {
             let cluster_adc;
             let adc_table = if self.residual {
                 let centroid = &self.coarse_centroids[*list_idx];
-                let q_res: Vec<f32> =
-                    q.iter().zip(centroid.iter()).map(|(a, b)| a - b).collect();
+                let q_res: Vec<f32> = q.iter().zip(centroid.iter()).map(|(a, b)| a - b).collect();
                 cluster_adc = self.pq.compute_adc_table(&q_res);
                 &cluster_adc
             } else {
                 // SAFETY: global_adc is Some when !self.residual (set above).
-                global_adc.as_ref().expect("global_adc must be Some for non-residual path")
+                global_adc
+                    .as_ref()
+                    .expect("global_adc must be Some for non-residual path")
             };
 
             for (j, &rid) in row_ids.iter().enumerate() {
@@ -655,7 +656,10 @@ mod tests {
         let query = vecs[0].clone();
         let results = idx.search(&query, 5, None);
         assert!(!results.is_empty());
-        assert!(results[0].1 < 0.1, "nearest residual-PQ result should be close to query");
+        assert!(
+            results[0].1 < 0.1,
+            "nearest residual-PQ result should be close to query"
+        );
     }
 
     #[test]
@@ -702,6 +706,9 @@ mod tests {
         let idx = IvfPqIndex::train(&ids, &vecs, VectorMetric::Euclidean, config).unwrap();
         let bytes = IvfPqSerializer::to_bytes(&idx).unwrap();
         let idx2 = IvfPqSerializer::from_bytes(&bytes).unwrap();
-        assert!(!idx2.residual, "non-residual index must deserialize as residual=false");
+        assert!(
+            !idx2.residual,
+            "non-residual index must deserialize as residual=false"
+        );
     }
 }

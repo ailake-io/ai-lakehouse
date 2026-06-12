@@ -30,7 +30,7 @@ async fn pruning_eliminates_distant_file() {
         pre_normalize: false,
         hnsw_m: None,
         hnsw_ef_construction: None,
-    ivf_residual: false,
+        ivf_residual: false,
     };
 
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
