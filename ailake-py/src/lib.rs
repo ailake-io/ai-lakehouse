@@ -15,7 +15,7 @@ use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 use tracing::{debug, warn};
 
 use ailake_catalog::{
@@ -162,7 +162,7 @@ impl TableWriter {
 /// Returns a list of dicts: [{"row_id": int, "distance": float, "file": str}, ...]
 #[pyfunction]
 #[pyo3(signature = (path, query, top_k=10))]
-fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult<PyObject> {
+fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
         "ailake-py: search path={} dim={} top_k={}",
@@ -231,7 +231,7 @@ fn search_with_data(
     path: &str,
     query: Vec<f32>,
     top_k: usize,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
         "ailake-py: search_with_data path={} dim={} top_k={}",
