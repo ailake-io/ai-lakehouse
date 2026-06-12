@@ -460,7 +460,7 @@ fn migrate_embeddings(
     let embed_fn_arc: Arc<dyn Fn(&[String]) -> AilakeResult<Vec<Vec<f32>>> + Send + Sync> = {
         let embed_fn = embed_fn.clone_ref(py);
         Arc::new(move |texts: &[String]| {
-            Python::attach(|py| {
+            Python::with_gil(|py| {
                 let py_texts = PyList::new(py, texts)
                     .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
                 let result = embed_fn

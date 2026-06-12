@@ -63,6 +63,7 @@ pub fn exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32 {
         VectorMetric::Cosine => cosine_distance(a, b),
         VectorMetric::Euclidean => euclidean_distance(a, b),
         VectorMetric::DotProduct => -dot_product(a, b),
+        VectorMetric::NormalizedCosine => 1.0 - dot_product(a, b),
     }
 }
 
@@ -138,6 +139,16 @@ pub fn compute_centroid_and_radius(vectors: &[Vec<f32>], metric: VectorMetric) -
         values: centroid,
         radius,
         metric,
+    }
+}
+
+/// Normalize vector to unit L2 length in-place. Returns new vec.
+pub fn normalize_l2(v: &[f32]) -> Vec<f32> {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm < 1e-9 {
+        v.to_vec()
+    } else {
+        v.iter().map(|x| x / norm).collect()
     }
 }
 

@@ -10,6 +10,7 @@ pub fn metric_str(m: VectorMetric) -> &'static str {
         VectorMetric::Cosine => "cosine",
         VectorMetric::Euclidean => "euclidean",
         VectorMetric::DotProduct => "dotproduct",
+        VectorMetric::NormalizedCosine => "normalizedcosine",
     }
 }
 

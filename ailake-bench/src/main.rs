@@ -251,6 +251,11 @@ async fn run_ailake(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<BenchR
         precision: VectorPrecision::F16,
         pq: None,
         keep_raw_for_reranking: false,
+        pre_normalize: false,
+        hnsw_m: None,
+        hnsw_ef_construction: None,
+        ivf_residual: false,
+        embedding_model: None,
     };
 
     // ── Write phase ───────────────────────────────────────────────────────────
@@ -432,6 +437,11 @@ async fn run_ailake_ivf_pq(args: &Args, ds: &dataset::Dataset) -> anyhow::Result
         precision: VectorPrecision::F16,
         pq: None,
         keep_raw_for_reranking: false,
+        pre_normalize: false,
+        hnsw_m: None,
+        hnsw_ef_construction: None,
+        ivf_residual: false,
+        embedding_model: None,
     };
 
     let ivf_config = IvfPqConfig {
@@ -623,6 +633,11 @@ async fn run_ailake_auto(args: &Args, ds: &dataset::Dataset) -> anyhow::Result<B
         precision: VectorPrecision::F16,
         pq: None,
         keep_raw_for_reranking: false,
+        pre_normalize: false,
+        hnsw_m: None,
+        hnsw_ef_construction: None,
+        ivf_residual: false,
+        embedding_model: None,
     };
 
     eprintln!("\nAI-Lake Auto write phase …");

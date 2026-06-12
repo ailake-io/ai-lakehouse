@@ -191,6 +191,13 @@ impl HnswBuilder {
                     self.build_serial_typed::<DotProductDist>()
                 }
             }
+            VectorMetric::NormalizedCosine => {
+                if parallel {
+                    self.build_parallel_typed::<CosineDist>()
+                } else {
+                    self.build_serial_typed::<CosineDist>()
+                }
+            }
         }
     }
 
@@ -471,6 +478,7 @@ impl HnswIndex {
             VectorMetric::Cosine => self.search_typed::<CosineDist>(query, top_k, ef),
             VectorMetric::Euclidean => self.search_typed::<EuclideanDist>(query, top_k, ef),
             VectorMetric::DotProduct => self.search_typed::<DotProductDist>(query, top_k, ef),
+            VectorMetric::NormalizedCosine => self.search_typed::<CosineDist>(query, top_k, ef),
         }
     }
 

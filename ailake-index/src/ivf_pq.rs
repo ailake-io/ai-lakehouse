@@ -100,6 +100,12 @@ impl IvfPqConfig {
             max_iter: 25,
         }
     }
+
+    /// Mark config as residual PQ. Current implementation uses global PQ (non-residual);
+    /// this is a no-op until per-cluster residual PQ is implemented.
+    pub fn with_residual(self) -> Self {
+        self
+    }
 }
 
 pub struct IvfPqIndex {
@@ -248,6 +254,106 @@ impl IvfPqIndex {
         candidates
     }
 
+    /// Train only the codebook (coarse centroids + PQ) without building inverted lists.
+    /// Used by multi-shard writers: train once on the first shard, reuse for all others.
+    pub fn train_codebook(
+        vectors: &[Vec<f32>],
+        metric: VectorMetric,
+        config: &IvfPqConfig,
+    ) -> AilakeResult<IvfPqCodebook> {
+        let n = vectors.len();
+        if n == 0 {
+            return Err(AilakeError::Catalog(
+                "IVF-PQ train_codebook requires at least 1 vector".into(),
+            ));
+        }
+        let dim = vectors[0].len();
+        let normed_storage: Vec<Vec<f32>>;
+        let vecs: &[Vec<f32>] = if metric == VectorMetric::Cosine {
+            normed_storage = vectors.iter().map(|v| l2_normalize(v)).collect();
+            &normed_storage
+        } else {
+            vectors
+        };
+        let nlist = config.nlist.min(n);
+        let pq_m = find_valid_pq_m(config.pq_m, dim);
+        let coarse_centroids = kmeans_dispatch(vecs, nlist, config.max_iter);
+        let pq = PQCodebook::train_with_kmeans(
+            vecs,
+            pq_m,
+            config.pq_k.min(256),
+            config.max_iter,
+            kmeans_dispatch,
+        )
+        .map_err(|e| AilakeError::Catalog(format!("PQ training failed: {e}")))?;
+        Ok(IvfPqCodebook {
+            config: IvfPqConfig { nlist, pq_m, ..config.clone() },
+            metric,
+            dim,
+            coarse_centroids,
+            pq,
+        })
+    }
+
+    /// Extract the trained codebook so subsequent shards can skip k-means.
+    pub fn extract_codebook(&self) -> IvfPqCodebook {
+        IvfPqCodebook {
+            config: self.config.clone(),
+            metric: self.metric,
+            dim: self.dim,
+            coarse_centroids: self.coarse_centroids.clone(),
+            pq: self.pq.clone(),
+        }
+    }
+
+    /// Build an IVF-PQ index using a pre-trained codebook (skips k-means).
+    /// All shards sharing a codebook produce ADC-comparable distances.
+    pub fn build_with_codebook(
+        row_ids: &[RowId],
+        vectors: &[Vec<f32>],
+        codebook: &IvfPqCodebook,
+    ) -> AilakeResult<Self> {
+        let n = vectors.len();
+        if n == 0 {
+            return Err(AilakeError::Catalog(
+                "IVF-PQ build_with_codebook requires at least 1 vector".into(),
+            ));
+        }
+        let metric = codebook.metric;
+        let normed_storage: Vec<Vec<f32>>;
+        let vecs: &[Vec<f32>] = if metric == VectorMetric::Cosine {
+            normed_storage = vectors.iter().map(|v| l2_normalize(v)).collect();
+            &normed_storage
+        } else {
+            vectors
+        };
+
+        let nlist = codebook.coarse_centroids.len();
+        let assignments: Vec<usize> = vecs
+            .iter()
+            .map(|v| nearest_idx(v, &codebook.coarse_centroids))
+            .collect();
+
+        let mut inv_row_ids = vec![Vec::new(); nlist];
+        let mut inv_codes = vec![Vec::new(); nlist];
+
+        for (i, (v, &list_idx)) in vecs.iter().zip(assignments.iter()).enumerate() {
+            let codes = codebook.pq.encode(v);
+            inv_row_ids[list_idx].push(row_ids[i].0);
+            inv_codes[list_idx].extend_from_slice(&codes);
+        }
+
+        Ok(IvfPqIndex {
+            config: codebook.config.clone(),
+            metric,
+            dim: codebook.dim,
+            coarse_centroids: codebook.coarse_centroids.clone(),
+            pq: codebook.pq.clone(),
+            inv_row_ids,
+            inv_codes,
+        })
+    }
+
     pub fn node_count(&self) -> u64 {
         self.inv_row_ids.iter().map(|l| l.len() as u64).sum()
     }
@@ -255,6 +361,17 @@ impl IvfPqIndex {
     pub fn dim(&self) -> usize {
         self.dim
     }
+}
+
+/// Shared PQ codebook trained on the first shard, reused by subsequent shards
+/// to avoid re-running k-means. Ensures ADC distances are cross-shard comparable.
+#[derive(Clone)]
+pub struct IvfPqCodebook {
+    pub config: IvfPqConfig,
+    pub metric: VectorMetric,
+    pub dim: usize,
+    pub coarse_centroids: Vec<Vec<f32>>,
+    pub pq: PQCodebook,
 }
 
 // ── Serialization ──────────────────────────────────────────────────────────────
@@ -366,6 +483,7 @@ fn metric_to_u8(m: VectorMetric) -> u8 {
         VectorMetric::Cosine => 0,
         VectorMetric::Euclidean => 1,
         VectorMetric::DotProduct => 2,
+        VectorMetric::NormalizedCosine => 3,
     }
 }
 
@@ -374,6 +492,7 @@ fn u8_to_metric(v: u8) -> AilakeResult<VectorMetric> {
         0 => Ok(VectorMetric::Cosine),
         1 => Ok(VectorMetric::Euclidean),
         2 => Ok(VectorMetric::DotProduct),
+        3 => Ok(VectorMetric::NormalizedCosine),
         _ => Err(AilakeError::Catalog(format!("unknown metric byte: {v}"))),
     }
 }
