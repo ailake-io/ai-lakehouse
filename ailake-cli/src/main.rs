@@ -68,6 +68,11 @@ enum Commands {
         /// Requires `--metric cosine` (or euclidean) with an IVF-PQ or HNSW index.
         #[arg(long, default_value_t = false)]
         pq_only: bool,
+        /// Residual PQ: encode (vec - coarse_centroid) per IVF cell instead of raw vec.
+        /// Zero storage overhead; improves recall@10 by ~2-4 pp on typical embeddings.
+        /// Only effective when the auto index path selects IVF-PQ.
+        #[arg(long, default_value_t = false)]
+        ivf_residual: bool,
     },
     /// Insert a Parquet file (with an embedding column) into a table
     Insert {
@@ -245,6 +250,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             hnsw_m,
             hnsw_ef,
             pq_only,
+            ivf_residual,
         } => {
             let ident = parse_table_ident(&table);
             let policy = VectorStoragePolicy {
@@ -257,7 +263,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 pre_normalize,
                 hnsw_m,
                 hnsw_ef_construction: hnsw_ef,
-                ivf_residual: false,
+                ivf_residual,
             };
 
             catalog

@@ -340,6 +340,8 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         metric: Option<String>,
         #[serde(default)]
         precision: Option<String>,
+        #[serde(default)]
+        ivf_residual: bool,
         ids: Vec<i64>,
         embeddings: Vec<Vec<f32>>,
     }
@@ -402,7 +404,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         pre_normalize: false,
         hnsw_m: None,
         hnsw_ef_construction: None,
-        ivf_residual: false,
+        ivf_residual: req.ivf_residual,
     };
 
     let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
