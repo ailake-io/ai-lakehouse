@@ -121,6 +121,38 @@ impl TableWriter {
             })
     }
 
+    /// Write a batch with auto index selection and deferred (background) index build.
+    ///
+    /// Persists Parquet immediately (~200k vec/s). Selects IVF-PQ when a GPU or ≥8 CPU
+    /// cores are present and batch ≥5 000 vectors; falls back to HNSW. Index built in a
+    /// background task — shard is served via flat scan until the index is ready.
+    ///
+    /// Args:
+    ///   texts: list[str] — text content for each row
+    ///   embeddings: list[list[float]] — one embedding per row
+    fn write_batch_auto_deferred(
+        &mut self,
+        texts: Vec<String>,
+        embeddings: Vec<Vec<f32>>,
+    ) -> PyResult<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let text_arr = StringArray::from(texts);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        let writer = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TableWriter already committed"))?;
+
+        self.runtime
+            .block_on(writer.write_batch_auto_deferred(&batch, &embeddings))
+            .map_err(|e| {
+                warn!("ailake-py: write_batch_auto_deferred failed: {}", e);
+                PyValueError::new_err(e.to_string())
+            })
+    }
+
     /// Idempotent write — no-op if `batch_id` was already committed.
     ///
     /// Args:
