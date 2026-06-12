@@ -37,6 +37,8 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 | GPU search (NVIDIA + AMD) | ❌ | Vendor-specific | ✅ |
 | Time-travel on vectors | ❌ | ❌ | ✅ |
 
+→ **[Full technical argument — AI-Lake vs Iceberg alone vs LanceDB vs external vector DBs](docs/WHY_AILAKE.md)**
+
 ---
 
 ## Interactive demo (single command)
