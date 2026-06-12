@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **PQ-only mode** (`keep_raw_for_reranking = false`) — when enabled, the raw F16 vector column is omitted from Parquet files entirely; only the AILK index blob is written. Storage reduction: ~98% for vector column (1M × dim=1536 F16: 3 GB → ~47 MB). Trade-off: reranking disabled, recall@10 ~93-95%. Exposed via `ailake create --pq-only` (CLI) and `TableWriter(pq_only=True)` (Python). Reader detects `ailake.pq_only=true` KV metadata and returns empty embeddings vec instead of erroring.
+
+### Fixed
+
+- **pyo3 upgraded 0.24 → 0.29** — resolves RUSTSEC-2026-0176 (OOB read in `PyList`/`PyTuple` `nth`/`nth_back` iterators). `PyObject` (removed from prelude in 0.29) replaced with `Py<PyAny>`.
+- **deny.toml** — removed stale `MPL-2.0` license allowance and `RUSTSEC-2021-0153` ignore entry; both were transitive via `lancedb` which moved to the separate `ailake-benchmark` repository.
+
 ---
 
 ## [0.0.16] — 2026-06-11
