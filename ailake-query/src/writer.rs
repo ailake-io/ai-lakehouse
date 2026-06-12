@@ -358,7 +358,10 @@ impl TableWriter {
             .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))??;
             self.cached_ivf_codebook = Some(Arc::new(codebook));
         }
-        let codebook = self.cached_ivf_codebook.as_ref().unwrap().clone();
+        // SAFETY: set to Some in the block above (either pre-existing or just trained).
+        let codebook = self.cached_ivf_codebook.as_ref()
+            .expect("IVF-PQ codebook must be Some after training block")
+            .clone();
 
         let file_writer = AilakeFileWriter::new(self.policy.clone())
             .with_index_type(IndexType::IvfPq(ivf_config))

@@ -157,7 +157,11 @@ impl CompactionExecutor {
         }
 
         // Concatenate all row groups into one batch
-        let merged_batch = concat_batches(schema.unwrap(), &all_batches)?;
+        // SAFETY: schema is set whenever a batch is pushed; all_batches non-empty above.
+        let merged_batch = concat_batches(
+            schema.expect("schema set because all_batches is non-empty"),
+            &all_batches,
+        )?;
         let record_count = merged_batch.num_rows() as u64;
 
         // Write merged file with adaptive index selection.
@@ -216,7 +220,7 @@ impl CompactionExecutor {
 
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|e| e.duration()) // handle misconfigured system clocks
             .as_millis();
         let output_path = format!("{output_prefix}/compacted-{ts}.parquet");
 
