@@ -289,11 +289,43 @@ impl TableWriter {
     ) -> AilakeResult<()> {
         let profile = ailake_index::HardwareProfile::detect();
         if profile.recommend_ivf_pq(embeddings.len()) {
-            let ivf_config =
+            let mut ivf_config =
                 ailake_index::IvfPqConfig::for_dataset(self.policy.dim as usize, embeddings.len());
+            if self.policy.ivf_residual {
+                ivf_config = ivf_config.with_residual();
+            }
             self.write_batch_ivf_pq(batch, embeddings, ivf_config).await
         } else {
             self.write_batch(batch, embeddings).await
+        }
+    }
+
+    /// Write batch, auto-selecting the index based on detected hardware — deferred variant.
+    ///
+    /// Same hardware detection as `write_batch_auto`: picks IVF-PQ when a CUDA GPU or
+    /// ≥8 CPU cores are present AND the batch has ≥5 000 vectors; falls back to HNSW.
+    ///
+    /// Unlike `write_batch_auto`, the index is built in a background tokio task:
+    /// - Parquet is persisted immediately (~200k vec/s, same as write_parquet_only).
+    /// - HNSW or IVF-PQ index built asynchronously; shard served via flat scan meanwhile.
+    ///
+    /// Use this when ingest throughput matters more than immediate searchability.
+    pub async fn write_batch_auto_deferred(
+        &mut self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+    ) -> AilakeResult<()> {
+        let profile = ailake_index::HardwareProfile::detect();
+        if profile.recommend_ivf_pq(embeddings.len()) {
+            let mut ivf_config =
+                ailake_index::IvfPqConfig::for_dataset(self.policy.dim as usize, embeddings.len());
+            if self.policy.ivf_residual {
+                ivf_config = ivf_config.with_residual();
+            }
+            self.write_batch_ivf_pq_deferred(batch, embeddings, ivf_config)
+                .await
+        } else {
+            self.write_batch_deferred(batch, embeddings).await
         }
     }
 
@@ -924,6 +956,7 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+        ivf_residual: false,
         }
     }
 
@@ -1086,5 +1119,47 @@ mod tests {
 
         // Nested element ID must be > 3
         assert!(upd.fields[1]["type"]["element-id"].as_i64().unwrap() > 3);
+    }
+
+    /// Smoke-test write_batch_auto_deferred: verifies that it completes without error
+    /// and stages a pending file entry (index built asynchronously in background).
+    #[tokio::test]
+    async fn write_batch_auto_deferred_stages_file() {
+        use ailake_catalog::{HadoopCatalog, TableIdent};
+        use ailake_store::LocalStore;
+        use arrow_schema::{DataType, Field, Schema};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: std::sync::Arc<dyn ailake_store::Store> =
+            std::sync::Arc::new(LocalStore::new(dir.path().to_str().unwrap()));
+        let catalog = std::sync::Arc::new(HadoopCatalog::new(std::sync::Arc::clone(&store), ""));
+        let pol = policy("embedding", 4);
+        let ident = TableIdent::new("default", "t");
+
+        let mut writer = TableWriter::create_or_open(catalog, store, pol, ident)
+            .await
+            .unwrap();
+
+        let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+            "text",
+            DataType::Utf8,
+            false,
+        )]));
+        let batch = arrow_array::RecordBatch::try_new(
+            schema,
+            vec![std::sync::Arc::new(arrow_array::StringArray::from(vec![
+                "hello",
+            ]))],
+        )
+        .unwrap();
+        let embeddings = vec![vec![1.0f32, 0.0, 0.0, 0.0]];
+
+        writer
+            .write_batch_auto_deferred(&batch, &embeddings)
+            .await
+            .unwrap();
+
+        // One pending file should be staged even before commit.
+        assert_eq!(writer.pending_files.len(), 1);
     }
 }

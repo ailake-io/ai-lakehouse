@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Thiago Egon Lange
 // IVF-PQ index deserialization and CPU search.
 // For GPU search see cuda/distance.cuh.
+//
+// Wire format: bincode v1 IvfPqSnapshotCore, then optional trailing byte:
+//   [residual: u8]  — 0x01 = residual PQ encoding active; absent in legacy files.
 #pragma once
 
 #include "bincode.hpp"
@@ -19,6 +22,7 @@ struct IvfPqConfig {
     uint64_t pq_m;
     uint64_t pq_k;
     uint64_t max_iter;
+    bool     residual = false; // codes are per-cluster residuals; use per-cluster ADC
 };
 
 struct PQCodebook {
@@ -55,39 +59,25 @@ inline IvfPqIndex deserialize_ivfpq(const uint8_t* buf, size_t len) {
     idx.pq.centroids    = r.read_f32_vec2d();
     idx.inv_row_ids     = r.read_u64_vec2d();
     idx.inv_codes       = r.read_u8_vec2d();
+    // Optional trailing byte: residual flag. Legacy files have no trailing byte.
+    if (r.remaining() > 0)
+        idx.config.residual = (r.read_u8() != 0);
     return idx;
 }
 
-// CPU IVF-PQ search using Asymmetric Distance Computation (ADC).
-inline std::vector<SearchResult>
-ivfpq_search(const IvfPqIndex& idx, const float* query, int top_k, int nprobe = 0) {
-    if (nprobe <= 0) nprobe = (int)idx.config.nprobe;
-    size_t m       = idx.pq.m;
-    size_t k       = idx.pq.k;
-    size_t sub_dim = (size_t)idx.dim / m;
-
-    // 1. Find nearest coarse centroids
-    std::vector<std::pair<float,size_t>> cell_dists(idx.coarse_centroids.size());
-    for (size_t i = 0; i < idx.coarse_centroids.size(); ++i) {
-        cell_dists[i] = {
-            compute_distance(idx.metric, query, idx.coarse_centroids[i].data(), (size_t)idx.dim),
-            i
-        };
-    }
-    std::partial_sort(cell_dists.begin(),
-                      cell_dists.begin() + std::min((size_t)nprobe, cell_dists.size()),
-                      cell_dists.end());
-
-    // 2. Precompute ADC LUT: dist(query_sub_j, codebook[j][c]) for all j, c
-    //    lut[j * k + c] = squared euclidean distance
+// build_adc_lut: dist(q_sub_j, codebook[j][c]) for all j, c.
+// lut[j * k + c] = squared euclidean distance.
+inline std::vector<float>
+build_adc_lut(const float* query, size_t m, size_t k, size_t sub_dim,
+              const std::vector<std::vector<float>>& centroids) {
     std::vector<float> lut(m * k);
     for (size_t j = 0; j < m; ++j) {
         const float* q_sub = query + j * sub_dim;
         for (size_t c = 0; c < k; ++c) {
             size_t cb_idx = j * k + c;
             float d = 0;
-            if (cb_idx < idx.pq.centroids.size()) {
-                const float* cb = idx.pq.centroids[cb_idx].data();
+            if (cb_idx < centroids.size()) {
+                const float* cb = centroids[cb_idx].data();
                 for (size_t s = 0; s < sub_dim; ++s) {
                     float diff = q_sub[s] - cb[s];
                     d += diff * diff;
@@ -96,13 +86,56 @@ ivfpq_search(const IvfPqIndex& idx, const float* query, int top_k, int nprobe = 
             lut[j * k + c] = d;
         }
     }
+    return lut;
+}
+
+// CPU IVF-PQ search using Asymmetric Distance Computation (ADC).
+// For residual indexes, builds a per-cluster LUT over q - coarse_centroid[cell].
+inline std::vector<SearchResult>
+ivfpq_search(const IvfPqIndex& idx, const float* query, int top_k, int nprobe = 0) {
+    if (nprobe <= 0) nprobe = (int)idx.config.nprobe;
+    size_t m       = idx.pq.m;
+    size_t k       = idx.pq.k;
+    size_t dim     = (size_t)idx.dim;
+    size_t sub_dim = dim / m;
+
+    // 1. Find nearest coarse centroids
+    std::vector<std::pair<float,size_t>> cell_dists(idx.coarse_centroids.size());
+    for (size_t i = 0; i < idx.coarse_centroids.size(); ++i) {
+        cell_dists[i] = {
+            compute_distance(idx.metric, query, idx.coarse_centroids[i].data(), dim),
+            i
+        };
+    }
+    std::partial_sort(cell_dists.begin(),
+                      cell_dists.begin() + std::min((size_t)nprobe, cell_dists.size()),
+                      cell_dists.end());
+
+    // 2. For non-residual: one global ADC LUT.
+    //    For residual: computed per cluster in step 3.
+    std::vector<float> global_lut;
+    if (!idx.config.residual)
+        global_lut = build_adc_lut(query, m, k, sub_dim, idx.pq.centroids);
 
     // 3. Scan probed cells
     std::vector<std::pair<float,uint64_t>> hits;
     hits.reserve((size_t)top_k + 1);
 
+    std::vector<float> q_res(dim); // reused scratch for residual mode
+
     for (int p = 0; p < nprobe && p < (int)cell_dists.size(); ++p) {
         size_t cell = cell_dists[p].second;
+
+        const std::vector<float>* lut_ptr = &global_lut;
+        std::vector<float> cluster_lut;
+        if (idx.config.residual) {
+            // q_res = query - coarse_centroid[cell]
+            const float* cent = idx.coarse_centroids[cell].data();
+            for (size_t d = 0; d < dim; ++d) q_res[d] = query[d] - cent[d];
+            cluster_lut = build_adc_lut(q_res.data(), m, k, sub_dim, idx.pq.centroids);
+            lut_ptr = &cluster_lut;
+        }
+
         const auto& row_ids = idx.inv_row_ids[cell];
         const auto& codes   = idx.inv_codes[cell];
         for (size_t r = 0; r < row_ids.size(); ++r) {
@@ -110,7 +143,7 @@ ivfpq_search(const IvfPqIndex& idx, const float* query, int top_k, int nprobe = 
             size_t base = r * m;
             for (size_t j = 0; j < m; ++j) {
                 uint8_t c = codes[base + j];
-                d += lut[j * k + c];
+                d += (*lut_ptr)[j * k + c];
             }
             if ((int)hits.size() < top_k || d < hits.back().first) {
                 hits.push_back({d, row_ids[r]});

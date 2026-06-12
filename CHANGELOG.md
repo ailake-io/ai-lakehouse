@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Residual PQ** (`ivf_residual=true`) — encodes `vec - coarse_centroid` per cluster instead of raw vector; zero storage overhead vs. standard PQ; ~2–4 pp recall@10 improvement on typical embeddings (dim=1536, cosine). Enabled via `VectorStoragePolicy::ivf_residual`, `ailake create --ivf-residual` (CLI), `TableWriter(ivf_residual=True)` (Python), `IvfPqConfig::with_residual()` (Rust). Search uses per-cluster ADC table in all bindings.
+- **`write_batch_auto_deferred`** — deferred variant of auto index selection; persists Parquet immediately (~200k vec/s) and builds HNSW or IVF-PQ index in a background Tokio task. Hardware detection: CUDA GPU / AMD ROCm / ≥8 CPU cores + ≥5k vectors → IVF-PQ (deferred); else HNSW (deferred). Shard served via flat scan until index is ready. Exposed via `TableWriter.write_batch_auto_deferred()` (Python and Rust).
+
+### Fixed
+
+- **Residual PQ backward compat** (`ailake-index`) — `#[serde(default)]` does not work with bincode v1 (positional serialization); old files missing trailing byte caused "unexpected EOF". Fixed by removing `residual` from `IvfPqSnapshot` struct (renamed `IvfPqSnapshotCore`) and appending a single trailing byte (`0x01` = residual) after bincode payload. `from_bytes` uses `bincode::deserialize_from` with a `Cursor` to detect the trailing byte; absence defaults to `false`.
+- **Go IVF-PQ search correctness** (`ailake-go`) — `Search()` was using a single global ADC LUT for all probed clusters regardless of `Config.Residual`. For residual indexes this computed distance against raw query instead of per-cluster residual (`q - coarse_centroid`), producing wrong rankings. Fixed: per-cluster ADC via new `buildADCTable` helper; global LUT pre-computed once for non-residual path.
+- **C++ IVF-PQ search correctness** (`ailake-cpp`) — same bug as Go: `ivfpq_search` built one global ADC LUT; residual indexes returned wrong results. Fixed: `IvfPqConfig` gains `residual` field; `deserialize_ivfpq` reads trailing byte via `r.remaining() > 0`; `ivfpq_search` uses per-cluster LUT via new `build_adc_lut` helper when `config.residual=true`.
+
 ---
 
 ## [0.0.17] — 2026-06-12

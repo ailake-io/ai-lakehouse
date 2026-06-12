@@ -60,7 +60,7 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false))]
     fn new(
         path: &str,
         vector_column: &str,
@@ -70,11 +70,12 @@ impl TableWriter {
         hnsw_m: Option<u32>,
         hnsw_ef_construction: Option<u32>,
         pq_only: bool,
+        ivf_residual: bool,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
-            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} pq_only={}",
-            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction, pq_only
+            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} pq_only={} ivf_residual={}",
+            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction, pq_only, ivf_residual
         );
         let mut policy =
             VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
@@ -82,6 +83,7 @@ impl TableWriter {
         policy.hnsw_m = hnsw_m;
         policy.hnsw_ef_construction = hnsw_ef_construction;
         policy.keep_raw_for_reranking = !pq_only;
+        policy.ivf_residual = ivf_residual;
         let (catalog, store) = local_catalog_store(path);
         let table = TableIdent::new("default", "table");
 
@@ -115,6 +117,38 @@ impl TableWriter {
             .block_on(writer.write_batch(&batch, &embeddings))
             .map_err(|e| {
                 warn!("ailake-py: write_batch failed: {}", e);
+                PyValueError::new_err(e.to_string())
+            })
+    }
+
+    /// Write a batch with auto index selection and deferred (background) index build.
+    ///
+    /// Persists Parquet immediately (~200k vec/s). Selects IVF-PQ when a GPU or ≥8 CPU
+    /// cores are present and batch ≥5 000 vectors; falls back to HNSW. Index built in a
+    /// background task — shard is served via flat scan until the index is ready.
+    ///
+    /// Args:
+    ///   texts: list[str] — text content for each row
+    ///   embeddings: list[list[float]] — one embedding per row
+    fn write_batch_auto_deferred(
+        &mut self,
+        texts: Vec<String>,
+        embeddings: Vec<Vec<f32>>,
+    ) -> PyResult<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let text_arr = StringArray::from(texts);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        let writer = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TableWriter already committed"))?;
+
+        self.runtime
+            .block_on(writer.write_batch_auto_deferred(&batch, &embeddings))
+            .map_err(|e| {
+                warn!("ailake-py: write_batch_auto_deferred failed: {}", e);
                 PyValueError::new_err(e.to_string())
             })
     }
