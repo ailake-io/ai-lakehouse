@@ -132,6 +132,24 @@ enum Commands {
         #[arg(long, value_enum, default_value = "text")]
         format: OutputFormat,
     },
+    /// Estimate storage usage before writing (no I/O — pure math)
+    Estimate {
+        /// Number of vectors (supports K/M/B suffixes: 1M, 500K, 1B)
+        #[arg(long)]
+        rows: String,
+        /// Vector dimensionality
+        #[arg(long)]
+        dim: u32,
+        /// HNSW M parameter — connections per node (default: 16)
+        #[arg(long, default_value = "16")]
+        hnsw_m: u32,
+        /// PQ sub-vectors M — used for PQ-only and IVF-PQ estimates (default: dim/32, min 8)
+        #[arg(long)]
+        pq_m: Option<u32>,
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
 }
 
 #[derive(ValueEnum, Clone)]
@@ -201,6 +219,18 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
+    // Estimate is pure math — handle before store/catalog creation.
+    if let Commands::Estimate {
+        rows,
+        dim,
+        hnsw_m,
+        pq_m,
+        format,
+    } = cli.command
+    {
+        return run_estimate(&rows, dim, hnsw_m, pq_m, &format);
+    }
+
     let store = store_from_url(&cli.store).map_err(|e| e.to_string())?;
     let catalog = Arc::new(HadoopCatalog::new(Arc::clone(&store), ""));
 
@@ -626,6 +656,193 @@ async fn run(cli: Cli) -> Result<(), String> {
             }
             Ok(())
         }
+
+        // Handled before store/catalog creation — unreachable here.
+        Commands::Estimate { .. } => unreachable!(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ailake estimate — pure storage math, no I/O
+// ---------------------------------------------------------------------------
+
+fn parse_rows(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last() {
+        Some('K') | Some('k') => (&s[..s.len() - 1], 1_000u64),
+        Some('M') | Some('m') => (&s[..s.len() - 1], 1_000_000u64),
+        Some('B') | Some('b') | Some('G') | Some('g') => (&s[..s.len() - 1], 1_000_000_000u64),
+        _ => (s, 1u64),
+    };
+    let n: f64 = num.replace('_', "").parse().map_err(|_| {
+        format!("invalid row count '{s}' — use a number with optional K/M/B suffix")
+    })?;
+    Ok((n * mult as f64) as u64)
+}
+
+#[derive(Debug)]
+struct EstimateRow {
+    label: &'static str,
+    vectors_bytes: u64,
+    index_bytes: u64,
+    recall: &'static str,
+    note: &'static str,
+}
+
+fn run_estimate(
+    rows_str: &str,
+    dim: u32,
+    hnsw_m: u32,
+    pq_m_opt: Option<u32>,
+    format: &OutputFormat,
+) -> Result<(), String> {
+    let rows = parse_rows(rows_str)?;
+    let dim = dim as u64;
+
+    // Default PQ M: dim/32, clamped to [8, dim].
+    let pq_m = pq_m_opt
+        .map(|m| m as u64)
+        .unwrap_or_else(|| (dim / 32).max(8).min(dim));
+
+    // Raw vector bytes per row per precision.
+    let vec_f32 = rows * dim * 4;
+    let vec_f16 = rows * dim * 2;
+    let vec_i8 = rows * dim;
+
+    // HNSW index: each node stores ~M×2 neighbor IDs (u32 × 2 per layer).
+    // Approximation: rows × hnsw_m × 2 × 4 bytes (two u32 per neighbor slot).
+    // Real bincode overhead adds ~10-15%; use 18 bytes/neighbor as empirical factor.
+    let hnsw_bytes = rows * hnsw_m as u64 * 2 * 9; // ≈ M×2 neighbors × 9 bytes avg
+
+    // IVF-PQ codes: rows × pq_m bytes (1 byte per sub-quantizer code).
+    // Codebook: negligible vs row data for any practical table size.
+    let pq_bytes = rows * pq_m;
+
+    // Recall estimates (literature + empirical for text embeddings dim=768-3072).
+    let rows_table = vec![
+        EstimateRow {
+            label: "F32 (baseline)",
+            vectors_bytes: vec_f32,
+            index_bytes: hnsw_bytes,
+            recall: "~99%",
+            note: "",
+        },
+        EstimateRow {
+            label: "F16 (default)",
+            vectors_bytes: vec_f16,
+            index_bytes: hnsw_bytes,
+            recall: "~99%",
+            note: "",
+        },
+        EstimateRow {
+            label: "I8",
+            vectors_bytes: vec_i8,
+            index_bytes: hnsw_bytes,
+            recall: "~97%",
+            note: "",
+        },
+        EstimateRow {
+            label: "F16 + IVF-PQ index",
+            vectors_bytes: vec_f16,
+            index_bytes: pq_bytes,
+            recall: "~99%",
+            note: "reranks with raw F16",
+        },
+        EstimateRow {
+            label: "I8  + IVF-PQ index",
+            vectors_bytes: vec_i8,
+            index_bytes: pq_bytes,
+            recall: "~97%",
+            note: "reranks with raw I8",
+        },
+        EstimateRow {
+            label: "PQ-only (--pq-only)",
+            vectors_bytes: 0,
+            index_bytes: pq_bytes,
+            recall: "~94%",
+            note: "no reranking",
+        },
+    ];
+
+    let baseline_total = vec_f32 + hnsw_bytes;
+
+    match format {
+        OutputFormat::Json => {
+            let entries: Vec<serde_json::Value> = rows_table
+                .iter()
+                .map(|r| {
+                    let total = r.vectors_bytes + r.index_bytes;
+                    let reduction = baseline_total as f64 / total.max(1) as f64;
+                    serde_json::json!({
+                        "mode": r.label,
+                        "vectors_bytes": r.vectors_bytes,
+                        "index_bytes": r.index_bytes,
+                        "total_bytes": total,
+                        "reduction_factor": format!("{reduction:.1}×"),
+                        "recall_at_10": r.recall,
+                        "note": r.note,
+                    })
+                })
+                .collect();
+            let out = serde_json::json!({
+                "rows": rows,
+                "dim": dim,
+                "hnsw_m": hnsw_m,
+                "pq_m": pq_m,
+                "estimates": entries,
+            });
+            println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        }
+
+        OutputFormat::Text => {
+            println!(
+                "\nStorage estimate — {} rows × dim={} (HNSW M={}, PQ M={})\n",
+                format_count(rows),
+                dim,
+                hnsw_m,
+                pq_m
+            );
+            println!(
+                "  {:<26} {:>10}  {:>12}  {:>10}  {:>8}  {}",
+                "Mode", "Vectors", "Index", "Total", "Reduct.", "Recall@10"
+            );
+            println!("  {}", "-".repeat(82));
+
+            for r in &rows_table {
+                let total = r.vectors_bytes + r.index_bytes;
+                let reduction = baseline_total as f64 / total.max(1) as f64;
+                let note = if r.note.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ← {}", r.note)
+                };
+                println!(
+                    "  {:<26} {:>10}  {:>12}  {:>10}  {:>7.1}×  {}{}",
+                    r.label,
+                    format_bytes(r.vectors_bytes),
+                    format_bytes(r.index_bytes),
+                    format_bytes(total),
+                    reduction,
+                    r.recall,
+                    note,
+                );
+            }
+            println!();
+        }
+    }
+
+    Ok(())
+}
+
+fn format_count(n: u64) -> String {
+    if n >= 1_000_000_000 {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    } else if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{n}")
     }
 }
 
