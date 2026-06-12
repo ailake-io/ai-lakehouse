@@ -227,7 +227,7 @@ ailake/
 ├── ailake-cli/
 │   ├── Cargo.toml
 │   └── src/
-│       └── main.rs             # CLI: ailake create / insert / search / compact / info / serve
+│       └── main.rs             # CLI: ailake create / insert / search / compact / info / serve / estimate
 ├── ailake-py/
 │   ├── Cargo.toml
 │   ├── pyproject.toml

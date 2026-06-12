@@ -15,7 +15,7 @@ async fn positional_invariant_holds_for_1k_rows() {
         metric: VectorMetric::Cosine,
         precision: VectorPrecision::F16,
         pq: None,
-        keep_raw_for_reranking: false,
+        keep_raw_for_reranking: true,
         pre_normalize: false,
         hnsw_m: None,
         hnsw_ef_construction: None,

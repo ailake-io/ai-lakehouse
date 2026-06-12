@@ -59,6 +59,7 @@ pub struct TableWriter {
 impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false))]
     fn new(
         path: &str,
