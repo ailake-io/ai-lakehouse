@@ -22,6 +22,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Go `sqEuclidean` returns squared distance** (`ailake-go`) — `sqEuclidean()` was calling `math.Sqrt(sum)`, returning euclidean distance instead of squared euclidean. ADC lookup tables require squared distances; the sqrt caused wrong ranking for all IVF-PQ searches regardless of residual mode.
 - **CLI `--ivf-residual` flag wired** (`ailake-cli`) — `ailake create --ivf-residual` was documented but the flag and its handler were absent; added to `Create` subcommand and propagated to `VectorStoragePolicy`.
 - **JNI `ivf_residual` from JSON** (`ailake-jni`) — `ailake_write_batch_json` Req struct gains `#[serde(default)] ivf_residual: bool`; Spark/Trino/Flink callers can now enable residual PQ via `"ivf_residual": true` in the JSON envelope.
+- **NaN-safe sort in IVF-PQ search** (`ailake-index`) — `partial_cmp(...).unwrap()` in sort closures panics if any distance is NaN (degenerate zero-vector input). Replaced with `total_cmp()` (Rust 1.62+) which imposes a total order over all f32 values including NaN.
+- **`assert_eq!` → `Err` in `write_batch_multi_vec`** (`ailake-parquet`) — internal invariant check now returns `AilakeError::Parquet` instead of aborting the process on dim/precision mismatch.
+- **footer.rs: remove `try_into().unwrap()`** (`ailake-file`) — `AilakeHeader::from_bytes` and `AilakeTrailer::from_bytes` used `b[x..y].try_into().unwrap()` to convert fixed-size slices; replaced with explicit `[b[x], b[x+1], ...]` array literals — no runtime failure path, no unwrap.
 
 ---
 
