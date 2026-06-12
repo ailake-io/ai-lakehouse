@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.17] — 2026-06-12
+
 ### Added
 
 - **PQ-only mode** (`keep_raw_for_reranking = false`) — when enabled, the raw F16 vector column is omitted from Parquet files entirely; only the AILK index blob is written. Storage reduction: ~98% for vector column (1M × dim=1536 F16: 3 GB → ~47 MB). Trade-off: reranking disabled, recall@10 ~93-95%. Exposed via `ailake create --pq-only` (CLI) and `TableWriter(pq_only=True)` (Python). Reader detects `ailake.pq_only=true` KV metadata and returns empty embeddings vec instead of erroring.
