@@ -383,9 +383,22 @@ impl IvfPqIndex {
 }
 
 // ── Serialization ──────────────────────────────────────────────────────────────
+//
+// Format: IvfPqSnapshotCore (bincode v1) + optional trailing byte for residual flag.
+//
+// The `residual` flag is appended as a single byte AFTER the bincode payload rather
+// than as a struct field.  bincode v1 is purely positional — #[serde(default)] has
+// no effect on missing bytes at EOF.  Appending the flag as a trailing byte gives us
+// clean backward compatibility:
+//
+//   Legacy file (no trailing byte) → cursor at EOF after core → residual = false
+//   New file (trailing byte 0x01)  → cursor has 1 byte left  → residual = true
+//   Go / C++ readers               → stop after inv_codes, trailing byte ignored
+//
+// This is the only safe way to extend the format without a versioned header rewrite.
 
 #[derive(Serialize, Deserialize)]
-struct IvfPqSnapshot {
+struct IvfPqSnapshotCore {
     nlist: usize,
     nprobe: usize,
     pq_m: usize,
@@ -397,8 +410,6 @@ struct IvfPqSnapshot {
     pq: PQCodebook,
     inv_row_ids: Vec<Vec<u64>>,
     inv_codes: Vec<Vec<u8>>, // flat per list: len == inv_row_ids[i].len() * pq_m
-    #[serde(default)]
-    residual: bool, // false for pre-residual-PQ files — backward compatible
 }
 
 pub struct IvfPqSerializer;
@@ -410,7 +421,7 @@ impl IvfPqSerializer {
             .iter()
             .flat_map(|c| c.iter().copied())
             .collect();
-        let snap = IvfPqSnapshot {
+        let core = IvfPqSnapshotCore {
             nlist: index.config.nlist,
             nprobe: index.config.nprobe,
             pq_m: index.config.pq_m,
@@ -422,36 +433,50 @@ impl IvfPqSerializer {
             pq: index.pq.clone(),
             inv_row_ids: index.inv_row_ids.clone(),
             inv_codes: index.inv_codes.clone(),
-            residual: index.residual,
         };
-        bincode::serialize(&snap).map_err(|e| AilakeError::Bincode(e.to_string()))
+        let mut bytes =
+            bincode::serialize(&core).map_err(|e| AilakeError::Bincode(e.to_string()))?;
+        // Append residual flag as trailing byte (0x00 = false, 0x01 = true).
+        // Legacy readers (Go, C++, old Rust) stop at this boundary and ignore it.
+        bytes.push(u8::from(index.residual));
+        Ok(bytes)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> AilakeResult<IvfPqIndex> {
-        let snap: IvfPqSnapshot =
-            bincode::deserialize(bytes).map_err(|e| AilakeError::Bincode(e.to_string()))?;
-        let metric = u8_to_metric(snap.metric)?;
-        let coarse_centroids: Vec<Vec<f32>> = snap
+        // Use a cursor so we know exactly how many bytes were consumed by the core.
+        // Any remaining byte after deserialization is the residual flag.
+        let mut cursor = std::io::Cursor::new(bytes);
+        let core: IvfPqSnapshotCore = bincode::deserialize_from(&mut cursor)
+            .map_err(|e| AilakeError::Bincode(e.to_string()))?;
+
+        let residual = if (cursor.position() as usize) < bytes.len() {
+            bytes[cursor.position() as usize] != 0
+        } else {
+            false // legacy file — no trailing byte
+        };
+
+        let metric = u8_to_metric(core.metric)?;
+        let coarse_centroids: Vec<Vec<f32>> = core
             .coarse_flat
-            .chunks_exact(snap.dim)
+            .chunks_exact(core.dim)
             .map(|c| c.to_vec())
             .collect();
         Ok(IvfPqIndex {
             config: IvfPqConfig {
-                nlist: snap.nlist,
-                nprobe: snap.nprobe,
-                pq_m: snap.pq_m,
-                pq_k: snap.pq_k,
-                max_iter: snap.max_iter,
-                residual: snap.residual,
+                nlist: core.nlist,
+                nprobe: core.nprobe,
+                pq_m: core.pq_m,
+                pq_k: core.pq_k,
+                max_iter: core.max_iter,
+                residual,
             },
             metric,
-            dim: snap.dim,
+            dim: core.dim,
             coarse_centroids,
-            pq: snap.pq,
-            inv_row_ids: snap.inv_row_ids,
-            inv_codes: snap.inv_codes,
-            residual: snap.residual,
+            pq: core.pq,
+            inv_row_ids: core.inv_row_ids,
+            inv_codes: core.inv_codes,
+            residual,
         })
     }
 }
