@@ -15,7 +15,7 @@ use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 use tracing::{debug, warn};
 
 use ailake_catalog::{
@@ -59,7 +59,7 @@ pub struct TableWriter {
 impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false))]
     fn new(
         path: &str,
         vector_column: &str,
@@ -68,17 +68,19 @@ impl TableWriter {
         pre_normalize: bool,
         hnsw_m: Option<u32>,
         hnsw_ef_construction: Option<u32>,
+        pq_only: bool,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
-            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?}",
-            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction
+            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} pq_only={}",
+            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction, pq_only
         );
         let mut policy =
             VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
         policy.pre_normalize = pre_normalize;
         policy.hnsw_m = hnsw_m;
         policy.hnsw_ef_construction = hnsw_ef_construction;
+        policy.keep_raw_for_reranking = !pq_only;
         let (catalog, store) = local_catalog_store(path);
         let table = TableIdent::new("default", "table");
 
@@ -160,7 +162,7 @@ impl TableWriter {
 /// Returns a list of dicts: [{"row_id": int, "distance": float, "file": str}, ...]
 #[pyfunction]
 #[pyo3(signature = (path, query, top_k=10))]
-fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult<PyObject> {
+fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
         "ailake-py: search path={} dim={} top_k={}",
@@ -229,7 +231,7 @@ fn search_with_data(
     path: &str,
     query: Vec<f32>,
     top_k: usize,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
         "ailake-py: search_with_data path={} dim={} top_k={}",
