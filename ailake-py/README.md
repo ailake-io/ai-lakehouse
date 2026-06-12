@@ -119,15 +119,19 @@ Opens or creates an AI-Lake table at `path`.
 | `pre_normalize` | `False` | Normalize to unit L2 at write; enables `1-dot(a,b)` fast path (~12-20 % speedup) |
 | `hnsw_m` | `None` (=16) | HNSW connections per node |
 | `hnsw_ef_construction` | `None` (=150) | HNSW build pool size |
+| `pq_only` | `False` | Discard raw F16 vectors after index build — only PQ codes stored. ~98 % storage reduction; reranking disabled; recall@10 ~93-95 %. |
+| `ivf_residual` | `False` | Encode `vec − cluster_centroid` per IVF cell (residual PQ). Same storage as standard PQ; ~2-4 pp better recall@10. |
 
 ### `Table`
 
 | Method | Description |
 |---|---|
 | `insert(texts, embeddings) → Table` | Buffer a batch. `embeddings`: `list[list[float]]` or numpy array. |
+| `write_batch_auto_deferred(texts, embeddings) → Table` | Deferred write — Parquet persisted immediately (~200k vec/s); index (HNSW or IVF-PQ, auto-selected) built in a background thread. Shard served via flat scan until index ready. |
 | `commit() → int` | Persist as a new Iceberg snapshot; returns snapshot ID. |
 | `search(query, top_k=10, fetch_data=False) → SearchQuery` | Lazy, chainable search. `query`: `list[float]` or numpy array. Set `fetch_data=True` to return full row data. |
 | `insert_async(...)` | Async variant of `insert`. |
+| `write_batch_auto_deferred_async(...)` | Async variant of `write_batch_auto_deferred`. |
 | `commit_async() → int` | Async variant of `commit`. |
 
 `Table` is a context manager: `with ailake.open_table(...) as t: ...`
@@ -174,17 +178,52 @@ df = table.search(query, top_k=10, fetch_data=True).to_pandas()
 
 Module-level search returning the same chainable `SearchQuery`.
 
-### `TableWriter` (legacy — still supported)
+### `TableWriter` (low-level — use `open_table()` for most cases)
 
 ```python
-writer = ailake.TableWriter(path, vector_column="embedding", dim=1536, metric="cosine")
+# Standard HNSW write
+writer = ailake.TableWriter(path, dim=1536, metric="cosine")
 writer.write_batch(texts, embeddings)
 snapshot_id = writer.commit()
+
+# PQ-only — raw vectors discarded after index build (~98 % storage reduction)
+writer = ailake.TableWriter(path, dim=1536, metric="cosine", pq_only=True)
+writer.write_batch(texts, embeddings)
+writer.commit()
+
+# Residual PQ — per-cluster encoding for better recall
+writer = ailake.TableWriter(path, dim=1536, metric="cosine", ivf_residual=True)
+writer.write_batch(texts, embeddings)
+writer.commit()
+
+# Deferred write — Parquet immediate, index background (~200k vec/s)
+writer = ailake.TableWriter(path, dim=1536, metric="cosine")
+writer.write_batch_auto_deferred(texts, embeddings)
+writer.commit()
 ```
+
+`TableWriter` parameters: same as `open_table()` (includes `pq_only`, `ivf_residual`, `pre_normalize`, `hnsw_m`, `hnsw_ef_construction`).
 
 ### `assemble_context(chunks, max_tokens=4096, dedup_threshold=0.05) → str`
 
 Assembles chunk dicts into structured XML for LLM input. Deduplicates near-identical chunks within the token budget.
+
+## Storage modes and index types
+
+| Mode | `pq_only` | `ivf_residual` | Storage (dim=1536, 1M rows) | Reranking | Recall@10 |
+|---|---|---|---|---|---|
+| HNSW + F16 raw (default) | `False` | `False` | ~300 GB vectors + ~30 GB HNSW | Yes (exact) | ~97 % |
+| IVF-PQ + F16 raw | `False` | `False` | ~300 GB + ~5 GB PQ codes | Yes (exact) | ~93 % inline |
+| IVF-PQ residual + raw | `False` | `True` | ~300 GB + ~5 GB | Yes (exact) | ~96 % |
+| PQ-only | `True` | `False` | **~5 GB total** | No | ~93-95 % |
+| PQ-only residual | `True` | `True` | **~5 GB total** | No | ~94-96 % |
+
+```python
+# Deferred write — all modes, instant Parquet commit, index in background
+writer = ailake.TableWriter(path, dim=1536, pq_only=True, ivf_residual=True)
+writer.write_batch_auto_deferred(texts, embeddings)
+writer.commit()
+```
 
 ## HNSW tuning guide
 

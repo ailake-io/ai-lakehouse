@@ -11,8 +11,9 @@ Guide for running the file format locally: writing batches, vector search with g
 docker compose -f tests/docker/compose-demo.yml up -d
 ```
 
-Open **http://localhost:8888** — JupyterLab starts with 500 synthetic documents
-already indexed and ready for vector search.
+Open **http://localhost:8888** — JupyterLab starts with 4 pre-built fixture tables (HNSW standard, PQ-only, Residual-PQ, Deferred write) and 500 synthetic documents indexed across all of them.
+
+The demo covers all SDK features across 5 notebooks (17 sections in `01_ailake_demo.ipynb` alone): vector search, IVF-PQ, residual PQ, deferred writes, HNSW tuning, async API, storage estimation, Iceberg compatibility, RAG context assembly, and object storage integration.
 
 For engine demos (Trino + BigQuery emulator):
 

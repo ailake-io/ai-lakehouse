@@ -335,3 +335,56 @@ New public API:
 **Rejected alternatives**:
 - Global k-means before any shard writes: breaks streaming ingestion model; requires knowing all vectors upfront.
 - Train on each shard independently (no sharing): works but no write speedup benefit, and cross-shard ADC distances remain incomparable.
+
+---
+
+## ADR-015: Residual PQ — encode residuals, not raw vectors
+
+**Date**: 2026-06  
+**Status**: Accepted
+
+**Context**: Standard IVF-PQ encodes raw vectors. The PQ codebook is trained on the distribution of all vectors across all clusters. For each cluster, the intra-cluster variance is smaller than the global variance — a codebook trained on all vectors wastes representational capacity encoding inter-cluster distances that IVF already captures (the hard assignment to the nearest cluster centroid).
+
+**Decision**: When `ivf_residual = true`, encode `residual = vec - coarse_centroid` instead of `vec`. The PQ codebook is trained on residuals, not raw vectors — it focuses all M sub-codebooks on intra-cluster variance.
+
+Implementation notes:
+- On-disk: single trailing byte after the bincode payload (`0x01` = residual, `0x00` / absent = standard). Compatible with existing files (absence defaults to `false`).
+- ADC at search time: subtract `cluster_centroid` from query before building the per-cluster LUT. Go, C++, and Rust all have per-cluster LUT logic gated on the residual flag.
+- Bincode v1 positional serialization excludes `residual` from the struct (would break existing files); trailing byte is the portable extension point.
+
+**Consequences**:
+- ~2-4 pp recall@10 improvement at identical code size (M bytes/vector) and storage cost.
+- Encoding/search overhead: one vector subtraction per ADC table build — negligible.
+- Bincode backward compat maintained: old files (no trailing byte) still decode correctly.
+- All bindings (Rust, Python, Go, C++) automatically use per-cluster LUT when the flag is detected at deserialization time; caller change is not required.
+
+**Rejected alternatives**:
+- Retrain codebook on residuals without changing the on-disk format: would produce wrong ADC distances when old files (non-residual) and new files (residual) coexist in the same table — distance scales incomparable.
+- Field in the bincode struct: breaks bincode v1 positional deserialization for files without the field.
+
+---
+
+## ADR-016: `write_batch_auto_deferred` as the default high-throughput write path
+
+**Date**: 2026-06  
+**Status**: Accepted
+
+**Context**: `write_batch` (HNSW inline) achieves ~6-10k vec/s. `write_batch_deferred` and `write_batch_ivf_pq_deferred` achieve ~200k vec/s each, but require callers to choose the index type explicitly. Most callers want "best index for this hardware" without specifying IVF-PQ vs HNSW.
+
+**Decision**: `write_batch_auto_deferred` combines hardware detection with deferred index build:
+1. Write Parquet immediately (same fast path as all deferred variants — ~200k vec/s).
+2. Detect hardware: CUDA GPU / AMD ROCm / ≥8 CPU cores + batch ≥5k vectors → IVF-PQ deferred; else → HNSW deferred.
+3. Spawn background Tokio task for index build.
+
+Exposed in: Rust (`TableWriter::write_batch_auto_deferred`), Python (`Table.write_batch_auto_deferred()` + `write_batch_auto_deferred_async()`), CLI (`ailake insert --engine auto-deferred`).
+
+**Consequences**:
+- Callers get near-optimal index selection (GPU/many-core → IVF-PQ; otherwise HNSW) without specifying hardware.
+- Throughput: ~200k vec/s on all hardware — same as HNSW deferred.
+- During the index build window, shards are served via flat scan (exact brute-force). Acceptable; identical to HNSW/IVF-PQ deferred behavior.
+- Hardware detection result is cached per process (`OnceLock`); no per-call overhead.
+
+**Rejected alternatives**:
+- Always IVF-PQ deferred: wrong choice on single-core machines; IVF-PQ quality degrades with <1k training vectors per cluster.
+- Always HNSW deferred: misses GPU acceleration available on ML infra nodes.
+- Caller-specified engine: puts the burden of hardware knowledge on every application developer.
