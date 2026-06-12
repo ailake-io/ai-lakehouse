@@ -264,6 +264,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_m,
                 hnsw_ef_construction: hnsw_ef,
                 ivf_residual,
+                embedding_model: None,
             };
 
             catalog
@@ -322,6 +323,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     hnsw_m: None,
                     hnsw_ef_construction: None,
                     ivf_residual: false,
+                    embedding_model: None,
                 },
                 Err(_) => VectorStoragePolicy {
                     column_name: embeddings.clone(),
@@ -334,6 +336,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     hnsw_m: None,
                     hnsw_ef_construction: None,
                     ivf_residual: false,
+                    embedding_model: None,
                 },
             };
 
@@ -478,6 +481,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_m: None,
                 hnsw_ef_construction: None,
                 ivf_residual: false,
+                embedding_model: None,
             };
 
             let files = catalog
@@ -577,6 +581,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_m: None,
                 hnsw_ef_construction: None,
                 ivf_residual: false,
+                embedding_model: None,
             };
             serve::run(
                 catalog as Arc<dyn CatalogProvider>,

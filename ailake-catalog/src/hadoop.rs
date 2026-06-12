@@ -295,6 +295,7 @@ mod tests {
                 hnsw_m: None,
                 hnsw_ef_construction: None,
                 ivf_residual: false,
+                embedding_model: None,
             },
             extra: std::collections::HashMap::new(),
         }

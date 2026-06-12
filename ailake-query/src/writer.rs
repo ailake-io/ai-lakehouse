@@ -8,7 +8,7 @@ use ailake_catalog::{
     ExtraVectorIndex, IcebergSchemaUpdate, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation,
     TableIdent, TableProperties, VectorIndexInfo,
 };
-use ailake_core::{AilakeResult, VectorStoragePolicy};
+use ailake_core::{AilakeError, AilakeResult, VectorStoragePolicy};
 use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBatch};
 use ailake_index::{IvfPqCodebook, IvfPqConfig};
 use ailake_store::Store;
@@ -87,6 +87,7 @@ impl TableWriter {
         batch: &RecordBatch,
         embeddings: &[Vec<f32>],
     ) -> AilakeResult<()> {
+        self.validate_embedding_dim(embeddings)?;
         if self.captured_schema.is_none() {
             self.captured_schema = Some(batch.schema());
         }
@@ -218,6 +219,30 @@ impl TableWriter {
     }
 
     /// Write a batch to a new AI-Lake file and stage it for commit.
+    /// Validates that provided embeddings match the table's configured dimension.
+    /// Returns `ModelMismatch` error when dim differs — prevents silently mixing
+    /// incompatible vectors (same error type used across write paths for consistency).
+    fn validate_embedding_dim(&self, embeddings: &[Vec<f32>]) -> AilakeResult<()> {
+        if let Some(first) = embeddings.first() {
+            let actual = first.len() as u32;
+            if actual != self.policy.dim {
+                let table_model = self
+                    .policy
+                    .embedding_model
+                    .as_ref()
+                    .map(|m| m.to_property_value())
+                    .unwrap_or_else(|| format!("dim={}", self.policy.dim));
+                return Err(AilakeError::ModelMismatch {
+                    table_model,
+                    table_dim: self.policy.dim,
+                    batch_model: format!("dim={}", actual),
+                    batch_dim: actual,
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub async fn write_batch(
         &mut self,
         batch: &RecordBatch,
@@ -232,6 +257,7 @@ impl TableWriter {
         embeddings: &[Vec<f32>],
         batch_id: Option<String>,
     ) -> AilakeResult<()> {
+        self.validate_embedding_dim(embeddings)?;
         if self.captured_schema.is_none() {
             self.captured_schema = Some(batch.schema());
         }
@@ -962,6 +988,7 @@ mod tests {
             hnsw_m: None,
             hnsw_ef_construction: None,
             ivf_residual: false,
+            embedding_model: None,
         }
     }
 

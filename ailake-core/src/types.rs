@@ -64,6 +64,51 @@ pub enum VectorMetric {
     NormalizedCosine = 3,
 }
 
+/// Identifies the embedding model used to produce vectors in a table or file.
+/// Stored in Iceberg properties so any reader can detect model changes before
+/// mixing incompatible vectors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingModelInfo {
+    /// Human-readable model identifier, e.g. "text-embedding-3-small" or "my-model-v2".
+    pub name: String,
+    /// Optional model version or checkpoint tag, e.g. "2024-01".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+impl EmbeddingModelInfo {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into(), version: None }
+    }
+
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+
+    /// Canonical key stored in Iceberg properties.
+    pub fn property_key() -> &'static str {
+        "ailake.embedding-model"
+    }
+
+    /// Returns "<name>" or "<name>@<version>" for display / property value.
+    pub fn to_property_value(&self) -> String {
+        match &self.version {
+            Some(v) => format!("{}@{}", self.name, v),
+            None => self.name.clone(),
+        }
+    }
+
+    /// Parse back from a property value written by `to_property_value`.
+    pub fn from_property_value(s: &str) -> Self {
+        if let Some((name, version)) = s.split_once('@') {
+            Self { name: name.to_string(), version: Some(version.to_string()) }
+        } else {
+            Self { name: s.to_string(), version: None }
+        }
+    }
+}
+
 /// Per-file geometric statistics used for pruning
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Centroid {
