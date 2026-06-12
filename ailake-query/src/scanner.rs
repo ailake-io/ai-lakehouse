@@ -5,11 +5,12 @@ use rayon::prelude::*;
 use tracing::{debug, error};
 
 use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
-use ailake_core::{AilakeResult, RowId, VectorMetric};
+use ailake_core::{AilakeError, AilakeResult, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
 use ailake_index::AnyIndex;
 use ailake_store::Store;
 use ailake_vec::exact_distance;
+use arrow_array::RecordBatch;
 use bytes::Bytes;
 
 use crate::pruner::VectorPruner;
@@ -414,7 +415,7 @@ impl SearchSession {
                 // Geometric pruning per shard.
                 if let Some(centroid) = ailake_catalog::decode_centroid(&shard.entry, self.metric) {
                     let dist = match self.metric {
-                        VectorMetric::Cosine => {
+                        VectorMetric::Cosine | VectorMetric::NormalizedCosine => {
                             ailake_vec::cosine_distance(query, &centroid.values)
                         }
                         VectorMetric::Euclidean => {
@@ -495,6 +496,125 @@ impl SearchSession {
     }
 }
 
+/// Fetch full row data for a slice of search results.
+///
+/// Groups results by Parquet file, reads each file once, extracts the matching rows
+/// via `arrow_select::take`, then concatenates everything back in original top-k order
+/// with a `_distance: Float32` column appended.
+///
+/// Use this immediately after `search()` to retrieve the actual text / metadata
+/// columns (e.g. `chunk_text`, `document_title`) alongside the distance scores.
+pub async fn fetch_rows(
+    results: &[SearchResult],
+    store: Arc<dyn Store>,
+    vector_column: &str,
+    dim: u32,
+) -> AilakeResult<RecordBatch> {
+    use std::collections::HashMap;
+
+    use arrow_array::{ArrayRef, Float32Array, UInt32Array};
+    use arrow_schema::{DataType, Field, Schema};
+    use arrow_select::{concat::concat_batches, take::take};
+
+    if results.is_empty() {
+        return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
+    }
+
+    // Group by file path; preserve original position for re-sorting.
+    let mut by_file: HashMap<&str, Vec<(u64, f32, usize)>> = HashMap::new();
+    for (i, r) in results.iter().enumerate() {
+        by_file
+            .entry(r.file_path.as_str())
+            .or_default()
+            .push((r.row_id.as_u64(), r.distance, i));
+    }
+
+    use arrow_array::FixedSizeListArray;
+
+    // (original_index, distance, single-row RecordBatch, decoded F32 vector)
+    let mut collected: Vec<(usize, f32, RecordBatch, Vec<f32>)> = Vec::with_capacity(results.len());
+
+    for (file_path, rows) in &by_file {
+        let bytes = store.get(file_path).await?;
+        let reader = AilakeFileReader::new(bytes, vector_column, dim);
+        let (batch, vectors) = reader.read_parquet()?;
+
+        for &(row_id, distance, pos) in rows {
+            let idx = row_id as usize;
+            if idx >= batch.num_rows() {
+                tracing::warn!(
+                    "fetch_rows: row_id {} out of bounds (file_rows={}, file={}), skipping",
+                    idx,
+                    batch.num_rows(),
+                    file_path
+                );
+                continue;
+            }
+
+            let indices = UInt32Array::from(vec![idx as u32]);
+            let row_cols: Vec<ArrayRef> = batch
+                .columns()
+                .iter()
+                .map(|col| {
+                    take(col.as_ref(), &indices, None)
+                        .map_err(|e| AilakeError::Arrow(e.to_string()))
+                })
+                .collect::<AilakeResult<Vec<_>>>()?;
+
+            let row_batch = RecordBatch::try_new(batch.schema(), row_cols)
+                .map_err(|e| AilakeError::Arrow(e.to_string()))?;
+
+            // Capture decoded F32 vector for this row (empty vec if not available).
+            let vec = vectors
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| vec![0.0f32; dim as usize]);
+
+            collected.push((pos, distance, row_batch, vec));
+        }
+    }
+
+    if collected.is_empty() {
+        return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
+    }
+
+    // Restore original top-k order from the search results slice.
+    collected.sort_by_key(|(pos, _, _, _)| *pos);
+
+    let distances: Vec<f32> = collected.iter().map(|(_, d, _, _)| *d).collect();
+    let row_batches: Vec<&RecordBatch> = collected.iter().map(|(_, _, b, _)| b).collect();
+    let base_schema = collected[0].2.schema();
+
+    let combined =
+        concat_batches(&base_schema, row_batches).map_err(|e| AilakeError::Arrow(e.to_string()))?;
+
+    // Build FixedSizeList<Float32> column with decoded vectors (F32, not raw F16 bytes).
+    let flat_vecs: Vec<f32> = collected
+        .iter()
+        .flat_map(|(_, _, _, v)| v.iter().copied())
+        .collect();
+    let item_field = Arc::new(Field::new("item", DataType::Float32, false));
+    let values_arr = Arc::new(Float32Array::from(flat_vecs)) as ArrayRef;
+    let vec_col = FixedSizeListArray::new(item_field.clone(), dim as i32, values_arr, None);
+    let vec_field = Arc::new(Field::new(
+        vector_column,
+        DataType::FixedSizeList(item_field, dim as i32),
+        false,
+    ));
+
+    // Schema: tabular cols, then decoded vector col, then _distance.
+    let mut fields: Vec<Arc<Field>> = base_schema.fields().to_vec();
+    fields.push(vec_field);
+    fields.push(Arc::new(Field::new("_distance", DataType::Float32, false)));
+    let new_schema = Arc::new(Schema::new(fields));
+
+    let mut columns: Vec<ArrayRef> = combined.columns().to_vec();
+    columns.push(Arc::new(vec_col));
+    columns.push(Arc::new(Float32Array::from(distances)));
+
+    RecordBatch::try_new(new_schema, columns).map_err(|e| AilakeError::Arrow(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,7 +633,12 @@ mod tests {
             metric: VectorMetric::Cosine,
             precision: VectorPrecision::F16,
             pq: None,
-            keep_raw_for_reranking: false,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         }
     }
 

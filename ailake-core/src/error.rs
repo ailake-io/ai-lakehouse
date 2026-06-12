@@ -18,6 +18,17 @@ pub enum AilakeError {
     #[error("vector dimension mismatch: expected {expected}, got {actual}")]
     DimensionMismatch { expected: u32, actual: u32 },
 
+    #[error(
+        "embedding model mismatch: table uses '{table_model}' (dim={table_dim}), \
+         batch uses '{batch_model}' (dim={batch_dim})"
+    )]
+    ModelMismatch {
+        table_model: String,
+        table_dim: u32,
+        batch_model: String,
+        batch_dim: u32,
+    },
+
     #[error("centroid length mismatch: expected dim={expected_dim}, got {actual} bytes")]
     InvalidCentroidLength { expected_dim: u32, actual: usize },
 

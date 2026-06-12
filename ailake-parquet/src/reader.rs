@@ -25,9 +25,26 @@ impl ParquetVectorReader {
     ///
     /// Reads ALL row groups — uses a large batch size so typical single-row-group
     /// files are returned in one pass, and concatenates multiple batches otherwise.
+    ///
+    /// PQ-only files (written with `keep_raw_for_reranking = false`) omit the raw
+    /// vector column. For those files, the returned embeddings vec is empty and the
+    /// returned RecordBatch contains only tabular columns.
     pub fn read_all(&self) -> AilakeResult<(RecordBatch, Vec<Vec<f32>>)> {
         let builder = ParquetRecordBatchReaderBuilder::try_new(self.bytes.clone())
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
+
+        // Detect PQ-only before consuming the builder.
+        let pq_only = builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|kvs| {
+                kvs.iter()
+                    .find(|kv| kv.key == "ailake.pq_only")
+                    .and_then(|kv| kv.value.as_deref())
+                    .map(|v| v == "true")
+            })
+            .unwrap_or(false);
 
         // Use a large batch size to avoid splitting single-row-group files across batches.
         // concatenate_all() handles the multi-batch case transparently.
@@ -55,6 +72,11 @@ impl ParquetVectorReader {
             arrow_select::concat::concat_batches(&batches[0].schema(), &batches)
                 .map_err(|e| AilakeError::Parquet(e.to_string()))?
         };
+
+        // PQ-only: no raw vector column present. Return tabular batch with empty embeddings.
+        if pq_only || batch.schema().index_of(&self.vector_column).is_err() {
+            return Ok((batch, vec![]));
+        }
 
         // Find and extract vector column
         let vec_idx = batch.schema().index_of(&self.vector_column).map_err(|_| {
@@ -88,6 +110,12 @@ impl ParquetVectorReader {
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
 
         Ok((tabular, embeddings))
+    }
+
+    /// Returns true when this file was written in PQ-only mode (raw vector column omitted).
+    pub fn is_pq_only(&self) -> AilakeResult<bool> {
+        let v = self.kv_metadata("ailake.pq_only")?;
+        Ok(v.as_deref() == Some("true"))
     }
 
     /// Extract a file-level key_value_metadata entry from the Parquet footer.
@@ -209,7 +237,12 @@ mod tests {
             metric: VectorMetric::Cosine,
             precision: VectorPrecision::F16,
             pq: None,
-            keep_raw_for_reranking: false,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         }
     }
 

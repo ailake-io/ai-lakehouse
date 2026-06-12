@@ -26,7 +26,12 @@ async fn pruning_eliminates_distant_file() {
         metric: VectorMetric::Cosine,
         precision: VectorPrecision::F16,
         pq: None,
-        keep_raw_for_reranking: false,
+        keep_raw_for_reranking: true,
+        pre_normalize: false,
+        hnsw_m: None,
+        hnsw_ef_construction: None,
+        ivf_residual: false,
+        embedding_model: None,
     };
 
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));

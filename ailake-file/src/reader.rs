@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+use crate::footer::Precision;
 use ailake_core::{AilakeError, AilakeResult, Centroid, VectorMetric};
 use ailake_index::{AnyIndex, HnswIndex, IvfPqSerializer, MmapLoader};
 use ailake_parquet::ParquetVectorReader;
@@ -127,7 +128,11 @@ impl AilakeFileReader {
         if hnsw_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
         }
-        MmapLoader::from_bytes(&self.bytes[hnsw_start..hnsw_end])
+        let mut idx = MmapLoader::from_bytes(&self.bytes[hnsw_start..hnsw_end])?;
+        if header.precision == Precision::F16 {
+            idx.quantize_to_f16();
+        }
+        Ok(idx)
     }
 
     /// Load primary index as `AnyIndex`, dispatching on header flags.
@@ -159,7 +164,10 @@ impl AilakeFileReader {
             let idx = IvfPqSerializer::from_bytes(index_bytes)?;
             Ok(AnyIndex::IvfPq(idx))
         } else {
-            let idx = MmapLoader::from_bytes(index_bytes)?;
+            let mut idx = MmapLoader::from_bytes(index_bytes)?;
+            if header.precision == Precision::F16 {
+                idx.quantize_to_f16();
+            }
             Ok(AnyIndex::Hnsw(idx))
         }
     }
@@ -199,6 +207,7 @@ fn distance_metric_to_vector_metric(dm: DistanceMetric) -> VectorMetric {
         DistanceMetric::Cosine => VectorMetric::Cosine,
         DistanceMetric::Euclidean => VectorMetric::Euclidean,
         DistanceMetric::DotProduct => VectorMetric::DotProduct,
+        DistanceMetric::NormalizedCosine => VectorMetric::NormalizedCosine,
     }
 }
 
@@ -218,7 +227,12 @@ mod tests {
             metric: VectorMetric::Cosine,
             precision: VectorPrecision::F16,
             pq: None,
-            keep_raw_for_reranking: false,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         }
     }
 

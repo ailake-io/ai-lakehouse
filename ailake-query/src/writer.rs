@@ -8,16 +8,16 @@ use ailake_catalog::{
     ExtraVectorIndex, IcebergSchemaUpdate, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation,
     TableIdent, TableProperties, VectorIndexInfo,
 };
-use ailake_core::{AilakeResult, VectorStoragePolicy};
+use ailake_core::{AilakeError, AilakeResult, VectorStoragePolicy};
 use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBatch};
-use ailake_index::IvfPqConfig;
+use ailake_index::{IvfPqCodebook, IvfPqConfig};
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
-use tracing::{error, info};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
 use serde_json;
+use tracing::{error, info};
 
 /// One vector column for a multi-column write batch.
 pub struct MultiVectorBatch<'a> {
@@ -38,6 +38,12 @@ pub struct TableWriter {
     captured_schema: Option<SchemaRef>,
     /// Extra vector column policies from write_batch_multi (columns beyond primary).
     extra_vec_policies: Vec<VectorStoragePolicy>,
+    /// IVF-PQ codebook trained on the first shard and reused for all subsequent shards.
+    /// Ensures cross-shard ADC distances are comparable — no reranking needed.
+    cached_ivf_codebook: Option<Arc<IvfPqCodebook>>,
+    /// Shared codebook cell for deferred IVF-PQ builds. Cloneable Arc so each
+    /// background task can access it; OnceCell guarantees training runs exactly once.
+    deferred_ivf_codebook: Arc<tokio::sync::OnceCell<IvfPqCodebook>>,
 }
 
 impl TableWriter {
@@ -57,6 +63,8 @@ impl TableWriter {
             parent_snapshot_id: None,
             captured_schema: None,
             extra_vec_policies: Vec::new(),
+            cached_ivf_codebook: None,
+            deferred_ivf_codebook: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 
@@ -79,6 +87,7 @@ impl TableWriter {
         batch: &RecordBatch,
         embeddings: &[Vec<f32>],
     ) -> AilakeResult<()> {
+        self.validate_embedding_dim(embeddings)?;
         if self.captured_schema.is_none() {
             self.captured_schema = Some(batch.schema());
         }
@@ -122,6 +131,68 @@ impl TableWriter {
         Ok(())
     }
 
+    /// Write batch as Parquet-only immediately; train IVF-PQ index in background.
+    ///
+    /// The first shard trains the shared codebook (k-means). All subsequent shards
+    /// reuse it via `OnceCell` — build is O(n) assign+encode, not O(n×k) k-means.
+    /// Returns after Parquet is persisted. Index transitions Indexing → Ready async.
+    pub async fn write_batch_ivf_pq_deferred(
+        &mut self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+        ivf_config: IvfPqConfig,
+    ) -> AilakeResult<()> {
+        if self.captured_schema.is_none() {
+            self.captured_schema = Some(batch.schema());
+        }
+        let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
+        let file_path = format!("data/part-{:05}.parquet", part_num);
+
+        let file_writer = AilakeFileWriter::new(self.policy.clone());
+        let parquet_bytes = file_writer.write_parquet_only(batch, embeddings)?;
+        let file_size = parquet_bytes.len() as u64;
+        self.store.put(&file_path, parquet_bytes).await?;
+
+        let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
+        let entry = make_data_file_entry_indexing(
+            &file_path,
+            embeddings.len() as u64,
+            file_size,
+            &centroid,
+            &self.policy.column_name,
+            self.policy.dim,
+        );
+        self.pending_files.push(entry);
+
+        let store = self.store.clone();
+        let catalog = self.catalog.clone();
+        let policy = self.policy.clone();
+        let table = self.table.clone();
+        let fp = file_path.clone();
+        let codebook_cell = self.deferred_ivf_codebook.clone();
+        tokio::spawn(async move {
+            if let Err(e) = build_ivf_pq_and_patch_index(
+                store,
+                catalog,
+                policy,
+                table,
+                fp,
+                ivf_config,
+                codebook_cell,
+            )
+            .await
+            {
+                error!(
+                    "ailake: deferred IVF-PQ build failed — file is indexed as Parquet-only until \
+                     next compaction rebuilds the index: {}",
+                    e
+                );
+            }
+        });
+
+        Ok(())
+    }
+
     /// Idempotent variant of `write_batch`.
     ///
     /// Before any I/O, checks if `batch_id` already appears in the current
@@ -148,6 +219,30 @@ impl TableWriter {
     }
 
     /// Write a batch to a new AI-Lake file and stage it for commit.
+    /// Validates that provided embeddings match the table's configured dimension.
+    /// Returns `ModelMismatch` error when dim differs — prevents silently mixing
+    /// incompatible vectors (same error type used across write paths for consistency).
+    fn validate_embedding_dim(&self, embeddings: &[Vec<f32>]) -> AilakeResult<()> {
+        if let Some(first) = embeddings.first() {
+            let actual = first.len() as u32;
+            if actual != self.policy.dim {
+                let table_model = self
+                    .policy
+                    .embedding_model
+                    .as_ref()
+                    .map(|m| m.to_property_value())
+                    .unwrap_or_else(|| format!("dim={}", self.policy.dim));
+                return Err(AilakeError::ModelMismatch {
+                    table_model,
+                    table_dim: self.policy.dim,
+                    batch_model: format!("dim={}", actual),
+                    batch_dim: actual,
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub async fn write_batch(
         &mut self,
         batch: &RecordBatch,
@@ -162,6 +257,7 @@ impl TableWriter {
         embeddings: &[Vec<f32>],
         batch_id: Option<String>,
     ) -> AilakeResult<()> {
+        self.validate_embedding_dim(embeddings)?;
         if self.captured_schema.is_none() {
             self.captured_schema = Some(batch.schema());
         }
@@ -219,11 +315,43 @@ impl TableWriter {
     ) -> AilakeResult<()> {
         let profile = ailake_index::HardwareProfile::detect();
         if profile.recommend_ivf_pq(embeddings.len()) {
-            let ivf_config =
+            let mut ivf_config =
                 ailake_index::IvfPqConfig::for_dataset(self.policy.dim as usize, embeddings.len());
+            if self.policy.ivf_residual {
+                ivf_config = ivf_config.with_residual();
+            }
             self.write_batch_ivf_pq(batch, embeddings, ivf_config).await
         } else {
             self.write_batch(batch, embeddings).await
+        }
+    }
+
+    /// Write batch, auto-selecting the index based on detected hardware — deferred variant.
+    ///
+    /// Same hardware detection as `write_batch_auto`: picks IVF-PQ when a CUDA GPU or
+    /// ≥8 CPU cores are present AND the batch has ≥5 000 vectors; falls back to HNSW.
+    ///
+    /// Unlike `write_batch_auto`, the index is built in a background tokio task:
+    /// - Parquet is persisted immediately (~200k vec/s, same as write_parquet_only).
+    /// - HNSW or IVF-PQ index built asynchronously; shard served via flat scan meanwhile.
+    ///
+    /// Use this when ingest throughput matters more than immediate searchability.
+    pub async fn write_batch_auto_deferred(
+        &mut self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+    ) -> AilakeResult<()> {
+        let profile = ailake_index::HardwareProfile::detect();
+        if profile.recommend_ivf_pq(embeddings.len()) {
+            let mut ivf_config =
+                ailake_index::IvfPqConfig::for_dataset(self.policy.dim as usize, embeddings.len());
+            if self.policy.ivf_residual {
+                ivf_config = ivf_config.with_residual();
+            }
+            self.write_batch_ivf_pq_deferred(batch, embeddings, ivf_config)
+                .await
+        } else {
+            self.write_batch_deferred(batch, embeddings).await
         }
     }
 
@@ -242,8 +370,30 @@ impl TableWriter {
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = format!("data/part-{:05}.parquet", part_num);
 
+        // Train codebook once on the first shard; all subsequent shards reuse it.
+        // This makes cross-shard ADC distances comparable, eliminating the need
+        // for exact reranking during multi-shard search.
+        if self.cached_ivf_codebook.is_none() {
+            let codebook = tokio::task::spawn_blocking({
+                let embeddings = embeddings.to_vec();
+                let metric = self.policy.metric;
+                let config = ivf_config.clone();
+                move || ailake_index::IvfPqIndex::train_codebook(&embeddings, metric, &config)
+            })
+            .await
+            .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))??;
+            self.cached_ivf_codebook = Some(Arc::new(codebook));
+        }
+        // SAFETY: set to Some in the block above (either pre-existing or just trained).
+        let codebook = self
+            .cached_ivf_codebook
+            .as_ref()
+            .expect("IVF-PQ codebook must be Some after training block")
+            .clone();
+
         let file_writer = AilakeFileWriter::new(self.policy.clone())
-            .with_index_type(IndexType::IvfPq(ivf_config));
+            .with_index_type(IndexType::IvfPq(ivf_config))
+            .with_shared_ivf_codebook(codebook);
         let file_bytes: Bytes = file_writer.write(batch, embeddings)?;
         let file_size = file_bytes.len() as u64;
 
@@ -709,6 +859,117 @@ async fn build_and_patch_index(
     Ok(())
 }
 
+/// Background task: train IVF-PQ (using shared codebook) and patch catalog entry.
+///
+/// The OnceCell guarantees that k-means training runs exactly once across all
+/// concurrent background tasks — subsequent tasks skip directly to assign+encode.
+async fn build_ivf_pq_and_patch_index(
+    store: Arc<dyn Store>,
+    catalog: Arc<dyn CatalogProvider>,
+    policy: VectorStoragePolicy,
+    table: TableIdent,
+    file_path: String,
+    ivf_config: IvfPqConfig,
+    codebook_cell: Arc<tokio::sync::OnceCell<IvfPqCodebook>>,
+) -> AilakeResult<()> {
+    let parquet_bytes = store.get(&file_path).await?;
+    let reader = AilakeFileReader::new(parquet_bytes, &policy.column_name, policy.dim);
+    let (batch, embeddings) = reader.read_parquet()?;
+
+    // Get or train the shared codebook. First task trains; all others await the result.
+    let codebook = codebook_cell
+        .get_or_try_init(|| async {
+            let vecs = embeddings.clone();
+            let metric = policy.metric;
+            let cfg = ivf_config.clone();
+            tokio::task::spawn_blocking(move || {
+                ailake_index::IvfPqIndex::train_codebook(&vecs, metric, &cfg)
+            })
+            .await
+            .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))?
+        })
+        .await?;
+
+    let full_bytes = tokio::task::spawn_blocking({
+        let policy = policy.clone();
+        let codebook = codebook.clone();
+        move || {
+            let file_writer = AilakeFileWriter::new(policy)
+                .with_index_type(IndexType::IvfPq(ivf_config))
+                .with_shared_ivf_codebook(Arc::new(codebook));
+            file_writer.write(&batch, &embeddings)
+        }
+    })
+    .await
+    .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))??;
+
+    let full_reader = AilakeFileReader::new(full_bytes.clone(), &policy.column_name, policy.dim);
+    let header = full_reader.read_header()?;
+    let ailk_start = full_reader.ailk_offset()?;
+    let hnsw_abs_offset = ailk_start + header.hnsw_offset;
+    let hnsw_len = header.hnsw_len;
+
+    store.put(&file_path, full_bytes).await?;
+
+    // Wait for initial commit to appear then patch IndexStatus::Ready (same CAS loop as HNSW).
+    for _ in 0..120u32 {
+        match catalog.load_table(&table).await {
+            Ok(meta) if meta.current_snapshot_id.is_some() => break,
+            _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        }
+    }
+
+    for attempt in 0..50u32 {
+        let table_meta = catalog.load_table(&table).await?;
+        let parent_snapshot_id = table_meta.current_snapshot_id;
+        let mut files = catalog.list_files(&table, None).await?;
+
+        if files
+            .iter()
+            .any(|f| f.path == file_path && f.index_status == IndexStatus::Ready)
+        {
+            break;
+        }
+
+        for f in &mut files {
+            if f.path == file_path {
+                f.hnsw_offset = Some(hnsw_abs_offset);
+                f.hnsw_len = Some(hnsw_len);
+                f.index_status = IndexStatus::Ready;
+                break;
+            }
+        }
+        catalog
+            .commit_snapshot(
+                &table,
+                NewSnapshot {
+                    snapshot_id: new_snapshot_id(),
+                    parent_snapshot_id,
+                    files,
+                    operation: SnapshotOperation::Replace,
+                    iceberg_schema: None,
+                },
+            )
+            .await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(10 + attempt as u64 * 5)).await;
+
+        let verify = catalog.list_files(&table, None).await?;
+        if verify
+            .iter()
+            .any(|f| f.path == file_path && f.index_status == IndexStatus::Ready)
+        {
+            break;
+        }
+    }
+
+    info!(
+        "ailake: deferred IVF-PQ index built for {} (offset={}, len={})",
+        file_path, hnsw_abs_offset, hnsw_len
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,7 +983,12 @@ mod tests {
             metric: VectorMetric::Cosine,
             precision: VectorPrecision::F16,
             pq: None,
-            keep_raw_for_reranking: false,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         }
     }
 
@@ -885,5 +1151,44 @@ mod tests {
 
         // Nested element ID must be > 3
         assert!(upd.fields[1]["type"]["element-id"].as_i64().unwrap() > 3);
+    }
+
+    /// Smoke-test write_batch_auto_deferred: verifies that it completes without error
+    /// and stages a pending file entry (index built asynchronously in background).
+    #[tokio::test]
+    async fn write_batch_auto_deferred_stages_file() {
+        use ailake_catalog::{HadoopCatalog, TableIdent};
+        use ailake_store::LocalStore;
+        use arrow_schema::{DataType, Field, Schema};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: std::sync::Arc<dyn ailake_store::Store> =
+            std::sync::Arc::new(LocalStore::new(dir.path().to_str().unwrap()));
+        let catalog = std::sync::Arc::new(HadoopCatalog::new(std::sync::Arc::clone(&store), ""));
+        let pol = policy("embedding", 4);
+        let ident = TableIdent::new("default", "t");
+
+        let mut writer = TableWriter::create_or_open(catalog, store, pol, ident)
+            .await
+            .unwrap();
+
+        let schema =
+            std::sync::Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let batch = arrow_array::RecordBatch::try_new(
+            schema,
+            vec![std::sync::Arc::new(arrow_array::StringArray::from(vec![
+                "hello",
+            ]))],
+        )
+        .unwrap();
+        let embeddings = vec![vec![1.0f32, 0.0, 0.0, 0.0]];
+
+        writer
+            .write_batch_auto_deferred(&batch, &embeddings)
+            .await
+            .unwrap();
+
+        // One pending file should be staged even before commit.
+        assert_eq!(writer.pending_files.len(), 1);
     }
 }
