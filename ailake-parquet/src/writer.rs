@@ -49,48 +49,62 @@ impl ParquetVectorWriter {
             });
         }
 
-        let bytes_per_vec = self.policy.dim as usize * self.policy.precision.bytes_per_element();
+        let pq_only = !self.policy.keep_raw_for_reranking;
 
-        // Encode each vector to F16 bytes, concatenate
-        let flat: Vec<u8> = embeddings
-            .iter()
-            .flat_map(|v| Quantizer::f32_to_f16_bytes(v))
-            .collect();
-
-        // Build FixedSizeBinary array from contiguous bytes
-        let chunks: Vec<Option<&[u8]>> = flat.chunks_exact(bytes_per_vec).map(Some).collect();
-        let vec_array = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
-            chunks.into_iter(),
-            bytes_per_vec as i32,
-        )
-        .map_err(|e| AilakeError::Parquet(e.to_string()))?;
-
-        // Extend schema with vector column; stamp Iceberg-aligned field IDs
-        // so Parquet column metadata matches Iceberg schema (Spark nullability checks).
-        let vec_f = vector_field(
-            &self.policy.column_name,
-            self.policy.dim,
-            self.policy.metric,
-            self.policy.precision,
-        );
-        let vec_field_id = batch.schema().fields().len() + 1;
-        let new_fields: Vec<Field> = batch
+        // Stamp Iceberg-aligned field IDs on tabular columns.
+        let tabular_fields: Vec<Field> = batch
             .schema()
             .fields()
             .iter()
             .enumerate()
             .map(|(i, f)| stamp_field_id((**f).clone(), i + 1))
-            .chain(std::iter::once(stamp_field_id(vec_f, vec_field_id)))
             .collect();
-        let extended_schema = Arc::new(Schema::new_with_metadata(
-            new_fields,
-            batch.schema().metadata().clone(),
-        ));
 
-        // Build extended RecordBatch
-        let mut cols: Vec<Arc<dyn Array>> = batch.columns().to_vec();
-        cols.push(Arc::new(vec_array));
-        let extended = RecordBatch::try_new(extended_schema.clone(), cols)
+        let (extended_schema, extended_cols) = if pq_only {
+            // PQ-only mode: omit the raw vector column entirely.
+            // The AILK section still contains the index; search works via the index blob.
+            // Callers that need raw vectors for reranking should use keep_raw_for_reranking=true.
+            let schema = Arc::new(Schema::new_with_metadata(
+                tabular_fields,
+                batch.schema().metadata().clone(),
+            ));
+            let cols = batch.columns().to_vec();
+            (schema, cols)
+        } else {
+            let bytes_per_vec =
+                self.policy.dim as usize * self.policy.precision.bytes_per_element();
+            let flat: Vec<u8> = embeddings
+                .iter()
+                .flat_map(|v| Quantizer::f32_to_f16_bytes(v))
+                .collect();
+            let chunks: Vec<Option<&[u8]>> = flat.chunks_exact(bytes_per_vec).map(Some).collect();
+            let vec_array = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                chunks.into_iter(),
+                bytes_per_vec as i32,
+            )
+            .map_err(|e| AilakeError::Parquet(e.to_string()))?;
+
+            let vec_f = vector_field(
+                &self.policy.column_name,
+                self.policy.dim,
+                self.policy.metric,
+                self.policy.precision,
+            );
+            let vec_field_id = batch.schema().fields().len() + 1;
+            let new_fields: Vec<Field> = tabular_fields
+                .into_iter()
+                .chain(std::iter::once(stamp_field_id(vec_f, vec_field_id)))
+                .collect();
+            let schema = Arc::new(Schema::new_with_metadata(
+                new_fields,
+                batch.schema().metadata().clone(),
+            ));
+            let mut cols: Vec<Arc<dyn Array>> = batch.columns().to_vec();
+            cols.push(Arc::new(vec_array));
+            (schema, cols)
+        };
+
+        let extended = RecordBatch::try_new(extended_schema.clone(), extended_cols)
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
 
         let mut kv = vec![
@@ -110,6 +124,12 @@ impl ParquetVectorWriter {
             ),
             KeyValue::new("ailake.dim".to_string(), Some(self.policy.dim.to_string())),
         ];
+        if pq_only {
+            kv.push(KeyValue::new(
+                "ailake.pq_only".to_string(),
+                Some("true".to_string()),
+            ));
+        }
         for (k, v) in extra_kv {
             kv.push(KeyValue::new(k.to_string(), Some(v.to_string())));
         }
@@ -286,6 +306,20 @@ mod tests {
         }
     }
 
+    fn make_pq_only_policy(dim: u32) -> VectorStoragePolicy {
+        VectorStoragePolicy {
+            column_name: "embedding".to_string(),
+            dim,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: false,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+        }
+    }
+
     #[test]
     fn write_produces_nonempty_bytes() {
         let schema = Arc::new(Schema::new(vec![
@@ -306,5 +340,61 @@ mod tests {
         let (bytes, count) = writer.write_batch(&batch, &embeddings).unwrap();
         assert!(!bytes.is_empty());
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn pq_only_omits_vector_column() {
+        use crate::reader::ParquetVectorReader;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("text", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let embeddings: Vec<Vec<f32>> = (0..2).map(|_| vec![0.1f32, 0.2, 0.3, 0.4]).collect();
+
+        let writer = ParquetVectorWriter::new(make_pq_only_policy(4));
+        let (bytes, count) = writer.write_batch(&batch, &embeddings).unwrap();
+        assert_eq!(count, 2);
+
+        let reader = ParquetVectorReader::new(bytes, "embedding");
+        assert!(reader.is_pq_only().unwrap(), "ailake.pq_only must be true");
+
+        let (tabular, embs) = reader.read_all().unwrap();
+        assert!(embs.is_empty(), "PQ-only: no raw embeddings returned");
+        // Tabular columns preserved
+        assert_eq!(tabular.num_rows(), 2);
+        assert!(tabular.schema().index_of("id").is_ok());
+        assert!(tabular.schema().index_of("text").is_ok());
+        // Vector column absent from schema
+        assert!(tabular.schema().index_of("embedding").is_err());
+    }
+
+    #[test]
+    fn non_pq_only_preserves_vector_column() {
+        use crate::reader::ParquetVectorReader;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1]))]).unwrap();
+        let embeddings = vec![vec![1.0f32, 0.0, 0.0, 0.0]];
+
+        // keep_raw_for_reranking = true (default)
+        let mut policy = make_pq_only_policy(4);
+        policy.keep_raw_for_reranking = true;
+        let writer = ParquetVectorWriter::new(policy);
+        let (bytes, _) = writer.write_batch(&batch, &embeddings).unwrap();
+
+        let reader = ParquetVectorReader::new(bytes, "embedding");
+        assert!(!reader.is_pq_only().unwrap());
+        let (_, embs) = reader.read_all().unwrap();
+        assert_eq!(embs.len(), 1, "raw embeddings present when keep_raw=true");
     }
 }

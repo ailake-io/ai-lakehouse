@@ -59,7 +59,7 @@ pub struct TableWriter {
 impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false))]
     fn new(
         path: &str,
         vector_column: &str,
@@ -68,17 +68,19 @@ impl TableWriter {
         pre_normalize: bool,
         hnsw_m: Option<u32>,
         hnsw_ef_construction: Option<u32>,
+        pq_only: bool,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
-            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?}",
-            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction
+            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} pq_only={}",
+            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction, pq_only
         );
         let mut policy =
             VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
         policy.pre_normalize = pre_normalize;
         policy.hnsw_m = hnsw_m;
         policy.hnsw_ef_construction = hnsw_ef_construction;
+        policy.keep_raw_for_reranking = !pq_only;
         let (catalog, store) = local_catalog_store(path);
         let table = TableIdent::new("default", "table");
 
