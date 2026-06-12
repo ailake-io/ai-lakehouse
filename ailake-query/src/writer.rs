@@ -289,8 +289,11 @@ impl TableWriter {
     ) -> AilakeResult<()> {
         let profile = ailake_index::HardwareProfile::detect();
         if profile.recommend_ivf_pq(embeddings.len()) {
-            let ivf_config =
+            let mut ivf_config =
                 ailake_index::IvfPqConfig::for_dataset(self.policy.dim as usize, embeddings.len());
+            if self.policy.ivf_residual {
+                ivf_config = ivf_config.with_residual();
+            }
             self.write_batch_ivf_pq(batch, embeddings, ivf_config).await
         } else {
             self.write_batch(batch, embeddings).await
@@ -924,6 +927,7 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+        ivf_residual: false,
         }
     }
 

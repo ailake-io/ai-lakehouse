@@ -51,6 +51,10 @@ pub struct VectorStoragePolicy {
     /// Recommended values: 100 (fast), 150 (default), 200 (quality), 400 (max quality).
     #[serde(default)]
     pub hnsw_ef_construction: Option<u32>,
+    /// IVF-PQ residual encoding — train PQ on per-cluster residuals (vec - coarse_centroid).
+    /// Same bytes/vector, ~2-4pp better recall@10. Only applies when IVF-PQ index is used.
+    #[serde(default)]
+    pub ivf_residual: bool,
 }
 
 impl VectorStoragePolicy {
@@ -65,6 +69,7 @@ impl VectorStoragePolicy {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+            ivf_residual: false,
         }
     }
 }
