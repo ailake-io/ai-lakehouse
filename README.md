@@ -328,6 +328,44 @@ tests/
             └── 05_bigquery.ipynb     # BigQuery emulator (--profile engines required)
 ```
 
+## Performance
+
+Numbers below are from the [ailake-benchmark](https://github.com/ThiagoLange/ailake-benchmark) repository run on a single AWS `c6i.8xlarge` (32 vCPU, 64 GB RAM) with local NVMe. GPU numbers on `g5.xlarge` (NVIDIA A10G).
+
+### Write throughput (`text-embedding-3-small`, dim=1536)
+
+| Path | Throughput | Notes |
+|---|---|---|
+| `write_batch` (HNSW inline) | ~6 k vec/s | HNSW graph built synchronously per shard |
+| `write_batch_deferred` (HNSW async) | ~200 k vec/s | Parquet written immediately; HNSW built in background |
+| `write_batch_ivf_pq_deferred` (IVF-PQ async) | ~250 k vec/s | Parquet + k-means-trained PQ index async |
+| `write_batch_auto_deferred` (auto) | ~200–250 k vec/s | Hardware-aware: selects IVF-PQ on GPU/≥8 cores, HNSW otherwise |
+
+### Search latency (top-10, dim=1536, 1 M vectors, cosine)
+
+| Index | Recall@10 | p50 latency | p99 latency |
+|---|---|---|---|
+| HNSW (F16, ef=50) | ~97% | ~4 ms | ~12 ms |
+| IVF-PQ (nprobe=8) | ~93% | ~2 ms | ~8 ms |
+| IVF-PQ residual (nprobe=8) | ~96% | ~2 ms | ~8 ms |
+| IVF-PQ GPU (A10G, nprobe=8) | ~93% | ~0.4 ms | ~1 ms |
+
+Geometric pruning eliminates 95–99% of files before any index is touched on tables with thousands of shards.
+
+### Storage (`text-embedding-3-small`, dim=1536, 100 M vectors)
+
+| Mode | Vector column | HNSW/IVF-PQ overhead | Total |
+|---|---|---|---|
+| F32 (raw) | ~600 GB | ~60–120 GB | ~660–720 GB |
+| F16 (default) | ~300 GB | ~30–60 GB | ~330–360 GB |
+| I8 | ~150 GB | ~15–30 GB | ~165–180 GB |
+| IVF-PQ (M=48, K=256) | ~300 GB raw + ~5 GB PQ codes | ~5 GB | ~310 GB |
+| PQ-only (`--pq-only`) | 0 GB (raw omitted) | ~5 GB | **~5 GB** |
+
+PQ-only mode trades reranking precision for 98% storage reduction. Recall@10 ~93–95%.
+
+---
+
 ## Build
 
 ```bash
