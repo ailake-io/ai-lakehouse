@@ -84,7 +84,12 @@ pub struct EmbeddingModelInfo {
 
 impl EmbeddingModelInfo {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), version: None, dim: None, metric: None }
+        Self {
+            name: name.into(),
+            version: None,
+            dim: None,
+            metric: None,
+        }
     }
 
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
@@ -118,9 +123,19 @@ impl EmbeddingModelInfo {
     /// Parse back from a property value written by `to_property_value`.
     pub fn from_property_value(s: &str) -> Self {
         if let Some((name, version)) = s.split_once('@') {
-            Self { name: name.to_string(), version: Some(version.to_string()), dim: None, metric: None }
+            Self {
+                name: name.to_string(),
+                version: Some(version.to_string()),
+                dim: None,
+                metric: None,
+            }
         } else {
-            Self { name: s.to_string(), version: None, dim: None, metric: None }
+            Self {
+                name: s.to_string(),
+                version: None,
+                dim: None,
+                metric: None,
+            }
         }
     }
 }

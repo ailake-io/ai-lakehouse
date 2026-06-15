@@ -110,7 +110,11 @@ impl TableWriter {
             &self.policy.column_name,
             self.policy.dim,
         );
-        entry.embedding_model = self.policy.embedding_model.as_ref().map(|m| m.to_property_value());
+        entry.embedding_model = self
+            .policy
+            .embedding_model
+            .as_ref()
+            .map(|m| m.to_property_value());
         self.pending_files.push(entry);
 
         // Spawn background HNSW build (fire-and-forget; errors are logged).
@@ -163,7 +167,11 @@ impl TableWriter {
             &self.policy.column_name,
             self.policy.dim,
         );
-        entry.embedding_model = self.policy.embedding_model.as_ref().map(|m| m.to_property_value());
+        entry.embedding_model = self
+            .policy
+            .embedding_model
+            .as_ref()
+            .map(|m| m.to_property_value());
         self.pending_files.push(entry);
 
         let store = self.store.clone();
@@ -301,7 +309,11 @@ impl TableWriter {
             },
         );
         entry.batch_id = batch_id;
-        entry.embedding_model = self.policy.embedding_model.as_ref().map(|m| m.to_property_value());
+        entry.embedding_model = self
+            .policy
+            .embedding_model
+            .as_ref()
+            .map(|m| m.to_property_value());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -426,7 +438,11 @@ impl TableWriter {
                 hnsw_len: index_len,
             },
         );
-        entry.embedding_model = self.policy.embedding_model.as_ref().map(|m| m.to_property_value());
+        entry.embedding_model = self
+            .policy
+            .embedding_model
+            .as_ref()
+            .map(|m| m.to_property_value());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -529,7 +545,11 @@ impl TableWriter {
             },
             &extra,
         );
-        entry.embedding_model = self.policy.embedding_model.as_ref().map(|m| m.to_property_value());
+        entry.embedding_model = self
+            .policy
+            .embedding_model
+            .as_ref()
+            .map(|m| m.to_property_value());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -578,7 +598,10 @@ impl TableWriter {
                 // Dim mismatch is a hard error caught at write_batch time; name divergence
                 // is softer — same dim, different model (e.g. fine-tune vs base) — warn only.
                 if let Some(incoming) = &policy.embedding_model {
-                    if let Some(stored_val) = existing_meta.properties.get(EmbeddingModelInfo::property_key()) {
+                    if let Some(stored_val) = existing_meta
+                        .properties
+                        .get(EmbeddingModelInfo::property_key())
+                    {
                         let stored = EmbeddingModelInfo::from_property_value(stored_val);
                         if stored.name != incoming.name {
                             warn!(

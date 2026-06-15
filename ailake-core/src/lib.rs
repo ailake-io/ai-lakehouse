@@ -10,4 +10,6 @@ pub mod types;
 
 pub use error::{AilakeError, AilakeResult};
 pub use schema::{llm_columns, LlmContextSchema, PQConfig, VectorStoragePolicy};
-pub use types::{ByteLen, ByteOffset, Centroid, Dim, EmbeddingModelInfo, RowId, VectorMetric, VectorPrecision};
+pub use types::{
+    ByteLen, ByteOffset, Centroid, Dim, EmbeddingModelInfo, RowId, VectorMetric, VectorPrecision,
+};

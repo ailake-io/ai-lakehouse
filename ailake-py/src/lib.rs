@@ -92,8 +92,7 @@ impl TableWriter {
         policy.keep_raw_for_reranking = !pq_only;
         policy.ivf_residual = ivf_residual;
         if let Some(model_name) = embedding_model {
-            let mut model_info = EmbeddingModelInfo::new(model_name)
-                .with_dim(dim);
+            let mut model_info = EmbeddingModelInfo::new(model_name).with_dim(dim);
             if let Some(version) = embedding_model_version {
                 model_info = model_info.with_version(version);
             }
@@ -136,15 +135,14 @@ impl TableWriter {
                         "embeddings is required when embed_fn was not set on TableWriter",
                     )
                 })?;
-                let py_texts = PyList::new(py, &texts)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let py_texts =
+                    PyList::new(py, &texts).map_err(|e| PyValueError::new_err(e.to_string()))?;
                 let result = embed_fn
                     .call1(py, (py_texts,))
                     .map_err(|e| PyValueError::new_err(format!("embed_fn error: {e}")))?;
-                result
-                    .bind(py)
-                    .extract::<Vec<Vec<f32>>>()
-                    .map_err(|e| PyValueError::new_err(format!("embed_fn must return list[list[float]]: {e}")))?
+                result.bind(py).extract::<Vec<Vec<f32>>>().map_err(|e| {
+                    PyValueError::new_err(format!("embed_fn must return list[list[float]]: {e}"))
+                })?
             }
         };
 
@@ -503,12 +501,11 @@ fn migrate_embeddings(
                     .call1(py, (py_texts,))
                     .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
                 // extract Vec<Vec<f32>> directly — works for list[list[float]] and np.ndarray
-                let vecs: Vec<Vec<f32>> = result
-                    .bind(py)
-                    .extract()
-                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(
-                        format!("embed_fn must return list[list[float]]: {e}")
-                    ))?;
+                let vecs: Vec<Vec<f32>> = result.bind(py).extract().map_err(|e| {
+                    ailake_core::AilakeError::InvalidArgument(format!(
+                        "embed_fn must return list[list[float]]: {e}"
+                    ))
+                })?;
                 Ok(vecs)
             })
         })

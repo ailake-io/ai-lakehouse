@@ -88,12 +88,8 @@ impl MigrationJob {
         store: Arc<dyn Store>,
     ) -> AilakeResult<()> {
         match self.strategy {
-            MigrationStrategy::AtomicReplace => {
-                self.run_atomic_replace(catalog, store).await
-            }
-            MigrationStrategy::DualWriteThenCutover => {
-                self.run_dual_write(catalog, store).await
-            }
+            MigrationStrategy::AtomicReplace => self.run_atomic_replace(catalog, store).await,
+            MigrationStrategy::DualWriteThenCutover => self.run_dual_write(catalog, store).await,
         }
     }
 
@@ -104,7 +100,9 @@ impl MigrationJob {
         store: Arc<dyn Store>,
     ) -> AilakeResult<()> {
         let table_meta = catalog.load_table(&self.table).await?;
-        let old_files = catalog.list_files(&self.table, table_meta.current_snapshot_id).await?;
+        let old_files = catalog
+            .list_files(&self.table, table_meta.current_snapshot_id)
+            .await?;
         let total = old_files.len();
         let mut rows_migrated: u64 = 0;
 
@@ -114,7 +112,9 @@ impl MigrationJob {
         let mut parent_snap = table_meta.current_snapshot_id;
 
         for (idx, old_entry) in old_files.iter().enumerate() {
-            let (batch, texts) = self.read_file_texts(&old_entry.path, &store, &new_policy).await?;
+            let (batch, texts) = self
+                .read_file_texts(&old_entry.path, &store, &new_policy)
+                .await?;
             let new_embeddings = self.embed_in_batches(&texts)?;
 
             let new_entry = self
@@ -164,7 +164,9 @@ impl MigrationJob {
         store: Arc<dyn Store>,
     ) -> AilakeResult<()> {
         let table_meta = catalog.load_table(&self.table).await?;
-        let old_files = catalog.list_files(&self.table, table_meta.current_snapshot_id).await?;
+        let old_files = catalog
+            .list_files(&self.table, table_meta.current_snapshot_id)
+            .await?;
         let total = old_files.len();
         let mut rows_migrated: u64 = 0;
 
@@ -172,7 +174,9 @@ impl MigrationJob {
         let mut new_entries: Vec<DataFileEntry> = Vec::with_capacity(total);
 
         for (idx, old_entry) in old_files.iter().enumerate() {
-            let (batch, texts) = self.read_file_texts(&old_entry.path, &store, &new_policy).await?;
+            let (batch, texts) = self
+                .read_file_texts(&old_entry.path, &store, &new_policy)
+                .await?;
             let new_embeddings = self.embed_in_batches(&texts)?;
 
             let entry = self
@@ -292,9 +296,9 @@ impl MigrationJob {
         let dim: u32 = props
             .get("ailake.vector-dim")
             .and_then(|s| s.parse().ok())
-            .ok_or_else(|| AilakeError::InvalidArgument(
-                "table missing ailake.vector-dim property".into(),
-            ))?;
+            .ok_or_else(|| {
+                AilakeError::InvalidArgument("table missing ailake.vector-dim property".into())
+            })?;
 
         let metric = match props
             .get("ailake.vector-metric")
@@ -324,9 +328,14 @@ impl MigrationJob {
             precision,
             pq: None,
             keep_raw_for_reranking: true,
-            pre_normalize: props.get("ailake.pre-normalize").map(|s| s == "true").unwrap_or(false),
+            pre_normalize: props
+                .get("ailake.pre-normalize")
+                .map(|s| s == "true")
+                .unwrap_or(false),
             hnsw_m: props.get("ailake.hnsw-m").and_then(|s| s.parse().ok()),
-            hnsw_ef_construction: props.get("ailake.hnsw-ef-construction").and_then(|s| s.parse().ok()),
+            hnsw_ef_construction: props
+                .get("ailake.hnsw-ef-construction")
+                .and_then(|s| s.parse().ok()),
             ivf_residual: false,
             embedding_model: self.new_model.clone(),
         })
@@ -338,18 +347,30 @@ fn extract_string_column(batch: &RecordBatch, column_name: &str) -> AilakeResult
         AilakeError::InvalidArgument(format!(
             "text column '{}' not found in Parquet file; available: {}",
             column_name,
-            batch.schema().fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>().join(", ")
+            batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ))
     })?;
 
-    let arr = col
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| AilakeError::InvalidArgument(
-            format!("column '{}' is not a Utf8/String column", column_name)
-        ))?;
+    let arr = col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+        AilakeError::InvalidArgument(format!(
+            "column '{}' is not a Utf8/String column",
+            column_name
+        ))
+    })?;
 
     Ok((0..arr.len())
-        .map(|i| if arr.is_null(i) { String::new() } else { arr.value(i).to_string() })
+        .map(|i| {
+            if arr.is_null(i) {
+                String::new()
+            } else {
+                arr.value(i).to_string()
+            }
+        })
         .collect())
 }

@@ -203,10 +203,13 @@ mod tests {
     fn embedding_model_stored_in_properties() {
         use ailake_core::EmbeddingModelInfo;
         let mut policy = make_policy();
-        policy.embedding_model = Some(EmbeddingModelInfo::new("text-embedding-3-small").with_version("2024-01"));
+        policy.embedding_model =
+            Some(EmbeddingModelInfo::new("text-embedding-3-small").with_version("2024-01"));
         let meta = IcebergMetadata::new("file:///tmp/tbl", &policy);
         assert_eq!(
-            meta.properties.get("ailake.embedding-model").map(|s| s.as_str()),
+            meta.properties
+                .get("ailake.embedding-model")
+                .map(|s| s.as_str()),
             Some("text-embedding-3-small@2024-01")
         );
     }

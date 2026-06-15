@@ -339,6 +339,7 @@ mod tests {
                 extra_vector_indexes: vec![],
                 index_status: crate::provider::IndexStatus::Ready,
                 batch_id: None,
+                embedding_model: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,

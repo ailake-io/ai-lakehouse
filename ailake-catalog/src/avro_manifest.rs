@@ -402,6 +402,7 @@ mod tests {
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
             batch_id: None,
+            embedding_model: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -428,6 +429,7 @@ mod tests {
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
             batch_id: Some("dag_run_2026-05-28_taskA".to_string()),
+            embedding_model: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;

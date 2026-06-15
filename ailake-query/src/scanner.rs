@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use tracing::{debug, error};
 
 use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
-use ailake_core::{AilakeError, AilakeResult, RowId, VectorMetric, EmbeddingModelInfo};
+use ailake_core::{AilakeError, AilakeResult, EmbeddingModelInfo, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
 use ailake_index::AnyIndex;
 use ailake_store::Store;

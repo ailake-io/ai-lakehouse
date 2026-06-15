@@ -7,7 +7,9 @@ use ailake_catalog::{
     hadoop::HadoopCatalog,
     provider::{CatalogProvider, TableIdent, TableProperties},
 };
-use ailake_core::{AilakeError, EmbeddingModelInfo, VectorMetric, VectorPrecision, VectorStoragePolicy};
+use ailake_core::{
+    AilakeError, EmbeddingModelInfo, VectorMetric, VectorPrecision, VectorStoragePolicy,
+};
 use ailake_query::{
     CompactionConfig, CompactionExecutor, CompactionPlanner, MigrationJob, MigrationProgress,
     MigrationStrategy, SearchConfig, TableWriter,
@@ -771,9 +773,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                         )));
                     }
                     serde_json::from_slice::<Vec<Vec<f32>>>(&output.stdout).map_err(|e| {
-                        AilakeError::InvalidArgument(format!(
-                            "embed-cmd stdout parse error: {e}"
-                        ))
+                        AilakeError::InvalidArgument(format!("embed-cmd stdout parse error: {e}"))
                     })
                 })
             };
