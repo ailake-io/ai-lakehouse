@@ -54,7 +54,6 @@ fn compute_distance(a: &[f32], b: &[f32], metric: VectorMetric) -> f32 {
         VectorMetric::Cosine | VectorMetric::NormalizedCosine => cosine_distance(a, b),
         VectorMetric::Euclidean => euclidean_distance(a, b),
         VectorMetric::DotProduct => -dot_product(a, b),
-        VectorMetric::NormalizedCosine => 1.0 - dot_product(a, b),
     }
 }
 
