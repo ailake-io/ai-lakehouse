@@ -84,9 +84,16 @@ urllib.request.urlretrieve(jar_url, str(dest))
 print(f'Iceberg JAR: {dest.stat().st_size} bytes', flush=True)
 "
 
-COPY tests/docker/demo/init_demo.py   /opt/init_demo.py
-COPY tests/docker/demo/entrypoint.sh  /entrypoint.sh
-COPY tests/docker/demo/notebooks      /notebooks
+COPY tests/docker/demo/init_demo.py              /opt/init_demo.py
+COPY tests/docker/demo/entrypoint.sh             /entrypoint.sh
+COPY tests/docker/demo/notebooks                 /notebooks
+COPY airbyte-destination-ailake                  /opt/airbyte-destination-ailake
+COPY airbyte-destination-ailake/demo/embed_cmd.py /opt/demo/embed_cmd.py
+
+RUN pip install --no-cache-dir \
+        "airbyte-cdk>=1.0" \
+        /opt/airbyte-destination-ailake \
+    && rm -rf /opt/airbyte-destination-ailake
 
 RUN chmod +x /entrypoint.sh
 
