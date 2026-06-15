@@ -41,15 +41,16 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
     companion object {
         const val IDENTIFIER = "ailake"
 
-        val WAREHOUSE    = ConfigOptions.key("warehouse").stringType().noDefaultValue()
-        val NAMESPACE    = ConfigOptions.key("namespace").stringType().defaultValue("default")
-        val TABLE_NAME   = ConfigOptions.key("table-name").stringType().noDefaultValue()
-        val VEC_COL      = ConfigOptions.key("vector.column").stringType().defaultValue("embedding")
-        val VEC_DIM      = ConfigOptions.key("vector.dim").intType().noDefaultValue()
-        val VEC_METRIC   = ConfigOptions.key("vector.metric").stringType().defaultValue("euclidean")
-        val VEC_PREC     = ConfigOptions.key("vector.precision").stringType().defaultValue("f16")
-        val SEARCH_TOPK  = ConfigOptions.key("search.top-k").intType().defaultValue(10)
-        val SEARCH_EF    = ConfigOptions.key("search.ef").intType().defaultValue(50)
+        val WAREHOUSE       = ConfigOptions.key("warehouse").stringType().noDefaultValue()
+        val NAMESPACE       = ConfigOptions.key("namespace").stringType().defaultValue("default")
+        val TABLE_NAME      = ConfigOptions.key("table-name").stringType().noDefaultValue()
+        val VEC_COL         = ConfigOptions.key("vector.column").stringType().defaultValue("embedding")
+        val VEC_DIM         = ConfigOptions.key("vector.dim").intType().noDefaultValue()
+        val VEC_METRIC      = ConfigOptions.key("vector.metric").stringType().defaultValue("euclidean")
+        val VEC_PREC        = ConfigOptions.key("vector.precision").stringType().defaultValue("f16")
+        val SEARCH_TOPK     = ConfigOptions.key("search.top-k").intType().defaultValue(10)
+        val SEARCH_EF       = ConfigOptions.key("search.ef").intType().defaultValue(50)
+        val EMBEDDING_MODEL = ConfigOptions.key("embedding.model").stringType().noDefaultValue()
     }
 
     override fun factoryIdentifier(): String = IDENTIFIER
@@ -57,7 +58,7 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
     override fun requiredOptions(): Set<ConfigOption<*>> = setOf(WAREHOUSE, TABLE_NAME, VEC_DIM)
 
     override fun optionalOptions(): Set<ConfigOption<*>> =
-        setOf(NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF)
+        setOf(NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF, EMBEDDING_MODEL)
 
     override fun createDynamicTableSource(context: DynamicTableFactory.Context): DynamicTableSource {
         val helper = FactoryUtil.createTableFactoryHelper(this, context)
@@ -79,15 +80,18 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
         val helper = FactoryUtil.createTableFactoryHelper(this, context)
         helper.validate()
         val opts = helper.options
+        val embeddingModel = runCatching { opts.get(EMBEDDING_MODEL) }.getOrNull()
+            ?.takeIf { it.isNotEmpty() }
         return AilakeVectorTableSink(
-            warehouse  = opts.get(WAREHOUSE),
-            namespace  = opts.get(NAMESPACE),
-            tableName  = opts.get(TABLE_NAME),
-            vecCol     = opts.get(VEC_COL),
-            dim        = opts.get(VEC_DIM),
-            metric     = opts.get(VEC_METRIC),
-            precision  = opts.get(VEC_PREC),
-            schema     = context.catalogTable.resolvedSchema,
+            warehouse      = opts.get(WAREHOUSE),
+            namespace      = opts.get(NAMESPACE),
+            tableName      = opts.get(TABLE_NAME),
+            vecCol         = opts.get(VEC_COL),
+            dim            = opts.get(VEC_DIM),
+            metric         = opts.get(VEC_METRIC),
+            precision      = opts.get(VEC_PREC),
+            schema         = context.catalogTable.resolvedSchema,
+            embeddingModel = embeddingModel,
         )
     }
 }

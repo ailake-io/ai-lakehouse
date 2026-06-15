@@ -120,21 +120,22 @@ object AilakeNativeLoader {
         precision: String = "f16",
         ids: LongArray,
         embeddings: Array<FloatArray>,
+        embeddingModel: String? = null,
     ): Long {
         require(ids.size == embeddings.size) { "ids.size != embeddings.size" }
-        val req = mapper.writeValueAsString(
-            mapOf(
-                "warehouse" to warehouse,
-                "namespace" to namespace,
-                "table" to table,
-                "vec_col" to vecCol,
-                "dim" to dim,
-                "metric" to metric,
-                "precision" to precision,
-                "ids" to ids.toList(),
-                "embeddings" to embeddings.map { it.toList() },
-            )
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse,
+            "namespace" to namespace,
+            "table" to table,
+            "vec_col" to vecCol,
+            "dim" to dim,
+            "metric" to metric,
+            "precision" to precision,
+            "ids" to ids.toList(),
+            "embeddings" to embeddings.map { it.toList() },
         )
+        if (embeddingModel != null) payload["embedding_model"] = embeddingModel
+        val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_write_batch_json(req)
         return try {
             val json = ptr.getString(0)

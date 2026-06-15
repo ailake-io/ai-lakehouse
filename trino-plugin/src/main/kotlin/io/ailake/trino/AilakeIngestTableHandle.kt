@@ -15,11 +15,12 @@ import io.trino.spi.connector.ConnectorTableHandle
  * Schema exposed to Trino: (id BIGINT, embedding ARRAY<DOUBLE>)
  */
 data class AilakeIngestTableHandle @JsonCreator constructor(
-    @JsonProperty("tableUri")     val tableUri:     String,
-    @JsonProperty("namespace")    val namespace:    String,
-    @JsonProperty("tableName")    val tableName:    String,
-    @JsonProperty("vectorColumn") val vectorColumn: String,
-    @JsonProperty("dim")          val dim:          Int,
-    @JsonProperty("metric")       val metric:       String,
-    @JsonProperty("precision")    val precision:    String,
+    @JsonProperty("tableUri")        val tableUri:        String,
+    @JsonProperty("namespace")       val namespace:       String,
+    @JsonProperty("tableName")       val tableName:       String,
+    @JsonProperty("vectorColumn")    val vectorColumn:    String,
+    @JsonProperty("dim")             val dim:             Int,
+    @JsonProperty("metric")          val metric:          String,
+    @JsonProperty("precision")       val precision:       String,
+    @JsonProperty("embeddingModel")  val embeddingModel:  String? = null,
 ) : ConnectorTableHandle, ConnectorInsertTableHandle

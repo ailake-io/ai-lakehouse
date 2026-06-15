@@ -174,6 +174,21 @@ search(HadoopCatalog& catalog,
     auto entries = catalog.list_files(ns, tbl);
     auto metric  = metric_from_str(info.vector_metric);
 
+    // Validate query dim against the table's stored dimension.
+    if (!info.vector_dim.empty()) {
+        uint32_t table_dim = (uint32_t)std::stoul(info.vector_dim);
+        if (dim != (size_t)table_dim) {
+            std::string model = info.embedding_model.empty()
+                ? ("dim=" + info.vector_dim)
+                : info.embedding_model;
+            throw std::runtime_error(
+                "ailake: query dim=" + std::to_string(dim) +
+                " does not match table dim=" + std::to_string(table_dim) +
+                " (table model: " + model + ")"
+            );
+        }
+    }
+
     // NormalizedCosine requires unit-length query — normalize here so callers
     // don't need to pre-normalize manually.
     std::vector<float> norm_query;

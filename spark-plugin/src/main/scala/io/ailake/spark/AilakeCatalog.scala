@@ -42,15 +42,16 @@ class AilakeCatalog extends CatalogPlugin with TableCatalog {
   // ── TableCatalog ──────────────────────────────────────────────────────────
 
   override def loadTable(ident: Identifier): Table = {
-    val tableUri     = requireOpt("table-uri")
-    val vectorColumn = opts.getOrDefault("vector-column", "embedding")
-    val dim          = opts.getOrDefault("vector-dim", "1536").toInt
-    val metric       = opts.getOrDefault("metric", "cosine")
-    val precision    = opts.getOrDefault("precision", "f16")
-    val namespace    = if (ident.namespace().nonEmpty) ident.namespace()(0) else "default"
-    val tableName    = ident.name()
+    val tableUri       = requireOpt("table-uri")
+    val vectorColumn   = opts.getOrDefault("vector-column", "embedding")
+    val dim            = opts.getOrDefault("vector-dim", "1536").toInt
+    val metric         = opts.getOrDefault("metric", "cosine")
+    val precision      = opts.getOrDefault("precision", "f16")
+    val namespace      = if (ident.namespace().nonEmpty) ident.namespace()(0) else "default"
+    val tableName      = ident.name()
+    val embeddingModel = Option(opts.get("embedding-model")).filter(_.nonEmpty)
 
-    new AilakeTable(AilakeWriteHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision))
+    new AilakeTable(AilakeWriteHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel = embeddingModel))
   }
 
   override def listTables(namespace: Array[String]): Array[Identifier] = Array.empty

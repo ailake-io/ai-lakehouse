@@ -63,23 +63,24 @@ object AilakeNative {
         precision: String,
         ids: List<Long>,
         embeddings: List<List<Float>>,
+        embeddingModel: String? = null,
     ): Long? {
         val native = lib ?: return null
         if (ids.isEmpty()) return null
 
-        val requestJson = mapper.writeValueAsString(
-            mapOf(
-                "warehouse"  to tableUri,
-                "namespace"  to namespace,
-                "table"      to tableName,
-                "vec_col"    to vectorColumn,
-                "dim"        to dim,
-                "metric"     to metric,
-                "precision"  to precision,
-                "ids"        to ids,
-                "embeddings" to embeddings,
-            )
+        val payload = mutableMapOf<String, Any>(
+            "warehouse"  to tableUri,
+            "namespace"  to namespace,
+            "table"      to tableName,
+            "vec_col"    to vectorColumn,
+            "dim"        to dim,
+            "metric"     to metric,
+            "precision"  to precision,
+            "ids"        to ids,
+            "embeddings" to embeddings,
         )
+        if (embeddingModel != null) payload["embedding_model"] = embeddingModel
+        val requestJson = mapper.writeValueAsString(payload)
 
         val ptr = native.ailake_write_batch_json(requestJson) ?: run {
             log.warn("[ailake] ailake_write_batch_json returned null pointer for table={}", tableName)

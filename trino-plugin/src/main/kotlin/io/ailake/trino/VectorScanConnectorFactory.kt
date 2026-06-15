@@ -14,16 +14,17 @@ class VectorScanConnectorFactory : ConnectorFactory {
         config: Map<String, String>,
         context: ConnectorContext,
     ): Connector {
-        val tableUri = requireNotNull(config["ailake.table-uri"]) {
+        val tableUri       = requireNotNull(config["ailake.table-uri"]) {
             "ailake.table-uri is required in catalog properties"
         }
-        val vectorColumn = config.getOrDefault("ailake.vector-column", "embedding")
-        val dim          = config.getOrDefault("ailake.vector-dim", "1536").toInt()
-        val metric       = config.getOrDefault("ailake.metric", "cosine")
-        val precision    = config.getOrDefault("ailake.precision", "f16")
-        val namespace    = config.getOrDefault("ailake.namespace", "default")
-        val tableName    = config.getOrDefault("ailake.table-name",
+        val vectorColumn   = config.getOrDefault("ailake.vector-column", "embedding")
+        val dim            = config.getOrDefault("ailake.vector-dim", "1536").toInt()
+        val metric         = config.getOrDefault("ailake.metric", "cosine")
+        val precision      = config.getOrDefault("ailake.precision", "f16")
+        val namespace      = config.getOrDefault("ailake.namespace", "default")
+        val tableName      = config.getOrDefault("ailake.table-name",
             tableUri.trimEnd('/').substringAfterLast('/'))
-        return VectorScanConnector(tableUri, vectorColumn, dim, metric, precision, namespace, tableName)
+        val embeddingModel = config["ailake.embedding-model"]?.takeIf { it.isNotEmpty() }
+        return VectorScanConnector(tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel)
     }
 }

@@ -38,6 +38,7 @@ type DataFileEntry struct {
 	VectorDim           uint32
 	IndexStatus         string // "ready" | "indexing"
 	BatchID             string
+	EmbeddingModel      string // "<name>" or "<name>@<version>"; empty if not set
 }
 
 // TableInfo mirrors the JSON output of "ailake info --format json".
@@ -193,14 +194,15 @@ func readManifestList(path string) ([]string, error) {
 
 // ailakeEntryExt mirrors the JSON structure stored in key_metadata.
 type ailakeEntryExt struct {
-	CentroidB64 *string  `json:"centroid_b64"`
-	Radius      *float32 `json:"radius"`
-	HnswOffset  *uint64  `json:"hnsw_offset"`
-	HnswLen     *uint64  `json:"hnsw_len"`
-	VectorCol   *string  `json:"vector_column"`
-	VectorDim   *uint32  `json:"vector_dim"`
-	IndexStatus string   `json:"index_status"`
-	BatchID     *string  `json:"batch_id"`
+	CentroidB64    *string  `json:"centroid_b64"`
+	Radius         *float32 `json:"radius"`
+	HnswOffset     *uint64  `json:"hnsw_offset"`
+	HnswLen        *uint64  `json:"hnsw_len"`
+	VectorCol      *string  `json:"vector_column"`
+	VectorDim      *uint32  `json:"vector_dim"`
+	IndexStatus    string   `json:"index_status"`
+	BatchID        *string  `json:"batch_id"`
+	EmbeddingModel *string  `json:"embedding_model"`
 }
 
 // readManifestFile reads an Iceberg manifest file (Avro OCF) and returns DataFileEntry list.
@@ -283,6 +285,9 @@ func readManifestFile(path string) ([]DataFileEntry, error) {
 		}
 		if ext.BatchID != nil {
 			entry.BatchID = *ext.BatchID
+		}
+		if ext.EmbeddingModel != nil {
+			entry.EmbeddingModel = *ext.EmbeddingModel
 		}
 		entries = append(entries, entry)
 	}

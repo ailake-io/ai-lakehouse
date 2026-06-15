@@ -48,15 +48,16 @@ class AilakePageSink(private val handle: AilakeIngestTableHandle) : ConnectorPag
         if (ids.isEmpty()) return CompletableFuture.completedFuture(emptyList())
 
         val snapshotId = AilakeNative.writeBatch(
-            tableUri     = handle.tableUri,
-            namespace    = handle.namespace,
-            tableName    = handle.tableName,
-            vectorColumn = handle.vectorColumn,
-            dim          = handle.dim,
-            metric       = handle.metric,
-            precision    = handle.precision,
-            ids          = ids,
-            embeddings   = embeddings,
+            tableUri       = handle.tableUri,
+            namespace      = handle.namespace,
+            tableName      = handle.tableName,
+            vectorColumn   = handle.vectorColumn,
+            dim            = handle.dim,
+            metric         = handle.metric,
+            precision      = handle.precision,
+            ids            = ids,
+            embeddings     = embeddings,
+            embeddingModel = handle.embeddingModel,
         )
 
         if (snapshotId == null) {

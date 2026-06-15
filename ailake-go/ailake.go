@@ -89,6 +89,23 @@ func Search(
 	}
 	metric := metricFromString(info.VectorMetric)
 
+	// Validate query dimension against the table's stored dimension.
+	if info.VectorDim != "" {
+		var tableDim uint32
+		if _, err := fmt.Sscanf(info.VectorDim, "%d", &tableDim); err == nil {
+			if uint32(len(query)) != tableDim {
+				model := info.EmbeddingModel
+				if model == "" {
+					model = fmt.Sprintf("dim=%d", tableDim)
+				}
+				return nil, fmt.Errorf(
+					"ailake: query dim=%d does not match table dim=%d (table model: %s)",
+					len(query), tableDim, model,
+				)
+			}
+		}
+	}
+
 	// NormalizedCosine requires unit-length query; normalize here so callers
 	// don't need to pre-normalize manually.
 	if metric == MetricNormalizedCosine {

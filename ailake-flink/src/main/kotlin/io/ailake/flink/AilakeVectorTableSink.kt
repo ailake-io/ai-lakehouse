@@ -34,6 +34,7 @@ class AilakeVectorTableSink(
     private val metric: String,
     private val precision: String,
     private val schema: ResolvedSchema,
+    private val embeddingModel: String? = null,
 ) : DynamicTableSink {
 
     companion object {
@@ -53,15 +54,16 @@ class AilakeVectorTableSink(
             ): DataStreamSink<*> {
                 return dataStream.addSink(
                     AilakeSinkFunction(
-                        warehouse  = warehouse,
-                        namespace  = namespace,
-                        tableName  = tableName,
-                        vecCol     = vecCol,
-                        dim        = dim,
-                        metric     = metric,
-                        precision  = precision,
-                        idIdx      = idIdx,
-                        vecIdx     = vecIdx,
+                        warehouse      = warehouse,
+                        namespace      = namespace,
+                        tableName      = tableName,
+                        vecCol         = vecCol,
+                        dim            = dim,
+                        metric         = metric,
+                        precision      = precision,
+                        idIdx          = idIdx,
+                        vecIdx         = vecIdx,
+                        embeddingModel = embeddingModel,
                     )
                 )
             }
@@ -69,7 +71,7 @@ class AilakeVectorTableSink(
     }
 
     override fun copy(): DynamicTableSink = AilakeVectorTableSink(
-        warehouse, namespace, tableName, vecCol, dim, metric, precision, schema
+        warehouse, namespace, tableName, vecCol, dim, metric, precision, schema, embeddingModel
     )
 
     override fun asSummaryString(): String = "AI-Lake-Sink[$namespace.$tableName]"
@@ -85,6 +87,7 @@ class AilakeSinkFunction(
     private val precision: String,
     private val idIdx: Int,
     private val vecIdx: Int,
+    private val embeddingModel: String? = null,
 ) : RichSinkFunction<RowData>() {
 
     private val idsBuffer = mutableListOf<Long>()
@@ -106,15 +109,16 @@ class AilakeSinkFunction(
 
     private fun flush() {
         AilakeNativeLoader.writeBatch(
-            warehouse  = warehouse,
-            namespace  = namespace,
-            table      = tableName,
-            vecCol     = vecCol,
-            dim        = dim,
-            metric     = metric,
-            precision  = precision,
-            ids        = idsBuffer.toLongArray(),
-            embeddings = embeddingsBuffer.toTypedArray(),
+            warehouse      = warehouse,
+            namespace      = namespace,
+            table          = tableName,
+            vecCol         = vecCol,
+            dim            = dim,
+            metric         = metric,
+            precision      = precision,
+            ids            = idsBuffer.toLongArray(),
+            embeddings     = embeddingsBuffer.toTypedArray(),
+            embeddingModel = embeddingModel,
         )
         idsBuffer.clear()
         embeddingsBuffer.clear()
