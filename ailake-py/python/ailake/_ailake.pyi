@@ -19,6 +19,8 @@ class TableWriter:
         hnsw_ef_construction: Optional[int] = None,
         pq_only: bool = False,
         ivf_residual: bool = False,
+        embedding_model: Optional[str] = None,
+        embedding_model_version: Optional[str] = None,
     ) -> None:
         """Open or create an AI-Lake table at *path*.
 
@@ -42,6 +44,14 @@ class TableWriter:
                           cluster centroid rather than raw vectors.  Improves
                           recall@10 by ~2-4 pp at the same PQ budget.
                           Default ``False``.
+            embedding_model: Human-readable model identifier stored in Iceberg
+                             properties as ``ailake.embedding-model`` (e.g.
+                             ``"text-embedding-3-small"``).  Used to detect
+                             incompatible model changes at write time.
+                             Default ``None`` (no model tracking).
+            embedding_model_version: Optional version tag appended to
+                                     *embedding_model* (e.g. ``"2024-01"``).
+                                     Stored as ``"<name>@<version>"``.
         """
         ...
 
@@ -169,5 +179,47 @@ def assemble_context(
 
     Returns:
         XML string ready to pass to an LLM as context.
+    """
+    ...
+
+
+def migrate_embeddings(
+    path: str,
+    old_column: str,
+    new_column: str,
+    embed_fn: object,
+    text_column: str = "chunk_text",
+    strategy: str = "dual_write_then_cutover",
+    batch_size: int = 512,
+    new_model: Optional[str] = None,
+    new_model_version: Optional[str] = None,
+) -> None:
+    """Migrate an embedding column to a new model.
+
+    Reads all chunks from *path*, re-embeds them via *embed_fn*, and writes
+    new files with the updated embedding column.  Commits an Iceberg snapshot
+    when done.
+
+    Args:
+        path: Table root path or URI — same value used when writing.
+        old_column: Name of the existing embedding column (e.g. ``"embedding"``).
+        new_column: Name for the migrated column (e.g. ``"embedding_v2"``).
+                    May equal *old_column* for an in-place model upgrade.
+        embed_fn: ``Callable[[list[str]], list[list[float]]]`` — your embedding
+                  model.  Called in batches of *batch_size* texts.
+        text_column: Parquet column that holds the raw text (default
+                     ``"chunk_text"``).
+        strategy: ``"atomic_replace"`` — replace each file one at a time
+                  (lower peak storage, brief mixed-model window); or
+                  ``"dual_write_then_cutover"`` — write all new files first,
+                  then atomically swap (2× peak storage, zero downtime).
+                  Default ``"dual_write_then_cutover"``.
+        batch_size: Number of texts per *embed_fn* call (default 512).
+        new_model: Model identifier stored in ``ailake.embedding-model`` after
+                   migration (e.g. ``"text-embedding-3-small"``).
+        new_model_version: Optional version tag (e.g. ``"2024-01"``).
+
+    Raises:
+        ValueError: On invalid strategy, missing text column, or embed_fn error.
     """
     ...

@@ -12,7 +12,7 @@ use std::{
 };
 
 use ailake_catalog::{HadoopCatalog, TableIdent};
-use ailake_core::VectorMetric;
+use ailake_core::{EmbeddingModelInfo, VectorMetric};
 use ailake_query::{
     fetch_rows as rs_fetch_rows, search as rs_search, Chunk, ContextAssembler,
     ContextAssemblerConfig, SearchConfig, SearchResult,
@@ -81,6 +81,7 @@ fn parse_metric(s: &str) -> VectorMetric {
     match s {
         "euclidean" => VectorMetric::Euclidean,
         "dot_product" | "dotproduct" => VectorMetric::DotProduct,
+        "normalized_cosine" | "normalizedcosine" => VectorMetric::NormalizedCosine,
         _ => VectorMetric::Cosine,
     }
 }
@@ -342,6 +343,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         precision: Option<String>,
         #[serde(default)]
         ivf_residual: bool,
+        /// Optional model identifier stored in ``ailake.embedding-model`` Iceberg property.
+        /// Format: ``"<name>"`` or ``"<name>@<version>"`` (same as ``EmbeddingModelInfo::to_property_value``).
+        #[serde(default)]
+        embedding_model: Option<String>,
         ids: Vec<i64>,
         embeddings: Vec<Vec<f32>>,
     }
@@ -394,6 +399,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         "i8" => VectorPrecision::I8,
         _ => VectorPrecision::F16,
     };
+    let embedding_model = req
+        .embedding_model
+        .as_deref()
+        .map(EmbeddingModelInfo::from_property_value);
     let policy = VectorStoragePolicy {
         column_name: req.vec_col.clone(),
         dim: req.dim,
@@ -405,7 +414,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         hnsw_m: None,
         hnsw_ef_construction: None,
         ivf_residual: req.ivf_residual,
-        embedding_model: None,
+        embedding_model,
     };
 
     let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);

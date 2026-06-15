@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Iterable, Sequence, Union
 from ailake._ailake import (  # type: ignore[import]
     TableWriter as _TableWriter,
     assemble_context,
+    migrate_embeddings,
     search as _search_raw,
     search_with_data as _search_with_data,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "SearchQuery",
     "TableWriter",
     "assemble_context",
+    "migrate_embeddings",
 ]
 
 # Backward-compat re-export: ailake.TableWriter still works.
@@ -275,6 +277,8 @@ class Table:
         hnsw_ef_construction: int | None = None,
         pq_only: bool = False,
         ivf_residual: bool = False,
+        embedding_model: str | None = None,
+        embedding_model_version: str | None = None,
     ) -> None:
         self._path = path
         self._vector_column = vector_column
@@ -285,6 +289,8 @@ class Table:
         self._hnsw_ef = hnsw_ef_construction
         self._pq_only = pq_only
         self._ivf_residual = ivf_residual
+        self._embedding_model = embedding_model
+        self._embedding_model_version = embedding_model_version
         self._writer = _TableWriter(
             path,
             vector_column=vector_column,
@@ -295,6 +301,8 @@ class Table:
             hnsw_ef_construction=hnsw_ef_construction,
             pq_only=pq_only,
             ivf_residual=ivf_residual,
+            embedding_model=embedding_model,
+            embedding_model_version=embedding_model_version,
         )
 
     # ── write ─────────────────────────────────────────────────────────────────
@@ -461,6 +469,8 @@ def open_table(
     hnsw_ef_construction: int | None = None,
     pq_only: bool = False,
     ivf_residual: bool = False,
+    embedding_model: str | None = None,
+    embedding_model_version: str | None = None,
 ) -> Table:
     """Open or create an AI-Lake table at *path*.
 
@@ -473,6 +483,9 @@ def open_table(
         pre_normalize: Normalise vectors to unit-L2 at write time (~12-20 % search speedup).
         hnsw_m: HNSW graph degree *M* per layer.
         hnsw_ef_construction: HNSW build-time beam width.
+        embedding_model: Model identifier stored in ``ailake.embedding-model`` Iceberg
+                         property (e.g. ``"text-embedding-3-small"``).
+        embedding_model_version: Optional version tag (e.g. ``"2024-01"``).
     """
     return Table(
         path,
@@ -484,6 +497,8 @@ def open_table(
         hnsw_ef_construction=hnsw_ef_construction,
         pq_only=pq_only,
         ivf_residual=ivf_residual,
+        embedding_model=embedding_model,
+        embedding_model_version=embedding_model_version,
     )
 
 
