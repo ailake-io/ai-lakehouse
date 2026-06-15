@@ -449,6 +449,29 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 
 > **Nota (v0.0.14)**: RaBitQ e Binary Hamming foram removidos do codebase. Recall ≈ 0 em embeddings float gerais sem alinhamento de treinamento; complexidade não justificada vs. HNSW/IVF-PQ.
 
+### Fase 8 — Multimodal (Imagens, Áudio, Vídeo)
+
+> **Pré-condição**: vetores de imagem/áudio já funcionam hoje via coluna `VECTOR` padrão (CLIP dim=512, ImageBind dim=1024). Esta fase adiciona suporte semântico de primeira classe para dados multimodais.
+
+- [ ] **`ailake.modality` property** — tag de modalidade por coluna vetorial: `text` / `image` / `audio` / `video`. Armazenada em `key_value_metadata` do campo Parquet e em `ailake.modality-<col>` nas propriedades Iceberg. Permite que o leitor selecione o HNSW correto por modalidade sem inspecionar dados.
+- [ ] **Coluna `MEDIA`** — tipo lógico `MEDIA(mime_type)` sobre `BINARY` Parquet. Armazena bytes brutos (JPEG, PNG, MP3, MP4) com metadata `ailake.media-mime` e `ailake.media-col` nas propriedades Iceberg. Leitores legados leem como `BINARY` sem erro. SDK expõe `read_media(row_id) -> Bytes`.
+- [ ] **Vetores N generalizados** — qualquer número de colunas `VECTOR` com HNSW próprio no rodapé, em vez do dual fixo (`embedding` + `context_embedding`). Rodapé AILK ganha tabela de colunas vetoriais: `[(col_name, dim, metric, hnsw_offset, hnsw_len)]`. CLI e Python aceitam `--vector-cols embedding,image_embedding,audio_embedding`.
+- [ ] **Cross-modal fusion search** — `ailake.search(query_text_vec, image_col="image_embedding", text_col="embedding", fusion="rrf")`: busca em múltiplas colunas HNSW simultaneamente e funde resultados via Reciprocal Rank Fusion. Caso de uso primário: query de texto retorna imagens semanticamente relacionadas.
+- [ ] **`MultimodalContextSchema`** — estende `LlmContextSchema` com `media_uri: String`, `media_mime: String`, `media_caption: String`, `image_embedding: Vector<512>`, `audio_transcript: String`. Base64-encode de miniaturas inline para contexto LLM multimodal.
+- [ ] **Bindings multimodal** — Python `TableWriter(vector_cols=[VectorColSpec("embedding", dim=1536), VectorColSpec("image_embedding", dim=512)])`, `search_multimodal(text_query, image_query, top_k, fusion)`. Airbyte destination `http` mode estendido com `modality` field.
+
+### Fase 9 — Agentes e Memória Episódica
+
+> **Contexto**: AI-Lake já funciona para RAG de agentes (busca semântica de longo prazo via HNSW + `LlmContextSchema`). Esta fase adiciona primitivas específicas para padrões de memória de agentes: episódica, procedural e de trabalho.
+
+- [ ] **`ToolCallSchema`** — estende `LlmContextSchema` com campos de agente: `agent_id: Uuid`, `session_id: Uuid`, `step_index: u32`, `tool_name: String`, `tool_input_json: String`, `tool_output_json: String`, `outcome: Enum(Success, Failure, Timeout)`, `latency_ms: u32`. Permite busca vetorial sobre histórico de tool calls ("quando a ferramenta X falhou em contextos similares?").
+- [ ] **`EpisodicMemorySchema`** — estende `LlmContextSchema` com `recency_weight: f32` (decai com o tempo via `exp(-λ * days_since_access)`), `access_count: u32`, `last_accessed_at: Timestamp`, `importance_score: f32` (definido pelo agente). Scoring híbrido no merge: `final_score = distance * recency_weight * importance_score`.
+- [ ] **Scoring híbrido no merge de resultados** — `SearchConfig` ganha `score_fn: Option<ScoreFn>` onde `ScoreFn = fn(distance: f32, row: &RecordBatch) -> f32`. Permite o agente injetar recência, importância ou qualquer sinal contextual no ranking final sem re-escrever o índice.
+- [ ] **Partição por `agent_id`** — `VectorStoragePolicy::partition_by: Option<String>` usa Iceberg hidden partitioning por coluna (`agent_id`, `session_id`). Pruning geométrico aplicado dentro da partição — busca isolada por agente sem filtro pós-scan.
+- [ ] **`WorkingMemoryBuffer`** — `MemTable` em memória com capacidade limitada (N chunks mais recentes/relevantes) que drena para AI-Lake em background quando cheio. Interface: `push(chunk)`, `search(query, top_k)`, `drain_to_table(path)`. Agentes de curto prazo usam só a MemTable; agentes de longo prazo usam MemTable + AI-Lake em cascata.
+- [ ] **`MemoryDecayJob`** — job assíncrono periódico que recalcula `recency_weight` para todos os registros e atualiza a coluna via compaction. Parâmetro: `λ` (taxa de decaimento). Integra com `CompactionExecutor` existente como nova estratégia.
+- [ ] **Python `Agent` helper** — `ailake.Agent(table_path, embed_fn, agent_id)` com métodos: `remember(text, importance=1.0)`, `recall(query, top_k)` (scoring híbrido automático), `log_tool_call(name, input, output)`, `assemble_context(query, max_tokens)`. Abstração de alto nível sobre `TableWriter` + `search` + `ContextAssembler` para uso em frameworks de agentes (LangChain, CrewAI, AutoGen).
+
 ---
 
 ## 11. Stack Técnica — Rust
