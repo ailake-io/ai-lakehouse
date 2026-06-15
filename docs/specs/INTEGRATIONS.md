@@ -404,7 +404,9 @@ CREATE TABLE docs (
   'vector.metric'    = 'cosine',
   'vector.precision' = 'f16',
   'search.top-k'     = '10',
-  'search.ef'        = '50'
+  'search.ef'        = '50',
+  -- Optional: model name stored in Iceberg metadata on every INSERT via this table
+  'embedding.model'  = 'text-embedding-3-small@v1'
 );
 
 -- Write (streaming ingest)

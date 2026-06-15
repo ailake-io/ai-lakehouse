@@ -44,6 +44,11 @@ Performs a nearest-neighbor vector search on a local AI-Lake table.
 
 On error: `{"ok": false, "error": "..."}`.
 
+When the query vector dimension does not match the table dimension, the error message names the stored embedding model:
+```json
+{"ok": false, "error": "query dim=512 does not match table dim=1536 (table model: text-embedding-3-small@v1)"}
+```
+
 ---
 
 ### `ailake_write_batch_json`
@@ -58,21 +63,23 @@ Writes a batch of records and their embeddings to an AI-Lake table.
 
 ```json
 {
-  "warehouse":    "/path/to/warehouse",
-  "namespace":    "default",
-  "table":        "my_table",
-  "vec_col":      "embedding",
-  "dim":          1536,
-  "metric":       "cosine",
-  "precision":    "f16",
-  "ids":          [1, 2, 3],
-  "embeddings":   [[0.1, 0.2, "..."], [0.3, 0.4, "..."], [0.5, 0.6, "..."]],
-  "ivf_residual": false
+  "warehouse":       "/path/to/warehouse",
+  "namespace":       "default",
+  "table":           "my_table",
+  "vec_col":         "embedding",
+  "dim":             1536,
+  "metric":          "cosine",
+  "precision":       "f16",
+  "ids":             [1, 2, 3],
+  "embeddings":      [[0.1, 0.2, "..."], [0.3, 0.4, "..."], [0.5, 0.6, "..."]],
+  "ivf_residual":    false,
+  "embedding_model": "text-embedding-3-small@v1"
 }
 ```
 
-Optional fields (all default `false`):
-- `ivf_residual` — enable residual PQ encoding (`vec - cluster_centroid`); improves recall@10 by ~2-4 pp at same storage.
+Optional fields:
+- `ivf_residual` (bool, default `false`) — enable residual PQ encoding (`vec - cluster_centroid`); improves recall@10 by ~2-4 pp at same storage.
+- `embedding_model` (string, default absent) — model identifier stored in Iceberg properties (`ailake.embedding-model`) and in the per-file Avro `key_metadata`. Format: `"<name>"` or `"<name>@<version>"`. Used for mismatch detection and migration tracking.
 
 **Response JSON:** `{"ok": true, "snapshot_id": 7}` or `{"ok": false, "error": "..."}`.
 

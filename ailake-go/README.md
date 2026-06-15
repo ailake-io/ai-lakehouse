@@ -99,6 +99,41 @@ type FileSearchResult struct {
 }
 ```
 
+### `DataFileEntry`
+
+```go
+type DataFileEntry struct {
+    Path           string
+    FileSizeBytes  int64
+    RecordCount    int64
+    Centroid       []float32
+    Radius         float32
+    FooterOffset   int64
+    EmbeddingModel string // "<name>" or "<name>@<version>"; empty if not set
+}
+```
+
+`EmbeddingModel` is read from the per-file Avro `key_metadata` JSON (`"embedding_model"` field) written by the AI-Lake SDK at ingest time. Use it to detect mixed-model tables before searching.
+
+### `TableInfo`
+
+```go
+type TableInfo struct {
+    VectorDim      string
+    VectorMetric   string
+    VectorPrecision string
+    EmbeddingModel string // global model from ailake.embedding-model property
+}
+```
+
+### Dim validation in `Search()`
+
+`Search()` validates `len(query)` against `TableInfo.VectorDim` before any I/O. If they differ, it returns an error naming the stored model:
+
+```
+ailake: query dim=512 does not match table dim=1536 (table model: text-embedding-3-small@v1)
+```
+
 ### `ScanRow`
 
 ```go
@@ -147,7 +182,7 @@ go test ./...
 AILAKE_FIXTURE=/path/to/fixture go test ./... -run Integration
 ```
 
-33 unit tests pass without a fixture. 5 integration tests require `AILAKE_FIXTURE`.
+33 unit tests pass without a fixture. 7 integration tests require `AILAKE_FIXTURE` (includes `TestListFilesIntegration` for `EmbeddingModel` and `TestSearchDimMismatchIntegration` for dim validation).
 
 ## License
 

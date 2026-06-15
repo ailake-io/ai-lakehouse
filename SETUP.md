@@ -1019,6 +1019,107 @@ C++ SDK: 14 unit tests in `ailake-cpp/tests/test_binary.cpp` cover `f32_to_bits`
 
 ---
 
+## 8K. Embedding model tracking and migration
+
+AI-Lake records the embedding model used to produce vectors. This enables safe schema evolution — catching accidental dim mismatches, labelling each ingest shard, and driving automated re-embedding workflows.
+
+### Store model metadata at write time
+
+```bash
+# CLI
+ailake create s3://my-lake/docs/ --dim 1536 --metric cosine \
+    --embedding-model text-embedding-3-small \
+    --embedding-model-version v1
+
+# Stored in Iceberg properties as:
+#   ailake.embedding-model = text-embedding-3-small@v1
+```
+
+```python
+# Python
+table = ailake.open_table(
+    "s3://my-lake/docs/",
+    dim=1536,
+    embedding_model="text-embedding-3-small",
+    embedding_model_version="v1",
+)
+table.insert(texts, embeddings)
+table.commit()
+
+# Pattern B — embed_fn: omit embeddings, SDK calls embed_fn automatically
+table = ailake.open_table(
+    "s3://my-lake/docs/",
+    dim=1536,
+    embedding_model="text-embedding-3-small",
+    embed_fn=lambda texts: openai_client.embed(texts),
+)
+table.insert(texts)   # embed_fn invoked automatically
+table.commit()
+```
+
+### Query dim validation
+
+All bindings validate query dimension before any I/O:
+
+```python
+# Python — raises ValueError("ModelMismatch: query dim=512, table dim=1536 (model: ...)")
+table.search(np.zeros(512), top_k=10)
+
+# Go — returns error
+results, err := ailake.Search(catalog, "default", "docs", query512, opts)
+// err: "ailake: query dim=512 does not match table dim=1536 (table model: text-embedding-3-small@v1)"
+
+# C++ — throws std::runtime_error
+auto results = ailake::search(catalog, "default", "docs", query512.data(), 512, opts);
+// throws: "ailake: query dim=512 does not match table dim=1536 (table model: ...)"
+```
+
+### Migrate embeddings to a new model
+
+```python
+import ailake
+
+def new_embed(texts: list[str]) -> list[list[float]]:
+    return openai_client.embed(texts, model="text-embedding-3-large")
+
+ailake.migrate_embeddings(
+    path              = "s3://my-lake/docs/",
+    old_column        = "embedding",
+    new_column        = "embedding",        # replace in-place
+    embed_fn          = new_embed,
+    text_column       = "chunk_text",
+    strategy          = "dual_write_then_cutover",   # zero-downtime
+    batch_size        = 512,
+    new_model         = "text-embedding-3-large",
+    new_model_version = "v1",
+    on_progress       = lambda *, files_done, files_total, rows_migrated:
+                        print(f"{files_done}/{files_total} files, {rows_migrated} rows"),
+)
+```
+
+Strategies:
+
+| Strategy | Peak storage | Downtime | Use when |
+|---|---|---|---|
+| `dual_write_then_cutover` | 2× | None | Production; both old and new models readable during migration |
+| `atomic_replace` | 1.1× | Brief mixed-model window | Dev/staging; lower storage cost |
+
+### CLI migration
+
+```bash
+ailake migrate s3://my-lake/docs/ \
+    --embed-cmd "python embed.py" \
+    --old-column embedding \
+    --new-column embedding \
+    --strategy dual_write_then_cutover \
+    --model-name text-embedding-3-large \
+    --model-version v1
+```
+
+`--embed-cmd` receives a JSON array of strings on stdin and must write a JSON array of float arrays to stdout.
+
+---
+
 ## 9. Testing RestCatalog — multi-cloud
 
 `RestCatalog` implements the [Iceberg REST Catalog spec](https://iceberg.apache.org/spec/#rest-catalog) and works with Polaris, Nessie, S3 Tables, AWS BigLake, and Unity Catalog.

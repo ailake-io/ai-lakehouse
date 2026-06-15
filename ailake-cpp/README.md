@@ -144,6 +144,39 @@ struct HadoopCatalog {
 };
 ```
 
+### `TableInfo`
+
+```cpp
+struct TableInfo {
+    std::string vector_dim;
+    std::string vector_metric;
+    std::string vector_precision;
+    std::string embedding_model; // from ailake.embedding-model property; empty if not set
+};
+```
+
+### `DataFileEntry`
+
+```cpp
+struct DataFileEntry {
+    std::string path;
+    int64_t     file_size_bytes;
+    int64_t     record_count;
+    std::vector<float> centroid;
+    float       radius;
+    int64_t     footer_offset;
+    std::string embedding_model; // from per-file key_metadata JSON; empty if not set
+};
+```
+
+### Dim validation in `search()`
+
+`search()` validates `dim` against `TableInfo.vector_dim` before any I/O. On mismatch it throws `std::runtime_error` naming the stored model:
+
+```
+ailake: query dim=512 does not match table dim=1536 (table model: text-embedding-3-small@v1)
+```
+
 ## Low-level index access
 
 ### HNSW
