@@ -631,5 +631,71 @@ with tempfile.TemporaryDirectory() as tmp:
     print(f"PASS (migrate_embeddings): completed, search returns {len(results_mg)} results")
 
 
+# ── 17. Pattern B: TableWriter(embed_fn=...) + write_batch without embeddings ──
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = str(pathlib.Path(tmp) / "pattern_b_test")
+
+    def _auto_embed(texts: list) -> list:
+        return [make_embedding(abs(hash(t)) % N) for t in texts]
+
+    writer = ailake.TableWriter(
+        path,
+        vector_column="embedding",
+        dim=DIM,
+        metric="cosine",
+        embed_fn=_auto_embed,
+    )
+    writer.write_batch([f"doc_{i}" for i in range(N)])
+    writer.commit()
+
+    results_pb = ailake.search(path, make_embedding(0), top_k=3).to_list()
+    assert len(results_pb) > 0, "FAIL: Pattern B search returned empty"
+    print(f"PASS (Pattern B embed_fn): write_batch without embeddings, search returns {len(results_pb)} results")
+
+    # open_table with embed_fn
+    tbl = ailake.open_table(path, dim=DIM, embed_fn=_auto_embed)
+    tbl.insert([f"extra_{i}" for i in range(5)])
+    tbl.commit()
+    print("PASS (Pattern B open_table): open_table with embed_fn + insert without embeddings")
+
+
+# ── 18. migrate_embeddings with on_progress callback ─────────────────────────
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = str(pathlib.Path(tmp) / "progress_test")
+
+    writer = ailake.TableWriter(
+        path,
+        vector_column="embedding",
+        dim=DIM,
+        metric="cosine",
+        embedding_model="model-v1",
+    )
+    writer.write_batch([f"doc_{i}" for i in range(N)], [make_embedding(i) for i in range(N)])
+    writer.commit()
+
+    progress_calls: list = []
+
+    def _on_progress(**kwargs):
+        progress_calls.append(dict(kwargs))
+
+    ailake.migrate_embeddings(
+        path,
+        old_column="embedding",
+        new_column="embedding",
+        embed_fn=_identity_embed,
+        text_column="text",
+        strategy="atomic_replace",
+        batch_size=10,
+        on_progress=_on_progress,
+    )
+    assert len(progress_calls) > 0, "FAIL: on_progress never called"
+    last = progress_calls[-1]
+    assert "files_done" in last and "files_total" in last and "rows_migrated" in last, \
+        f"FAIL: on_progress kwargs missing keys: {last}"
+    print(f"PASS (on_progress): called {len(progress_calls)} times, last={last}")
+
+
 print()
 print("PASS: ailake Python SDK — all checks passed.")

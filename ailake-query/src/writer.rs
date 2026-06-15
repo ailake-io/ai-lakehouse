@@ -8,7 +8,7 @@ use ailake_catalog::{
     ExtraVectorIndex, IcebergSchemaUpdate, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation,
     TableIdent, TableProperties, VectorIndexInfo,
 };
-use ailake_core::{AilakeError, AilakeResult, VectorStoragePolicy};
+use ailake_core::{AilakeError, AilakeResult, EmbeddingModelInfo, VectorStoragePolicy};
 use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBatch};
 use ailake_index::{IvfPqCodebook, IvfPqConfig};
 use ailake_store::Store;
@@ -17,7 +17,7 @@ use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
 use serde_json;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// One vector column for a multi-column write batch.
 pub struct MultiVectorBatch<'a> {
@@ -102,7 +102,7 @@ impl TableWriter {
 
         // Centroid needed immediately for geometric pruning during the build window.
         let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
-        let entry = make_data_file_entry_indexing(
+        let mut entry = make_data_file_entry_indexing(
             &file_path,
             embeddings.len() as u64,
             file_size,
@@ -110,6 +110,7 @@ impl TableWriter {
             &self.policy.column_name,
             self.policy.dim,
         );
+        entry.embedding_model = self.policy.embedding_model.as_ref().map(|m| m.to_property_value());
         self.pending_files.push(entry);
 
         // Spawn background HNSW build (fire-and-forget; errors are logged).
@@ -154,7 +155,7 @@ impl TableWriter {
         self.store.put(&file_path, parquet_bytes).await?;
 
         let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
-        let entry = make_data_file_entry_indexing(
+        let mut entry = make_data_file_entry_indexing(
             &file_path,
             embeddings.len() as u64,
             file_size,
@@ -162,6 +163,7 @@ impl TableWriter {
             &self.policy.column_name,
             self.policy.dim,
         );
+        entry.embedding_model = self.policy.embedding_model.as_ref().map(|m| m.to_property_value());
         self.pending_files.push(entry);
 
         let store = self.store.clone();
@@ -299,6 +301,7 @@ impl TableWriter {
             },
         );
         entry.batch_id = batch_id;
+        entry.embedding_model = self.policy.embedding_model.as_ref().map(|m| m.to_property_value());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -411,7 +414,7 @@ impl TableWriter {
         let index_abs_offset = ailk_start + header.hnsw_offset;
         let index_len = header.hnsw_len;
 
-        let entry = make_data_file_entry(
+        let mut entry = make_data_file_entry(
             &file_path,
             embeddings.len() as u64,
             file_size,
@@ -423,6 +426,7 @@ impl TableWriter {
                 hnsw_len: index_len,
             },
         );
+        entry.embedding_model = self.policy.embedding_model.as_ref().map(|m| m.to_property_value());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -512,7 +516,7 @@ impl TableWriter {
             });
         }
 
-        let entry = make_multi_column_data_file_entry(
+        let mut entry = make_multi_column_data_file_entry(
             &file_path,
             columns[0].embeddings.len() as u64,
             file_size,
@@ -525,6 +529,7 @@ impl TableWriter {
             },
             &extra,
         );
+        entry.embedding_model = self.policy.embedding_model.as_ref().map(|m| m.to_property_value());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -567,16 +572,35 @@ impl TableWriter {
         table: TableIdent,
     ) -> AilakeResult<Self> {
         // Try to load; if not found, create
-        if catalog.load_table(&table).await.is_err() {
-            catalog
-                .create_table(
-                    &table,
-                    &TableProperties {
-                        policy: policy.clone(),
-                        extra: std::collections::HashMap::new(),
-                    },
-                )
-                .await?;
+        match catalog.load_table(&table).await {
+            Ok(existing_meta) => {
+                // Warn when writing with a different model name into an existing table.
+                // Dim mismatch is a hard error caught at write_batch time; name divergence
+                // is softer — same dim, different model (e.g. fine-tune vs base) — warn only.
+                if let Some(incoming) = &policy.embedding_model {
+                    if let Some(stored_val) = existing_meta.properties.get(EmbeddingModelInfo::property_key()) {
+                        let stored = EmbeddingModelInfo::from_property_value(stored_val);
+                        if stored.name != incoming.name {
+                            warn!(
+                                "ailake: embedding model name changed: table has '{}', writing with '{}' \
+                                 (dim={}). Vectors may be incompatible for similarity search.",
+                                stored.name, incoming.name, policy.dim
+                            );
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                catalog
+                    .create_table(
+                        &table,
+                        &TableProperties {
+                            policy: policy.clone(),
+                            extra: std::collections::HashMap::new(),
+                        },
+                    )
+                    .await?;
+            }
         }
         Ok(Self::new(catalog, store, policy, table))
     }

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Iterable, Sequence, Union
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence, Union
 
 from ailake._ailake import (  # type: ignore[import]
     TableWriter as _TableWriter,
@@ -279,6 +279,7 @@ class Table:
         ivf_residual: bool = False,
         embedding_model: str | None = None,
         embedding_model_version: str | None = None,
+        embed_fn: Optional[Callable[[list[str]], list[list[float]]]] = None,
     ) -> None:
         self._path = path
         self._vector_column = vector_column
@@ -291,6 +292,7 @@ class Table:
         self._ivf_residual = ivf_residual
         self._embedding_model = embedding_model
         self._embedding_model_version = embedding_model_version
+        self._embed_fn = embed_fn
         self._writer = _TableWriter(
             path,
             vector_column=vector_column,
@@ -303,6 +305,7 @@ class Table:
             ivf_residual=ivf_residual,
             embedding_model=embedding_model,
             embedding_model_version=embedding_model_version,
+            embed_fn=embed_fn,
         )
 
     # ── write ─────────────────────────────────────────────────────────────────
@@ -310,20 +313,24 @@ class Table:
     def insert(
         self,
         texts: list[str],
-        embeddings: _Embeddings,
+        embeddings: Optional[_Embeddings] = None,
     ) -> "Table":
         """Buffer a batch for writing.  Call ``commit()`` to persist.
 
         Args:
             texts: one string per row.
             embeddings: ``list[list[float]]`` or any array with a ``.tolist()``
-                        method (numpy, torch, etc.).
+                        method (numpy, torch, etc.).  May be omitted when
+                        *embed_fn* was passed to ``__init__``.
         """
-        _emb: list[list[float]] = (
-            embeddings.tolist()  # type: ignore[union-attr]
-            if hasattr(embeddings, "tolist")
-            else [list(row) for row in embeddings]
-        )
+        if embeddings is not None:
+            _emb: list[list[float]] | None = (
+                embeddings.tolist()  # type: ignore[union-attr]
+                if hasattr(embeddings, "tolist")
+                else [list(row) for row in embeddings]
+            )
+        else:
+            _emb = None
         self._writer.write_batch(texts, _emb)
         return self
 
@@ -471,6 +478,7 @@ def open_table(
     ivf_residual: bool = False,
     embedding_model: str | None = None,
     embedding_model_version: str | None = None,
+    embed_fn: Optional[Callable[[list[str]], list[list[float]]]] = None,
 ) -> Table:
     """Open or create an AI-Lake table at *path*.
 
@@ -486,6 +494,8 @@ def open_table(
         embedding_model: Model identifier stored in ``ailake.embedding-model`` Iceberg
                          property (e.g. ``"text-embedding-3-small"``).
         embedding_model_version: Optional version tag (e.g. ``"2024-01"``).
+        embed_fn: ``Callable[[list[str]], list[list[float]]]`` — auto-embed callable.
+                  When set, ``insert(texts)`` may be called without *embeddings*.
     """
     return Table(
         path,
@@ -499,6 +509,7 @@ def open_table(
         ivf_residual=ivf_residual,
         embedding_model=embedding_model,
         embedding_model_version=embedding_model_version,
+        embed_fn=embed_fn,
     )
 
 

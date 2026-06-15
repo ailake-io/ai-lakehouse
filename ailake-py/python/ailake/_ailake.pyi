@@ -3,7 +3,7 @@
 # Stubs for the compiled Rust extension ailake._ailake.
 # This file is the authoritative type source for type checkers and IDEs.
 
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 class TableWriter:
     """Python-facing table writer.  Wraps ``ailake_query::TableWriter``."""
@@ -21,6 +21,7 @@ class TableWriter:
         ivf_residual: bool = False,
         embedding_model: Optional[str] = None,
         embedding_model_version: Optional[str] = None,
+        embed_fn: Optional[Callable[[list[str]], list[list[float]]]] = None,
     ) -> None:
         """Open or create an AI-Lake table at *path*.
 
@@ -58,14 +59,16 @@ class TableWriter:
     def write_batch(
         self,
         texts: Sequence[str],
-        embeddings: Sequence[Sequence[float]],
+        embeddings: Optional[Sequence[Sequence[float]]] = None,
     ) -> None:
         """Buffer a batch of rows.  Call :meth:`commit` to persist.
 
         Args:
             texts: One string per row.
             embeddings: One embedding (list of floats) per row; length must
-                        match *texts*.
+                        match *texts*.  May be omitted when *embed_fn* was
+                        passed to :meth:`__init__` — embeddings are generated
+                        automatically.
         """
         ...
 
@@ -187,12 +190,13 @@ def migrate_embeddings(
     path: str,
     old_column: str,
     new_column: str,
-    embed_fn: object,
+    embed_fn: Callable[[list[str]], list[list[float]]],
     text_column: str = "chunk_text",
     strategy: str = "dual_write_then_cutover",
     batch_size: int = 512,
     new_model: Optional[str] = None,
     new_model_version: Optional[str] = None,
+    on_progress: Optional[Callable[..., None]] = None,
 ) -> None:
     """Migrate an embedding column to a new model.
 
@@ -218,6 +222,9 @@ def migrate_embeddings(
         new_model: Model identifier stored in ``ailake.embedding-model`` after
                    migration (e.g. ``"text-embedding-3-small"``).
         new_model_version: Optional version tag (e.g. ``"2024-01"``).
+        on_progress: Optional ``Callable`` receiving keyword args
+                     ``files_done`` (int), ``files_total`` (int),
+                     ``rows_migrated`` (int) after each file completes.
 
     Raises:
         ValueError: On invalid strategy, missing text column, or embed_fn error.

@@ -74,15 +74,31 @@ pub struct EmbeddingModelInfo {
     /// Optional model version or checkpoint tag, e.g. "2024-01".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Expected embedding dimension — used to detect model/table mismatches per-file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dim: Option<u32>,
+    /// Expected distance metric — used to detect model/table mismatches per-file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<VectorMetric>,
 }
 
 impl EmbeddingModelInfo {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), version: None }
+        Self { name: name.into(), version: None, dim: None, metric: None }
     }
 
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
+        self
+    }
+
+    pub fn with_dim(mut self, dim: u32) -> Self {
+        self.dim = Some(dim);
+        self
+    }
+
+    pub fn with_metric(mut self, metric: VectorMetric) -> Self {
+        self.metric = Some(metric);
         self
     }
 
@@ -102,9 +118,9 @@ impl EmbeddingModelInfo {
     /// Parse back from a property value written by `to_property_value`.
     pub fn from_property_value(s: &str) -> Self {
         if let Some((name, version)) = s.split_once('@') {
-            Self { name: name.to_string(), version: Some(version.to_string()) }
+            Self { name: name.to_string(), version: Some(version.to_string()), dim: None, metric: None }
         } else {
-            Self { name: s.to_string(), version: None }
+            Self { name: s.to_string(), version: None, dim: None, metric: None }
         }
     }
 }
@@ -117,7 +133,22 @@ mod tests {
     fn embedding_model_info_roundtrip_with_version() {
         let info = EmbeddingModelInfo::new("text-embedding-3-small").with_version("2024-01");
         assert_eq!(info.to_property_value(), "text-embedding-3-small@2024-01");
-        assert_eq!(EmbeddingModelInfo::from_property_value("text-embedding-3-small@2024-01"), info);
+        let parsed = EmbeddingModelInfo::from_property_value("text-embedding-3-small@2024-01");
+        // from_property_value only restores name+version; dim/metric are not in the property string
+        assert_eq!(parsed.name, info.name);
+        assert_eq!(parsed.version, info.version);
+    }
+
+    #[test]
+    fn embedding_model_info_with_dim_and_metric() {
+        use super::VectorMetric;
+        let info = EmbeddingModelInfo::new("my-model")
+            .with_dim(1536)
+            .with_metric(VectorMetric::Cosine);
+        assert_eq!(info.dim, Some(1536));
+        assert_eq!(info.metric, Some(VectorMetric::Cosine));
+        // property_value only encodes name (no dim/metric)
+        assert_eq!(info.to_property_value(), "my-model");
     }
 
     #[test]
