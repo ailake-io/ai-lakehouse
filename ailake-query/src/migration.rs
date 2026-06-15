@@ -23,6 +23,7 @@ use arrow_array::{Array, RecordBatch, StringArray};
 use tracing::info;
 
 pub type EmbedFn = Arc<dyn Fn(&[String]) -> AilakeResult<Vec<Vec<f32>>> + Send + Sync>;
+pub type ProgressFn = Arc<dyn Fn(MigrationProgress) + Send + Sync>;
 
 /// How files are replaced during migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,7 +81,7 @@ pub struct MigrationJob {
     /// Metadata for the new embedding model — stored in Iceberg properties after migration.
     pub new_model: Option<EmbeddingModelInfo>,
     /// Optional callback called after each file completes.
-    pub on_progress: Option<Arc<dyn Fn(MigrationProgress) + Send + Sync>>,
+    pub on_progress: Option<ProgressFn>,
 }
 
 impl MigrationJob {

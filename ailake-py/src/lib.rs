@@ -22,11 +22,11 @@ use ailake_catalog::{
     hadoop::HadoopCatalog,
     provider::{CatalogProvider, TableIdent},
 };
-use ailake_core::{AilakeResult, EmbeddingModelInfo, VectorMetric, VectorStoragePolicy};
+use ailake_core::{EmbeddingModelInfo, VectorMetric, VectorStoragePolicy};
 use ailake_query::{
     fetch_rows as rs_fetch_rows, search as rs_search, Chunk, ContextAssembler,
     ContextAssemblerConfig, EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy,
-    SearchConfig, TableWriter as RsTableWriter,
+    ProgressFn, SearchConfig, TableWriter as RsTableWriter,
 };
 use ailake_store::{store::Store, LocalStore};
 
@@ -511,21 +511,19 @@ fn migrate_embeddings(
         })
     };
 
-    let progress_arc: Option<Arc<dyn Fn(MigrationProgress) + Send + Sync>> =
-        on_progress.map(|cb| {
-            let cb = cb.clone_ref(py);
-            let arc: Arc<dyn Fn(MigrationProgress) + Send + Sync> =
-                Arc::new(move |p: MigrationProgress| {
-                    Python::attach(|py| {
-                        let kwargs = PyDict::new(py);
-                        let _ = kwargs.set_item("files_done", p.files_done);
-                        let _ = kwargs.set_item("files_total", p.files_total);
-                        let _ = kwargs.set_item("rows_migrated", p.rows_migrated);
-                        let _ = cb.call(py, (), Some(&kwargs));
-                    });
-                });
-            arc
+    let progress_arc: Option<ProgressFn> = on_progress.map(|cb| {
+        let cb = cb.clone_ref(py);
+        let arc: ProgressFn = Arc::new(move |p: MigrationProgress| {
+            Python::attach(|py| {
+                let kwargs = PyDict::new(py);
+                let _ = kwargs.set_item("files_done", p.files_done);
+                let _ = kwargs.set_item("files_total", p.files_total);
+                let _ = kwargs.set_item("rows_migrated", p.rows_migrated);
+                let _ = cb.call(py, (), Some(&kwargs));
+            });
         });
+        arc
+    });
 
     let (catalog, store) = local_catalog_store(path);
     let table = TableIdent::new("default", "table");

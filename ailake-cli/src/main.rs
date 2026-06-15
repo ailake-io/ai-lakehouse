@@ -12,7 +12,7 @@ use ailake_core::{
 };
 use ailake_query::{
     CompactionConfig, CompactionExecutor, CompactionPlanner, EmbedFn, MigrationJob,
-    MigrationProgress, MigrationStrategy, SearchConfig, TableWriter,
+    MigrationProgress, MigrationStrategy, ProgressFn, SearchConfig, TableWriter,
 };
 use ailake_store::store_from_url;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -776,13 +776,12 @@ async fn run(cli: Cli) -> Result<(), String> {
                 })
             };
 
-            let on_progress = Some(std::sync::Arc::new(|p: MigrationProgress| {
+            let on_progress: Option<ProgressFn> = Some(Arc::new(|p: MigrationProgress| {
                 eprintln!(
                     "migration: {}/{} files done, {} rows migrated",
                     p.files_done, p.files_total, p.rows_migrated
                 );
-            })
-                as std::sync::Arc<dyn Fn(MigrationProgress) + Send + Sync>);
+            }));
 
             let job = MigrationJob {
                 table: ident,
