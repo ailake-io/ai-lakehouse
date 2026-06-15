@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.18] — 2026-06-15
+
 ### Added
 
 - **`EmbeddingModelInfo.dim` + `.metric` fields** — `EmbeddingModelInfo` gains optional `dim: Option<u32>` and `metric: Option<VectorMetric>` fields with builder methods `with_dim()` / `with_metric()`. When set, stored as `ailake.embedding-model-dim` and `ailake.embedding-model-metric` in Iceberg properties (separate from the `ailake.embedding-model` name string). Backward-compatible: `dim`/`metric` default to `None`.
@@ -55,6 +59,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **NaN-safe sort in IVF-PQ search** (`ailake-index`) — `partial_cmp(...).unwrap()` in sort closures panics if any distance is NaN (degenerate zero-vector input). Replaced with `total_cmp()` (Rust 1.62+) which imposes a total order over all f32 values including NaN.
 - **`assert_eq!` → `Err` in `write_batch_multi_vec`** (`ailake-parquet`) — internal invariant check now returns `AilakeError::Parquet` instead of aborting the process on dim/precision mismatch.
 - **footer.rs: remove `try_into().unwrap()`** (`ailake-file`) — `AilakeHeader::from_bytes` and `AilakeTrailer::from_bytes` used `b[x..y].try_into().unwrap()` to convert fixed-size slices; replaced with explicit `[b[x], b[x+1], ...]` array literals — no runtime failure path, no unwrap.
+- **`airbyte-destination-ailake` package** — Airbyte CDK v3 destination connector that writes Airbyte records to AI-Lake vector tables. Each stream maps to one AI-Lake table at `{table_base_path}/{stream_name}/`. Embedding backends: `cmd` (external process via stdin/stdout JSON protocol), `openai` (OpenAI Embeddings API), `cohere` (Cohere Embed API), `http` (any OpenAI-compatible endpoint: Ollama, vLLM, LM Studio, Together.ai, Azure OpenAI). Config fields: `table_base_path`, `embed_mode`, `text_field` (dot-notation for nested), `embedding_dim`, `embedding_metric`, `embedding_model` / `embedding_model_version` (propagated to Iceberg properties), `batch_size`, `pre_normalize`, `pq_only`. Airbyte state messages trigger intermediate commits (durability guarantee). Ships with connector spec JSON, Dockerfile for Airbyte registry, and unit tests.
+- **`http` embed mode** (`airbyte-destination-ailake`) — `HttpEmbedder` posts to any OpenAI-compatible endpoint using stdlib `urllib` (no extra dependencies). Request: `{"model": "...", "input": [...]}`. Response: `{"data": [{"embedding": [...]}]}`. Config: `http_url` (required), `http_model` (optional), `http_auth_header` (optional, `Authorization` header, `airbyte_secret`), `http_timeout` (default 60 s).
+- **Airbyte destination demo notebook** — `tests/docker/demo/notebooks/06_airbyte_destination.ipynb`: config → CmdEmbedder → StreamWriter batch flush → simulate `Destination.write()` with state messages → vector search → DuckDB/Iceberg compat → embedding model tracking → migration → Airbyte platform usage snippets.
+- **Standalone demo scripts** (`airbyte-destination-ailake/demo/`) — `demo_local.py` (no Docker/API keys, CmdEmbedder with `embed_cmd.py`), `demo_openai.py` (real OpenAI embeddings, `--table-path` / `--model` args), `embed_cmd.py` (shell-protocol helper: deterministic unit vectors from text hash).
+- **Roadmap Phase 8 — Multimodal** — `ailake.modality` property per vector column, N generalized `VECTOR` columns with independent HNSW per file, cross-modal fusion search (RRF), `MultimodalContextSchema` with `image_embedding` / `media_uri` / `audio_transcript`. Note: raw `MEDIA` binary column excluded — AI-Lake is not a blob store; images live in S3, only vectors belong in AI-Lake.
+- **Roadmap Phase 9 — Agents / Episodic Memory** — `ToolCallSchema` (agent_id, tool_name, tool_input/output, step_index), `EpisodicMemorySchema` (recency_weight with exponential decay, importance_score), injectable hybrid scoring fn (`distance * recency * importance`), `agent_id` Iceberg hidden partitioning, `WorkingMemoryBuffer`, `MemoryDecayJob`, `ailake.Agent` Python helper for LangChain/CrewAI/AutoGen.
 
 ---
 
