@@ -22,7 +22,7 @@
         "type": "string",
         "title": "Embedding Mode",
         "description": "How to produce embeddings from record text.",
-        "enum": ["cmd", "openai", "cohere"],
+        "enum": ["cmd", "openai", "cohere", "http"],
         "default": "openai",
         "order": 1
       },
@@ -103,6 +103,35 @@
         "title": "Cohere Input Type",
         "default": "search_document",
         "order": 13
+      },
+      "http_url": {
+        "type": "string",
+        "title": "HTTP Embed URL",
+        "description": "OpenAI-compatible POST endpoint. Body: {\"model\": \"...\", \"input\": [...]}; response: {\"data\": [{\"embedding\": [...]}]}. Works with Ollama (/v1/embeddings), vLLM, LM Studio, Together.ai, Azure OpenAI, and any OpenAI-compatible server.",
+        "examples": ["http://localhost:11434/v1/embeddings", "https://api.together.xyz/v1/embeddings"],
+        "default": "",
+        "order": 17
+      },
+      "http_model": {
+        "type": "string",
+        "title": "HTTP Model Name",
+        "description": "Model name sent in the request body. Example: nomic-embed-text, mxbai-embed-large. Leave empty to omit.",
+        "default": "",
+        "order": 18
+      },
+      "http_auth_header": {
+        "type": "string",
+        "title": "HTTP Authorization Header",
+        "description": "Full value of the Authorization header. Example: Bearer sk-... Leave empty for unauthenticated endpoints (e.g. local Ollama).",
+        "airbyte_secret": true,
+        "default": "",
+        "order": 19
+      },
+      "http_timeout": {
+        "type": "integer",
+        "title": "HTTP Timeout (seconds)",
+        "default": 60,
+        "order": 20
       },
       "batch_size": {
         "type": "integer",

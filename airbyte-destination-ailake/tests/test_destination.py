@@ -57,6 +57,13 @@ class TestAilakeDestinationConfig:
         errors = cfg.validate()
         assert any("cohere_api_key" in e for e in errors)
 
+    def test_validate_missing_http_url(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "http"}
+        )
+        errors = cfg.validate()
+        assert any("http_url" in e for e in errors)
+
     def test_validate_missing_embed_cmd(self):
         cfg = AilakeDestinationConfig.from_dict(
             {"table_base_path": "/tmp", "embed_mode": "cmd"}
@@ -95,6 +102,130 @@ class TestExtractText:
 # ---------------------------------------------------------------------------
 
 
+class TestHttpEmbedder:
+    def test_valid_response(self):
+        from airbyte_destination_ailake.embedder import HttpEmbedder
+        from unittest.mock import patch, MagicMock
+        import io
+
+        payload = json.dumps({"data": [{"embedding": [0.1, 0.2, 0.3]}, {"embedding": [0.4, 0.5, 0.6]}]}).encode()
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = payload
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            embedder = HttpEmbedder(url="http://localhost:11434/v1/embeddings", model="nomic-embed-text")
+            vecs = embedder.embed(["hello", "world"])
+
+        assert vecs.shape == (2, 3)
+        assert vecs.dtype == np.float32
+
+    def test_auth_header_sent(self):
+        from airbyte_destination_ailake.embedder import HttpEmbedder
+        from unittest.mock import patch, MagicMock, call
+        import urllib.request as ur
+
+        payload = json.dumps({"data": [{"embedding": [0.1]}]}).encode()
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = payload
+
+        captured_req = []
+
+        def fake_urlopen(req, timeout=None):
+            captured_req.append(req)
+            return mock_resp
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            embedder = HttpEmbedder(url="http://example.com/embed", auth_header="Bearer sk-test")
+            embedder.embed(["text"])
+
+        assert captured_req[0].get_header("Authorization") == "Bearer sk-test"
+
+    def test_model_in_request_body(self):
+        from airbyte_destination_ailake.embedder import HttpEmbedder
+        from unittest.mock import patch, MagicMock
+
+        payload = json.dumps({"data": [{"embedding": [0.5, 0.5]}]}).encode()
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = payload
+
+        sent_bodies = []
+
+        def fake_urlopen(req, timeout=None):
+            sent_bodies.append(json.loads(req.data))
+            return mock_resp
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            embedder = HttpEmbedder(url="http://x/embed", model="mxbai-embed-large")
+            embedder.embed(["hello"])
+
+        assert sent_bodies[0]["model"] == "mxbai-embed-large"
+        assert sent_bodies[0]["input"] == ["hello"]
+
+    def test_no_model_omits_field(self):
+        from airbyte_destination_ailake.embedder import HttpEmbedder
+        from unittest.mock import patch, MagicMock
+
+        payload = json.dumps({"data": [{"embedding": [1.0]}]}).encode()
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = payload
+
+        sent_bodies = []
+
+        def fake_urlopen(req, timeout=None):
+            sent_bodies.append(json.loads(req.data))
+            return mock_resp
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            embedder = HttpEmbedder(url="http://x/embed", model="")
+            embedder.embed(["hello"])
+
+        assert "model" not in sent_bodies[0]
+
+    def test_http_error_raises(self):
+        from airbyte_destination_ailake.embedder import HttpEmbedder
+        from unittest.mock import patch
+        import urllib.error, io
+
+        err = urllib.error.HTTPError(
+            url="http://x", code=401, msg="Unauthorized",
+            hdrs=None, fp=io.BytesIO(b"invalid api key"),
+        )
+        with patch("urllib.request.urlopen", side_effect=err):
+            embedder = HttpEmbedder(url="http://x/embed")
+            with pytest.raises(RuntimeError, match="401"):
+                embedder.embed(["text"])
+
+    def test_malformed_response_raises(self):
+        from airbyte_destination_ailake.embedder import HttpEmbedder
+        from unittest.mock import patch, MagicMock
+
+        payload = json.dumps({"result": "oops"}).encode()
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = payload
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            embedder = HttpEmbedder(url="http://x/embed")
+            with pytest.raises(RuntimeError, match="unexpected response shape"):
+                embedder.embed(["text"])
+
+    def test_build_embedder_http(self):
+        from airbyte_destination_ailake.embedder import build_embedder, HttpEmbedder
+
+        cfg = _make_cfg(embed_mode="http", http_url="http://ollama:11434/v1/embeddings", http_model="nomic-embed-text")
+        emb = build_embedder(cfg)
+        assert isinstance(emb, HttpEmbedder)
+
+
 class TestCmdEmbedder:
     def test_valid_output(self, tmp_path):
         script = tmp_path / "embed.py"
@@ -120,7 +251,7 @@ class TestCmdEmbedder:
 
 
 def _make_cfg(**overrides) -> AilakeDestinationConfig:
-    raw = {
+    raw: dict = {
         "table_base_path": "/tmp/ailake_test",
         "embed_mode": "cmd",
         "embed_cmd": "unused",
@@ -128,6 +259,9 @@ def _make_cfg(**overrides) -> AilakeDestinationConfig:
         "batch_size": 3,
     }
     raw.update(overrides)
+    # http mode needs http_url, not embed_cmd
+    if raw.get("embed_mode") == "http" and "embed_cmd" in raw and not raw.get("http_url"):
+        raw.setdefault("http_url", "http://localhost/embed")
     return AilakeDestinationConfig.from_dict(raw)
 
 

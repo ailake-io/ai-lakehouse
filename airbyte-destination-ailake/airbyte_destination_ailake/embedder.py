@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import urllib.error
+import urllib.request
 from typing import Protocol
 
 import numpy as np
@@ -87,6 +89,62 @@ class CohereEmbedder:
         return np.array(response.embeddings, dtype=np.float32)
 
 
+class HttpEmbedder:
+    """OpenAI-compatible HTTP embedding endpoint.
+
+    Protocol (request)::
+
+        POST {url}
+        Authorization: {auth_header}          # omitted if empty
+        Content-Type: application/json
+
+        {"model": "{model}", "input": ["text1", "text2", ...]}
+
+    Protocol (response)::
+
+        {"data": [{"embedding": [...]}, ...]}
+
+    Compatible with: Ollama (``/v1/embeddings``), vLLM, LM Studio,
+    Together.ai, Anyscale, Azure OpenAI, any OpenAI-compatible server.
+    """
+
+    def __init__(self, url: str, model: str = "", auth_header: str = "", timeout: int = 60) -> None:
+        self._url = url
+        self._model = model
+        self._auth_header = auth_header
+        self._timeout = timeout
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        body: dict = {"input": texts}
+        if self._model:
+            body["model"] = self._model
+
+        data = json.dumps(body).encode()
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self._auth_header:
+            headers["Authorization"] = self._auth_header
+
+        req = urllib.request.Request(self._url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                payload = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            body_preview = exc.read(500).decode(errors="replace")
+            raise RuntimeError(
+                f"HTTP embedder: {exc.code} {exc.reason} — {body_preview}"
+            ) from exc
+
+        try:
+            vecs = [item["embedding"] for item in payload["data"]]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(
+                f"HTTP embedder: unexpected response shape. "
+                f"Expected {{\"data\": [{{\"embedding\": [...]}}]}}, got: {str(payload)[:200]}"
+            ) from exc
+
+        return np.array(vecs, dtype=np.float32)
+
+
 def build_embedder(cfg: "AilakeDestinationConfig") -> Embedder:  # noqa: F821 — forward ref
     from airbyte_destination_ailake.config import AilakeDestinationConfig
 
@@ -103,5 +161,12 @@ def build_embedder(cfg: "AilakeDestinationConfig") -> Embedder:  # noqa: F821 �
             api_key=cfg.cohere_api_key,
             model=cfg.cohere_model,
             input_type=cfg.cohere_input_type,
+        )
+    if cfg.embed_mode == "http":
+        return HttpEmbedder(
+            url=cfg.http_url,
+            model=cfg.http_model,
+            auth_header=cfg.http_auth_header,
+            timeout=cfg.http_timeout,
         )
     raise ValueError(f"Unknown embed_mode: {cfg.embed_mode}")

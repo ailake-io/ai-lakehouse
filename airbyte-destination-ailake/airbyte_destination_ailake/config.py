@@ -19,8 +19,8 @@ class AilakeDestinationConfig:
     """Base path for all tables. Each stream lands at ``{table_base_path}/{stream_name}/``."""
 
     # --- Embedding ---
-    embed_mode: Literal["cmd", "openai", "cohere"]
-    """How to produce embeddings from text. One of: ``cmd``, ``openai``, ``cohere``."""
+    embed_mode: Literal["cmd", "openai", "cohere", "http"]
+    """How to produce embeddings from text. One of: ``cmd``, ``openai``, ``cohere``, ``http``."""
 
     embedding_dim: int = 1536
     """Vector dimensionality — must match the model output."""
@@ -53,6 +53,19 @@ class AilakeDestinationConfig:
     cohere_model: str = "embed-english-v3.0"
     cohere_input_type: str = "search_document"
 
+    # --- http mode (OpenAI-compatible endpoint) ---
+    http_url: str = ""
+    """POST endpoint. Body: ``{"model": "...", "input": [...]}``; response: ``{"data": [{"embedding": [...]}]}``."""
+
+    http_model: str = ""
+    """Model name sent in the request body. Leave empty to omit the field."""
+
+    http_auth_header: str = ""
+    """Value of the ``Authorization`` header. Example: ``Bearer sk-...``."""
+
+    http_timeout: int = 60
+    """Request timeout in seconds."""
+
     # --- Write behaviour ---
     batch_size: int = 512
     """Records per embed call and per ``TableWriter.write_batch()`` call."""
@@ -66,9 +79,9 @@ class AilakeDestinationConfig:
     @classmethod
     def from_dict(cls, raw: dict) -> "AilakeDestinationConfig":
         embed_mode = raw.get("embed_mode", "cmd")
-        if embed_mode not in ("cmd", "openai", "cohere"):
+        if embed_mode not in ("cmd", "openai", "cohere", "http"):
             raise ValueError(
-                f"embed_mode must be one of cmd/openai/cohere, got '{embed_mode}'"
+                f"embed_mode must be one of cmd/openai/cohere/http, got '{embed_mode}'"
             )
         return cls(
             table_base_path=raw["table_base_path"].rstrip("/"),
@@ -85,6 +98,10 @@ class AilakeDestinationConfig:
             cohere_api_key=raw.get("cohere_api_key", ""),
             cohere_model=raw.get("cohere_model", "embed-english-v3.0"),
             cohere_input_type=raw.get("cohere_input_type", "search_document"),
+            http_url=raw.get("http_url", ""),
+            http_model=raw.get("http_model", ""),
+            http_auth_header=raw.get("http_auth_header", ""),
+            http_timeout=int(raw.get("http_timeout", 60)),
             batch_size=int(raw.get("batch_size", 512)),
             pre_normalize=bool(raw.get("pre_normalize", False)),
             pq_only=bool(raw.get("pq_only", False)),
@@ -100,6 +117,8 @@ class AilakeDestinationConfig:
             errors.append("openai_api_key is required when embed_mode=openai")
         if self.embed_mode == "cohere" and not self.cohere_api_key:
             errors.append("cohere_api_key is required when embed_mode=cohere")
+        if self.embed_mode == "http" and not self.http_url:
+            errors.append("http_url is required when embed_mode=http")
         if self.embedding_dim <= 0:
             errors.append(f"embedding_dim must be > 0, got {self.embedding_dim}")
         if self.batch_size <= 0:
