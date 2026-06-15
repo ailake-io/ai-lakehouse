@@ -7,9 +7,10 @@ use ailake_catalog::{
     hadoop::HadoopCatalog,
     provider::{CatalogProvider, TableIdent, TableProperties},
 };
-use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
+use ailake_core::{AilakeError, EmbeddingModelInfo, VectorMetric, VectorPrecision, VectorStoragePolicy};
 use ailake_query::{
-    CompactionConfig, CompactionExecutor, CompactionPlanner, SearchConfig, TableWriter,
+    CompactionConfig, CompactionExecutor, CompactionPlanner, MigrationJob, MigrationProgress,
+    MigrationStrategy, SearchConfig, TableWriter,
 };
 use ailake_store::store_from_url;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -137,6 +138,37 @@ enum Commands {
         #[arg(long, value_enum, default_value = "text")]
         format: OutputFormat,
     },
+    /// Migrate embedding column to a new model by re-embedding all chunks via an external command
+    Migrate {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// Name of the existing embedding column
+        #[arg(long, default_value = "embedding")]
+        old_column: String,
+        /// Name for the migrated column (may equal --old-column for in-place upgrade)
+        #[arg(long, default_value = "embedding_v2")]
+        new_column: String,
+        /// Parquet column that holds the raw text to re-embed
+        #[arg(long, default_value = "chunk_text")]
+        text_column: String,
+        /// Shell command that reads a JSON array of strings from stdin and writes
+        /// a JSON array of float arrays to stdout. Example:
+        ///   python3 embed.py
+        #[arg(long)]
+        embed_cmd: String,
+        /// Migration strategy: atomic_replace (lower storage) or dual_write_then_cutover (zero downtime)
+        #[arg(long, value_enum, default_value = "dual-write-then-cutover")]
+        strategy: MigrateStrategy,
+        /// Number of texts per embed-cmd call
+        #[arg(long, default_value = "512")]
+        batch_size: usize,
+        /// Model identifier stored in ailake.embedding-model after migration
+        #[arg(long)]
+        model_name: Option<String>,
+        /// Optional version tag appended to --model-name (stored as "<name>@<version>")
+        #[arg(long)]
+        model_version: Option<String>,
+    },
     /// Estimate storage usage before writing (no I/O — pure math)
     Estimate {
         /// Number of vectors (supports K/M/B suffixes: 1M, 500K, 1B)
@@ -155,6 +187,21 @@ enum Commands {
         #[arg(long, value_enum, default_value = "text")]
         format: OutputFormat,
     },
+}
+
+#[derive(ValueEnum, Clone)]
+enum MigrateStrategy {
+    AtomicReplace,
+    DualWriteThenCutover,
+}
+
+impl From<MigrateStrategy> for MigrationStrategy {
+    fn from(s: MigrateStrategy) -> Self {
+        match s {
+            MigrateStrategy::AtomicReplace => MigrationStrategy::AtomicReplace,
+            MigrateStrategy::DualWriteThenCutover => MigrationStrategy::DualWriteThenCutover,
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone)]
@@ -670,6 +717,92 @@ async fn run(cli: Cli) -> Result<(), String> {
                     }
                 }
             }
+            Ok(())
+        }
+
+        Commands::Migrate {
+            table,
+            old_column,
+            new_column,
+            text_column,
+            embed_cmd,
+            strategy,
+            batch_size,
+            model_name,
+            model_version,
+        } => {
+            let ident = parse_table_ident(&table);
+
+            let new_model = model_name.map(|name| {
+                let mut info = EmbeddingModelInfo::new(name);
+                if let Some(v) = model_version {
+                    info = info.with_version(v);
+                }
+                info
+            });
+
+            // Wrap external embed command as a sync Fn closure.
+            // stdin: JSON array of strings; stdout: JSON array of float arrays.
+            let embed_fn: std::sync::Arc<
+                dyn Fn(&[String]) -> ailake_core::AilakeResult<Vec<Vec<f32>>> + Send + Sync,
+            > = {
+                let embed_cmd = embed_cmd.clone();
+                std::sync::Arc::new(move |texts: &[String]| {
+                    use std::io::Write;
+                    let input = serde_json::to_string(texts)
+                        .map_err(|e| AilakeError::InvalidArgument(e.to_string()))?;
+                    let output = std::process::Command::new("sh")
+                        .args(["-c", &embed_cmd])
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::inherit())
+                        .spawn()
+                        .and_then(|mut child| {
+                            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+                            child.wait_with_output()
+                        })
+                        .map_err(|e| {
+                            AilakeError::InvalidArgument(format!("embed-cmd spawn error: {e}"))
+                        })?;
+                    if !output.status.success() {
+                        return Err(AilakeError::InvalidArgument(format!(
+                            "embed-cmd exited with status {}",
+                            output.status
+                        )));
+                    }
+                    serde_json::from_slice::<Vec<Vec<f32>>>(&output.stdout).map_err(|e| {
+                        AilakeError::InvalidArgument(format!(
+                            "embed-cmd stdout parse error: {e}"
+                        ))
+                    })
+                })
+            };
+
+            let on_progress = Some(std::sync::Arc::new(|p: MigrationProgress| {
+                eprintln!(
+                    "migration: {}/{} files done, {} rows migrated",
+                    p.files_done, p.files_total, p.rows_migrated
+                );
+            })
+                as std::sync::Arc<dyn Fn(MigrationProgress) + Send + Sync>);
+
+            let job = MigrationJob {
+                table: ident,
+                old_column,
+                new_column,
+                text_column,
+                embed_fn,
+                strategy: strategy.into(),
+                batch_size,
+                new_model,
+                on_progress,
+            };
+
+            job.run(catalog as std::sync::Arc<dyn CatalogProvider>, store)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            println!("migration complete");
             Ok(())
         }
 

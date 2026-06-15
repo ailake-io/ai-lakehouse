@@ -42,16 +42,17 @@ type DataFileEntry struct {
 
 // TableInfo mirrors the JSON output of "ailake info --format json".
 type TableInfo struct {
-	Table        string  `json:"table"`
-	Location     string  `json:"location"`
-	VectorColumn string  `json:"vector_column"`
-	VectorDim    string  `json:"vector_dim"`
-	VectorMetric string  `json:"vector_metric"`
-	Files        int     `json:"files"`
-	IndexedFiles int     `json:"indexed_files"`
-	Rows         uint64  `json:"rows"`
-	SizeBytes    uint64  `json:"size_bytes"`
-	SnapshotID   *int64  `json:"snapshot_id"`
+	Table          string  `json:"table"`
+	Location       string  `json:"location"`
+	VectorColumn   string  `json:"vector_column"`
+	VectorDim      string  `json:"vector_dim"`
+	VectorMetric   string  `json:"vector_metric"`
+	EmbeddingModel string  `json:"embedding_model,omitempty"`
+	Files          int     `json:"files"`
+	IndexedFiles   int     `json:"indexed_files"`
+	Rows           uint64  `json:"rows"`
+	SizeBytes      uint64  `json:"size_bytes"`
+	SnapshotID     *int64  `json:"snapshot_id"`
 }
 
 // HadoopCatalog reads an AI-Lake table from a local filesystem path.
@@ -80,6 +81,7 @@ func (c *HadoopCatalog) LoadTable(namespace, name string) (*TableInfo, error) {
 		info.VectorColumn, _ = props["ailake.vector-column"].(string)
 		info.VectorDim, _ = props["ailake.vector-dim"].(string)
 		info.VectorMetric, _ = props["ailake.vector-metric"].(string)
+		info.EmbeddingModel, _ = props["ailake.embedding-model"].(string)
 	}
 	if sid, ok := meta["current-snapshot-id"].(float64); ok {
 		id := int64(sid)
