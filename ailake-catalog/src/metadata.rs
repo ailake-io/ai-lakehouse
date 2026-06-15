@@ -98,6 +98,15 @@ impl IcebergMetadata {
                 EmbeddingModelInfo::property_key().to_string(),
                 model.to_property_value(),
             );
+            if let Some(dim) = model.dim {
+                properties.insert("ailake.embedding-model-dim".to_string(), dim.to_string());
+            }
+            if let Some(metric) = model.metric {
+                properties.insert(
+                    "ailake.embedding-model-metric".to_string(),
+                    format!("{:?}", metric).to_lowercase(),
+                );
+            }
         }
 
         let now_ms = now_ms();

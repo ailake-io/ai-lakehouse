@@ -135,6 +135,7 @@ pub fn write_manifest_file(
             extra_vector_indexes: f.extra_vector_indexes.clone(),
             index_status: f.index_status.clone(),
             batch_id: f.batch_id.clone(),
+            embedding_model: f.embedding_model.clone(),
         };
         match serde_json::to_vec(&ext) {
             Ok(bytes) => encode_union_bytes(1, &bytes, &mut rec), // key_metadata=bytes
@@ -315,6 +316,7 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                             .map(|e| e.index_status.clone())
                             .unwrap_or_default(),
                         batch_id: ext.as_ref().and_then(|e| e.batch_id.clone()),
+                        embedding_model: ext.as_ref().and_then(|e| e.embedding_model.clone()),
                     });
                 }
             }
@@ -344,6 +346,8 @@ struct AilakeEntryExt {
     pub index_status: IndexStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
 }
 
 /// Read manifest file paths from an Iceberg manifest list (Avro).

@@ -68,6 +68,10 @@ pub struct DataFileEntry {
     /// write if a file with the same batch_id is already committed in the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
+    /// Embedding model identifier stored per-file so mixed-model tables (during migration)
+    /// can be identified without reading the main metadata.json.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
 }
 
 /// Iceberg-compatible table metadata read from the catalog.
@@ -194,6 +198,7 @@ pub fn make_multi_column_data_file_entry(
         extra_vector_indexes: extra.to_vec(),
         index_status: IndexStatus::Ready,
         batch_id: None,
+        embedding_model: None,
     }
 }
 
@@ -229,6 +234,7 @@ pub fn make_data_file_entry_indexing(
         extra_vector_indexes: vec![],
         index_status: IndexStatus::Indexing,
         batch_id: None,
+        embedding_model: None,
     }
 }
 

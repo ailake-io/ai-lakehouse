@@ -25,7 +25,7 @@ use ailake_catalog::{
 use ailake_core::{AilakeResult, EmbeddingModelInfo, VectorMetric, VectorStoragePolicy};
 use ailake_query::{
     fetch_rows as rs_fetch_rows, search as rs_search, Chunk, ContextAssembler,
-    ContextAssemblerConfig, MigrationJob, MigrationStrategy, SearchConfig,
+    ContextAssemblerConfig, MigrationJob, MigrationProgress, MigrationStrategy, SearchConfig,
     TableWriter as RsTableWriter,
 };
 use ailake_store::{store::Store, LocalStore};
@@ -54,6 +54,8 @@ fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>)
 pub struct TableWriter {
     inner: Option<RsTableWriter>,
     runtime: tokio::runtime::Runtime,
+    /// Optional Python callable used for Pattern B: embed_fn(texts) -> list[list[float]]
+    embed_fn: Option<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -61,8 +63,9 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None))]
     fn new(
+        py: Python<'_>,
         path: &str,
         vector_column: &str,
         dim: u32,
@@ -74,6 +77,7 @@ impl TableWriter {
         ivf_residual: bool,
         embedding_model: Option<&str>,
         embedding_model_version: Option<&str>,
+        embed_fn: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
@@ -88,7 +92,8 @@ impl TableWriter {
         policy.keep_raw_for_reranking = !pq_only;
         policy.ivf_residual = ivf_residual;
         if let Some(model_name) = embedding_model {
-            let mut model_info = EmbeddingModelInfo::new(model_name);
+            let mut model_info = EmbeddingModelInfo::new(model_name)
+                .with_dim(dim);
             if let Some(version) = embedding_model_version {
                 model_info = model_info.with_version(version);
             }
@@ -97,6 +102,7 @@ impl TableWriter {
         let (catalog, store) = local_catalog_store(path);
         let table = TableIdent::new("default", "table");
 
+        let stored_embed_fn = embed_fn.map(|f| f.clone_ref(py));
         let writer = rt
             .block_on(RsTableWriter::create_or_open(catalog, store, policy, table))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -104,6 +110,7 @@ impl TableWriter {
         Ok(Self {
             inner: Some(writer),
             runtime: rt,
+            embed_fn: stored_embed_fn,
         })
     }
 
@@ -111,8 +118,36 @@ impl TableWriter {
     ///
     /// Args:
     ///   texts: list[str] — text content for each row
-    ///   embeddings: list[list[float]] — one embedding per row
-    fn write_batch(&mut self, texts: Vec<String>, embeddings: Vec<Vec<f32>>) -> PyResult<()> {
+    ///   embeddings: list[list[float]] or None — one embedding per row.
+    ///               When None, embed_fn set at construction time is called automatically
+    ///               (Pattern B). Raises ValueError when embeddings is None and no embed_fn.
+    #[pyo3(signature = (texts, embeddings=None))]
+    fn write_batch(
+        &mut self,
+        py: Python<'_>,
+        texts: Vec<String>,
+        embeddings: Option<Vec<Vec<f32>>>,
+    ) -> PyResult<()> {
+        let embs: Vec<Vec<f32>> = match embeddings {
+            Some(e) => e,
+            None => {
+                let embed_fn = self.embed_fn.as_ref().ok_or_else(|| {
+                    PyValueError::new_err(
+                        "embeddings is required when embed_fn was not set on TableWriter",
+                    )
+                })?;
+                let py_texts = PyList::new(py, &texts)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let result = embed_fn
+                    .call1(py, (py_texts,))
+                    .map_err(|e| PyValueError::new_err(format!("embed_fn error: {e}")))?;
+                result
+                    .bind(py)
+                    .extract::<Vec<Vec<f32>>>()
+                    .map_err(|e| PyValueError::new_err(format!("embed_fn must return list[list[float]]: {e}")))?
+            }
+        };
+
         let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
         let text_arr = StringArray::from(texts);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
@@ -124,7 +159,7 @@ impl TableWriter {
             .ok_or_else(|| PyValueError::new_err("TableWriter already committed"))?;
 
         self.runtime
-            .block_on(writer.write_batch(&batch, &embeddings))
+            .block_on(writer.write_batch(&batch, &embs))
             .map_err(|e| {
                 warn!("ailake-py: write_batch failed: {}", e);
                 PyValueError::new_err(e.to_string())
@@ -422,7 +457,7 @@ fn assemble_context(
 ///   new_model_version: optional version tag for the new model
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, old_column, new_column, embed_fn, text_column="chunk_text", strategy="dual_write_then_cutover", batch_size=512, new_model=None, new_model_version=None))]
+#[pyo3(signature = (path, old_column, new_column, embed_fn, text_column="chunk_text", strategy="dual_write_then_cutover", batch_size=512, new_model=None, new_model_version=None, on_progress=None))]
 fn migrate_embeddings(
     py: Python<'_>,
     path: &str,
@@ -434,6 +469,7 @@ fn migrate_embeddings(
     batch_size: usize,
     new_model: Option<&str>,
     new_model_version: Option<&str>,
+    on_progress: Option<Py<PyAny>>,
 ) -> PyResult<()> {
     let migration_strategy = match strategy {
         "atomic_replace" => MigrationStrategy::AtomicReplace,
@@ -478,6 +514,22 @@ fn migrate_embeddings(
         })
     };
 
+    let progress_arc: Option<Arc<dyn Fn(MigrationProgress) + Send + Sync>> =
+        on_progress.map(|cb| {
+            let cb = cb.clone_ref(py);
+            let arc: Arc<dyn Fn(MigrationProgress) + Send + Sync> =
+                Arc::new(move |p: MigrationProgress| {
+                    Python::attach(|py| {
+                        let kwargs = PyDict::new(py);
+                        let _ = kwargs.set_item("files_done", p.files_done);
+                        let _ = kwargs.set_item("files_total", p.files_total);
+                        let _ = kwargs.set_item("rows_migrated", p.rows_migrated);
+                        let _ = cb.call(py, (), Some(&kwargs));
+                    });
+                });
+            arc
+        });
+
     let (catalog, store) = local_catalog_store(path);
     let table = TableIdent::new("default", "table");
 
@@ -490,7 +542,7 @@ fn migrate_embeddings(
         strategy: migration_strategy,
         batch_size,
         new_model: new_model_info,
-        on_progress: None,
+        on_progress: progress_arc,
     };
 
     let rt = rt()?;
