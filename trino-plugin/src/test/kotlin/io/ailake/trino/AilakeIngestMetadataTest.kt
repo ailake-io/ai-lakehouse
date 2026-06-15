@@ -106,4 +106,31 @@ class AilakeIngestMetadataTest {
         )
         assertTrue(connector.getPageSinkProvider() is AilakePageSinkProvider)
     }
+
+    // ── embeddingModel propagation ────────────────────────────────────────────
+
+    @Test
+    fun embeddingModelPropagatedToIngestHandle() {
+        val meta = VectorScanMetadata(
+            tableUri       = "file:///tmp/test-table",
+            vectorColumn   = "embedding",
+            dim            = 4,
+            metric         = "cosine",
+            precision      = "f16",
+            namespace      = "default",
+            tableName      = "docs",
+            embeddingModel = "text-embedding-3-small@v1",
+        )
+        val handle = meta.getTableHandle(session, SchemaTableName("default", "ingest"))
+        assertNotNull(handle)
+        val h = handle as AilakeIngestTableHandle
+        assertEquals("text-embedding-3-small@v1", h.embeddingModel)
+    }
+
+    @Test
+    fun embeddingModelNullByDefault() {
+        val handle = metadata.getTableHandle(session, SchemaTableName("default", "ingest"))
+        assertNotNull(handle)
+        assertNull((handle as AilakeIngestTableHandle).embeddingModel)
+    }
 }
