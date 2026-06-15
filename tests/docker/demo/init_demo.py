@@ -18,10 +18,11 @@ import pathlib
 import random
 import sys
 
-TABLE_PATH    = os.environ.get("DEMO_TABLE_PATH", "/data/ailake_demo")
-PQ_PATH       = str(pathlib.Path(TABLE_PATH).parent / "ailake_pq")
-RESIDUAL_PATH = str(pathlib.Path(TABLE_PATH).parent / "ailake_residual_pq")
-DEFERRED_PATH = str(pathlib.Path(TABLE_PATH).parent / "ailake_deferred")
+TABLE_PATH     = os.environ.get("DEMO_TABLE_PATH", "/data/ailake_demo")
+PQ_PATH        = str(pathlib.Path(TABLE_PATH).parent / "ailake_pq")
+RESIDUAL_PATH  = str(pathlib.Path(TABLE_PATH).parent / "ailake_residual_pq")
+DEFERRED_PATH  = str(pathlib.Path(TABLE_PATH).parent / "ailake_deferred")
+MODEL_TRACKED_PATH = str(pathlib.Path(TABLE_PATH).parent / "ailake_model_tracked")
 DIM           = int(os.environ.get("DEMO_DIM", "32"))
 N_DOCS        = 500
 N_DEFERRED    = 200
@@ -96,6 +97,22 @@ def _write_residual_pq(texts: list[str], embeddings: list[list[float]]) -> None:
     print(f"[Residual] Committed snapshot_id={snap_id}  rows={len(texts)}")
 
 
+def _write_model_tracked(texts: list[str], embeddings: list[list[float]]) -> None:
+    """HNSW table with embedding model metadata — demonstrates model tracking feature."""
+    import ailake
+    os.makedirs(MODEL_TRACKED_PATH, exist_ok=True)
+    table = ailake.open_table(
+        MODEL_TRACKED_PATH,
+        dim=DIM,
+        metric=METRIC,
+        embedding_model="synthetic-embed-v1",
+        embedding_model_version="1.0",
+    )
+    table.insert(texts[:100], embeddings[:100])
+    snap_id = table.commit()
+    print(f"[ModelTracked] Committed snapshot_id={snap_id}  rows=100  model=synthetic-embed-v1@1.0")
+
+
 def _write_deferred(texts: list[str], embeddings: list[list[float]]) -> None:
     """Deferred write — Parquet immediate, index built in background."""
     from ailake import TableWriter
@@ -113,10 +130,11 @@ def _save_query_payload(embeddings: list[list[float]], texts: list[str]) -> None
         "dim":                DIM,
         "metric":             METRIC,
         "table_paths": {
-            "hnsw":     TABLE_PATH,
-            "pq_only":  PQ_PATH,
-            "residual": RESIDUAL_PATH,
-            "deferred": DEFERRED_PATH,
+            "hnsw":          TABLE_PATH,
+            "pq_only":       PQ_PATH,
+            "residual":      RESIDUAL_PATH,
+            "deferred":      DEFERRED_PATH,
+            "model_tracked": MODEL_TRACKED_PATH,
         },
     }
     query_path = os.path.join(os.path.dirname(TABLE_PATH), "demo_query.json")
@@ -139,6 +157,7 @@ def main() -> None:
     _write_pq_only(texts, embeddings)
     _write_residual_pq(texts, embeddings)
     _write_deferred(texts, embeddings)
+    _write_model_tracked(texts, embeddings)
     _save_query_payload(embeddings, texts)
 
     _maybe_register_nessie(TABLE_PATH)
