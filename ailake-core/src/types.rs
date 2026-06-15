@@ -109,6 +109,47 @@ impl EmbeddingModelInfo {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedding_model_info_roundtrip_with_version() {
+        let info = EmbeddingModelInfo::new("text-embedding-3-small").with_version("2024-01");
+        assert_eq!(info.to_property_value(), "text-embedding-3-small@2024-01");
+        assert_eq!(EmbeddingModelInfo::from_property_value("text-embedding-3-small@2024-01"), info);
+    }
+
+    #[test]
+    fn embedding_model_info_roundtrip_no_version() {
+        let info = EmbeddingModelInfo::new("my-model");
+        assert_eq!(info.to_property_value(), "my-model");
+        assert_eq!(EmbeddingModelInfo::from_property_value("my-model"), info);
+    }
+
+    #[test]
+    fn embedding_model_info_property_key() {
+        assert_eq!(EmbeddingModelInfo::property_key(), "ailake.embedding-model");
+    }
+
+    #[test]
+    fn embedding_model_info_fixture_value() {
+        // Exact value used by write_fixture.py → Go integration test.
+        let parsed = EmbeddingModelInfo::from_property_value("fixture-model@v1");
+        assert_eq!(parsed.name, "fixture-model");
+        assert_eq!(parsed.version.as_deref(), Some("v1"));
+        assert_eq!(parsed.to_property_value(), "fixture-model@v1");
+    }
+
+    #[test]
+    fn embedding_model_info_first_at_only() {
+        // split_once('@') splits at first '@'; remainder goes into version.
+        let parsed = EmbeddingModelInfo::from_property_value("model@v1@extra");
+        assert_eq!(parsed.name, "model");
+        assert_eq!(parsed.version.as_deref(), Some("v1@extra"));
+    }
+}
+
 /// Per-file geometric statistics used for pruning
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Centroid {
