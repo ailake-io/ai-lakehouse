@@ -11,8 +11,8 @@ use ailake_core::{
     AilakeError, EmbeddingModelInfo, VectorMetric, VectorPrecision, VectorStoragePolicy,
 };
 use ailake_query::{
-    CompactionConfig, CompactionExecutor, CompactionPlanner, MigrationJob, MigrationProgress,
-    MigrationStrategy, SearchConfig, TableWriter,
+    CompactionConfig, CompactionExecutor, CompactionPlanner, EmbedFn, MigrationJob,
+    MigrationProgress, MigrationStrategy, SearchConfig, TableWriter,
 };
 use ailake_store::store_from_url;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -745,9 +745,7 @@ async fn run(cli: Cli) -> Result<(), String> {
 
             // Wrap external embed command as a sync Fn closure.
             // stdin: JSON array of strings; stdout: JSON array of float arrays.
-            let embed_fn: std::sync::Arc<
-                dyn Fn(&[String]) -> ailake_core::AilakeResult<Vec<Vec<f32>>> + Send + Sync,
-            > = {
+            let embed_fn: EmbedFn = {
                 let embed_cmd = embed_cmd.clone();
                 std::sync::Arc::new(move |texts: &[String]| {
                     use std::io::Write;

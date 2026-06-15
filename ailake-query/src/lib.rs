@@ -16,7 +16,7 @@ pub use ailake_index::IvfPqConfig;
 pub use compaction::{CompactionConfig, CompactionExecutor, CompactionMode, CompactionPlanner};
 pub use context_assembler::{AssembledContext, Chunk, ContextAssembler, ContextAssemblerConfig};
 pub use mem_table::{MemTableConfig, MemTableWriter};
-pub use migration::{MigrationJob, MigrationProgress, MigrationStrategy};
+pub use migration::{EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy};
 pub use pruner::VectorPruner;
 pub use scanner::{fetch_rows, search, SearchConfig, SearchResult, SearchSession};
 pub use writer::{MultiVectorBatch, TableWriter};
