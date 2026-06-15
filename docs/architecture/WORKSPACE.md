@@ -176,7 +176,8 @@ Query planning and execution. The integration layer — depends on all data-plan
   - `write_batch_deferred(batch, embeddings)` — Parquet immediately (~200k vec/s); HNSW built async in background tokio task
   - `write_batch_ivf_pq(batch, embeddings, config)` — IVF-PQ inline; shared codebook cached after first shard (`cached_ivf_codebook`)
   - `write_batch_ivf_pq_deferred(batch, embeddings, config)` — Parquet immediately; IVF-PQ built async; shared codebook via `Arc<tokio::sync::OnceCell<IvfPqCodebook>>` ensures k-means runs once across all concurrent background tasks
-  - `write_batch_auto(batch, embeddings)` — detects hardware, delegates to HNSW or IVF-PQ
+  - `write_batch_auto(batch, embeddings)` — detects hardware, delegates to HNSW or IVF-PQ (inline, blocking)
+  - `write_batch_auto_deferred(batch, embeddings)` — hardware-aware deferred: Parquet committed immediately, index (HNSW or IVF-PQ) built in background; shard served via flat scan until `IndexStatus::Ready`; ~200k vec/s throughput
   - `commit() -> SnapshotId` — writes Iceberg snapshot
 - `VectorPruner::prune(files, query, metric, threshold)` — filters `Vec<DataFileEntry>` using centroid geometry; works on catalog metadata only, zero file I/O for pruned files
 - `search(table, query, config, ...)` — full pipeline: list catalog → prune → load index → global top-k merge; `SearchConfig.pruning_threshold` controls prune aggressiveness; `SearchConfig.rerank_factor` enables reranking after PQ (fetch `top_k × factor` candidates, recompute exact distances from raw vectors, re-sort)
@@ -200,8 +201,9 @@ PyO3 extension module (`cdylib`). Thin async-to-sync bridge — all logic lives 
 Deps: `ailake-query`, `ailake-catalog`, `ailake-store`, `ailake-core` + `openssl-sys[vendored]` (forces hermetic OpenSSL compilation in manylinux wheel builds; no system headers required).
 
 Exports:
-- `TableWriter(path, vector_column, dim, metric)` — open or create table
-- `TableWriter.write_batch(texts, embeddings)` — stage a batch
+- `TableWriter(path, vector_column, dim, metric, pq_only, ivf_residual, ...)` — open or create table; `pq_only=True` discards raw F16 after index build (~98% storage reduction); `ivf_residual=True` encodes residual vectors per IVF cell (~2-4 pp recall gain)
+- `TableWriter.write_batch(texts, embeddings)` — stage a batch (HNSW inline)
+- `TableWriter.write_batch_auto_deferred(texts, embeddings)` — hardware-aware deferred write; Parquet committed immediately, index built in background; exposed in Python as `Table.write_batch_auto_deferred()`
 - `TableWriter.commit() → int` — flush to Parquet + HNSW, return snapshot id
 - `search(path, query, top_k) → list[dict]` — vector search
 - `assemble_context(chunks, max_tokens, dedup_threshold) → str` — LLM context XML

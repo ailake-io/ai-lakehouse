@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use ailake_core::{AilakeError, AilakeResult, VectorStoragePolicy};
+use ailake_core::{AilakeError, AilakeResult, EmbeddingModelInfo, VectorStoragePolicy};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -93,6 +93,21 @@ impl IcebergMetadata {
         if let Some(ef) = policy.hnsw_ef_construction {
             properties.insert("ailake.hnsw-ef-construction".to_string(), ef.to_string());
         }
+        if let Some(model) = &policy.embedding_model {
+            properties.insert(
+                EmbeddingModelInfo::property_key().to_string(),
+                model.to_property_value(),
+            );
+            if let Some(dim) = model.dim {
+                properties.insert("ailake.embedding-model-dim".to_string(), dim.to_string());
+            }
+            if let Some(metric) = model.metric {
+                properties.insert(
+                    "ailake.embedding-model-metric".to_string(),
+                    format!("{:?}", metric).to_lowercase(),
+                );
+            }
+        }
 
         let now_ms = now_ms();
         IcebergMetadata {
@@ -160,6 +175,8 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         }
     }
 
@@ -180,5 +197,20 @@ mod tests {
         let meta = IcebergMetadata::new("file:///tmp/tbl", &make_policy());
         assert!(meta.properties.contains_key("ailake.format-version"));
         assert!(meta.properties.contains_key("ailake.vector-dim"));
+    }
+
+    #[test]
+    fn embedding_model_stored_in_properties() {
+        use ailake_core::EmbeddingModelInfo;
+        let mut policy = make_policy();
+        policy.embedding_model =
+            Some(EmbeddingModelInfo::new("text-embedding-3-small").with_version("2024-01"));
+        let meta = IcebergMetadata::new("file:///tmp/tbl", &policy);
+        assert_eq!(
+            meta.properties
+                .get("ailake.embedding-model")
+                .map(|s| s.as_str()),
+            Some("text-embedding-3-small@2024-01")
+        );
     }
 }

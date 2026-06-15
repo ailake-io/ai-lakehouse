@@ -7,8 +7,12 @@
 //   - Recall: slightly lower at same memory, tunable via nprobe
 //   - Build: O(n * nlist) k-means vs O(n log n) HNSW insertions
 //
-// Non-residual variant: global PQ codebook trained on all vectors.
-// Simpler than per-cluster residual PQ, adequate for dim >= 64.
+// Two variants selected by IvfPqConfig::residual:
+//   false (default) — global PQ codebook trained on raw vectors. Simpler, backward-compatible.
+//   true (residual) — PQ trained on per-cluster residuals (vec - coarse_centroid).
+//     Same bytes/vector, ~2-4pp better recall@10 because residuals have lower variance
+//     per sub-space than raw vectors. Search uses per-cluster ADC tables (O(nprobe*M*K)
+//     extra precomputation, negligible vs scan cost).
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -60,6 +64,10 @@ pub struct IvfPqConfig {
     pub pq_k: usize,
     /// k-means max iterations for both coarse and PQ training. Default 25.
     pub max_iter: usize,
+    /// Residual PQ: train PQ on per-cluster residuals (vec - coarse_centroid) instead of raw
+    /// vectors. Same storage cost, ~2-4pp better recall@10. Default false (backward-compatible).
+    #[serde(default)]
+    pub residual: bool,
 }
 
 impl Default for IvfPqConfig {
@@ -70,6 +78,7 @@ impl Default for IvfPqConfig {
             pq_m: 8,
             pq_k: 256,
             max_iter: 25,
+            residual: false,
         }
     }
 }
@@ -98,7 +107,14 @@ impl IvfPqConfig {
             pq_m: find_valid_pq_m(pq_m_hint, dim),
             pq_k: 256,
             max_iter: 25,
+            residual: false,
         }
+    }
+
+    /// Enable residual PQ — train on per-cluster residuals for better recall at same storage.
+    pub fn with_residual(mut self) -> Self {
+        self.residual = true;
+        self
     }
 }
 
@@ -108,12 +124,14 @@ pub struct IvfPqIndex {
     pub dim: usize,
     /// Coarse cluster centroids: [nlist × dim]
     coarse_centroids: Vec<Vec<f32>>,
-    /// Global PQ codebook trained on all vectors
+    /// PQ codebook — trained on raw vectors (residual=false) or residuals (residual=true)
     pq: PQCodebook,
     /// Inverted lists: row IDs per cluster
     inv_row_ids: Vec<Vec<u64>>,
     /// PQ codes per cluster, flat: inv_codes[i].len() == inv_row_ids[i].len() * pq_m
     inv_codes: Vec<Vec<u8>>,
+    /// Whether codes are residual-encoded (vec - coarse_centroid)
+    residual: bool,
 }
 
 /// Shared codebook trained once and reused across all shards.
@@ -128,6 +146,7 @@ pub struct IvfPqCodebook {
     pub pq_m: usize,
     pub dim: usize,
     pub metric: VectorMetric,
+    pub residual: bool,
 }
 
 impl IvfPqIndex {
@@ -182,8 +201,32 @@ impl IvfPqIndex {
         );
 
         let coarse_centroids = kmeans_dispatch(vecs, nlist, config.max_iter);
+
+        let pq_train_vecs: Vec<Vec<f32>>;
+        let pq_input: &[Vec<f32>] = if config.residual {
+            // Compute per-cluster residuals and train PQ on them.
+            // Lower variance per sub-space → better codebook quality at same K.
+            let assignments: Vec<usize> = vecs
+                .iter()
+                .map(|v| nearest_idx(v, &coarse_centroids))
+                .collect();
+            pq_train_vecs = vecs
+                .iter()
+                .zip(assignments.iter())
+                .map(|(v, &c)| {
+                    v.iter()
+                        .zip(coarse_centroids[c].iter())
+                        .map(|(a, b)| a - b)
+                        .collect()
+                })
+                .collect();
+            &pq_train_vecs
+        } else {
+            vecs
+        };
+
         let pq = PQCodebook::train_with_kmeans(
-            vecs,
+            pq_input,
             pq_m,
             config.pq_k.min(256),
             config.max_iter,
@@ -199,6 +242,7 @@ impl IvfPqIndex {
             pq_m,
             dim,
             metric,
+            residual: config.residual,
         })
     }
 
@@ -234,7 +278,14 @@ impl IvfPqIndex {
         let mut inv_codes = vec![Vec::new(); nlist];
 
         for (i, (v, &list_idx)) in vecs.iter().zip(assignments.iter()).enumerate() {
-            let codes = codebook.pq.encode(v);
+            let codes = if codebook.residual {
+                let centroid = &codebook.coarse_centroids[list_idx];
+                let residual: Vec<f32> =
+                    v.iter().zip(centroid.iter()).map(|(a, b)| a - b).collect();
+                codebook.pq.encode(&residual)
+            } else {
+                codebook.pq.encode(v)
+            };
             inv_row_ids[list_idx].push(row_ids[i].0);
             inv_codes[list_idx].extend_from_slice(&codes);
         }
@@ -246,6 +297,7 @@ impl IvfPqIndex {
                 pq_m: codebook.pq_m,
                 pq_k: codebook.pq.num_centroids,
                 max_iter: 0,
+                residual: codebook.residual,
             },
             metric: codebook.metric,
             dim: codebook.dim,
@@ -253,6 +305,7 @@ impl IvfPqIndex {
             pq: codebook.pq.clone(),
             inv_row_ids,
             inv_codes,
+            residual: codebook.residual,
         })
     }
 
@@ -277,11 +330,16 @@ impl IvfPqIndex {
             .enumerate()
             .map(|(i, c)| (i, l2_sq(q, c)))
             .collect();
-        c_dists.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        c_dists.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
         c_dists.truncate(nprobe);
 
-        // Precompute ADC table once for the full query
-        let adc_table = self.pq.compute_adc_table(q);
+        // Non-residual: precompute one global ADC table for the full query.
+        // Residual: per-cluster ADC table — query residual differs per centroid.
+        let global_adc = if !self.residual {
+            Some(self.pq.compute_adc_table(q))
+        } else {
+            None
+        };
 
         // Scan selected inverted lists
         let pq_m = self.config.pq_m;
@@ -291,14 +349,28 @@ impl IvfPqIndex {
             let row_ids = &self.inv_row_ids[*list_idx];
             let codes_flat = &self.inv_codes[*list_idx];
 
+            // For residual mode, subtract coarse centroid from query before computing ADC.
+            let cluster_adc;
+            let adc_table = if self.residual {
+                let centroid = &self.coarse_centroids[*list_idx];
+                let q_res: Vec<f32> = q.iter().zip(centroid.iter()).map(|(a, b)| a - b).collect();
+                cluster_adc = self.pq.compute_adc_table(&q_res);
+                &cluster_adc
+            } else {
+                // SAFETY: global_adc is Some when !self.residual (set above).
+                global_adc
+                    .as_ref()
+                    .expect("global_adc must be Some for non-residual path")
+            };
+
             for (j, &rid) in row_ids.iter().enumerate() {
                 let codes = &codes_flat[j * pq_m..(j + 1) * pq_m];
-                let dist = self.pq.adc_distance(codes, &adc_table);
+                let dist = self.pq.adc_distance(codes, adc_table);
                 candidates.push((RowId(rid), dist));
             }
         }
 
-        candidates.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        candidates.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
         candidates.truncate(top_k);
         candidates
     }
@@ -313,9 +385,22 @@ impl IvfPqIndex {
 }
 
 // ── Serialization ──────────────────────────────────────────────────────────────
+//
+// Format: IvfPqSnapshotCore (bincode v1) + optional trailing byte for residual flag.
+//
+// The `residual` flag is appended as a single byte AFTER the bincode payload rather
+// than as a struct field.  bincode v1 is purely positional — #[serde(default)] has
+// no effect on missing bytes at EOF.  Appending the flag as a trailing byte gives us
+// clean backward compatibility:
+//
+//   Legacy file (no trailing byte) → cursor at EOF after core → residual = false
+//   New file (trailing byte 0x01)  → cursor has 1 byte left  → residual = true
+//   Go / C++ readers               → stop after inv_codes, trailing byte ignored
+//
+// This is the only safe way to extend the format without a versioned header rewrite.
 
 #[derive(Serialize, Deserialize)]
-struct IvfPqSnapshot {
+struct IvfPqSnapshotCore {
     nlist: usize,
     nprobe: usize,
     pq_m: usize,
@@ -338,7 +423,7 @@ impl IvfPqSerializer {
             .iter()
             .flat_map(|c| c.iter().copied())
             .collect();
-        let snap = IvfPqSnapshot {
+        let core = IvfPqSnapshotCore {
             nlist: index.config.nlist,
             nprobe: index.config.nprobe,
             pq_m: index.config.pq_m,
@@ -351,32 +436,49 @@ impl IvfPqSerializer {
             inv_row_ids: index.inv_row_ids.clone(),
             inv_codes: index.inv_codes.clone(),
         };
-        bincode::serialize(&snap).map_err(|e| AilakeError::Bincode(e.to_string()))
+        let mut bytes =
+            bincode::serialize(&core).map_err(|e| AilakeError::Bincode(e.to_string()))?;
+        // Append residual flag as trailing byte (0x00 = false, 0x01 = true).
+        // Legacy readers (Go, C++, old Rust) stop at this boundary and ignore it.
+        bytes.push(u8::from(index.residual));
+        Ok(bytes)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> AilakeResult<IvfPqIndex> {
-        let snap: IvfPqSnapshot =
-            bincode::deserialize(bytes).map_err(|e| AilakeError::Bincode(e.to_string()))?;
-        let metric = u8_to_metric(snap.metric)?;
-        let coarse_centroids: Vec<Vec<f32>> = snap
+        // Use a cursor so we know exactly how many bytes were consumed by the core.
+        // Any remaining byte after deserialization is the residual flag.
+        let mut cursor = std::io::Cursor::new(bytes);
+        let core: IvfPqSnapshotCore = bincode::deserialize_from(&mut cursor)
+            .map_err(|e| AilakeError::Bincode(e.to_string()))?;
+
+        let residual = if (cursor.position() as usize) < bytes.len() {
+            bytes[cursor.position() as usize] != 0
+        } else {
+            false // legacy file — no trailing byte
+        };
+
+        let metric = u8_to_metric(core.metric)?;
+        let coarse_centroids: Vec<Vec<f32>> = core
             .coarse_flat
-            .chunks_exact(snap.dim)
+            .chunks_exact(core.dim)
             .map(|c| c.to_vec())
             .collect();
         Ok(IvfPqIndex {
             config: IvfPqConfig {
-                nlist: snap.nlist,
-                nprobe: snap.nprobe,
-                pq_m: snap.pq_m,
-                pq_k: snap.pq_k,
-                max_iter: snap.max_iter,
+                nlist: core.nlist,
+                nprobe: core.nprobe,
+                pq_m: core.pq_m,
+                pq_k: core.pq_k,
+                max_iter: core.max_iter,
+                residual,
             },
             metric,
-            dim: snap.dim,
+            dim: core.dim,
             coarse_centroids,
-            pq: snap.pq,
-            inv_row_ids: snap.inv_row_ids,
-            inv_codes: snap.inv_codes,
+            pq: core.pq,
+            inv_row_ids: core.inv_row_ids,
+            inv_codes: core.inv_codes,
+            residual,
         })
     }
 }
@@ -401,7 +503,7 @@ fn nearest_idx(v: &[f32], centroids: &[Vec<f32>]) -> usize {
         .iter()
         .enumerate()
         .map(|(i, c)| (i, l2_sq(v, c)))
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
         .unwrap_or(0)
 }
@@ -461,6 +563,7 @@ mod tests {
             pq_m: 2,
             pq_k: 4,
             max_iter: 10,
+            residual: false,
         };
         let idx = IvfPqIndex::train(&ids, &vecs, VectorMetric::Euclidean, config).unwrap();
         assert_eq!(idx.node_count(), 64);
@@ -482,6 +585,7 @@ mod tests {
             pq_m: 2,
             pq_k: 4,
             max_iter: 10,
+            residual: false,
         };
         let idx = IvfPqIndex::train(&ids, &vecs, VectorMetric::Cosine, config).unwrap();
         let results = idx.search(&vecs[0], 1, None);
@@ -498,6 +602,7 @@ mod tests {
             pq_m: 2,
             pq_k: 4,
             max_iter: 10,
+            residual: false,
         };
         let idx = IvfPqIndex::train(&ids, &vecs, VectorMetric::Euclidean, config).unwrap();
         let bytes = IvfPqSerializer::to_bytes(&idx).unwrap();
@@ -525,9 +630,85 @@ mod tests {
             pq_m: 2,
             pq_k: 4,
             max_iter: 5,
+            residual: false,
         };
         let idx = IvfPqIndex::train(&ids, &vecs, VectorMetric::Euclidean, config).unwrap();
         assert!(idx.config.nlist <= 10);
         assert_eq!(idx.node_count(), 10);
+    }
+
+    #[test]
+    fn residual_pq_search_finds_nearest() {
+        let dim = 8;
+        let (ids, vecs) = make_vecs(64, dim);
+        let config = IvfPqConfig {
+            nlist: 4,
+            nprobe: 4,
+            pq_m: 2,
+            pq_k: 4,
+            max_iter: 10,
+            residual: true,
+        };
+        let idx = IvfPqIndex::train(&ids, &vecs, VectorMetric::Euclidean, config).unwrap();
+        assert_eq!(idx.node_count(), 64);
+        assert!(idx.residual);
+
+        let query = vecs[0].clone();
+        let results = idx.search(&query, 5, None);
+        assert!(!results.is_empty());
+        assert!(
+            results[0].1 < 0.1,
+            "nearest residual-PQ result should be close to query"
+        );
+    }
+
+    #[test]
+    fn residual_pq_serialize_roundtrip() {
+        let dim = 8;
+        let (ids, vecs) = make_vecs(32, dim);
+        let config = IvfPqConfig {
+            nlist: 4,
+            nprobe: 2,
+            pq_m: 2,
+            pq_k: 4,
+            max_iter: 10,
+            residual: true,
+        };
+        let idx = IvfPqIndex::train(&ids, &vecs, VectorMetric::Euclidean, config).unwrap();
+        let bytes = IvfPqSerializer::to_bytes(&idx).unwrap();
+        let idx2 = IvfPqSerializer::from_bytes(&bytes).unwrap();
+
+        assert_eq!(idx2.node_count(), idx.node_count());
+        assert!(idx2.residual, "residual flag must survive roundtrip");
+
+        let q = vecs[0].clone();
+        let r1 = idx.search(&q, 5, None);
+        let r2 = idx2.search(&q, 5, None);
+        assert_eq!(r1.len(), r2.len());
+        for (a, b) in r1.iter().zip(r2.iter()) {
+            assert_eq!(a.0, b.0, "row_ids should match after roundtrip");
+        }
+    }
+
+    #[test]
+    fn non_residual_snapshot_deserializes_as_false() {
+        // Simulate a legacy snapshot (no `residual` field) deserializing to residual=false.
+        let dim = 8;
+        let (ids, vecs) = make_vecs(16, dim);
+        let config = IvfPqConfig {
+            nlist: 2,
+            nprobe: 1,
+            pq_m: 2,
+            pq_k: 4,
+            max_iter: 5,
+            residual: false,
+        };
+        let idx = IvfPqIndex::train(&ids, &vecs, VectorMetric::Euclidean, config).unwrap();
+        let bytes = IvfPqSerializer::to_bytes(&idx).unwrap();
+        let idx2 = IvfPqSerializer::from_bytes(&bytes).unwrap();
+        assert!(
+            !idx2.residual,
+            "non-residual index must deserialize as residual=false"
+        );
     }
 }

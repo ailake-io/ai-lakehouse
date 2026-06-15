@@ -353,6 +353,8 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         }
     }
 
@@ -393,6 +395,8 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         };
 
         let writer = AilakeFileWriter::new(policy1.clone());

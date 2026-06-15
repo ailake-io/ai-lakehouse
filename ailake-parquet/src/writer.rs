@@ -182,7 +182,15 @@ impl ParquetVectorWriter {
 
         let total_vecs: usize = embeddings_per_row.iter().map(|r| r.len()).sum();
         let chunks: Vec<Option<&[u8]>> = flat_bytes.chunks_exact(bytes_per_vec).map(Some).collect();
-        assert_eq!(chunks.len(), total_vecs);
+        if chunks.len() != total_vecs {
+            return Err(AilakeError::Parquet(format!(
+                "multi-vec encoding produced {} chunks but expected {} (dim={} precision={} bytes)",
+                chunks.len(),
+                total_vecs,
+                self.policy.dim,
+                bytes_per_vec,
+            )));
+        }
 
         // Build inner FixedSizeBinaryArray (all vectors concatenated)
         let values = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
@@ -303,6 +311,8 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         }
     }
 
@@ -317,6 +327,8 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         }
     }
 

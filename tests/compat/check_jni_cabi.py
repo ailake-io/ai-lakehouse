@@ -138,6 +138,25 @@ with tempfile.TemporaryDirectory() as tmp:
     print(f"PASS (search): top-1 row_id={best['row_id']} distance={best['distance']:.6f}")
     print(f"      results={[(r['row_id'], round(r['distance'], 4)) for r in results]}")
 
+# ── Write with embedding_model field ──────────────────────────────────────────
+
+with tempfile.TemporaryDirectory() as tmp:
+    embeddings = [make_embedding(i) for i in range(N)]
+    resp = _call(lib.ailake_write_batch_json, {
+        "warehouse": tmp,
+        "namespace": "default",
+        "table": "model_test",
+        "vec_col": "embedding",
+        "dim": DIM,
+        "metric": "cosine",
+        "precision": "f16",
+        "embedding_model": "test-model@v2",
+        "ids": list(range(N)),
+        "embeddings": embeddings,
+    })
+    assert resp.get("ok"), f"FAIL: write with embedding_model failed: {resp}"
+    print(f"PASS (embedding_model write): snapshot_id={resp['snapshot_id']}")
+
 # ── Optional: write Spark/Trino fixture (table="table") ───────────────────────
 
 spark_trino_fixture = os.environ.get("AILAKE_SPARK_TRINO_FIXTURE")

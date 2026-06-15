@@ -22,10 +22,11 @@ use ailake_catalog::{
     hadoop::HadoopCatalog,
     provider::{CatalogProvider, TableIdent},
 };
-use ailake_core::{VectorMetric, VectorStoragePolicy};
+use ailake_core::{EmbeddingModelInfo, VectorMetric, VectorStoragePolicy};
 use ailake_query::{
     fetch_rows as rs_fetch_rows, search as rs_search, Chunk, ContextAssembler,
-    ContextAssemblerConfig, SearchConfig, TableWriter as RsTableWriter,
+    ContextAssemblerConfig, EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy,
+    ProgressFn, SearchConfig, TableWriter as RsTableWriter,
 };
 use ailake_store::{store::Store, LocalStore};
 
@@ -53,6 +54,8 @@ fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>)
 pub struct TableWriter {
     inner: Option<RsTableWriter>,
     runtime: tokio::runtime::Runtime,
+    /// Optional Python callable used for Pattern B: embed_fn(texts) -> list[list[float]]
+    embed_fn: Option<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -60,8 +63,9 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None))]
     fn new(
+        py: Python<'_>,
         path: &str,
         vector_column: &str,
         dim: u32,
@@ -70,11 +74,15 @@ impl TableWriter {
         hnsw_m: Option<u32>,
         hnsw_ef_construction: Option<u32>,
         pq_only: bool,
+        ivf_residual: bool,
+        embedding_model: Option<&str>,
+        embedding_model_version: Option<&str>,
+        embed_fn: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
-            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} pq_only={}",
-            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction, pq_only
+            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} pq_only={} ivf_residual={} embedding_model={:?}",
+            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction, pq_only, ivf_residual, embedding_model
         );
         let mut policy =
             VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
@@ -82,9 +90,18 @@ impl TableWriter {
         policy.hnsw_m = hnsw_m;
         policy.hnsw_ef_construction = hnsw_ef_construction;
         policy.keep_raw_for_reranking = !pq_only;
+        policy.ivf_residual = ivf_residual;
+        if let Some(model_name) = embedding_model {
+            let mut model_info = EmbeddingModelInfo::new(model_name).with_dim(dim);
+            if let Some(version) = embedding_model_version {
+                model_info = model_info.with_version(version);
+            }
+            policy.embedding_model = Some(model_info);
+        }
         let (catalog, store) = local_catalog_store(path);
         let table = TableIdent::new("default", "table");
 
+        let stored_embed_fn = embed_fn.map(|f| f.clone_ref(py));
         let writer = rt
             .block_on(RsTableWriter::create_or_open(catalog, store, policy, table))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -92,6 +109,7 @@ impl TableWriter {
         Ok(Self {
             inner: Some(writer),
             runtime: rt,
+            embed_fn: stored_embed_fn,
         })
     }
 
@@ -99,8 +117,35 @@ impl TableWriter {
     ///
     /// Args:
     ///   texts: list[str] — text content for each row
-    ///   embeddings: list[list[float]] — one embedding per row
-    fn write_batch(&mut self, texts: Vec<String>, embeddings: Vec<Vec<f32>>) -> PyResult<()> {
+    ///   embeddings: list[list[float]] or None — one embedding per row.
+    ///               When None, embed_fn set at construction time is called automatically
+    ///               (Pattern B). Raises ValueError when embeddings is None and no embed_fn.
+    #[pyo3(signature = (texts, embeddings=None))]
+    fn write_batch(
+        &mut self,
+        py: Python<'_>,
+        texts: Vec<String>,
+        embeddings: Option<Vec<Vec<f32>>>,
+    ) -> PyResult<()> {
+        let embs: Vec<Vec<f32>> = match embeddings {
+            Some(e) => e,
+            None => {
+                let embed_fn = self.embed_fn.as_ref().ok_or_else(|| {
+                    PyValueError::new_err(
+                        "embeddings is required when embed_fn was not set on TableWriter",
+                    )
+                })?;
+                let py_texts =
+                    PyList::new(py, &texts).map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let result = embed_fn
+                    .call1(py, (py_texts,))
+                    .map_err(|e| PyValueError::new_err(format!("embed_fn error: {e}")))?;
+                result.bind(py).extract::<Vec<Vec<f32>>>().map_err(|e| {
+                    PyValueError::new_err(format!("embed_fn must return list[list[float]]: {e}"))
+                })?
+            }
+        };
+
         let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
         let text_arr = StringArray::from(texts);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
@@ -112,9 +157,41 @@ impl TableWriter {
             .ok_or_else(|| PyValueError::new_err("TableWriter already committed"))?;
 
         self.runtime
-            .block_on(writer.write_batch(&batch, &embeddings))
+            .block_on(writer.write_batch(&batch, &embs))
             .map_err(|e| {
                 warn!("ailake-py: write_batch failed: {}", e);
+                PyValueError::new_err(e.to_string())
+            })
+    }
+
+    /// Write a batch with auto index selection and deferred (background) index build.
+    ///
+    /// Persists Parquet immediately (~200k vec/s). Selects IVF-PQ when a GPU or ≥8 CPU
+    /// cores are present and batch ≥5 000 vectors; falls back to HNSW. Index built in a
+    /// background task — shard is served via flat scan until the index is ready.
+    ///
+    /// Args:
+    ///   texts: list[str] — text content for each row
+    ///   embeddings: list[list[float]] — one embedding per row
+    fn write_batch_auto_deferred(
+        &mut self,
+        texts: Vec<String>,
+        embeddings: Vec<Vec<f32>>,
+    ) -> PyResult<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let text_arr = StringArray::from(texts);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        let writer = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TableWriter already committed"))?;
+
+        self.runtime
+            .block_on(writer.write_batch_auto_deferred(&batch, &embeddings))
+            .map_err(|e| {
+                warn!("ailake-py: write_batch_auto_deferred failed: {}", e);
                 PyValueError::new_err(e.to_string())
             })
     }
@@ -364,6 +441,110 @@ fn assemble_context(
     Ok(ctx.text)
 }
 
+/// Migrate an AI-Lake table from one embedding model to another.
+///
+/// Args:
+///   path: filesystem path to the table root (same as TableWriter path)
+///   old_column: name of the existing embedding column (e.g. "embedding")
+///   new_column: name for the migrated embedding column (e.g. "embedding_v2")
+///   text_column: Parquet column that holds the raw text to re-embed (default "chunk_text")
+///   embed_fn: callable(list[str]) -> list[list[float]] — your embedding model
+///   strategy: "atomic_replace" (lower storage) or "dual_write_then_cutover" (zero downtime)
+///   batch_size: number of texts per embed_fn call (default 512)
+///   new_model: optional model name stored in Iceberg properties after migration
+///   new_model_version: optional version tag for the new model
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (path, old_column, new_column, embed_fn, text_column="chunk_text", strategy="dual_write_then_cutover", batch_size=512, new_model=None, new_model_version=None, on_progress=None))]
+fn migrate_embeddings(
+    py: Python<'_>,
+    path: &str,
+    old_column: &str,
+    new_column: &str,
+    embed_fn: Py<PyAny>,
+    text_column: &str,
+    strategy: &str,
+    batch_size: usize,
+    new_model: Option<&str>,
+    new_model_version: Option<&str>,
+    on_progress: Option<Py<PyAny>>,
+) -> PyResult<()> {
+    let migration_strategy = match strategy {
+        "atomic_replace" => MigrationStrategy::AtomicReplace,
+        "dual_write_then_cutover" => MigrationStrategy::DualWriteThenCutover,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown strategy '{other}' — use atomic_replace or dual_write_then_cutover"
+            )))
+        }
+    };
+
+    let new_model_info = new_model.map(|name| {
+        let mut info = EmbeddingModelInfo::new(name);
+        if let Some(v) = new_model_version {
+            info = info.with_version(v);
+        }
+        info
+    });
+
+    // Wrap Python callable as a Rust closure.
+    // Migration runs via block_on on the current thread — the GIL is held throughout.
+    // We use Python::attach (pyo3 0.29 rename of with_gil) to re-acquire the GIL
+    // token inside the closure; this is safe because block_on does not release the GIL.
+    let embed_fn_arc: EmbedFn = {
+        let embed_fn = embed_fn.clone_ref(py);
+        Arc::new(move |texts: &[String]| {
+            Python::attach(|py| {
+                let py_texts = PyList::new(py, texts)
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+                let result = embed_fn
+                    .call1(py, (py_texts,))
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+                // extract Vec<Vec<f32>> directly — works for list[list[float]] and np.ndarray
+                let vecs: Vec<Vec<f32>> = result.bind(py).extract().map_err(|e| {
+                    ailake_core::AilakeError::InvalidArgument(format!(
+                        "embed_fn must return list[list[float]]: {e}"
+                    ))
+                })?;
+                Ok(vecs)
+            })
+        })
+    };
+
+    let progress_arc: Option<ProgressFn> = on_progress.map(|cb| {
+        let cb = cb.clone_ref(py);
+        let arc: ProgressFn = Arc::new(move |p: MigrationProgress| {
+            Python::attach(|py| {
+                let kwargs = PyDict::new(py);
+                let _ = kwargs.set_item("files_done", p.files_done);
+                let _ = kwargs.set_item("files_total", p.files_total);
+                let _ = kwargs.set_item("rows_migrated", p.rows_migrated);
+                let _ = cb.call(py, (), Some(&kwargs));
+            });
+        });
+        arc
+    });
+
+    let (catalog, store) = local_catalog_store(path);
+    let table = TableIdent::new("default", "table");
+
+    let job = MigrationJob {
+        table,
+        old_column: old_column.to_string(),
+        new_column: new_column.to_string(),
+        text_column: text_column.to_string(),
+        embed_fn: embed_fn_arc,
+        strategy: migration_strategy,
+        batch_size,
+        new_model: new_model_info,
+        on_progress: progress_arc,
+    };
+
+    let rt = rt()?;
+    rt.block_on(job.run(catalog, store))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 fn parse_metric(s: &str) -> PyResult<VectorMetric> {
     match s {
         "cosine" => Ok(VectorMetric::Cosine),
@@ -382,5 +563,6 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(search, m)?)?;
     m.add_function(wrap_pyfunction!(search_with_data, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_context, m)?)?;
+    m.add_function(wrap_pyfunction!(migrate_embeddings, m)?)?;
     Ok(())
 }

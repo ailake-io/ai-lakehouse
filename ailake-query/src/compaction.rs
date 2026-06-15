@@ -157,7 +157,11 @@ impl CompactionExecutor {
         }
 
         // Concatenate all row groups into one batch
-        let merged_batch = concat_batches(schema.unwrap(), &all_batches)?;
+        // SAFETY: schema is set whenever a batch is pushed; all_batches non-empty above.
+        let merged_batch = concat_batches(
+            schema.expect("schema set because all_batches is non-empty"),
+            &all_batches,
+        )?;
         let record_count = merged_batch.num_rows() as u64;
 
         // Write merged file with adaptive index selection.
@@ -216,7 +220,7 @@ impl CompactionExecutor {
 
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|e| e.duration()) // handle misconfigured system clocks
             .as_millis();
         let output_path = format!("{output_prefix}/compacted-{ts}.parquet");
 
@@ -284,6 +288,7 @@ mod tests {
                 extra_vector_indexes: vec![],
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
+                embedding_model: None,
             })
             .collect();
         assert!(planner.plan(&files).is_empty());
@@ -310,6 +315,7 @@ mod tests {
                 extra_vector_indexes: vec![],
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
+                embedding_model: None,
             },
             DataFileEntry {
                 path: "large.parquet".into(),
@@ -324,6 +330,7 @@ mod tests {
                 extra_vector_indexes: vec![],
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
+                embedding_model: None,
             },
             DataFileEntry {
                 path: "also-small.parquet".into(),
@@ -338,6 +345,7 @@ mod tests {
                 extra_vector_indexes: vec![],
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
+                embedding_model: None,
             },
         ];
         let selected = planner.plan(&files);
@@ -367,6 +375,8 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         };
 
         // Write two small files
@@ -407,6 +417,7 @@ mod tests {
                 extra_vector_indexes: vec![],
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
+                embedding_model: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -421,6 +432,7 @@ mod tests {
                 extra_vector_indexes: vec![],
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
+                embedding_model: None,
             },
         ];
 

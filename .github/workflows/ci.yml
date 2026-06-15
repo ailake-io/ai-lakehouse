@@ -189,3 +189,5 @@ jobs:
         run: gradle -p trino-plugin test --no-daemon --no-configuration-cache
       - name: Run Spark plugin unit tests
         run: gradle -p spark-plugin test --no-daemon --no-configuration-cache
+      - name: Run Flink plugin unit tests
+        run: gradle -p ailake-flink test --no-daemon --no-configuration-cache

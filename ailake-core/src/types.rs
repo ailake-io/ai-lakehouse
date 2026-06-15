@@ -64,6 +64,138 @@ pub enum VectorMetric {
     NormalizedCosine = 3,
 }
 
+/// Identifies the embedding model used to produce vectors in a table or file.
+/// Stored in Iceberg properties so any reader can detect model changes before
+/// mixing incompatible vectors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingModelInfo {
+    /// Human-readable model identifier, e.g. "text-embedding-3-small" or "my-model-v2".
+    pub name: String,
+    /// Optional model version or checkpoint tag, e.g. "2024-01".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Expected embedding dimension — used to detect model/table mismatches per-file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dim: Option<u32>,
+    /// Expected distance metric — used to detect model/table mismatches per-file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<VectorMetric>,
+}
+
+impl EmbeddingModelInfo {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: None,
+            dim: None,
+            metric: None,
+        }
+    }
+
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+
+    pub fn with_dim(mut self, dim: u32) -> Self {
+        self.dim = Some(dim);
+        self
+    }
+
+    pub fn with_metric(mut self, metric: VectorMetric) -> Self {
+        self.metric = Some(metric);
+        self
+    }
+
+    /// Canonical key stored in Iceberg properties.
+    pub fn property_key() -> &'static str {
+        "ailake.embedding-model"
+    }
+
+    /// Returns "<name>" or "<name>@<version>" for display / property value.
+    pub fn to_property_value(&self) -> String {
+        match &self.version {
+            Some(v) => format!("{}@{}", self.name, v),
+            None => self.name.clone(),
+        }
+    }
+
+    /// Parse back from a property value written by `to_property_value`.
+    pub fn from_property_value(s: &str) -> Self {
+        if let Some((name, version)) = s.split_once('@') {
+            Self {
+                name: name.to_string(),
+                version: Some(version.to_string()),
+                dim: None,
+                metric: None,
+            }
+        } else {
+            Self {
+                name: s.to_string(),
+                version: None,
+                dim: None,
+                metric: None,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedding_model_info_roundtrip_with_version() {
+        let info = EmbeddingModelInfo::new("text-embedding-3-small").with_version("2024-01");
+        assert_eq!(info.to_property_value(), "text-embedding-3-small@2024-01");
+        let parsed = EmbeddingModelInfo::from_property_value("text-embedding-3-small@2024-01");
+        // from_property_value only restores name+version; dim/metric are not in the property string
+        assert_eq!(parsed.name, info.name);
+        assert_eq!(parsed.version, info.version);
+    }
+
+    #[test]
+    fn embedding_model_info_with_dim_and_metric() {
+        use super::VectorMetric;
+        let info = EmbeddingModelInfo::new("my-model")
+            .with_dim(1536)
+            .with_metric(VectorMetric::Cosine);
+        assert_eq!(info.dim, Some(1536));
+        assert_eq!(info.metric, Some(VectorMetric::Cosine));
+        // property_value only encodes name (no dim/metric)
+        assert_eq!(info.to_property_value(), "my-model");
+    }
+
+    #[test]
+    fn embedding_model_info_roundtrip_no_version() {
+        let info = EmbeddingModelInfo::new("my-model");
+        assert_eq!(info.to_property_value(), "my-model");
+        assert_eq!(EmbeddingModelInfo::from_property_value("my-model"), info);
+    }
+
+    #[test]
+    fn embedding_model_info_property_key() {
+        assert_eq!(EmbeddingModelInfo::property_key(), "ailake.embedding-model");
+    }
+
+    #[test]
+    fn embedding_model_info_fixture_value() {
+        // Exact value used by write_fixture.py → Go integration test.
+        let parsed = EmbeddingModelInfo::from_property_value("fixture-model@v1");
+        assert_eq!(parsed.name, "fixture-model");
+        assert_eq!(parsed.version.as_deref(), Some("v1"));
+        assert_eq!(parsed.to_property_value(), "fixture-model@v1");
+    }
+
+    #[test]
+    fn embedding_model_info_first_at_only() {
+        // split_once('@') splits at first '@'; remainder goes into version.
+        let parsed = EmbeddingModelInfo::from_property_value("model@v1@extra");
+        assert_eq!(parsed.name, "model");
+        assert_eq!(parsed.version.as_deref(), Some("v1@extra"));
+    }
+}
+
 /// Per-file geometric statistics used for pruning
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Centroid {

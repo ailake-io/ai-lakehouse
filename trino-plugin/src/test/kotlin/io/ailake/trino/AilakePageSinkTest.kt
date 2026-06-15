@@ -32,4 +32,22 @@ class AilakePageSinkTest {
         // No rows added; abort must not throw
         assertDoesNotThrow { sink.abort() }
     }
+
+    @Test
+    fun sinkWithEmbeddingModelFinishesGracefully() {
+        val h = AilakeIngestTableHandle(
+            tableUri       = "file:///tmp/test-table",
+            namespace      = "default",
+            tableName      = "docs",
+            vectorColumn   = "embedding",
+            dim            = 4,
+            metric         = "cosine",
+            precision      = "f16",
+            embeddingModel = "text-embedding-3-small@v1",
+        )
+        val sink = AilakePageSink(h)
+        // Native lib absent — should return empty, not throw
+        val fragments = sink.finish().get()
+        assertTrue(fragments.isEmpty())
+    }
 }

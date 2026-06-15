@@ -100,6 +100,7 @@ resp = _call_write({
     "dim": DIM,
     "metric": "cosine",
     "precision": "f16",
+    "embedding_model": "fixture-model@v1",
     "ids": ids,
     "embeddings": embeddings,
 })

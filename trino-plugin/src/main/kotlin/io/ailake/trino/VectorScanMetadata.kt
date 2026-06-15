@@ -28,6 +28,7 @@ class VectorScanMetadata(
     private val precision: String,
     private val namespace: String,
     private val tableName: String,
+    private val embeddingModel: String? = null,
 ) : ConnectorMetadata {
 
     companion object {
@@ -65,7 +66,7 @@ class VectorScanMetadata(
         if (schemaTableName.schemaName != SCHEMA) return null
         return when (schemaTableName.tableName) {
             TABLE_SEARCH -> VectorScanTableHandle(tableUri, vectorColumn, dim)
-            TABLE_INGEST -> AilakeIngestTableHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision)
+            TABLE_INGEST -> AilakeIngestTableHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel)
             else -> null
         }
     }

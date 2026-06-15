@@ -428,6 +428,7 @@ feat(ailake-index): add IVF-PQ adaptive nlist selection
 
 | Document | What it covers |
 |---|---|
+| [`docs/WHY_AILAKE.md`](./docs/WHY_AILAKE.md) | Why AI-Lake — technical case vs Iceberg alone, LanceDB, and external vector DBs |
 | [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md) | Test categories, fixtures, CI matrix, manual Actions trigger order |
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Rust conventions, error handling, unsafe policy |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | ADR log — why key architectural choices were made |

@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Iterable, Sequence, Union
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence, Union
 
 from ailake._ailake import (  # type: ignore[import]
     TableWriter as _TableWriter,
     assemble_context,
+    migrate_embeddings,
     search as _search_raw,
     search_with_data as _search_with_data,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "SearchQuery",
     "TableWriter",
     "assemble_context",
+    "migrate_embeddings",
 ]
 
 # Backward-compat re-export: ailake.TableWriter still works.
@@ -273,6 +275,11 @@ class Table:
         pre_normalize: bool = False,
         hnsw_m: int | None = None,
         hnsw_ef_construction: int | None = None,
+        pq_only: bool = False,
+        ivf_residual: bool = False,
+        embedding_model: str | None = None,
+        embedding_model_version: str | None = None,
+        embed_fn: Optional[Callable[[list[str]], list[list[float]]]] = None,
     ) -> None:
         self._path = path
         self._vector_column = vector_column
@@ -281,6 +288,11 @@ class Table:
         self._pre_normalize = pre_normalize
         self._hnsw_m = hnsw_m
         self._hnsw_ef = hnsw_ef_construction
+        self._pq_only = pq_only
+        self._ivf_residual = ivf_residual
+        self._embedding_model = embedding_model
+        self._embedding_model_version = embedding_model_version
+        self._embed_fn = embed_fn
         self._writer = _TableWriter(
             path,
             vector_column=vector_column,
@@ -289,6 +301,11 @@ class Table:
             pre_normalize=pre_normalize,
             hnsw_m=hnsw_m,
             hnsw_ef_construction=hnsw_ef_construction,
+            pq_only=pq_only,
+            ivf_residual=ivf_residual,
+            embedding_model=embedding_model,
+            embedding_model_version=embedding_model_version,
+            embed_fn=embed_fn,
         )
 
     # ── write ─────────────────────────────────────────────────────────────────
@@ -296,20 +313,24 @@ class Table:
     def insert(
         self,
         texts: list[str],
-        embeddings: _Embeddings,
+        embeddings: Optional[_Embeddings] = None,
     ) -> "Table":
         """Buffer a batch for writing.  Call ``commit()`` to persist.
 
         Args:
             texts: one string per row.
             embeddings: ``list[list[float]]`` or any array with a ``.tolist()``
-                        method (numpy, torch, etc.).
+                        method (numpy, torch, etc.).  May be omitted when
+                        *embed_fn* was passed to ``__init__``.
         """
-        _emb: list[list[float]] = (
-            embeddings.tolist()  # type: ignore[union-attr]
-            if hasattr(embeddings, "tolist")
-            else [list(row) for row in embeddings]
-        )
+        if embeddings is not None:
+            _emb: list[list[float]] | None = (
+                embeddings.tolist()  # type: ignore[union-attr]
+                if hasattr(embeddings, "tolist")
+                else [list(row) for row in embeddings]
+            )
+        else:
+            _emb = None
         self._writer.write_batch(texts, _emb)
         return self
 
@@ -319,6 +340,44 @@ class Table:
         Returns the new snapshot id.
         """
         return self._writer.commit()
+
+    def write_batch_auto_deferred(
+        self,
+        texts: list[str],
+        embeddings: _Embeddings,
+    ) -> "Table":
+        """Deferred-index write — Parquet persisted immediately (~200k vec/s).
+
+        Selects IVF-PQ when a GPU or ≥8 CPU cores are detected and the batch
+        has ≥5 000 vectors; falls back to HNSW otherwise.  Index is built in a
+        background thread — shard is served via flat scan until the index is ready.
+
+        Args:
+            texts: one string per row.
+            embeddings: ``list[list[float]]`` or any array with a ``.tolist()`` method.
+        """
+        _emb: list[list[float]] = (
+            embeddings.tolist()  # type: ignore[union-attr]
+            if hasattr(embeddings, "tolist")
+            else [list(row) for row in embeddings]
+        )
+        self._writer.write_batch_auto_deferred(texts, _emb)
+        return self
+
+    async def write_batch_auto_deferred_async(
+        self,
+        texts: list[str],
+        embeddings: _Embeddings,
+    ) -> "Table":
+        """Async variant of :meth:`write_batch_auto_deferred`."""
+        _emb: list[list[float]] = (
+            embeddings.tolist()  # type: ignore[union-attr]
+            if hasattr(embeddings, "tolist")
+            else [list(row) for row in embeddings]
+        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._writer.write_batch_auto_deferred, texts, _emb)
+        return self
 
     async def insert_async(
         self,
@@ -415,6 +474,11 @@ def open_table(
     pre_normalize: bool = False,
     hnsw_m: int | None = None,
     hnsw_ef_construction: int | None = None,
+    pq_only: bool = False,
+    ivf_residual: bool = False,
+    embedding_model: str | None = None,
+    embedding_model_version: str | None = None,
+    embed_fn: Optional[Callable[[list[str]], list[list[float]]]] = None,
 ) -> Table:
     """Open or create an AI-Lake table at *path*.
 
@@ -427,6 +491,11 @@ def open_table(
         pre_normalize: Normalise vectors to unit-L2 at write time (~12-20 % search speedup).
         hnsw_m: HNSW graph degree *M* per layer.
         hnsw_ef_construction: HNSW build-time beam width.
+        embedding_model: Model identifier stored in ``ailake.embedding-model`` Iceberg
+                         property (e.g. ``"text-embedding-3-small"``).
+        embedding_model_version: Optional version tag (e.g. ``"2024-01"``).
+        embed_fn: ``Callable[[list[str]], list[list[float]]]`` — auto-embed callable.
+                  When set, ``insert(texts)`` may be called without *embeddings*.
     """
     return Table(
         path,
@@ -436,6 +505,11 @@ def open_table(
         pre_normalize=pre_normalize,
         hnsw_m=hnsw_m,
         hnsw_ef_construction=hnsw_ef_construction,
+        pq_only=pq_only,
+        ivf_residual=ivf_residual,
+        embedding_model=embedding_model,
+        embedding_model_version=embedding_model_version,
+        embed_fn=embed_fn,
     )
 
 

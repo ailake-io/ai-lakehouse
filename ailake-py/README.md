@@ -26,6 +26,8 @@ table = ailake.open_table(
     pre_normalize=True,       # normalize at write time; enables fast 1-dot(a,b) path
     hnsw_m=16,                # HNSW connections per node (default 16)
     hnsw_ef_construction=150,
+    embedding_model="text-embedding-3-small",  # tracked in Iceberg metadata
+    embedding_model_version="v1",
 )
 
 texts = ["Document about AI", "Another document"]
@@ -33,6 +35,14 @@ embeddings = np.random.rand(2, 1536).astype(np.float32)
 
 table.insert(texts, embeddings)   # accepts list or numpy array
 snapshot_id = table.commit()
+
+# Pattern B — auto-embed without passing embeddings explicitly
+def my_embed(texts: list[str]) -> list[list[float]]:
+    return np.random.rand(len(texts), 1536).tolist()  # replace with real model
+
+table2 = ailake.open_table("./my_table2", dim=1536, embed_fn=my_embed)
+table2.insert(["Document about AI", "Another document"])  # embed_fn called automatically
+table2.commit()
 
 # Pointer-only search (default — backward-compatible)
 df      = table.search(embeddings[0], top_k=10).to_pandas()   # row_id, distance, file
@@ -119,15 +129,22 @@ Opens or creates an AI-Lake table at `path`.
 | `pre_normalize` | `False` | Normalize to unit L2 at write; enables `1-dot(a,b)` fast path (~12-20 % speedup) |
 | `hnsw_m` | `None` (=16) | HNSW connections per node |
 | `hnsw_ef_construction` | `None` (=150) | HNSW build pool size |
+| `pq_only` | `False` | Discard raw F16 vectors after index build — only PQ codes stored. ~98 % storage reduction; reranking disabled; recall@10 ~93-95 %. |
+| `ivf_residual` | `False` | Encode `vec − cluster_centroid` per IVF cell (residual PQ). Same storage as standard PQ; ~2-4 pp better recall@10. |
+| `embedding_model` | `None` | Embedding model name stored in Iceberg properties (`ailake.embedding-model`). Used for mismatch detection and migration tracking. |
+| `embedding_model_version` | `None` | Optional model version. Stored as `"<name>@<version>"` in Iceberg properties. |
+| `embed_fn` | `None` | Auto-embed callable `list[str] → list[list[float]]`. When set, `insert(texts)` and `write_batch(texts)` can be called without passing `embeddings` — the callable is invoked automatically. |
 
 ### `Table`
 
 | Method | Description |
 |---|---|
-| `insert(texts, embeddings) → Table` | Buffer a batch. `embeddings`: `list[list[float]]` or numpy array. |
+| `insert(texts, embeddings=None) → Table` | Buffer a batch. `embeddings`: `list[list[float]]` or numpy array. When `embed_fn` was set on `open_table()`, `embeddings` may be omitted — the callable is invoked automatically. |
+| `write_batch_auto_deferred(texts, embeddings=None) → Table` | Deferred write — Parquet persisted immediately (~200k vec/s); index (HNSW or IVF-PQ, auto-selected) built in a background thread. Shard served via flat scan until index ready. |
 | `commit() → int` | Persist as a new Iceberg snapshot; returns snapshot ID. |
-| `search(query, top_k=10, fetch_data=False) → SearchQuery` | Lazy, chainable search. `query`: `list[float]` or numpy array. Set `fetch_data=True` to return full row data. |
+| `search(query, top_k=10, fetch_data=False) → SearchQuery` | Lazy, chainable search. `query`: `list[float]` or numpy array. Set `fetch_data=True` to return full row data. Raises `ModelMismatch` if query dim ≠ table dim. |
 | `insert_async(...)` | Async variant of `insert`. |
+| `write_batch_auto_deferred_async(...)` | Async variant of `write_batch_auto_deferred`. |
 | `commit_async() → int` | Async variant of `commit`. |
 
 `Table` is a context manager: `with ailake.open_table(...) as t: ...`
@@ -174,17 +191,98 @@ df = table.search(query, top_k=10, fetch_data=True).to_pandas()
 
 Module-level search returning the same chainable `SearchQuery`.
 
-### `TableWriter` (legacy — still supported)
+### `migrate_embeddings(path, old_column, new_column, embed_fn, *, ...)`
+
+Re-embeds all chunks in a table with a new model, committing the result as a new Iceberg snapshot.
 
 ```python
-writer = ailake.TableWriter(path, vector_column="embedding", dim=1536, metric="cosine")
+ailake.migrate_embeddings(
+    path         = "s3://my-lake/docs/",
+    old_column   = "embedding",        # existing vector column
+    new_column   = "embedding_v2",     # destination column (may be same name)
+    embed_fn     = my_embed_fn,        # callable: list[str] → list[list[float]]
+    text_column  = "chunk_text",       # source text column
+    strategy     = "dual_write_then_cutover",  # or "atomic_replace"
+    batch_size   = 512,
+    new_model    = "text-embedding-3-large",
+    new_model_version = "v1",
+    on_progress  = lambda *, files_done, files_total, rows_migrated: print(
+        f"{files_done}/{files_total} files, {rows_migrated} rows"
+    ),
+)
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `path` | required | Table root URI |
+| `old_column` | required | Existing vector column to migrate from |
+| `new_column` | required | Destination vector column |
+| `embed_fn` | required | `list[str] → list[list[float]]` callable |
+| `text_column` | `"chunk_text"` | Parquet column containing the source text |
+| `strategy` | `"dual_write_then_cutover"` | `"dual_write_then_cutover"` (zero downtime, 2× peak storage) or `"atomic_replace"` (lower storage, brief mixed-model window) |
+| `batch_size` | `512` | Rows passed to `embed_fn` per call |
+| `new_model` | `None` | Model name written to `ailake.embedding-model` after migration |
+| `new_model_version` | `None` | Optional version suffix |
+| `on_progress` | `None` | Callable invoked after each file with keyword args `files_done`, `files_total`, `rows_migrated` |
+
+### `TableWriter` (low-level — use `open_table()` for most cases)
+
+```python
+# Standard HNSW write with model tracking
+writer = ailake.TableWriter(
+    path, dim=1536, metric="cosine",
+    embedding_model="text-embedding-3-small",
+    embedding_model_version="v1",
+)
 writer.write_batch(texts, embeddings)
 snapshot_id = writer.commit()
+
+# Pattern B — auto-embed: omit embeddings, SDK calls embed_fn
+writer = ailake.TableWriter(
+    path, dim=1536,
+    embed_fn=lambda texts: my_model.encode(texts).tolist(),
+)
+writer.write_batch(texts)  # no embeddings arg needed
+writer.commit()
+
+# PQ-only — raw vectors discarded after index build (~98 % storage reduction)
+writer = ailake.TableWriter(path, dim=1536, metric="cosine", pq_only=True)
+writer.write_batch(texts, embeddings)
+writer.commit()
+
+# Residual PQ — per-cluster encoding for better recall
+writer = ailake.TableWriter(path, dim=1536, metric="cosine", ivf_residual=True)
+writer.write_batch(texts, embeddings)
+writer.commit()
+
+# Deferred write — Parquet immediate, index background (~200k vec/s)
+writer = ailake.TableWriter(path, dim=1536, metric="cosine")
+writer.write_batch_auto_deferred(texts, embeddings)
+writer.commit()
 ```
+
+`TableWriter` parameters: same as `open_table()` (includes `pq_only`, `ivf_residual`, `pre_normalize`, `hnsw_m`, `hnsw_ef_construction`, `embedding_model`, `embedding_model_version`, `embed_fn`).
 
 ### `assemble_context(chunks, max_tokens=4096, dedup_threshold=0.05) → str`
 
 Assembles chunk dicts into structured XML for LLM input. Deduplicates near-identical chunks within the token budget.
+
+## Storage modes and index types
+
+| Mode | `pq_only` | `ivf_residual` | Storage (dim=1536, 1M rows) | Reranking | Recall@10 |
+|---|---|---|---|---|---|
+| HNSW + F16 raw (default) | `False` | `False` | ~300 GB vectors + ~30 GB HNSW | Yes (exact) | ~97 % |
+| IVF-PQ + F16 raw | `False` | `False` | ~300 GB + ~5 GB PQ codes | Yes (exact) | ~93 % inline |
+| IVF-PQ residual + raw | `False` | `True` | ~300 GB + ~5 GB | Yes (exact) | ~96 % |
+| PQ-only | `True` | `False` | **~5 GB total** | No | ~93-95 % |
+| PQ-only residual | `True` | `True` | **~5 GB total** | No | ~94-96 % |
+
+```python
+# Deferred write — all modes, instant Parquet commit, index in background
+writer = ailake.TableWriter(path, dim=1536, pq_only=True, ivf_residual=True)
+writer.write_batch_auto_deferred(texts, embeddings)
+writer.commit()
+```
 
 ## HNSW tuning guide
 

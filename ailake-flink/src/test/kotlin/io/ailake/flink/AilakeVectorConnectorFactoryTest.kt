@@ -25,4 +25,10 @@ class AilakeVectorConnectorFactoryTest {
         assert("table-name" in keys)
         assert("vector.dim" in keys)
     }
+
+    @Test
+    fun optionalOptionsIncludesEmbeddingModel() {
+        val keys = AilakeVectorConnectorFactory().optionalOptions().map { it.key() }
+        assert("embedding.model" in keys) { "embedding.model missing from optionalOptions: $keys" }
+    }
 }

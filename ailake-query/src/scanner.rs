@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use tracing::{debug, error};
 
 use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
-use ailake_core::{AilakeError, AilakeResult, RowId, VectorMetric};
+use ailake_core::{AilakeError, AilakeResult, EmbeddingModelInfo, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
 use ailake_index::AnyIndex;
 use ailake_store::Store;
@@ -81,6 +81,27 @@ pub async fn search(
 
     // Determine vector metric from table metadata for correct distance computation
     let table_meta = catalog.load_table(table).await?;
+
+    // Validate query dim against table dim — silent dim mismatch gives garbage results.
+    if let Some(table_dim_str) = table_meta.properties.get("ailake.vector-dim") {
+        if let Ok(table_dim) = table_dim_str.parse::<u32>() {
+            let query_dim = query.len() as u32;
+            if query_dim != table_dim {
+                let table_model = table_meta
+                    .properties
+                    .get(EmbeddingModelInfo::property_key())
+                    .cloned()
+                    .unwrap_or_else(|| format!("dim={}", table_dim));
+                return Err(AilakeError::ModelMismatch {
+                    table_model,
+                    table_dim,
+                    batch_model: format!("query dim={}", query_dim),
+                    batch_dim: query_dim,
+                });
+            }
+        }
+    }
+
     let metric = parse_metric(
         table_meta
             .properties
@@ -637,6 +658,8 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         }
     }
 

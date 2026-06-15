@@ -3,7 +3,7 @@
 # Stubs for the compiled Rust extension ailake._ailake.
 # This file is the authoritative type source for type checkers and IDEs.
 
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 class TableWriter:
     """Python-facing table writer.  Wraps ``ailake_query::TableWriter``."""
@@ -17,6 +17,11 @@ class TableWriter:
         pre_normalize: bool = False,
         hnsw_m: Optional[int] = None,
         hnsw_ef_construction: Optional[int] = None,
+        pq_only: bool = False,
+        ivf_residual: bool = False,
+        embedding_model: Optional[str] = None,
+        embedding_model_version: Optional[str] = None,
+        embed_fn: Optional[Callable[[list[str]], list[list[float]]]] = None,
     ) -> None:
         """Open or create an AI-Lake table at *path*.
 
@@ -32,20 +37,55 @@ class TableWriter:
                     per-table default stored in Iceberg metadata.
             hnsw_ef_construction: HNSW build-time beam width.  ``None`` uses
                                   the per-table default.
+            pq_only: When ``True``, only PQ-compressed codes are stored —
+                     raw F16 vectors are discarded after index build.  Saves
+                     ~95-99 % vector storage at the cost of no exact reranking.
+                     Default ``False`` (keep raw for reranking).
+            ivf_residual: When ``True``, IVF-PQ encodes residuals from each
+                          cluster centroid rather than raw vectors.  Improves
+                          recall@10 by ~2-4 pp at the same PQ budget.
+                          Default ``False``.
+            embedding_model: Human-readable model identifier stored in Iceberg
+                             properties as ``ailake.embedding-model`` (e.g.
+                             ``"text-embedding-3-small"``).  Used to detect
+                             incompatible model changes at write time.
+                             Default ``None`` (no model tracking).
+            embedding_model_version: Optional version tag appended to
+                                     *embedding_model* (e.g. ``"2024-01"``).
+                                     Stored as ``"<name>@<version>"``.
         """
         ...
 
     def write_batch(
         self,
         texts: Sequence[str],
-        embeddings: Sequence[Sequence[float]],
+        embeddings: Optional[Sequence[Sequence[float]]] = None,
     ) -> None:
         """Buffer a batch of rows.  Call :meth:`commit` to persist.
 
         Args:
             texts: One string per row.
             embeddings: One embedding (list of floats) per row; length must
-                        match *texts*.
+                        match *texts*.  May be omitted when *embed_fn* was
+                        passed to :meth:`__init__` — embeddings are generated
+                        automatically.
+        """
+        ...
+
+    def write_batch_auto_deferred(
+        self,
+        texts: Sequence[str],
+        embeddings: Sequence[Sequence[float]],
+    ) -> None:
+        """Deferred-index write — Parquet persisted immediately (~200k vec/s).
+
+        Selects IVF-PQ when a GPU or ≥8 CPU cores are detected and the batch
+        has ≥5 000 vectors; falls back to HNSW otherwise.  Index is built in a
+        background thread — shard is served via flat scan until the index is ready.
+
+        Args:
+            texts: One string per row.
+            embeddings: One embedding (list of floats) per row.
         """
         ...
 
@@ -142,5 +182,51 @@ def assemble_context(
 
     Returns:
         XML string ready to pass to an LLM as context.
+    """
+    ...
+
+
+def migrate_embeddings(
+    path: str,
+    old_column: str,
+    new_column: str,
+    embed_fn: Callable[[list[str]], list[list[float]]],
+    text_column: str = "chunk_text",
+    strategy: str = "dual_write_then_cutover",
+    batch_size: int = 512,
+    new_model: Optional[str] = None,
+    new_model_version: Optional[str] = None,
+    on_progress: Optional[Callable[..., None]] = None,
+) -> None:
+    """Migrate an embedding column to a new model.
+
+    Reads all chunks from *path*, re-embeds them via *embed_fn*, and writes
+    new files with the updated embedding column.  Commits an Iceberg snapshot
+    when done.
+
+    Args:
+        path: Table root path or URI — same value used when writing.
+        old_column: Name of the existing embedding column (e.g. ``"embedding"``).
+        new_column: Name for the migrated column (e.g. ``"embedding_v2"``).
+                    May equal *old_column* for an in-place model upgrade.
+        embed_fn: ``Callable[[list[str]], list[list[float]]]`` — your embedding
+                  model.  Called in batches of *batch_size* texts.
+        text_column: Parquet column that holds the raw text (default
+                     ``"chunk_text"``).
+        strategy: ``"atomic_replace"`` — replace each file one at a time
+                  (lower peak storage, brief mixed-model window); or
+                  ``"dual_write_then_cutover"`` — write all new files first,
+                  then atomically swap (2× peak storage, zero downtime).
+                  Default ``"dual_write_then_cutover"``.
+        batch_size: Number of texts per *embed_fn* call (default 512).
+        new_model: Model identifier stored in ``ailake.embedding-model`` after
+                   migration (e.g. ``"text-embedding-3-small"``).
+        new_model_version: Optional version tag (e.g. ``"2024-01"``).
+        on_progress: Optional ``Callable`` receiving keyword args
+                     ``files_done`` (int), ``files_total`` (int),
+                     ``rows_migrated`` (int) after each file completes.
+
+    Raises:
+        ValueError: On invalid strategy, missing text column, or embed_fn error.
     """
     ...

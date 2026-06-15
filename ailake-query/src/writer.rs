@@ -8,7 +8,7 @@ use ailake_catalog::{
     ExtraVectorIndex, IcebergSchemaUpdate, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation,
     TableIdent, TableProperties, VectorIndexInfo,
 };
-use ailake_core::{AilakeResult, VectorStoragePolicy};
+use ailake_core::{AilakeError, AilakeResult, EmbeddingModelInfo, VectorStoragePolicy};
 use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBatch};
 use ailake_index::{IvfPqCodebook, IvfPqConfig};
 use ailake_store::Store;
@@ -17,7 +17,7 @@ use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
 use serde_json;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// One vector column for a multi-column write batch.
 pub struct MultiVectorBatch<'a> {
@@ -87,6 +87,7 @@ impl TableWriter {
         batch: &RecordBatch,
         embeddings: &[Vec<f32>],
     ) -> AilakeResult<()> {
+        self.validate_embedding_dim(embeddings)?;
         if self.captured_schema.is_none() {
             self.captured_schema = Some(batch.schema());
         }
@@ -101,7 +102,7 @@ impl TableWriter {
 
         // Centroid needed immediately for geometric pruning during the build window.
         let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
-        let entry = make_data_file_entry_indexing(
+        let mut entry = make_data_file_entry_indexing(
             &file_path,
             embeddings.len() as u64,
             file_size,
@@ -109,6 +110,11 @@ impl TableWriter {
             &self.policy.column_name,
             self.policy.dim,
         );
+        entry.embedding_model = self
+            .policy
+            .embedding_model
+            .as_ref()
+            .map(|m| m.to_property_value());
         self.pending_files.push(entry);
 
         // Spawn background HNSW build (fire-and-forget; errors are logged).
@@ -153,7 +159,7 @@ impl TableWriter {
         self.store.put(&file_path, parquet_bytes).await?;
 
         let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
-        let entry = make_data_file_entry_indexing(
+        let mut entry = make_data_file_entry_indexing(
             &file_path,
             embeddings.len() as u64,
             file_size,
@@ -161,6 +167,11 @@ impl TableWriter {
             &self.policy.column_name,
             self.policy.dim,
         );
+        entry.embedding_model = self
+            .policy
+            .embedding_model
+            .as_ref()
+            .map(|m| m.to_property_value());
         self.pending_files.push(entry);
 
         let store = self.store.clone();
@@ -218,6 +229,30 @@ impl TableWriter {
     }
 
     /// Write a batch to a new AI-Lake file and stage it for commit.
+    /// Validates that provided embeddings match the table's configured dimension.
+    /// Returns `ModelMismatch` error when dim differs — prevents silently mixing
+    /// incompatible vectors (same error type used across write paths for consistency).
+    fn validate_embedding_dim(&self, embeddings: &[Vec<f32>]) -> AilakeResult<()> {
+        if let Some(first) = embeddings.first() {
+            let actual = first.len() as u32;
+            if actual != self.policy.dim {
+                let table_model = self
+                    .policy
+                    .embedding_model
+                    .as_ref()
+                    .map(|m| m.to_property_value())
+                    .unwrap_or_else(|| format!("dim={}", self.policy.dim));
+                return Err(AilakeError::ModelMismatch {
+                    table_model,
+                    table_dim: self.policy.dim,
+                    batch_model: format!("dim={}", actual),
+                    batch_dim: actual,
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub async fn write_batch(
         &mut self,
         batch: &RecordBatch,
@@ -232,6 +267,7 @@ impl TableWriter {
         embeddings: &[Vec<f32>],
         batch_id: Option<String>,
     ) -> AilakeResult<()> {
+        self.validate_embedding_dim(embeddings)?;
         if self.captured_schema.is_none() {
             self.captured_schema = Some(batch.schema());
         }
@@ -273,6 +309,11 @@ impl TableWriter {
             },
         );
         entry.batch_id = batch_id;
+        entry.embedding_model = self
+            .policy
+            .embedding_model
+            .as_ref()
+            .map(|m| m.to_property_value());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -289,11 +330,43 @@ impl TableWriter {
     ) -> AilakeResult<()> {
         let profile = ailake_index::HardwareProfile::detect();
         if profile.recommend_ivf_pq(embeddings.len()) {
-            let ivf_config =
+            let mut ivf_config =
                 ailake_index::IvfPqConfig::for_dataset(self.policy.dim as usize, embeddings.len());
+            if self.policy.ivf_residual {
+                ivf_config = ivf_config.with_residual();
+            }
             self.write_batch_ivf_pq(batch, embeddings, ivf_config).await
         } else {
             self.write_batch(batch, embeddings).await
+        }
+    }
+
+    /// Write batch, auto-selecting the index based on detected hardware — deferred variant.
+    ///
+    /// Same hardware detection as `write_batch_auto`: picks IVF-PQ when a CUDA GPU or
+    /// ≥8 CPU cores are present AND the batch has ≥5 000 vectors; falls back to HNSW.
+    ///
+    /// Unlike `write_batch_auto`, the index is built in a background tokio task:
+    /// - Parquet is persisted immediately (~200k vec/s, same as write_parquet_only).
+    /// - HNSW or IVF-PQ index built asynchronously; shard served via flat scan meanwhile.
+    ///
+    /// Use this when ingest throughput matters more than immediate searchability.
+    pub async fn write_batch_auto_deferred(
+        &mut self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+    ) -> AilakeResult<()> {
+        let profile = ailake_index::HardwareProfile::detect();
+        if profile.recommend_ivf_pq(embeddings.len()) {
+            let mut ivf_config =
+                ailake_index::IvfPqConfig::for_dataset(self.policy.dim as usize, embeddings.len());
+            if self.policy.ivf_residual {
+                ivf_config = ivf_config.with_residual();
+            }
+            self.write_batch_ivf_pq_deferred(batch, embeddings, ivf_config)
+                .await
+        } else {
+            self.write_batch_deferred(batch, embeddings).await
         }
     }
 
@@ -326,7 +399,12 @@ impl TableWriter {
             .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))??;
             self.cached_ivf_codebook = Some(Arc::new(codebook));
         }
-        let codebook = self.cached_ivf_codebook.as_ref().unwrap().clone();
+        // SAFETY: set to Some in the block above (either pre-existing or just trained).
+        let codebook = self
+            .cached_ivf_codebook
+            .as_ref()
+            .expect("IVF-PQ codebook must be Some after training block")
+            .clone();
 
         let file_writer = AilakeFileWriter::new(self.policy.clone())
             .with_index_type(IndexType::IvfPq(ivf_config))
@@ -348,7 +426,7 @@ impl TableWriter {
         let index_abs_offset = ailk_start + header.hnsw_offset;
         let index_len = header.hnsw_len;
 
-        let entry = make_data_file_entry(
+        let mut entry = make_data_file_entry(
             &file_path,
             embeddings.len() as u64,
             file_size,
@@ -360,6 +438,11 @@ impl TableWriter {
                 hnsw_len: index_len,
             },
         );
+        entry.embedding_model = self
+            .policy
+            .embedding_model
+            .as_ref()
+            .map(|m| m.to_property_value());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -449,7 +532,7 @@ impl TableWriter {
             });
         }
 
-        let entry = make_multi_column_data_file_entry(
+        let mut entry = make_multi_column_data_file_entry(
             &file_path,
             columns[0].embeddings.len() as u64,
             file_size,
@@ -462,6 +545,11 @@ impl TableWriter {
             },
             &extra,
         );
+        entry.embedding_model = self
+            .policy
+            .embedding_model
+            .as_ref()
+            .map(|m| m.to_property_value());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -504,16 +592,38 @@ impl TableWriter {
         table: TableIdent,
     ) -> AilakeResult<Self> {
         // Try to load; if not found, create
-        if catalog.load_table(&table).await.is_err() {
-            catalog
-                .create_table(
-                    &table,
-                    &TableProperties {
-                        policy: policy.clone(),
-                        extra: std::collections::HashMap::new(),
-                    },
-                )
-                .await?;
+        match catalog.load_table(&table).await {
+            Ok(existing_meta) => {
+                // Warn when writing with a different model name into an existing table.
+                // Dim mismatch is a hard error caught at write_batch time; name divergence
+                // is softer — same dim, different model (e.g. fine-tune vs base) — warn only.
+                if let Some(incoming) = &policy.embedding_model {
+                    if let Some(stored_val) = existing_meta
+                        .properties
+                        .get(EmbeddingModelInfo::property_key())
+                    {
+                        let stored = EmbeddingModelInfo::from_property_value(stored_val);
+                        if stored.name != incoming.name {
+                            warn!(
+                                "ailake: embedding model name changed: table has '{}', writing with '{}' \
+                                 (dim={}). Vectors may be incompatible for similarity search.",
+                                stored.name, incoming.name, policy.dim
+                            );
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                catalog
+                    .create_table(
+                        &table,
+                        &TableProperties {
+                            policy: policy.clone(),
+                            extra: std::collections::HashMap::new(),
+                        },
+                    )
+                    .await?;
+            }
         }
         Ok(Self::new(catalog, store, policy, table))
     }
@@ -924,6 +1034,8 @@ mod tests {
             pre_normalize: false,
             hnsw_m: None,
             hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
         }
     }
 
@@ -1086,5 +1198,44 @@ mod tests {
 
         // Nested element ID must be > 3
         assert!(upd.fields[1]["type"]["element-id"].as_i64().unwrap() > 3);
+    }
+
+    /// Smoke-test write_batch_auto_deferred: verifies that it completes without error
+    /// and stages a pending file entry (index built asynchronously in background).
+    #[tokio::test]
+    async fn write_batch_auto_deferred_stages_file() {
+        use ailake_catalog::{HadoopCatalog, TableIdent};
+        use ailake_store::LocalStore;
+        use arrow_schema::{DataType, Field, Schema};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: std::sync::Arc<dyn ailake_store::Store> =
+            std::sync::Arc::new(LocalStore::new(dir.path().to_str().unwrap()));
+        let catalog = std::sync::Arc::new(HadoopCatalog::new(std::sync::Arc::clone(&store), ""));
+        let pol = policy("embedding", 4);
+        let ident = TableIdent::new("default", "t");
+
+        let mut writer = TableWriter::create_or_open(catalog, store, pol, ident)
+            .await
+            .unwrap();
+
+        let schema =
+            std::sync::Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let batch = arrow_array::RecordBatch::try_new(
+            schema,
+            vec![std::sync::Arc::new(arrow_array::StringArray::from(vec![
+                "hello",
+            ]))],
+        )
+        .unwrap();
+        let embeddings = vec![vec![1.0f32, 0.0, 0.0, 0.0]];
+
+        writer
+            .write_batch_auto_deferred(&batch, &embeddings)
+            .await
+            .unwrap();
+
+        // One pending file should be staged even before commit.
+        assert_eq!(writer.pending_files.len(), 1);
     }
 }

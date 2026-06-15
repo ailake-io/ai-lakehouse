@@ -44,10 +44,18 @@ Written as strict Iceberg Spec v2. The only AI-Lake additions are inside the `pr
     "ailake.vector-column": "embedding",
     "ailake.vector-dim": "1536",
     "ailake.vector-metric": "cosine",
-    "ailake.vector-precision": "f16"
+    "ailake.vector-precision": "f16",
+    "ailake.embedding-model": "text-embedding-3-small@v1",
+    "ailake.embedding-model-dim": "1536",
+    "ailake.embedding-model-metric": "cosine"
   }
 }
 ```
+
+AI-Lake embedding model properties (all optional):
+- `ailake.embedding-model` — model identifier (`"<name>"` or `"<name>@<version>"`). Used by `Search()` and `search()` to surface the expected model when a dim mismatch is detected.
+- `ailake.embedding-model-dim` — redundant dim cross-check; separate from `ailake.vector-dim`.
+- `ailake.embedding-model-metric` — expected metric for the model.
 
 **Why this is safe**: `properties` is a `Map<String, String>` with no reserved namespace in Iceberg Spec v2. All existing readers pass unknown keys through or ignore them.
 
@@ -69,9 +77,12 @@ Per-file AI-Lake metadata is encoded as JSON in the `key_metadata` bytes field:
   "hnsw_offset": 12582912,
   "hnsw_len": 4194304,
   "vector_column": "embedding",
-  "vector_dim": 1536
+  "vector_dim": 1536,
+  "embedding_model": "text-embedding-3-small@v1"
 }
 ```
+
+`embedding_model` is optional. When present it records which model produced the vectors in this file — enabling per-file model detection in mixed-model tables during migration.
 
 **Why this is safe**: `key_metadata` is a standard `bytes` field in the Iceberg `data_file` Avro schema (Spec v2 §4.1.7, field-id 131). Iceberg readers that don't know AI-Lake pass this field through as opaque bytes or ignore it entirely. The centroid is base64-encoded as a compact f32 array (e.g. for dim=1536: 6144 bytes raw → ~8.2 KB base64).
 

@@ -42,8 +42,9 @@ struct DataFileEntry {
     std::optional<uint64_t> hnsw_len;
     std::string vector_column;
     uint32_t    vector_dim     = 0;
-    std::string index_status;  // "ready" | "indexing"
+    std::string index_status;   // "ready" | "indexing"
     std::string batch_id;
+    std::string embedding_model; // "<name>" or "<name>@<version>"; empty if not set
 };
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,7 @@ struct TableInfo {
     std::string vector_column;
     std::string vector_dim;
     std::string vector_metric;
+    std::string embedding_model; // "<name>" or "<name>@<version>"; empty if not set
     int         files         = 0;
     int         indexed_files = 0;
     uint64_t    rows          = 0;
@@ -175,9 +177,10 @@ public:
             if (end == std::string::npos) return;
             out = meta.substr(pos + 1, end - pos - 1);
         };
-        get("ailake.vector-column", info.vector_column);
-        get("ailake.vector-dim",    info.vector_dim);
-        get("ailake.vector-metric", info.vector_metric);
+        get("ailake.vector-column",  info.vector_column);
+        get("ailake.vector-dim",     info.vector_dim);
+        get("ailake.vector-metric",  info.vector_metric);
+        get("ailake.embedding-model", info.embedding_model);
 
         // current-snapshot-id
         auto snap_pos = meta.find("\"current-snapshot-id\":");
@@ -467,8 +470,9 @@ private:
         if (!vc.empty()) e.vector_column = vc;
         auto vd = get_num("vector_dim");
         if (vd) e.vector_dim = (uint32_t)*vd;
-        e.index_status = get_str("index_status");
-        e.batch_id     = get_str("batch_id");
+        e.index_status   = get_str("index_status");
+        e.batch_id       = get_str("batch_id");
+        e.embedding_model = get_str("embedding_model");
     }
 
     static std::string base64_decode(const std::string& in) {

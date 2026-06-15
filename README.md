@@ -5,6 +5,8 @@
 [![PyPI](https://img.shields.io/pypi/v/ailake.svg)](https://pypi.org/p/ailake)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
 
+> 🇧🇷 [Leia em Português brasileiro →](./README.pt-BR.md)
+
 Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 
 **Single self-contained file**: tabular data, embeddings, and HNSW index live together in one Parquet-extended file at the S3 layer. ACID transactions via Iceberg. Any Iceberg-compatible framework reads AI-Lake tables without modification — the vector index in the file footer is invisible to standard Parquet readers.
@@ -37,6 +39,8 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
 | GPU search (NVIDIA + AMD) | ❌ | Vendor-specific | ✅ |
 | Time-travel on vectors | ❌ | ❌ | ✅ |
 
+→ **[Full technical argument — AI-Lake vs Iceberg alone vs LanceDB vs external vector DBs](docs/WHY_AILAKE.md)**
+
 ---
 
 ## Interactive demo (single command)
@@ -52,11 +56,11 @@ Then open **http://localhost:8888** and run the notebooks:
 
 | Notebook | What it shows |
 |---|---|
-| `01_ailake_demo.ipynb` | Vector search, Iceberg compat, RAG context assembly, MinIO upload |
-| `02_duckdb.ipynb` | DuckDB direct Parquet scan, filtered queries, aggregations |
-| `03_spark.ipynb` | PySpark local[*], Iceberg HadoopCatalog SQL, snapshot history |
-| `04_trino.ipynb` | Trino SQL via `trino` Python driver, `$snapshots` / `$files` system tables |
-| `05_bigquery.ipynb` | BigQuery emulator streaming inserts, SQL queries |
+| `01_ailake_demo.ipynb` | Write, search, IVF-PQ, residual PQ, deferred write, HNSW tuning, async API, storage estimator, Iceberg compat, RAG context assembly, MinIO upload |
+| `02_duckdb.ipynb` | DuckDB Parquet scan, filtered queries, per-file storage stats, F16 embedding decode |
+| `03_spark.ipynb` | PySpark local[*], Iceberg SQL, snapshot history, time-travel `VERSION AS OF` |
+| `04_trino.ipynb` | Trino SQL, AI-Lake table properties, `$files` / `$manifests` system tables |
+| `05_bigquery.ipynb` | BigQuery emulator inserts, F16 BYTES decode, production GCS + BigQuery Omni pattern |
 
 Notebooks 04 and 05 require the `engines` profile (adds Trino + BigQuery emulator):
 
@@ -92,9 +96,9 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 **Rust** (add to `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.16"
-ailake-query = "0.0.16"   # search(), TableWriter, ContextAssembler
-ailake-store = "0.0.16"   # S3 / GCS / Azure / local backends
+ailake-core  = "0.0.17"
+ailake-query = "0.0.17"   # search(), TableWriter, ContextAssembler
+ailake-store = "0.0.17"   # S3 / GCS / Azure / local backends
 ```
 
 **Python**:
@@ -129,7 +133,7 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.16
+VERSION=0.0.17
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
@@ -317,16 +321,64 @@ tests/
     └── demo/
         ├── Dockerfile           # Two-stage: Rust/maturin → JupyterLab
         ├── entrypoint.sh        # Init fixture then start Jupyter
-        ├── init_demo.py         # Writes 500-row AI-Lake table at startup
+        ├── init_demo.py         # Generates 4 fixture tables (HNSW, PQ-only, Residual-PQ, Deferred)
         ├── trino-catalog/
         │   └── ailake.properties # Trino Iceberg HadoopCatalog config
         └── notebooks/
-            ├── 01_ailake_demo.ipynb  # Vector search + Iceberg + RAG + MinIO
-            ├── 02_duckdb.ipynb       # DuckDB direct Parquet scan
-            ├── 03_spark.ipynb        # PySpark local[*] + Iceberg SQL
-            ├── 04_trino.ipynb        # Trino SQL (--profile engines required)
-            └── 05_bigquery.ipynb     # BigQuery emulator (--profile engines required)
+            ├── 01_ailake_demo.ipynb  # Write, search, IVF-PQ, residual PQ, deferred write, HNSW tuning, async, storage estimator
+            ├── 02_duckdb.ipynb       # DuckDB Parquet scan, per-file stats, F16 decode, Iceberg metadata
+            ├── 03_spark.ipynb        # PySpark + Iceberg SQL + time-travel VERSION AS OF
+            ├── 04_trino.ipynb        # Trino SQL + $properties / $files / $manifests (--profile engines)
+            └── 05_bigquery.ipynb     # BigQuery emulator + F16 decode + GCS+BQ Omni pattern (--profile engines)
 ```
+
+## Performance
+
+Numbers below are from the [ailake-benchmark](https://github.com/ThiagoLange/ailake-benchmark) repository run on a single AWS `c6i.8xlarge` (32 vCPU, 64 GB RAM) with local NVMe. GPU numbers on `g5.xlarge` (NVIDIA A10G).
+
+### Write throughput (`text-embedding-3-small`, dim=1536)
+
+| Path | Throughput | Notes |
+|---|---|---|
+| `write_batch` (HNSW inline) | ~6 k vec/s | HNSW graph built synchronously per shard |
+| `write_batch_deferred` (HNSW async) | ~200 k vec/s | Parquet written immediately; HNSW built in background |
+| `write_batch_ivf_pq_deferred` (IVF-PQ async) | ~250 k vec/s | Parquet + k-means-trained PQ index async |
+| `write_batch_auto_deferred` (auto) | ~200–250 k vec/s | Hardware-aware: selects IVF-PQ on GPU/≥8 cores, HNSW otherwise |
+
+### Search latency (top-10, dim=1536, 1 M vectors, cosine)
+
+| Index | Recall@10 | p50 latency | p99 latency |
+|---|---|---|---|
+| HNSW (F16, ef=50) | ~97% | ~4 ms | ~12 ms |
+| IVF-PQ (nprobe=8) | ~93% | ~2 ms | ~8 ms |
+| IVF-PQ residual (nprobe=8) | ~96% | ~2 ms | ~8 ms |
+| IVF-PQ GPU (A10G, nprobe=8) | ~93% | ~0.4 ms | ~1 ms |
+
+Geometric pruning eliminates 95–99% of files before any index is touched on tables with thousands of shards.
+
+### Storage (`text-embedding-3-small`, dim=1536, 100 M vectors)
+
+| Mode | Vector column | HNSW/IVF-PQ overhead | Total |
+|---|---|---|---|
+| F32 (raw) | ~600 GB | ~60–120 GB | ~660–720 GB |
+| F16 (default) | ~300 GB | ~30–60 GB | ~330–360 GB |
+| I8 | ~150 GB | ~15–30 GB | ~165–180 GB |
+| IVF-PQ (M=48, K=256) | ~300 GB raw + ~5 GB PQ codes | ~5 GB | ~310 GB |
+| PQ-only (`--pq-only`) | 0 GB (raw omitted) | ~5 GB | **~5 GB** |
+
+PQ-only mode trades reranking precision for 98% storage reduction. Recall@10 ~93–95%.
+
+---
+
+## Code examples
+
+| Language | Location | Run |
+|---|---|---|
+| **Rust** (write + search) | [`ailake-query/examples/demo.rs`](./ailake-query/examples/demo.rs) | `cargo run --example demo -p ailake-query` |
+| **Python** (fluent API, async, RAG) | [`ailake-py/README.md`](./ailake-py/README.md) | `python -c "import ailake; ..."` |
+| **Go** (search, scan) | [`ailake-go/examples/search/main.go`](./ailake-go/examples/search/main.go) | `go run . -warehouse /data/warehouse -table default.docs` |
+| **C++** (search, CUDA) | [`ailake-cpp/examples/search.cpp`](./ailake-cpp/examples/search.cpp) | `./build/ailake_search -w /data/warehouse -t default.docs` |
+| **Multi-engine** (Spark + Trino + DuckDB) | [`tests/docker/`](./tests/docker/) | `docker compose -f tests/docker/compose-demo.yml up -d` |
 
 ## Build
 
@@ -348,6 +400,6 @@ cargo check --workspace
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector; **IVF-PQ shared codebook** (single k-means training across all shards — ADC distances comparable cross-shard); **`write_batch_ivf_pq_deferred`** (~250k vec/s write, async IVF-PQ build); **k-means++ O(n×k) fix** + rayon parallelism (17× speedup); **`HadoopCatalog` Replace fix** (`IndexStatus::Ready` convergence with concurrent background tasks) |
 | **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP REST server, Apache Airflow provider, idempotent writes, Compat Heavy CI (Spark+Iceberg, Trino+REST, BigQuery emulator), TruffleHog secret scanning, cloud deployment guides |
 | **Phase 6** | ✅ Complete | Public distribution pipeline — crates.io, PyPI (manylinux abi3 wheels), Airflow provider on PyPI, pre-built JVM JARs + `libailake_jni.so` on GitHub Releases, dynamic Python versioning |
-| **Phase 7** | 🚧 In progress | Done: DuckDB extension (`duckdb-ailake/`), Python full-read (`fetch_data=True`). Remaining: `write_batch_auto_deferred` (~200k vec/s Auto engine deferred); DuckLake catalog backend; dbt integration guide |
+| **Phase 7** | 🚧 In progress | Done: DuckDB extension (`duckdb-ailake/`), Python full-read (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` exposed in Python SDK, expanded JupyterLab demo (4 fixture tables, 17 notebook sections). Remaining: DuckLake catalog backend; dbt integration guide |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.

@@ -21,6 +21,8 @@ During streaming ingest or batch micro-batches, new files arrive with per-batch 
 
 Records in un-compacted files are still searchable (their indexes exist, just small), but recall may be lower for very small batches. The "blind window" is bounded by the compaction interval.
 
+> **Tip**: `write_batch_auto_deferred` (Python / Rust SDK) builds the per-shard index in a background Tokio task immediately after Parquet commit. New shards are served via flat scan until `IndexStatus::Ready`, then switch to HNSW/IVF-PQ automatically. This narrows the blind window to the index build time (~30-165 s per shard) without waiting for the compaction job.
+
 ---
 
 ## Compaction triggers

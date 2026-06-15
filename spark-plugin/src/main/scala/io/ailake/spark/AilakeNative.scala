@@ -53,15 +53,16 @@ object AilakeNative {
    * Returns the snapshot_id on success, None on failure.
    */
   def writeBatch(
-    tableUri:     String,
-    namespace:    String,
-    tableName:    String,
-    vectorColumn: String,
-    dim:          Int,
-    metric:       String,
-    precision:    String,
-    ids:          Seq[Long],
-    embeddings:   Seq[Seq[Float]],
+    tableUri:       String,
+    namespace:      String,
+    tableName:      String,
+    vectorColumn:   String,
+    dim:            Int,
+    metric:         String,
+    precision:      String,
+    ids:            Seq[Long],
+    embeddings:     Seq[Seq[Float]],
+    embeddingModel: Option[String] = None,
   ): Option[Long] = {
     if (ids.isEmpty) return None
     lib match {
@@ -69,11 +70,12 @@ object AilakeNative {
       case Some(native) =>
         val idsJson  = ids.mkString("[", ",", "]")
         val embJson  = embeddings.map(_.mkString("[", ",", "]")).mkString("[", ",", "]")
+        val modelJson = embeddingModel.map(m => s""","embedding_model":${jsonStr(m)}""").getOrElse("")
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
           s""""table":${jsonStr(tableName)},"vec_col":${jsonStr(vectorColumn)},""" +
           s""""dim":$dim,"metric":${jsonStr(metric)},"precision":${jsonStr(precision)},""" +
-          s""""ids":$idsJson,"embeddings":$embJson}"""
+          s""""ids":$idsJson,"embeddings":$embJson$modelJson}"""
         val ptr = native.ailake_write_batch_json(requestJson)
         if (ptr == null) {
           log.warn(s"[ailake] ailake_write_batch_json returned null for table=$tableName")

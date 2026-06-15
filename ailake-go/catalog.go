@@ -38,20 +38,22 @@ type DataFileEntry struct {
 	VectorDim           uint32
 	IndexStatus         string // "ready" | "indexing"
 	BatchID             string
+	EmbeddingModel      string // "<name>" or "<name>@<version>"; empty if not set
 }
 
 // TableInfo mirrors the JSON output of "ailake info --format json".
 type TableInfo struct {
-	Table        string  `json:"table"`
-	Location     string  `json:"location"`
-	VectorColumn string  `json:"vector_column"`
-	VectorDim    string  `json:"vector_dim"`
-	VectorMetric string  `json:"vector_metric"`
-	Files        int     `json:"files"`
-	IndexedFiles int     `json:"indexed_files"`
-	Rows         uint64  `json:"rows"`
-	SizeBytes    uint64  `json:"size_bytes"`
-	SnapshotID   *int64  `json:"snapshot_id"`
+	Table          string  `json:"table"`
+	Location       string  `json:"location"`
+	VectorColumn   string  `json:"vector_column"`
+	VectorDim      string  `json:"vector_dim"`
+	VectorMetric   string  `json:"vector_metric"`
+	EmbeddingModel string  `json:"embedding_model,omitempty"`
+	Files          int     `json:"files"`
+	IndexedFiles   int     `json:"indexed_files"`
+	Rows           uint64  `json:"rows"`
+	SizeBytes      uint64  `json:"size_bytes"`
+	SnapshotID     *int64  `json:"snapshot_id"`
 }
 
 // HadoopCatalog reads an AI-Lake table from a local filesystem path.
@@ -80,6 +82,7 @@ func (c *HadoopCatalog) LoadTable(namespace, name string) (*TableInfo, error) {
 		info.VectorColumn, _ = props["ailake.vector-column"].(string)
 		info.VectorDim, _ = props["ailake.vector-dim"].(string)
 		info.VectorMetric, _ = props["ailake.vector-metric"].(string)
+		info.EmbeddingModel, _ = props["ailake.embedding-model"].(string)
 	}
 	if sid, ok := meta["current-snapshot-id"].(float64); ok {
 		id := int64(sid)
@@ -191,14 +194,15 @@ func readManifestList(path string) ([]string, error) {
 
 // ailakeEntryExt mirrors the JSON structure stored in key_metadata.
 type ailakeEntryExt struct {
-	CentroidB64 *string  `json:"centroid_b64"`
-	Radius      *float32 `json:"radius"`
-	HnswOffset  *uint64  `json:"hnsw_offset"`
-	HnswLen     *uint64  `json:"hnsw_len"`
-	VectorCol   *string  `json:"vector_column"`
-	VectorDim   *uint32  `json:"vector_dim"`
-	IndexStatus string   `json:"index_status"`
-	BatchID     *string  `json:"batch_id"`
+	CentroidB64    *string  `json:"centroid_b64"`
+	Radius         *float32 `json:"radius"`
+	HnswOffset     *uint64  `json:"hnsw_offset"`
+	HnswLen        *uint64  `json:"hnsw_len"`
+	VectorCol      *string  `json:"vector_column"`
+	VectorDim      *uint32  `json:"vector_dim"`
+	IndexStatus    string   `json:"index_status"`
+	BatchID        *string  `json:"batch_id"`
+	EmbeddingModel *string  `json:"embedding_model"`
 }
 
 // readManifestFile reads an Iceberg manifest file (Avro OCF) and returns DataFileEntry list.
@@ -281,6 +285,9 @@ func readManifestFile(path string) ([]DataFileEntry, error) {
 		}
 		if ext.BatchID != nil {
 			entry.BatchID = *ext.BatchID
+		}
+		if ext.EmbeddingModel != nil {
+			entry.EmbeddingModel = *ext.EmbeddingModel
 		}
 		entries = append(entries, entry)
 	}

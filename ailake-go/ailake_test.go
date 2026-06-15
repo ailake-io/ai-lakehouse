@@ -168,6 +168,11 @@ func TestLoadTableIntegration(t *testing.T) {
 	if info.SnapshotID == nil {
 		t.Error("SnapshotID: nil")
 	}
+	if info.EmbeddingModel == "" {
+		t.Error("EmbeddingModel: empty (expected fixture-model@v1 from write_fixture.py)")
+	} else if info.EmbeddingModel != "fixture-model@v1" {
+		t.Errorf("EmbeddingModel: got %q, want %q", info.EmbeddingModel, "fixture-model@v1")
+	}
 }
 
 func TestListFilesIntegration(t *testing.T) {
@@ -191,7 +196,28 @@ func TestListFilesIntegration(t *testing.T) {
 		if e.RecordCount == 0 {
 			t.Errorf("entry %d: RecordCount=0", i)
 		}
+		if e.EmbeddingModel == "" {
+			t.Errorf("entry %d: EmbeddingModel empty (expected fixture-model@v1)", i)
+		} else if e.EmbeddingModel != "fixture-model@v1" {
+			t.Errorf("entry %d: EmbeddingModel=%q, want %q", i, e.EmbeddingModel, "fixture-model@v1")
+		}
 	}
+}
+
+func TestSearchDimMismatchIntegration(t *testing.T) {
+	fixtureDir := os.Getenv("AILAKE_FIXTURE")
+	if fixtureDir == "" {
+		t.Skip("AILAKE_FIXTURE not set")
+	}
+	catalog := &HadoopCatalog{Warehouse: fixtureDir}
+
+	// Fixture table uses dim=128; query with wrong dim should return error.
+	wrongDimQuery := makeTestQuery(64)
+	_, err := Search(catalog, "default", "table", wrongDimQuery, SearchOptions{TopK: 5})
+	if err == nil {
+		t.Fatal("Search with wrong dim: expected error, got nil")
+	}
+	t.Logf("Search dim mismatch error (expected): %v", err)
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

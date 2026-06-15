@@ -56,7 +56,7 @@ Reference guide for the two JVM query-engine plugins that expose AI-Lake vector 
 Each GitHub Release includes pre-built artifacts uploaded by the `publish-jvm.yml` workflow. No Rust toolchain or Gradle required.
 
 ```bash
-VERSION=0.0.16   # replace with desired release
+VERSION=0.0.17   # replace with desired release
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
@@ -102,8 +102,10 @@ char* ailake_search_json(const char* request_json);
 
 // request_json: {"warehouse":"...","namespace":"default","table":"...",
 //                "dim":1536,"ids":[...],"embeddings":[[...],...],
-//                "metric":"cosine","precision":"f16"}
+//                "metric":"cosine","precision":"f16",
+//                "embedding_model":"text-embedding-3-small@v1"}  ← optional
 // Returns: {"ok":true,"snapshot_id":N}
+// On dim mismatch: {"ok":false,"error":"query dim=512 does not match table dim=1536 (...)"}
 char* ailake_write_batch_json(const char* request_json);
 
 void ailake_free_string(char* ptr);
@@ -154,6 +156,13 @@ ailake.table-uri=s3://my-lake/docs/
 # Optional: defaults match typical schema
 ailake.vector-column=embedding
 ailake.vector-dim=1536
+ailake.metric=cosine
+ailake.precision=f16
+
+# Optional: embedding model tracking — written to ailake.embedding-model in Iceberg props
+# and to per-file key_metadata on every INSERT via this catalog.
+# Format: "name" or "name@version"
+ailake.embedding-model=text-embedding-3-small@v1
 ```
 
 Multiple AI-Lake tables → multiple catalog files with different names and `table-uri` values.
@@ -491,3 +500,4 @@ ENV LD_LIBRARY_PATH=/opt/ailake/lib
 | `spark.ailakeSearch` not found | Missing import | Add `import io.ailake.spark.implicits._` |
 | Spark returns empty DataFrame | Native lib absent (expected in tests) | Ensure `java.library.path` points to `target/release/` |
 | `dim mismatch` | `ailake.vector-dim` in catalog props ≠ actual table dim | Match the value used when writing the table |
+| `query dim=N does not match table dim=M (table model: ...)` | Query vector dimension differs from the table's stored dim | Use the correct embedding model for this table; the error message names the expected model |
