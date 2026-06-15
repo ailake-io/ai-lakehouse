@@ -25,8 +25,8 @@ use ailake_catalog::{
 use ailake_core::{AilakeResult, EmbeddingModelInfo, VectorMetric, VectorStoragePolicy};
 use ailake_query::{
     fetch_rows as rs_fetch_rows, search as rs_search, Chunk, ContextAssembler,
-    ContextAssemblerConfig, MigrationJob, MigrationProgress, MigrationStrategy, SearchConfig,
-    TableWriter as RsTableWriter,
+    ContextAssemblerConfig, EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy,
+    SearchConfig, TableWriter as RsTableWriter,
 };
 use ailake_store::{store::Store, LocalStore};
 
@@ -491,7 +491,7 @@ fn migrate_embeddings(
     // Migration runs via block_on on the current thread — the GIL is held throughout.
     // We use Python::attach (pyo3 0.29 rename of with_gil) to re-acquire the GIL
     // token inside the closure; this is safe because block_on does not release the GIL.
-    let embed_fn_arc: Arc<dyn Fn(&[String]) -> AilakeResult<Vec<Vec<f32>>> + Send + Sync> = {
+    let embed_fn_arc: EmbedFn = {
         let embed_fn = embed_fn.clone_ref(py);
         Arc::new(move |texts: &[String]| {
             Python::attach(|py| {
