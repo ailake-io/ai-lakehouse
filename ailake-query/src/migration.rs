@@ -22,6 +22,8 @@ use ailake_vec::compute_centroid_and_radius;
 use arrow_array::{Array, RecordBatch, StringArray};
 use tracing::info;
 
+pub type EmbedFn = Arc<dyn Fn(&[String]) -> AilakeResult<Vec<Vec<f32>>> + Send + Sync>;
+
 /// How files are replaced during migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationStrategy {
@@ -71,7 +73,7 @@ pub struct MigrationJob {
     pub text_column: String,
     /// Callable that converts a slice of texts to embeddings.
     /// Must return exactly `texts.len()` vectors, all of the same dimension.
-    pub embed_fn: Arc<dyn Fn(&[String]) -> AilakeResult<Vec<Vec<f32>>> + Send + Sync>,
+    pub embed_fn: EmbedFn,
     pub strategy: MigrationStrategy,
     /// How many rows to embed per `embed_fn` call. Tune based on model batch size.
     pub batch_size: usize,
