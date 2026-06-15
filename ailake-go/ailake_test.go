@@ -168,6 +168,11 @@ func TestLoadTableIntegration(t *testing.T) {
 	if info.SnapshotID == nil {
 		t.Error("SnapshotID: nil")
 	}
+	if info.EmbeddingModel == "" {
+		t.Error("EmbeddingModel: empty (expected fixture-model@v1 from write_fixture.py)")
+	} else if info.EmbeddingModel != "fixture-model@v1" {
+		t.Errorf("EmbeddingModel: got %q, want %q", info.EmbeddingModel, "fixture-model@v1")
+	}
 }
 
 func TestListFilesIntegration(t *testing.T) {
