@@ -89,6 +89,7 @@ impl ParquetVectorWriter {
                 self.policy.dim,
                 self.policy.metric,
                 self.policy.precision,
+                self.policy.modality,
             );
             let vec_field_id = batch.schema().fields().len() + 1;
             let new_fields: Vec<Field> = tabular_fields
