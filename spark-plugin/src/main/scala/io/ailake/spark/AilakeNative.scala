@@ -183,7 +183,7 @@ object AilakeNative {
     Try {
       val root = mapper.readTree(json)
       if (!root.path("ok").asBoolean(false)) {
-        log.warn("[ailake] searchMultimodal ok=false for tableUri={}: {}", tableUri, root.path("error").asText())
+        log.warn(s"[ailake] searchMultimodal ok=false for tableUri=$tableUri: ${root.path("error").asText()}")
         return Seq.empty
       }
       val nodes = root.path("results")
