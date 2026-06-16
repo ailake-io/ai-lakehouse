@@ -108,6 +108,9 @@ pub struct NewSnapshot {
     pub operation: SnapshotOperation,
     /// When set, the catalog backend should update the table schema on commit.
     pub iceberg_schema: Option<IcebergSchemaUpdate>,
+    /// Additional table-level properties to merge on commit (e.g. secondary column dims).
+    /// Keys use `ailake.dim-<col>` / `ailake.metric-<col>` convention.
+    pub extra_properties: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]

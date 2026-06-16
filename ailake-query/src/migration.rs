@@ -136,6 +136,7 @@ impl MigrationJob {
                         files: vec![new_entry],
                         operation: SnapshotOperation::Replace,
                         iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
                     },
                 )
                 .await?;
@@ -215,6 +216,7 @@ impl MigrationJob {
                     files: new_entries,
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
                 },
             )
             .await?;

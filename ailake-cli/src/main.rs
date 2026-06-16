@@ -699,6 +699,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 files: remaining,
                 operation: ailake_catalog::provider::SnapshotOperation::Replace,
                 iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
             };
             catalog
                 .commit_snapshot(&ident, snap)

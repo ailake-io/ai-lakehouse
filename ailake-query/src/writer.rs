@@ -574,12 +574,26 @@ impl TableWriter {
             .captured_schema
             .as_deref()
             .map(|s| arrow_schema_to_iceberg_update(s, &self.policy, &self.extra_vec_policies));
+        // Store secondary column dims/metrics as table-level properties so
+        // search_multimodal can discover them without reading Parquet files.
+        let mut extra_properties = std::collections::HashMap::new();
+        for ep in &self.extra_vec_policies {
+            extra_properties.insert(
+                format!("ailake.dim-{}", ep.column_name),
+                ep.dim.to_string(),
+            );
+            extra_properties.insert(
+                format!("ailake.metric-{}", ep.column_name),
+                ailake_parquet::schema::metric_str(ep.metric).to_string(),
+            );
+        }
         let snapshot = NewSnapshot {
             snapshot_id: new_snapshot_id(),
             parent_snapshot_id: self.parent_snapshot_id,
             files: std::mem::take(&mut self.pending_files),
             operation: SnapshotOperation::Append,
             iceberg_schema,
+            extra_properties,
         };
         self.catalog.commit_snapshot(&self.table, snapshot).await
     }
@@ -882,6 +896,7 @@ async fn build_and_patch_index(
                     files,
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
                 },
             )
             .await?;
@@ -995,6 +1010,7 @@ async fn build_ivf_pq_and_patch_index(
                     files,
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
                 },
             )
             .await?;

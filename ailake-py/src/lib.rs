@@ -676,24 +676,43 @@ fn search_multimodal(
     let (catalog, store) = local_catalog_store(path);
     let table = TableIdent::new("default", "table");
 
-    let dim = if let Some(d) = dim {
-        d
-    } else {
-        let meta = rt
-            .block_on(catalog.load_table(&table))
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        meta.properties
+    // Load metadata once to resolve per-column dims.
+    // `dim` arg (if given) overrides for the primary column only; secondary
+    // columns resolve via `ailake.dim-<col>` properties written at write time.
+    let table_meta = rt
+        .block_on(catalog.load_table(&table))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let primary_col = table_meta
+        .properties
+        .get("ailake.vector-column")
+        .cloned()
+        .unwrap_or_default();
+    let primary_dim: u32 = dim.unwrap_or_else(|| {
+        table_meta
+            .properties
             .get("ailake.vector-dim")
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| queries.first().map(|(_, q, _)| q.len() as u32).unwrap_or(0))
-    };
+    });
 
     let modal_queries: Vec<ModalQuery<'_>> = queries
         .iter()
-        .map(|(col, q, w)| ModalQuery {
-            column: col.as_str(),
-            query: q.as_slice(),
-            weight: *w,
+        .map(|(col, q, w)| {
+            let col_dim = if col == &primary_col {
+                primary_dim
+            } else {
+                table_meta
+                    .properties
+                    .get(&format!("ailake.dim-{col}"))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| q.len() as u32)
+            };
+            ModalQuery {
+                column: col.as_str(),
+                query: q.as_slice(),
+                weight: *w,
+                dim: col_dim,
+            }
         })
         .collect();
 
@@ -709,7 +728,6 @@ fn search_multimodal(
             &table,
             &modal_queries,
             config,
-            dim,
             catalog,
             store,
             FusionMethod::Rrf,

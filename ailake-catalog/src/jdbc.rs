@@ -364,6 +364,7 @@ mod tests {
             }],
             operation: SnapshotOperation::Append,
             iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
         };
         let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 
