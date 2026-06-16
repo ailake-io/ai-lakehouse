@@ -27,6 +27,7 @@ fn make_policy(dim: u32) -> VectorStoragePolicy {
         hnsw_ef_construction: None,
         ivf_residual: false,
         embedding_model: None,
+        modality: None,
     }
 }
 

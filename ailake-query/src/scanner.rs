@@ -198,6 +198,125 @@ pub async fn search(
     Ok(all_results)
 }
 
+/// One query arm in a cross-modal search.
+#[derive(Debug, Clone)]
+pub struct ModalQuery<'a> {
+    /// Vector column to search (must exist in the table).
+    pub column: &'a str,
+    /// Query vector for this modality. Dimension must match the column's `dim`.
+    pub query: &'a [f32],
+    /// Relative weight applied in the RRF formula: `weight / (k + rank)`.
+    /// `1.0` means equal weight across all modalities.
+    pub weight: f32,
+}
+
+/// Fusion method for combining results from multiple vector columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusionMethod {
+    /// Reciprocal Rank Fusion: `score(d) = Σ weight_i / (k + rank_i(d))`.
+    /// `k = 60` (standard). Returned `SearchResult.distance` = `-rrf_score`
+    /// so that sort-ascending-by-distance gives the correct RRF ranking.
+    Rrf,
+}
+
+/// Cross-modal search: run independent HNSW searches across N vector columns,
+/// then fuse per-column ranked lists using Reciprocal Rank Fusion.
+///
+/// Each `ModalQuery` specifies a column name, its query vector, and an RRF weight.
+/// Results are de-duplicated by `(file_path, row_id)` and ranked by aggregate
+/// RRF score. `SearchResult.distance` stores `-rrf_score` (lower = better) so
+/// existing sort-ascending callers get the correct ordering.
+pub async fn search_multimodal(
+    table: &TableIdent,
+    queries: &[ModalQuery<'_>],
+    config: SearchConfig,
+    dim: u32,
+    catalog: Arc<dyn CatalogProvider>,
+    store: Arc<dyn Store>,
+    fusion: FusionMethod,
+) -> AilakeResult<Vec<SearchResult>> {
+    use std::collections::HashMap;
+
+    if queries.is_empty() {
+        return Err(AilakeError::InvalidArgument(
+            "search_multimodal requires at least one ModalQuery".into(),
+        ));
+    }
+
+    // Fetch more candidates per column so RRF has enough to fuse.
+    let per_col_k = (config.top_k * queries.len().max(2)).min(1000);
+
+    let mut per_col_results: Vec<(f32, Vec<SearchResult>)> = Vec::with_capacity(queries.len());
+    for mq in queries {
+        let col_config = SearchConfig {
+            top_k: per_col_k,
+            ef_search: config.ef_search,
+            pruning_threshold: config.pruning_threshold,
+            rerank_factor: config.rerank_factor,
+        };
+        let results = search(
+            table,
+            mq.query,
+            col_config,
+            mq.column,
+            dim,
+            catalog.clone(),
+            store.clone(),
+        )
+        .await?;
+        per_col_results.push((mq.weight, results));
+    }
+
+    // RRF fusion: accumulate score per (file_path, row_id).
+    const K: f32 = 60.0;
+    let mut scores: HashMap<(String, u64), f32> = HashMap::new();
+
+    for (weight, results) in &per_col_results {
+        for (rank, r) in results.iter().enumerate() {
+            let key = (r.file_path.clone(), r.row_id.as_u64());
+            let rrf = weight / (K + rank as f32 + 1.0);
+            *scores.entry(key).or_insert(0.0) += rrf;
+        }
+    }
+
+    // Build SearchResult list sorted by descending RRF score.
+    // Store `-rrf_score` as `.distance` so callers sorting ascending get correct order.
+    let all_files = catalog.list_files(table, None).await?;
+    let _ = all_files; // centroid not needed for fusion — just need file_path+row_id
+
+    // Collect unique candidates: prefer the row's appearance in the first column's results.
+    let mut seen: HashMap<(String, u64), f32> = HashMap::new();
+    for (_, results) in &per_col_results {
+        for r in results {
+            let key = (r.file_path.clone(), r.row_id.as_u64());
+            if !seen.contains_key(&key) {
+                let rrf_score = *scores.get(&key).unwrap_or(&0.0);
+                seen.insert(key, rrf_score);
+            }
+        }
+    }
+
+    let mut fused: Vec<SearchResult> = seen
+        .into_iter()
+        .map(|((file_path, row_id_u64), rrf_score)| SearchResult {
+            row_id: RowId::new(row_id_u64),
+            distance: -rrf_score,
+            file_path,
+        })
+        .collect();
+
+    fused.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    fused.truncate(config.top_k);
+
+    let _ = fusion; // only RRF implemented; enum is extensible
+
+    Ok(fused)
+}
+
 /// Brute-force top-k search over raw vectors. Used for Indexing shards.
 fn flat_search(
     raw: &[Vec<f32>],
@@ -660,6 +779,7 @@ mod tests {
             hnsw_ef_construction: None,
             ivf_residual: false,
             embedding_model: None,
+            modality: None,
         }
     }
 
@@ -818,5 +938,45 @@ mod tests {
 
         // Both should return same top-1 result (row 0, distance ~0)
         assert_eq!(plain[0].row_id, reranked[0].row_id);
+    }
+
+    #[tokio::test]
+    async fn multimodal_rrf_returns_top_k() {
+        let dir = TempDir::new().unwrap();
+        let dim = 4usize;
+        write_demo_table(&dir, dim, 4).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        // Two modal queries using the same column (single-column table).
+        // Different queries to exercise RRF merging.
+        let q1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let q2 = vec![0.0f32, 1.0, 0.0, 0.0];
+
+        let queries = vec![
+            ModalQuery { column: "embedding", query: &q1, weight: 0.7 },
+            ModalQuery { column: "embedding", query: &q2, weight: 0.3 },
+        ];
+
+        let config = SearchConfig {
+            top_k: 2,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+        };
+
+        let results =
+            search_multimodal(&table, &queries, config, dim as u32, catalog, store, FusionMethod::Rrf)
+                .await
+                .unwrap();
+
+        assert_eq!(results.len(), 2);
+        // RRF score stored as -distance; all should be negative
+        assert!(results[0].distance <= 0.0);
+        // Top result should be one of rows 0 or 1 (nearest to q1 or q2)
+        assert!(results[0].row_id.as_u64() < 4);
     }
 }

@@ -341,6 +341,7 @@ impl MigrationJob {
                 .and_then(|s| s.parse().ok()),
             ivf_residual: false,
             embedding_model: self.new_model.clone(),
+            modality: None,
         })
     }
 }

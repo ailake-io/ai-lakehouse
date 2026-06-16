@@ -24,9 +24,10 @@ use ailake_catalog::{
 };
 use ailake_core::{EmbeddingModelInfo, VectorMetric, VectorStoragePolicy};
 use ailake_query::{
-    fetch_rows as rs_fetch_rows, search as rs_search, Chunk, ContextAssembler,
-    ContextAssemblerConfig, EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy,
-    ProgressFn, SearchConfig, TableWriter as RsTableWriter,
+    fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
+    Chunk, ContextAssembler, ContextAssemblerConfig, EmbedFn, FusionMethod, ModalQuery,
+    MigrationJob, MigrationProgress, MigrationStrategy, ProgressFn, SearchConfig,
+    TableWriter as RsTableWriter,
 };
 use ailake_store::{store::Store, LocalStore};
 
@@ -557,10 +558,122 @@ fn parse_metric(s: &str) -> PyResult<VectorMetric> {
     }
 }
 
+/// Specification for one vector column in a multimodal write or search.
+///
+/// Args:
+///   column: str — vector column name (e.g. "embedding", "image_embedding")
+///   dim: int — dimensionality of vectors in this column
+///   metric: str — "cosine" | "euclidean" | "dot_product" | "normalized_cosine"
+///   modality: str | None — "text" | "image" | "audio" | "video" (optional tag)
+#[pyclass]
+pub struct VectorColSpec {
+    #[pyo3(get, set)]
+    pub column: String,
+    #[pyo3(get, set)]
+    pub dim: u32,
+    #[pyo3(get, set)]
+    pub metric: String,
+    #[pyo3(get, set)]
+    pub modality: Option<String>,
+}
+
+#[pymethods]
+impl VectorColSpec {
+    #[new]
+    #[pyo3(signature = (column, dim, metric="cosine", modality=None))]
+    fn new(column: String, dim: u32, metric: &str, modality: Option<String>) -> Self {
+        Self {
+            column,
+            dim,
+            metric: metric.to_string(),
+            modality,
+        }
+    }
+}
+
+/// Cross-modal search: run independent searches across N vector columns and
+/// fuse results using Reciprocal Rank Fusion (RRF).
+///
+/// Args:
+///   path: str — table directory (same as search())
+///   queries: list[tuple[str, list[float], float]] — (column_name, query_vec, weight)
+///            weight is relative importance (1.0 = equal). Typical: 0.7 for text, 0.3 for image.
+///   top_k: int — number of final fused results to return
+///   dim: int | None — vector dimension (auto-detected from table metadata when None)
+///
+/// Returns a list of dicts: [{"row_id": int, "rrf_score": float, "file": str}, ...]
+/// rrf_score is higher for better results.
+#[pyfunction]
+#[pyo3(signature = (path, queries, top_k=10, dim=None))]
+fn search_multimodal(
+    py: Python<'_>,
+    path: &str,
+    queries: Vec<(String, Vec<f32>, f32)>,
+    top_k: usize,
+    dim: Option<u32>,
+) -> PyResult<Py<PyAny>> {
+    let rt = rt()?;
+    let (catalog, store) = local_catalog_store(path);
+    let table = TableIdent::new("default", "table");
+
+    let dim = if let Some(d) = dim {
+        d
+    } else {
+        let meta = rt
+            .block_on(catalog.load_table(&table))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        meta.properties
+            .get("ailake.vector-dim")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| queries.first().map(|(_, q, _)| q.len() as u32).unwrap_or(0))
+    };
+
+    let modal_queries: Vec<ModalQuery<'_>> = queries
+        .iter()
+        .map(|(col, q, w)| ModalQuery {
+            column: col.as_str(),
+            query: q.as_slice(),
+            weight: *w,
+        })
+        .collect();
+
+    let config = SearchConfig {
+        top_k,
+        ef_search: 50,
+        pruning_threshold: f32::INFINITY,
+        rerank_factor: None,
+    };
+
+    let results = rt
+        .block_on(rs_search_multimodal(
+            &table,
+            &modal_queries,
+            config,
+            dim,
+            catalog,
+            store,
+            FusionMethod::Rrf,
+        ))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let list = PyList::empty(py);
+    for r in results {
+        let d = PyDict::new(py);
+        d.set_item("row_id", r.row_id.as_u64())?;
+        // distance stores -rrf_score; expose rrf_score (higher = better) to caller
+        d.set_item("rrf_score", -r.distance)?;
+        d.set_item("file", r.file_path)?;
+        list.append(d)?;
+    }
+    Ok(list.into())
+}
+
 #[pymodule]
 fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
+    m.add_class::<VectorColSpec>()?;
     m.add_function(wrap_pyfunction!(search, m)?)?;
+    m.add_function(wrap_pyfunction!(search_multimodal, m)?)?;
     m.add_function(wrap_pyfunction!(search_with_data, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_context, m)?)?;
     m.add_function(wrap_pyfunction!(migrate_embeddings, m)?)?;

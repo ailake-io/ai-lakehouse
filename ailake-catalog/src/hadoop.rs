@@ -296,6 +296,7 @@ mod tests {
                 hnsw_ef_construction: None,
                 ivf_residual: false,
                 embedding_model: None,
+                modality: None,
             },
             extra: std::collections::HashMap::new(),
         }

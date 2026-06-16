@@ -8,7 +8,8 @@ use ailake_catalog::{
     provider::{CatalogProvider, TableIdent, TableProperties},
 };
 use ailake_core::{
-    AilakeError, EmbeddingModelInfo, VectorMetric, VectorPrecision, VectorStoragePolicy,
+    AilakeError, EmbeddingModelInfo, VectorMetric, VectorModality, VectorPrecision,
+    VectorStoragePolicy,
 };
 use ailake_query::{
     CompactionConfig, CompactionExecutor, CompactionPlanner, EmbedFn, MigrationJob,
@@ -76,6 +77,10 @@ enum Commands {
         /// Only effective when the auto index path selects IVF-PQ.
         #[arg(long, default_value_t = false)]
         ivf_residual: bool,
+        /// Modality tag for the primary vector column (text, image, audio, video).
+        /// Stored as ailake.modality-<column> in Iceberg properties.
+        #[arg(long, value_enum)]
+        modality: Option<ModalityArg>,
     },
     /// Insert a Parquet file (with an embedding column) into a table
     Insert {
@@ -246,6 +251,25 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(ValueEnum, Clone)]
+enum ModalityArg {
+    Text,
+    Image,
+    Audio,
+    Video,
+}
+
+impl From<ModalityArg> for VectorModality {
+    fn from(m: ModalityArg) -> Self {
+        match m {
+            ModalityArg::Text => VectorModality::Text,
+            ModalityArg::Image => VectorModality::Image,
+            ModalityArg::Audio => VectorModality::Audio,
+            ModalityArg::Video => VectorModality::Video,
+        }
+    }
+}
+
 /// Parse "namespace.table" → (namespace, table).
 /// Plain "table" → ("default", "table").
 fn parse_table_ident(s: &str) -> TableIdent {
@@ -300,6 +324,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             hnsw_ef,
             pq_only,
             ivf_residual,
+            modality,
         } => {
             let ident = parse_table_ident(&table);
             let policy = VectorStoragePolicy {
@@ -314,6 +339,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_ef_construction: hnsw_ef,
                 ivf_residual,
                 embedding_model: None,
+                modality: modality.map(VectorModality::from),
             };
 
             catalog
@@ -373,6 +399,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     hnsw_ef_construction: None,
                     ivf_residual: false,
                     embedding_model: None,
+                    modality: None,
                 },
                 Err(_) => VectorStoragePolicy {
                     column_name: embeddings.clone(),
@@ -386,6 +413,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     hnsw_ef_construction: None,
                     ivf_residual: false,
                     embedding_model: None,
+                    modality: None,
                 },
             };
 
@@ -531,6 +559,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_ef_construction: None,
                 ivf_residual: false,
                 embedding_model: None,
+                modality: None,
             };
 
             let files = catalog
@@ -631,6 +660,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_ef_construction: None,
                 ivf_residual: false,
                 embedding_model: None,
+                modality: None,
             };
             serve::run(
                 catalog as Arc<dyn CatalogProvider>,

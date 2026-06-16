@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-use crate::types::{EmbeddingModelInfo, VectorMetric, VectorPrecision};
+use crate::types::{EmbeddingModelInfo, VectorMetric, VectorModality, VectorPrecision};
 use serde::{Deserialize, Serialize};
 
 /// Canonical column names for LLM-context tables.
@@ -61,6 +61,11 @@ pub struct VectorStoragePolicy {
     /// - Required for `migrate_embeddings` to track the model transition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<EmbeddingModelInfo>,
+    /// Modality tag for this vector column (text / image / audio / video).
+    /// Stored as `ailake.modality-<col>` in Iceberg properties and Parquet KV metadata.
+    /// Allows readers to select the correct HNSW by modality without reading data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modality: Option<VectorModality>,
 }
 
 impl VectorStoragePolicy {
@@ -77,6 +82,7 @@ impl VectorStoragePolicy {
             hnsw_ef_construction: None,
             ivf_residual: false,
             embedding_model: None,
+            modality: None,
         }
     }
 }
