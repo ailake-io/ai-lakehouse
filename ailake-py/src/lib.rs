@@ -22,11 +22,11 @@ use ailake_catalog::{
     hadoop::HadoopCatalog,
     provider::{CatalogProvider, TableIdent},
 };
-use ailake_core::{EmbeddingModelInfo, VectorMetric, VectorStoragePolicy};
+use ailake_core::{EmbeddingModelInfo, VectorMetric, VectorModality, VectorStoragePolicy};
 use ailake_query::{
     fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
     Chunk, ContextAssembler, ContextAssemblerConfig, EmbedFn, FusionMethod, ModalQuery,
-    MigrationJob, MigrationProgress, MigrationStrategy, ProgressFn, SearchConfig,
+    MigrationJob, MigrationProgress, MigrationStrategy, MultiVectorBatch, ProgressFn, SearchConfig,
     TableWriter as RsTableWriter,
 };
 use ailake_store::{store::Store, LocalStore};
@@ -222,6 +222,66 @@ impl TableWriter {
         self.runtime
             .block_on(writer.write_batch_idempotent(&batch, &embeddings, &batch_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Write a batch with N independent vector columns.
+    ///
+    /// Each column gets its own HNSW index in the file footer. Use for multimodal tables
+    /// where the same row has embeddings from different modalities (text + image, etc.).
+    ///
+    /// Args:
+    ///   texts: list[str] — text content for each row (primary tabular column)
+    ///   columns: list[tuple[VectorColSpec, list[list[float]]]]
+    ///            Each tuple: (column_spec, embeddings_for_that_column)
+    ///            Length of each embedding list must equal len(texts).
+    fn write_batch_multi(
+        &mut self,
+        py: Python<'_>,
+        texts: Vec<String>,
+        columns: Vec<(Py<VectorColSpec>, Vec<Vec<f32>>)>,
+    ) -> PyResult<()> {
+        if columns.is_empty() {
+            return Err(PyValueError::new_err(
+                "write_batch_multi requires at least one column",
+            ));
+        }
+
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let text_arr = StringArray::from(texts);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        // Build owned policies + embedding vecs.
+        let mut mv_batches: Vec<(VectorStoragePolicy, Vec<Vec<f32>>)> =
+            Vec::with_capacity(columns.len());
+        for (spec_py, embs) in &columns {
+            let spec = spec_py.borrow(py);
+            let metric = parse_metric(&spec.metric)?;
+            let modality = spec.modality.as_deref().and_then(VectorModality::from_str);
+            let mut policy = VectorStoragePolicy::default_f16(&spec.column, spec.dim, metric);
+            policy.modality = modality;
+            mv_batches.push((policy, embs.clone()));
+        }
+
+        let batches: Vec<MultiVectorBatch<'_>> = mv_batches
+            .iter()
+            .map(|(policy, embs)| MultiVectorBatch {
+                policy: policy.clone(),
+                embeddings: embs.as_slice(),
+            })
+            .collect();
+
+        let writer = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TableWriter already committed"))?;
+
+        self.runtime
+            .block_on(writer.write_batch_multi(&batch, &batches))
+            .map_err(|e| {
+                warn!("ailake-py: write_batch_multi failed: {}", e);
+                PyValueError::new_err(e.to_string())
+            })
     }
 
     /// Commit all staged batches as a new Iceberg snapshot.
