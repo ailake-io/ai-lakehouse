@@ -697,5 +697,68 @@ with tempfile.TemporaryDirectory() as tmp:
     print(f"PASS (on_progress): called {len(progress_calls)} times, last={last}")
 
 
+
+# ── 19. Phase 8 — VectorColSpec + write_batch_multi + search_multimodal ───────
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = str(pathlib.Path(tmp) / "multimodal_test")
+
+    IMAGE_DIM = 4
+
+    def make_image_embedding(i: int) -> list:
+        v = [float(i * IMAGE_DIM + j + 1) for j in range(IMAGE_DIM)]
+        norm = math.sqrt(sum(x * x for x in v))
+        return [x / norm for x in v]
+
+    # VectorColSpec construction
+    text_spec  = ailake.VectorColSpec("embedding",       DIM,       "cosine", "text")
+    image_spec = ailake.VectorColSpec("image_embedding", IMAGE_DIM, "cosine", "image")
+    assert text_spec  is not None, "FAIL: VectorColSpec text returned None"
+    assert image_spec is not None, "FAIL: VectorColSpec image returned None"
+    print("PASS (VectorColSpec): constructed text + image specs")
+
+    # write_batch_multi — N rows with two vector columns
+    writer = ailake.TableWriter(path, dim=DIM, metric="cosine")
+    texts      = [f"doc_{i}" for i in range(N)]
+    text_embs  = [make_embedding(i)       for i in range(N)]
+    image_embs = [make_image_embedding(i) for i in range(N)]
+    writer.write_batch_multi(
+        texts,
+        [(text_spec, text_embs), (image_spec, image_embs)],
+    )
+    snap_id = writer.commit()
+    assert snap_id >= 0, f"FAIL: write_batch_multi commit returned {snap_id}"
+    print(f"PASS (write_batch_multi): {N} rows, 2 vector columns, snapshot_id={snap_id}")
+
+    # search_multimodal — cross-modal RRF
+    query_idx  = 5
+    text_query  = make_embedding(query_idx)
+    image_query = make_image_embedding(query_idx)
+
+    results = ailake.search_multimodal(
+        path,
+        queries=[
+            ("embedding",       text_query,  0.7),
+            ("image_embedding", image_query, 0.3),
+        ],
+        top_k=5,
+    )
+    assert isinstance(results, list) and len(results) > 0, \
+        f"FAIL: search_multimodal returned {results}"
+    top = max(results, key=lambda r: r["rrf_score"])
+    assert top["row_id"] == query_idx, \
+        f"FAIL: top row_id={top['row_id']}, expected {query_idx}"
+    print(f"PASS (search_multimodal): top row_id={top['row_id']}, rrf_score={top['rrf_score']:.6f}")
+
+    # search_multimodal — text-only weight (0/1 split)
+    results_text_only = ailake.search_multimodal(
+        path,
+        queries=[("embedding", text_query, 1.0)],
+        top_k=3,
+    )
+    assert len(results_text_only) > 0, "FAIL: text-only search_multimodal returned empty"
+    print(f"PASS (search_multimodal text-only): {len(results_text_only)} results")
+
+
 print()
 print("PASS: ailake Python SDK — all checks passed.")
