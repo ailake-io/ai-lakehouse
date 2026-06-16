@@ -86,9 +86,11 @@ static unique_ptr<FunctionData> AilakeMultimodalBind(
                     if (!f.IsNull()) arg.query.push_back(FloatValue::Get(f));
                 }
             } else if (fname == "weight") {
-                arg.weight = FloatValue::Get(fval);
-                if (arg.weight < 0.0f) {
-                    throw InvalidInputException("ailake_search_multimodal: weight must be >= 0");
+                // SQL literal 1.0 is DOUBLE; handle both FLOAT and DOUBLE safely.
+                if (fval.type().id() == LogicalTypeId::DOUBLE) {
+                    arg.weight = static_cast<float>(DoubleValue::Get(fval));
+                } else {
+                    arg.weight = FloatValue::Get(fval);
                 }
             }
         }
