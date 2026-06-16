@@ -52,7 +52,10 @@ def setup_connection():
         sys.exit(0)
 
     ctypes.CDLL(lib_path, ctypes.RTLD_GLOBAL)
-    conn = duckdb.connect()
+    conn = duckdb.connect(config={
+        "allow_unsigned_extensions": True,
+        "allow_extensions_metadata_mismatch": True,
+    })
     conn.execute(f"LOAD '{ext_path}'")
     return conn
 
@@ -145,7 +148,10 @@ def test_multimodal_no_lib_returns_empty():
     ext_path = os.environ.get("AILAKE_EXT", "")
     if not ext_path:
         return
-    conn2 = duckdb.connect()
+    conn2 = duckdb.connect(config={
+        "allow_unsigned_extensions": True,
+        "allow_extensions_metadata_mismatch": True,
+    })
     try:
         conn2.execute(f"LOAD '{ext_path}'")
         count = conn2.execute("""
