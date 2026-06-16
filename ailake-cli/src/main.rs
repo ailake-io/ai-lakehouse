@@ -930,11 +930,11 @@ async fn run(cli: Cli) -> Result<(), String> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+type ColSpec = (String, u32, VectorMetric, Option<VectorModality>);
+
 /// Parse "--vector-cols" spec: "col:dim:metric[:modality],..."
 /// Returns Vec<(column_name, dim, metric, modality)>.
-fn parse_vector_cols(
-    spec: &str,
-) -> Result<Vec<(String, u32, VectorMetric, Option<VectorModality>)>, String> {
+fn parse_vector_cols(spec: &str) -> Result<Vec<ColSpec>, String> {
     spec.split(',')
         .map(|part| {
             let parts: Vec<&str> = part.trim().splitn(4, ':').collect();
@@ -958,7 +958,7 @@ fn parse_vector_cols(
                     ))
                 }
             };
-            let modality = parts.get(3).and_then(|m| VectorModality::from_str(m));
+            let modality = parts.get(3).and_then(|m| m.parse::<VectorModality>().ok());
             Ok((col, dim, metric, modality))
         })
         .collect()

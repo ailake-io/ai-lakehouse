@@ -295,7 +295,7 @@ pub async fn search_multimodal(
                 .properties
                 .get(&format!("ailake.dim-{}", mq.column))
                 .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| mq.query.len() as u32)
+                .unwrap_or(mq.query.len() as u32)
         };
 
         let col_config = SearchConfig {
@@ -339,10 +339,8 @@ pub async fn search_multimodal(
     for (_, results) in &per_col_results {
         for r in results {
             let key = (r.file_path.clone(), r.row_id.as_u64());
-            if !seen.contains_key(&key) {
-                let rrf_score = *scores.get(&key).unwrap_or(&0.0);
-                seen.insert(key, rrf_score);
-            }
+            let rrf_score = *scores.get(&key).unwrap_or(&0.0);
+            seen.entry(key).or_insert(rrf_score);
         }
     }
 

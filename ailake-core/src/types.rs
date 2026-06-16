@@ -219,14 +219,18 @@ impl VectorModality {
             Self::Video => "video",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for VectorModality {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "text" => Some(Self::Text),
-            "image" => Some(Self::Image),
-            "audio" => Some(Self::Audio),
-            "video" => Some(Self::Video),
-            _ => None,
+            "text" => Ok(Self::Text),
+            "image" => Ok(Self::Image),
+            "audio" => Ok(Self::Audio),
+            "video" => Ok(Self::Video),
+            _ => Err(()),
         }
     }
 }

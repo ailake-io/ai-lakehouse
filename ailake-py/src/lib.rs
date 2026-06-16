@@ -257,7 +257,10 @@ impl TableWriter {
         for (spec_py, embs) in &columns {
             let spec = spec_py.borrow(py);
             let metric = parse_metric(&spec.metric)?;
-            let modality = spec.modality.as_deref().and_then(VectorModality::from_str);
+            let modality = spec
+                .modality
+                .as_deref()
+                .and_then(|s| s.parse::<VectorModality>().ok());
             let mut policy = VectorStoragePolicy::default_f16(&spec.column, spec.dim, metric);
             policy.modality = modality;
             mv_batches.push((policy, embs.clone()));
@@ -705,7 +708,7 @@ fn search_multimodal(
                     .properties
                     .get(&format!("ailake.dim-{col}"))
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| q.len() as u32)
+                    .unwrap_or(q.len() as u32)
             };
             ModalQuery {
                 column: col.as_str(),
