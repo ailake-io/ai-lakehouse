@@ -74,6 +74,9 @@ static unique_ptr<FunctionData> AilakeMultimodalBind(
             const std::string &fname = keys[i].first;
             const Value       &fval  = children[i];
             if (fname == "col") {
+                if (fval.type().id() != LogicalTypeId::VARCHAR) {
+                    throw InvalidInputException("ailake_search_multimodal: query.col must be VARCHAR");
+                }
                 arg.col = StringValue::Get(fval);
             } else if (fname == "query") {
                 if (fval.type().id() != LogicalTypeId::LIST) {
@@ -84,6 +87,9 @@ static unique_ptr<FunctionData> AilakeMultimodalBind(
                 }
             } else if (fname == "weight") {
                 arg.weight = FloatValue::Get(fval);
+                if (arg.weight < 0.0f) {
+                    throw InvalidInputException("ailake_search_multimodal: weight must be >= 0");
+                }
             }
         }
         if (arg.col.empty() || arg.query.empty()) {

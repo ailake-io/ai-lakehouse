@@ -57,7 +57,19 @@ impl AilakeFileReader {
 
     /// Parse the 64-byte AI-Lake header from the embedded AILK section.
     pub fn read_header(&self) -> AilakeResult<AilakeHeader> {
-        let offset = self.ailk_offset()? as usize;
+        self.read_header_at_offset(self.ailk_offset()?)
+    }
+
+    /// Parse the 64-byte AI-Lake header for a named vector column.
+    ///
+    /// Uses `ailake.{column}.footer_offset` for extra columns and falls back to
+    /// `ailake.footer_offset` for the primary column (single-column files).
+    pub fn read_header_for_column(&self, column: &str) -> AilakeResult<AilakeHeader> {
+        self.read_header_at_offset(self.ailk_offset_for_column(column)?)
+    }
+
+    fn read_header_at_offset(&self, offset: u64) -> AilakeResult<AilakeHeader> {
+        let offset = offset as usize;
         if offset + HEADER_SIZE > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
         }

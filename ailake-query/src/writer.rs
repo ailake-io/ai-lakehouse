@@ -949,13 +949,23 @@ async fn build_and_patch_index(
     // Overwrite the Parquet-only file with the full AILK version.
     store.put(&file_path, full_bytes).await?;
 
-    // Wait for the initial writer commit to appear (HNSW builds can finish before
-    // the main write loop calls commit_snapshot, so the catalog has no snapshot yet).
+    // Wait for the initial writer commit to appear (max 60 s).
+    // HNSW builds can finish before the main write loop calls commit_snapshot.
+    let mut committed = false;
     for _ in 0..120u32 {
         match catalog.load_table(&table).await {
-            Ok(meta) if meta.current_snapshot_id.is_some() => break,
+            Ok(meta) if meta.current_snapshot_id.is_some() => {
+                committed = true;
+                break;
+            }
             _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
         }
+    }
+    if !committed {
+        return Err(ailake_core::AilakeError::Store(format!(
+            "deferred HNSW build: no snapshot committed for {file_path} after 60 s — \
+             did you call TableWriter::commit()?"
+        )));
     }
 
     // Update the catalog with CAS-like retry to handle concurrent background tasks.
@@ -1069,12 +1079,22 @@ async fn build_ivf_pq_and_patch_index(
 
     store.put(&file_path, full_bytes).await?;
 
-    // Wait for initial commit to appear then patch IndexStatus::Ready (same CAS loop as HNSW).
+    // Wait for initial commit to appear then patch IndexStatus::Ready (max 60 s).
+    let mut committed = false;
     for _ in 0..120u32 {
         match catalog.load_table(&table).await {
-            Ok(meta) if meta.current_snapshot_id.is_some() => break,
+            Ok(meta) if meta.current_snapshot_id.is_some() => {
+                committed = true;
+                break;
+            }
             _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
         }
+    }
+    if !committed {
+        return Err(ailake_core::AilakeError::Store(format!(
+            "deferred IVF-PQ build: no snapshot committed for {file_path} after 60 s — \
+             did you call TableWriter::commit()?"
+        )));
     }
 
     for attempt in 0..50u32 {
@@ -1180,24 +1200,37 @@ async fn build_and_patch_multi_index(
     let primary_hnsw_len = primary_header.hnsw_len;
 
     // Extract extra column HNSW offsets (one reader per column).
+    // Must use ailk_offset_for_column / read_header_for_column so each column's
+    // own `ailake.{col}.footer_offset` is used — ailk_offset() always returns the
+    // primary column offset, which is wrong for extra columns.
     let mut extra_offsets: Vec<(u64, u64)> = Vec::with_capacity(policies.len().saturating_sub(1));
     for col_policy in policies.iter().skip(1) {
         let col_reader =
             AilakeFileReader::new(full_bytes.clone(), &col_policy.column_name, col_policy.dim);
-        let col_header = col_reader.read_header()?;
-        let col_ailk_start = col_reader.ailk_offset()?;
+        let col_ailk_start = col_reader.ailk_offset_for_column(&col_policy.column_name)?;
+        let col_header = col_reader.read_header_for_column(&col_policy.column_name)?;
         extra_offsets.push((col_ailk_start + col_header.hnsw_offset, col_header.hnsw_len));
     }
 
     // Overwrite the Parquet-only shard with the full AILK file.
     store.put(&file_path, full_bytes).await?;
 
-    // Wait for the initial writer commit to appear.
+    // Wait for the initial writer commit to appear (max 60 s).
+    let mut committed = false;
     for _ in 0..120u32 {
         match catalog.load_table(&table).await {
-            Ok(meta) if meta.current_snapshot_id.is_some() => break,
+            Ok(meta) if meta.current_snapshot_id.is_some() => {
+                committed = true;
+                break;
+            }
             _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
         }
+    }
+    if !committed {
+        return Err(ailake_core::AilakeError::Store(format!(
+            "deferred index build: no snapshot committed for {file_path} after 60 s — \
+             did you call TableWriter::commit()?"
+        )));
     }
 
     // CAS retry loop: patch primary offsets + extra_vector_indexes + IndexStatus::Ready.
