@@ -578,10 +578,7 @@ impl TableWriter {
         // search_multimodal can discover them without reading Parquet files.
         let mut extra_properties = std::collections::HashMap::new();
         for ep in &self.extra_vec_policies {
-            extra_properties.insert(
-                format!("ailake.dim-{}", ep.column_name),
-                ep.dim.to_string(),
-            );
+            extra_properties.insert(format!("ailake.dim-{}", ep.column_name), ep.dim.to_string());
             extra_properties.insert(
                 format!("ailake.metric-{}", ep.column_name),
                 ailake_parquet::schema::metric_str(ep.metric).to_string(),

@@ -25,8 +25,8 @@ use ailake_catalog::{
 use ailake_core::{EmbeddingModelInfo, VectorMetric, VectorModality, VectorStoragePolicy};
 use ailake_query::{
     fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
-    Chunk, ContextAssembler, ContextAssemblerConfig, EmbedFn, FusionMethod, ModalQuery,
-    MigrationJob, MigrationProgress, MigrationStrategy, MultiVectorBatch, ProgressFn, SearchConfig,
+    Chunk, ContextAssembler, ContextAssemblerConfig, EmbedFn, FusionMethod, MigrationJob,
+    MigrationProgress, MigrationStrategy, ModalQuery, MultiVectorBatch, ProgressFn, SearchConfig,
     TableWriter as RsTableWriter,
 };
 use ailake_store::{store::Store, LocalStore};

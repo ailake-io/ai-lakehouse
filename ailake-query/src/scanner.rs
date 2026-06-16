@@ -1008,8 +1008,18 @@ mod tests {
         let q2 = vec![0.0f32, 1.0, 0.0, 0.0];
 
         let queries = vec![
-            ModalQuery { column: "embedding", query: &q1, weight: 0.7, dim: dim as u32 },
-            ModalQuery { column: "embedding", query: &q2, weight: 0.3, dim: dim as u32 },
+            ModalQuery {
+                column: "embedding",
+                query: &q1,
+                weight: 0.7,
+                dim: dim as u32,
+            },
+            ModalQuery {
+                column: "embedding",
+                query: &q2,
+                weight: 0.3,
+                dim: dim as u32,
+            },
         ];
 
         let config = SearchConfig {
@@ -1049,10 +1059,18 @@ mod tests {
         let batch = RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(ids))]).unwrap();
 
         let text_embs: Vec<Vec<f32>> = (0..rows)
-            .map(|i| { let mut v = vec![0.0f32; 4]; v[i % 4] = 1.0; v })
+            .map(|i| {
+                let mut v = vec![0.0f32; 4];
+                v[i % 4] = 1.0;
+                v
+            })
             .collect();
         let img_embs: Vec<Vec<f32>> = (0..rows)
-            .map(|i| { let mut v = vec![0.0f32; 2]; v[i % 2] = 1.0; v })
+            .map(|i| {
+                let mut v = vec![0.0f32; 2];
+                v[i % 2] = 1.0;
+                v
+            })
             .collect();
 
         let text_policy = make_policy(4);
@@ -1072,23 +1090,44 @@ mod tests {
         };
 
         let mut writer = crate::TableWriter::create_or_open(
-            catalog.clone(), store.clone(), text_policy, table.clone(),
-        ).await.unwrap();
+            catalog.clone(),
+            store.clone(),
+            text_policy,
+            table.clone(),
+        )
+        .await
+        .unwrap();
 
         let batches = [
-            MultiVectorBatch { policy: make_policy(4), embeddings: &text_embs },
-            MultiVectorBatch { policy: img_policy, embeddings: &img_embs },
+            MultiVectorBatch {
+                policy: make_policy(4),
+                embeddings: &text_embs,
+            },
+            MultiVectorBatch {
+                policy: img_policy,
+                embeddings: &img_embs,
+            },
         ];
         writer.write_batch_multi(&batch, &batches).await.unwrap();
         writer.commit().await.unwrap();
 
         // Cross-modal search: text query (dim=4) + image query (dim=2).
         let q_text = vec![1.0f32, 0.0, 0.0, 0.0];
-        let q_img  = vec![1.0f32, 0.0];
+        let q_img = vec![1.0f32, 0.0];
 
         let queries = vec![
-            ModalQuery { column: "embedding",     query: &q_text, weight: 0.6, dim: 4 },
-            ModalQuery { column: "img_embedding", query: &q_img,  weight: 0.4, dim: 2 },
+            ModalQuery {
+                column: "embedding",
+                query: &q_text,
+                weight: 0.6,
+                dim: 4,
+            },
+            ModalQuery {
+                column: "img_embedding",
+                query: &q_img,
+                weight: 0.4,
+                dim: 2,
+            },
         ];
         let config = SearchConfig {
             top_k: 2,
@@ -1097,9 +1136,10 @@ mod tests {
             rerank_factor: None,
         };
 
-        let results = search_multimodal(
-            &table, &queries, config, catalog, store, FusionMethod::Rrf,
-        ).await.unwrap();
+        let results =
+            search_multimodal(&table, &queries, config, catalog, store, FusionMethod::Rrf)
+                .await
+                .unwrap();
 
         assert!(!results.is_empty(), "should return results");
         assert!(results[0].distance <= 0.0, "distance is -rrf_score");

@@ -409,8 +409,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 mv_owned.push((first_policy, first_embs));
 
                 for (col_name, dim, metric, modality) in &col_specs[1..] {
-                    let reader =
-                        ailake_parquet::ParquetVectorReader::new(bytes.clone(), col_name);
+                    let reader = ailake_parquet::ParquetVectorReader::new(bytes.clone(), col_name);
                     let (_, embs) = reader.read_all().map_err(|e| e.to_string())?;
                     let policy = VectorStoragePolicy {
                         column_name: col_name.clone(),
@@ -450,7 +449,10 @@ async fn run(cli: Cli) -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
                 writer.commit().await.map_err(|e| e.to_string())?;
 
-                println!("inserted {rows} rows into {table} ({} vector columns)", col_specs.len());
+                println!(
+                    "inserted {rows} rows into {table} ({} vector columns)",
+                    col_specs.len()
+                );
             } else {
                 // Single-column mode (original behavior).
                 let reader = ailake_parquet::ParquetVectorReader::new(bytes, &embeddings);
@@ -699,7 +701,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 files: remaining,
                 operation: ailake_catalog::provider::SnapshotOperation::Replace,
                 iceberg_schema: None,
-                    extra_properties: std::collections::HashMap::new(),
+                extra_properties: std::collections::HashMap::new(),
             };
             catalog
                 .commit_snapshot(&ident, snap)

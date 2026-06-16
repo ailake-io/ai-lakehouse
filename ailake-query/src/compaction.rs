@@ -233,7 +233,7 @@ impl CompactionExecutor {
             files: vec![merged.clone()],
             operation: SnapshotOperation::Replace,
             iceberg_schema: None,
-                    extra_properties: std::collections::HashMap::new(),
+            extra_properties: std::collections::HashMap::new(),
         };
         catalog.commit_snapshot(table, snapshot).await?;
 

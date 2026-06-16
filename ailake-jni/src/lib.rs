@@ -498,9 +498,7 @@ pub unsafe extern "C" fn ailake_free_string(ptr: *mut c_char) {
 /// # Safety
 /// Caller must free the returned pointer with `ailake_free_string`.
 #[no_mangle]
-pub unsafe extern "C" fn ailake_search_multimodal_json(
-    request_json: *const c_char,
-) -> *mut c_char {
+pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_char) -> *mut c_char {
     #[derive(serde::Deserialize)]
     struct ModalQueryReq {
         col: String,
