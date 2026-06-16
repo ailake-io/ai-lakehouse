@@ -452,9 +452,11 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 ### Fase 8 — Multimodal (Imagens, Áudio, Vídeo)
 
 > **Pré-condição**: vetores de imagem/áudio já funcionam hoje via coluna `VECTOR` padrão (CLIP dim=512, ImageBind dim=1024). Esta fase adiciona suporte semântico de primeira classe para dados multimodais.
+>
+> **Nota (v0.0.19)**: Coluna `MEDIA` (bytes brutos embutidos) descartada — AI-Lake não é blob store. Mídia vive em object storage; apenas URIs e embeddings pertencem ao AI-Lake. Todos os demais itens implementados. **Fase 8 concluída.**
 
 - [x] **`ailake.modality` property** — `VectorModality` enum (`Text`, `Image`, `Audio`, `Video`) em `ailake-core`. `VectorStoragePolicy.modality: Option<VectorModality>` (serde default, backward-compat). Iceberg property: `ailake.modality-<col>`. CLI `ailake create --modality text|image|audio|video`. Permite seleção do HNSW correto por modalidade sem inspecionar dados.
-- [ ] **Coluna `MEDIA`** — tipo lógico `MEDIA(mime_type)` sobre `BINARY` Parquet. Armazena bytes brutos (JPEG, PNG, MP3, MP4) com metadata `ailake.media-mime` e `ailake.media-col` nas propriedades Iceberg. Leitores legados leem como `BINARY` sem erro. SDK expõe `read_media(row_id) -> Bytes`.
+
 - [x] **Vetores N generalizados** — N colunas `VECTOR` com HNSW próprio no rodapé via `AilakeFileWriter::write_multi` (existente). Python `VectorColSpec(column, dim, metric, modality)` expõe o multi-column write. Cada coluna tem AILK section independente; localização via `ailake.<col>.footer_offset` no KV metadata Parquet.
 - [x] **Cross-modal fusion search** — `search_multimodal()` em `ailake-query`: aceita `&[ModalQuery { column, query, weight }]`, roda HNSW por coluna independentemente, funde via Reciprocal Rank Fusion (`score = Σ weight_i / (60 + rank_i)`). Python: `ailake.search_multimodal(path, [(col, query, weight)], top_k)`. Enum `FusionMethod::Rrf` extensível.
 - [x] **`MultimodalContextSchema`** — estende `LlmContextSchema` com `media_uri: String`, `media_mime: String`, `media_caption: String`, `image_embedding: Vector<512>`, `audio_transcript: String`. Base64-encode de miniaturas inline para contexto LLM multimodal.
