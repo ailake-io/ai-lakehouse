@@ -78,10 +78,11 @@ def load_fixture_query():
 
 def test_extension_loads():
     conn = setup_connection()
-    rows = conn.execute("SELECT ailake_search_multimodal IS NULL").fetchall()
-    # If function is registered, querying its name raises a different error;
-    # a simple load check: the connection is alive.
-    require(conn is not None, "extension loads without error")
+    # Verify function is registered in duckdb_functions().
+    rows = conn.execute(
+        "SELECT count(*) FROM duckdb_functions() WHERE function_name = 'ailake_search_multimodal'"
+    ).fetchone()
+    require(rows[0] >= 1, "ailake_search_multimodal registered in duckdb_functions()")
     conn.close()
 
 
