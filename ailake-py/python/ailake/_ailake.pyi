@@ -157,6 +157,36 @@ class TableWriter:
         """
         ...
 
+    def write_batch_multi_deferred(
+        self,
+        texts: Sequence[str],
+        columns: Sequence[tuple["VectorColSpec", Sequence[Sequence[float]]]],
+    ) -> None:
+        """Deferred variant of ``write_batch_multi``.
+
+        Persists Parquet immediately and builds all N column HNSW indexes in a
+        background task. During the build window, search is served via flat scan
+        (exact, GPU-accelerated when available). Transitions to HNSW-indexed
+        search automatically once ``IndexStatus`` becomes ``Ready``.
+
+        Use when ingest throughput matters more than immediate HNSW availability.
+
+        Args:
+            texts: One string per row (primary tabular column).
+            columns: List of ``(VectorColSpec, embeddings)`` tuples — same format
+                     as :meth:`write_batch_multi`.
+
+        Example::
+
+            text_spec  = ailake.VectorColSpec("embedding",       1536, "cosine", "text")
+            image_spec = ailake.VectorColSpec("image_embedding",  512, "cosine", "image")
+            writer.write_batch_multi_deferred(
+                texts,
+                [(text_spec, text_embs), (image_spec, image_embs)],
+            )
+        """
+        ...
+
     def commit(self) -> int:
         """Persist all buffered batches as a new Iceberg snapshot.
 

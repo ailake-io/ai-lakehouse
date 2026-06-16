@@ -287,6 +287,70 @@ impl TableWriter {
             })
     }
 
+    /// Deferred variant of `write_batch_multi`.
+    ///
+    /// Persists Parquet immediately and builds all N column HNSW indexes in a
+    /// background task. During the build window, search is served via flat scan
+    /// (exact, GPU-accelerated when available). Transitions to HNSW-indexed search
+    /// automatically when `IndexStatus::Ready`.
+    ///
+    /// Use when ingest throughput matters more than immediate HNSW availability.
+    ///
+    /// Args:
+    ///   texts: list[str]
+    ///   columns: list[tuple[VectorColSpec, list[list[float]]]]
+    fn write_batch_multi_deferred(
+        &mut self,
+        py: Python<'_>,
+        texts: Vec<String>,
+        columns: Vec<(Py<VectorColSpec>, Vec<Vec<f32>>)>,
+    ) -> PyResult<()> {
+        if columns.is_empty() {
+            return Err(PyValueError::new_err(
+                "write_batch_multi_deferred requires at least one column",
+            ));
+        }
+
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let text_arr = StringArray::from(texts);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        let mut mv_batches: Vec<(VectorStoragePolicy, Vec<Vec<f32>>)> =
+            Vec::with_capacity(columns.len());
+        for (spec_py, embs) in &columns {
+            let spec = spec_py.borrow(py);
+            let metric = parse_metric(&spec.metric)?;
+            let modality = spec
+                .modality
+                .as_deref()
+                .and_then(|s| s.parse::<VectorModality>().ok());
+            let mut policy = VectorStoragePolicy::default_f16(&spec.column, spec.dim, metric);
+            policy.modality = modality;
+            mv_batches.push((policy, embs.clone()));
+        }
+
+        let batches: Vec<MultiVectorBatch<'_>> = mv_batches
+            .iter()
+            .map(|(policy, embs)| MultiVectorBatch {
+                policy: policy.clone(),
+                embeddings: embs.as_slice(),
+            })
+            .collect();
+
+        let writer = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TableWriter already committed"))?;
+
+        self.runtime
+            .block_on(writer.write_batch_multi_deferred(&batch, &batches))
+            .map_err(|e| {
+                warn!("ailake-py: write_batch_multi_deferred failed: {}", e);
+                PyValueError::new_err(e.to_string())
+            })
+    }
+
     /// Commit all staged batches as a new Iceberg snapshot.
     fn commit(&mut self) -> PyResult<i64> {
         let writer = self
