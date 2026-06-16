@@ -453,6 +453,99 @@ cd spark-plugin
 
 ---
 
+## Cross-modal search (Phase 8)
+
+All three JVM plugins expose `searchMultimodal()` backed by `ailake_search_multimodal_json` in `libailake_jni.so`.
+
+### C-ABI entry point
+
+```
+ailake_search_multimodal_json(request_json: *const c_char) -> *mut c_char
+ailake_free_string(ptr: *mut c_char)
+```
+
+**Request JSON**:
+```json
+{
+  "warehouse": "s3://my-lake/",
+  "namespace": "default",
+  "table": "docs",
+  "queries": [
+    { "col": "embedding",         "query": [0.1, 0.2, ...], "weight": 0.6, "dim": 0 },
+    { "col": "context_embedding", "query": [0.3, 0.1, ...], "weight": 0.4, "dim": 0 }
+  ],
+  "top_k": 20
+}
+```
+
+`dim: 0` = infer from stored column metadata.
+
+**Response JSON**:
+```json
+{
+  "ok": true,
+  "results": [
+    { "row_id": 42, "rrf_score": 0.0312, "file_path": "data/part-00001.parquet" }
+  ]
+}
+```
+
+`rrf_score = Σ weight_i / (60 + rank_i)` — higher is better. Rank is 0-indexed.
+
+### Spark (Scala)
+
+```scala
+import io.ailake.spark.AilakeNative
+import io.ailake.spark.MultimodalSearchRow
+
+val queries = Array(
+  (0.6f, "embedding",         queryVec1),
+  (0.4f, "context_embedding", queryVec2),
+)
+val rows: Array[MultimodalSearchRow] = AilakeNative.searchMultimodal(tableUri, queries, topK = 20)
+rows.foreach(r => println(s"row_id=${r.rowId}  rrf=${r.rrfScore:.4f}  file=${r.filePath}"))
+```
+
+### Trino (Kotlin)
+
+```kotlin
+import io.ailake.trino.AilakeNative
+import io.ailake.trino.MultimodalSearchRow
+
+val queries = listOf(
+    Triple(0.6f, "embedding",         queryVec1),
+    Triple(0.4f, "context_embedding", queryVec2),
+)
+val rows: List<MultimodalSearchRow> = AilakeNative.searchMultimodal(tableUri, queries, topK = 20)
+```
+
+### Flink (Kotlin)
+
+```kotlin
+import io.ailake.flink.internal.AilakeNativeLoader
+
+val loader = AilakeNativeLoader()
+val queries = listOf(
+    Triple(0.6f, "embedding",         queryVec1),
+    Triple(0.4f, "context_embedding", queryVec2),
+)
+val rows = loader.searchMultimodal(tableUri, queries, topK = 20)
+```
+
+### Architecture diagram (multimodal path)
+
+```
+JVM caller
+  └─ searchMultimodal(uri, queries, topK)
+       └─ AilakeNative.searchMultimodal()         [Spark/Trino/Flink]
+            └─ JNA: ailake_search_multimodal_json  [libailake_jni.so]
+                 └─ search_multimodal()             [ailake-query, Rust]
+                      ├─ Per-column HNSW search     [ailake-index]
+                      └─ Reciprocal Rank Fusion      [score = Σ w/(60+rank)]
+```
+
+---
+
 ## Native library deployment
 
 ### Local / development
