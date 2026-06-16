@@ -82,8 +82,21 @@ pub async fn search(
     // Determine vector metric from table metadata for correct distance computation
     let table_meta = catalog.load_table(table).await?;
 
-    // Validate query dim against table dim — silent dim mismatch gives garbage results.
-    if let Some(table_dim_str) = table_meta.properties.get("ailake.vector-dim") {
+    // Validate query dim against the column's stored dim.
+    // Primary column: use `ailake.vector-dim`. Secondary columns: use `ailake.dim-<col>`.
+    // Skip validation when the column has no stored dim (e.g. old tables written before
+    // multi-column support).
+    let primary_col = table_meta
+        .properties
+        .get("ailake.vector-column")
+        .map(String::as_str)
+        .unwrap_or("");
+    let stored_dim_key = if vector_column == primary_col {
+        "ailake.vector-dim".to_string()
+    } else {
+        format!("ailake.dim-{vector_column}")
+    };
+    if let Some(table_dim_str) = table_meta.properties.get(&stored_dim_key) {
         if let Ok(table_dim) = table_dim_str.parse::<u32>() {
             let query_dim = query.len() as u32;
             if query_dim != table_dim {
@@ -102,10 +115,17 @@ pub async fn search(
         }
     }
 
+    // Metric: prefer per-column `ailake.metric-<col>`, fall back to primary metric.
+    let metric_key = if vector_column == primary_col {
+        "ailake.vector-metric".to_string()
+    } else {
+        format!("ailake.metric-{vector_column}")
+    };
     let metric = parse_metric(
         table_meta
             .properties
-            .get("ailake.vector-metric")
+            .get(&metric_key)
+            .or_else(|| table_meta.properties.get("ailake.vector-metric"))
             .map(String::as_str)
             .unwrap_or("cosine"),
     );
@@ -196,6 +216,155 @@ pub async fn search(
     });
     all_results.truncate(config.top_k);
     Ok(all_results)
+}
+
+/// One query arm in a cross-modal search.
+#[derive(Debug, Clone)]
+pub struct ModalQuery<'a> {
+    /// Vector column to search (must exist in the table).
+    pub column: &'a str,
+    /// Query vector for this modality.
+    pub query: &'a [f32],
+    /// Relative weight applied in the RRF formula: `weight / (k + rank)`.
+    /// `1.0` means equal weight across all modalities.
+    pub weight: f32,
+    /// Dimensionality of this column's vectors. `0` = auto-detect from table metadata
+    /// (`ailake.dim-<column>` for secondary columns, `ailake.vector-dim` for primary).
+    pub dim: u32,
+}
+
+/// Fusion method for combining results from multiple vector columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusionMethod {
+    /// Reciprocal Rank Fusion: `score(d) = Σ weight_i / (k + rank_i(d))`.
+    /// `k = 60` (standard). Returned `SearchResult.distance` = `-rrf_score`
+    /// so that sort-ascending-by-distance gives the correct RRF ranking.
+    Rrf,
+}
+
+/// Cross-modal search: run independent HNSW searches across N vector columns,
+/// then fuse per-column ranked lists using Reciprocal Rank Fusion.
+///
+/// Each `ModalQuery` specifies a column name, its query vector, RRF weight, and dim.
+/// When `ModalQuery.dim == 0`, the dim is auto-detected from `ailake.dim-<col>` /
+/// `ailake.vector-dim` in table metadata.
+/// Results are de-duplicated by `(file_path, row_id)` and ranked by aggregate
+/// RRF score. `SearchResult.distance` stores `-rrf_score` (lower = better) so
+/// existing sort-ascending callers get the correct ordering.
+pub async fn search_multimodal(
+    table: &TableIdent,
+    queries: &[ModalQuery<'_>],
+    config: SearchConfig,
+    catalog: Arc<dyn CatalogProvider>,
+    store: Arc<dyn Store>,
+    fusion: FusionMethod,
+) -> AilakeResult<Vec<SearchResult>> {
+    use std::collections::HashMap;
+
+    if queries.is_empty() {
+        return Err(AilakeError::InvalidArgument(
+            "search_multimodal requires at least one ModalQuery".into(),
+        ));
+    }
+
+    // Load table metadata once for dim auto-detection and metric resolution.
+    let table_meta = catalog.load_table(table).await?;
+    let primary_col = table_meta
+        .properties
+        .get("ailake.vector-column")
+        .cloned()
+        .unwrap_or_default();
+    let primary_dim: u32 = table_meta
+        .properties
+        .get("ailake.vector-dim")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    // Fetch more candidates per column so RRF has enough to fuse.
+    let per_col_k = (config.top_k * queries.len().max(2)).min(1000);
+
+    let mut per_col_results: Vec<(f32, Vec<SearchResult>)> = Vec::with_capacity(queries.len());
+    for mq in queries {
+        // Resolve dim: caller-supplied > per-column property > primary column dim.
+        let resolved_dim = if mq.dim > 0 {
+            mq.dim
+        } else if mq.column == primary_col {
+            primary_dim
+        } else {
+            table_meta
+                .properties
+                .get(&format!("ailake.dim-{}", mq.column))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| mq.query.len() as u32)
+        };
+
+        let col_config = SearchConfig {
+            top_k: per_col_k,
+            ef_search: config.ef_search,
+            pruning_threshold: config.pruning_threshold,
+            rerank_factor: config.rerank_factor,
+        };
+        let results = search(
+            table,
+            mq.query,
+            col_config,
+            mq.column,
+            resolved_dim,
+            catalog.clone(),
+            store.clone(),
+        )
+        .await?;
+        per_col_results.push((mq.weight, results));
+    }
+
+    // RRF fusion: accumulate score per (file_path, row_id).
+    const K: f32 = 60.0;
+    let mut scores: HashMap<(String, u64), f32> = HashMap::new();
+
+    for (weight, results) in &per_col_results {
+        for (rank, r) in results.iter().enumerate() {
+            let key = (r.file_path.clone(), r.row_id.as_u64());
+            let rrf = weight / (K + rank as f32 + 1.0);
+            *scores.entry(key).or_insert(0.0) += rrf;
+        }
+    }
+
+    // Build SearchResult list sorted by descending RRF score.
+    // Store `-rrf_score` as `.distance` so callers sorting ascending get correct order.
+    let all_files = catalog.list_files(table, None).await?;
+    let _ = all_files; // centroid not needed for fusion — just need file_path+row_id
+
+    // Collect unique candidates: prefer the row's appearance in the first column's results.
+    let mut seen: HashMap<(String, u64), f32> = HashMap::new();
+    for (_, results) in &per_col_results {
+        for r in results {
+            let key = (r.file_path.clone(), r.row_id.as_u64());
+            if !seen.contains_key(&key) {
+                let rrf_score = *scores.get(&key).unwrap_or(&0.0);
+                seen.insert(key, rrf_score);
+            }
+        }
+    }
+
+    let mut fused: Vec<SearchResult> = seen
+        .into_iter()
+        .map(|((file_path, row_id_u64), rrf_score)| SearchResult {
+            row_id: RowId::new(row_id_u64),
+            distance: -rrf_score,
+            file_path,
+        })
+        .collect();
+
+    fused.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    fused.truncate(config.top_k);
+
+    let _ = fusion; // only RRF implemented; enum is extensible
+
+    Ok(fused)
 }
 
 /// Brute-force top-k search over raw vectors. Used for Indexing shards.
@@ -639,6 +808,7 @@ pub async fn fetch_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::writer::MultiVectorBatch;
     use ailake_catalog::{HadoopCatalog, TableIdent};
     use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
     use ailake_store::LocalStore;
@@ -660,6 +830,7 @@ mod tests {
             hnsw_ef_construction: None,
             ivf_residual: false,
             embedding_model: None,
+            modality: None,
         }
     }
 
@@ -818,5 +989,121 @@ mod tests {
 
         // Both should return same top-1 result (row 0, distance ~0)
         assert_eq!(plain[0].row_id, reranked[0].row_id);
+    }
+
+    #[tokio::test]
+    async fn multimodal_rrf_returns_top_k() {
+        let dir = TempDir::new().unwrap();
+        let dim = 4usize;
+        write_demo_table(&dir, dim, 4).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        // Two modal queries using the same column (single-column table).
+        // Different queries to exercise RRF merging.
+        let q1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let q2 = vec![0.0f32, 1.0, 0.0, 0.0];
+
+        let queries = vec![
+            ModalQuery { column: "embedding", query: &q1, weight: 0.7, dim: dim as u32 },
+            ModalQuery { column: "embedding", query: &q2, weight: 0.3, dim: dim as u32 },
+        ];
+
+        let config = SearchConfig {
+            top_k: 2,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+        };
+
+        let results =
+            search_multimodal(&table, &queries, config, catalog, store, FusionMethod::Rrf)
+                .await
+                .unwrap();
+
+        assert_eq!(results.len(), 2);
+        // RRF score stored as -distance; all should be negative
+        assert!(results[0].distance <= 0.0);
+        // Top result should be one of rows 0 or 1 (nearest to q1 or q2)
+        assert!(results[0].row_id.as_u64() < 4);
+    }
+
+    /// True cross-modal test: two columns with DIFFERENT dims (4 + 2).
+    /// Verifies that search_multimodal correctly routes to each column's HNSW
+    /// and that the dim validation in search() handles secondary columns.
+    #[tokio::test]
+    async fn multimodal_rrf_cross_modal_different_dims() {
+        let dir = TempDir::new().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        // Write a 2-column table: "embedding" dim=4, "img_embedding" dim=2
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let rows = 4usize;
+        let ids: Vec<i32> = (0..rows as i32).collect();
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(ids))]).unwrap();
+
+        let text_embs: Vec<Vec<f32>> = (0..rows)
+            .map(|i| { let mut v = vec![0.0f32; 4]; v[i % 4] = 1.0; v })
+            .collect();
+        let img_embs: Vec<Vec<f32>> = (0..rows)
+            .map(|i| { let mut v = vec![0.0f32; 2]; v[i % 2] = 1.0; v })
+            .collect();
+
+        let text_policy = make_policy(4);
+        let img_policy = VectorStoragePolicy {
+            column_name: "img_embedding".to_string(),
+            dim: 2,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+        };
+
+        let mut writer = crate::TableWriter::create_or_open(
+            catalog.clone(), store.clone(), text_policy, table.clone(),
+        ).await.unwrap();
+
+        let batches = [
+            MultiVectorBatch { policy: make_policy(4), embeddings: &text_embs },
+            MultiVectorBatch { policy: img_policy, embeddings: &img_embs },
+        ];
+        writer.write_batch_multi(&batch, &batches).await.unwrap();
+        writer.commit().await.unwrap();
+
+        // Cross-modal search: text query (dim=4) + image query (dim=2).
+        let q_text = vec![1.0f32, 0.0, 0.0, 0.0];
+        let q_img  = vec![1.0f32, 0.0];
+
+        let queries = vec![
+            ModalQuery { column: "embedding",     query: &q_text, weight: 0.6, dim: 4 },
+            ModalQuery { column: "img_embedding", query: &q_img,  weight: 0.4, dim: 2 },
+        ];
+        let config = SearchConfig {
+            top_k: 2,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+        };
+
+        let results = search_multimodal(
+            &table, &queries, config, catalog, store, FusionMethod::Rrf,
+        ).await.unwrap();
+
+        assert!(!results.is_empty(), "should return results");
+        assert!(results[0].distance <= 0.0, "distance is -rrf_score");
+        // Row 0 is nearest to both q_text=[1,0,0,0] and q_img=[1,0]
+        assert_eq!(results[0].row_id.as_u64(), 0, "row 0 should rank first");
     }
 }

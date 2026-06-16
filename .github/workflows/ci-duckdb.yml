@@ -71,3 +71,10 @@ jobs:
           AILAKE_LIB:     target/release/libailake_jni.so
           AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_FIXTURE: ./compat-fixture
+
+      - name: Run multimodal search tests
+        run: python duckdb-ailake/test/test_multimodal.py
+        env:
+          AILAKE_LIB:     target/release/libailake_jni.so
+          AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_FIXTURE: ./compat-fixture

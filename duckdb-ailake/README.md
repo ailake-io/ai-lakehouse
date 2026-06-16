@@ -48,6 +48,48 @@ SELECT * FROM ailake_search(
 );
 ```
 
+### `ailake_search_multimodal` — cross-modal RRF search (Phase 8)
+
+```sql
+SELECT * FROM ailake_search_multimodal(
+    table_path  VARCHAR,                -- path/URI to AI-Lake table root
+    queries     LIST(STRUCT(           -- one entry per vector column
+                    col    VARCHAR,    -- column name
+                    query  FLOAT[],   -- query embedding
+                    weight FLOAT)),   -- RRF weight (higher = more influential)
+    top_k       INTEGER
+) → TABLE(row_id BIGINT, rrf_score FLOAT, file_path VARCHAR)
+```
+
+Results are **not** automatically sorted — add `ORDER BY rrf_score DESC` to rank them.
+
+**Examples:**
+
+```sql
+-- Cross-modal: 70% text + 30% image
+SELECT row_id, rrf_score
+FROM ailake_search_multimodal(
+    'file:///data/media',
+    [
+        {'col': 'embedding',       'query': [0.1, 0.2, ...]::FLOAT[], 'weight': 0.7},
+        {'col': 'image_embedding', 'query': [0.3, 0.4, ...]::FLOAT[], 'weight': 0.3}
+    ],
+    20
+)
+ORDER BY rrf_score DESC;
+
+-- Single-column (equivalent to ailake_search but returns rrf_score)
+SELECT * FROM ailake_search_multimodal(
+    'file:///data/docs',
+    [{'col': 'embedding', 'query': my_vec, 'weight': 1.0}],
+    10
+) ORDER BY rrf_score DESC;
+```
+
+Returns 0 rows (no error) if `libailake_jni.so` is not loaded or does not export `ailake_search_multimodal_json`.
+
+---
+
 ### `ailake_write_batch` — ingest embeddings
 
 ```sql
@@ -134,7 +176,7 @@ D SELECT * FROM ailake_search('file:///data/docs', [0.1, 0.2]::FLOAT[], 5);
 
 ## Design
 
-- C-ABI bridge: `dlopen("libailake_jni.so")` → `ailake_search_json` / `ailake_write_batch_json`
+- C-ABI bridge: `dlopen("libailake_jni.so")` → `ailake_search_json` / `ailake_search_multimodal_json` / `ailake_write_batch_json`
 - Same JSON-envelope protocol as Spark (`AilakeNative.scala`) and Trino (`AilakeNative.kt`)
 - `ailake_search` executes the full search (pruning + HNSW) inside Rust; DuckDB sees a virtual table
 - Graceful degradation: if `libailake_jni.so` is not found, search returns 0 rows instead of aborting
@@ -144,6 +186,7 @@ D SELECT * FROM ailake_search('file:///data/docs', [0.1, 0.2]::FLOAT[], 5);
 | Feature | Spark | Trino | DuckDB |
 |---|---|---|---|
 | Vector search | `VectorScanExec` | `VectorScanRecordSet` | `ailake_search()` table fn |
+| Cross-modal search | `searchMultimodal()` | `searchMultimodal()` | `ailake_search_multimodal()` table fn |
 | INSERT INTO / write | `AilakeWriteSupport` | `AilakePageSink` | `ailake_write_batch()` scalar fn |
 | Catalog integration | `AilakeCatalog` | — | — (use `parquet_scan` for joins) |
 | Native lib loading | JNA | JNA | `dlopen` |

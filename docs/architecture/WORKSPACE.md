@@ -323,6 +323,9 @@ debug       = true
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS runtime-only), HNSW perf optimizations, IVF-PQ native index, GPU k-means, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog, JNA bridge) |
 | **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP server, Airflow provider, idempotent writes, Compat Heavy CI, TruffleHog scanning, cloud deployment guides |
 | **Phase 6** | ✅ Complete | Public distribution — crates.io pipeline, PyPI manylinux wheels, Airflow provider on PyPI, pre-built JVM JARs + native lib on GitHub Releases, dynamic Python versioning |
+| **Phase 7** | 🚧 In progress | DuckDB extension (`duckdb-ailake/`), Python `fetch_data=True`, `write_batch_auto_deferred` + async (~200k vec/s), `pq_only`/`ivf_residual` in Python SDK, Airbyte CDK v3 destination connector, expanded JupyterLab demo (5 fixture tables, `07_multimodal.ipynb`). Remaining: DuckLake catalog backend; dbt integration guide |
+| **Phase 8** | ✅ Complete | Multimodal — `VectorModality` enum, `ailake.modality-<col>` Iceberg property, N generalized vector columns with independent HNSW, `write_batch_multi`, CLI `--vector-cols`, cross-modal RRF (`search_multimodal`), `MultimodalContextSchema`, Python `VectorColSpec`. Propagated to all plugins: `ailake_search_multimodal_json` C-ABI, `searchMultimodal()` Spark/Trino/Flink, `ailake_search_multimodal()` DuckDB, `SearchMultimodal()` Go SDK, `search_multimodal()` C++ SDK |
+| **Phase 9** | 📋 Planned | Agents / Episodic Memory — `ToolCallSchema`, `EpisodicMemorySchema` with recency decay, injectable hybrid scoring, `agent_id` Iceberg hidden partitioning, `WorkingMemoryBuffer`, `MemoryDecayJob`, `ailake.Agent` Python helper |
 
 ### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
@@ -431,3 +434,30 @@ Delivered in Phase 6:
 - **Node.js 24 opt-in** — `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` across all 9 workflows; eliminates deprecation warnings ahead of GitHub-forced switch
 
 Manual Actions trigger order (pre-release): CI → CI Go → CI C++ → Compat Heavy → Release → Publish Python / Airflow Provider / JVM Plugins (parallel). See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.
+
+### Phase 7 — DuckDB Extension + Deferred Engine + Airbyte 🚧
+
+Delivered in Phase 7:
+
+- **`duckdb-ailake`** — C++ DuckDB community extension: `ailake_search()`, `ailake_write_batch()`, `ailake_scan()` table functions; `dlopen`-based C-ABI bridge to `libailake_jni.so`; 512-byte DuckDB 1.0+ metadata block; DuckDB v1.1.3 via CMake FetchContent.
+- **`write_batch_auto_deferred`** — async deferred variant of the `Auto` engine: detects hardware at runtime, writes Parquet immediately (~200k vec/s), builds index in background via `IndexStatus::Indexing → Ready`.
+- **`pq_only` + `ivf_residual`** — Python SDK `TableWriter(pq_only=True, ivf_residual=True)`.
+- **`airbyte-destination-ailake`** — Airbyte CDK v3 destination connector with `cmd`, `openai`, `cohere`, `http` embedding backends; state message → commit durability.
+- **Demo expansion** — `07_multimodal.ipynb`, 5 fixture tables in `init_demo.py`.
+
+Remaining:
+- **DuckLake catalog backend** — `DuckLakeCatalog` on top of `duckdb` crate (awaiting spec stabilization).
+- **dbt integration guide** — `dbt (transform) → AI-Lake SDK (ingest + HNSW)` for dbt-spark and dbt-trino.
+
+### Phase 8 — Multimodal ✅
+
+Delivered in Phase 8:
+
+- **`VectorModality` enum** — `Text`, `Image`, `Audio`, `Video`; stored as `ailake.modality-<col>` Iceberg property. CLI `ailake create --modality`.
+- **N generalized vector columns** — each column gets its own independent AILK section (HNSW + centroid + trailer). `write_batch_multi` Python API + `AilakeFileWriter::write_multi` Rust.
+- **`search_multimodal` (RRF)** — `ailake-query` accepts `&[ModalQuery{col, query, weight}]`; fuses per-column ranked lists via `score = Σ weight_i / (60 + rank_i)`.
+- **`MultimodalContextSchema`** + `multimodal_columns` constants (`MEDIA_URI`, `IMAGE_EMBEDDING`, `AUDIO_TRANSCRIPT`, etc.).
+- **Python `VectorColSpec`** — `ailake.VectorColSpec(column, dim, metric, modality)`.
+- **Plugin propagation** — `ailake_search_multimodal_json` C-ABI in `ailake-jni`; `searchMultimodal()` in Spark/Trino/Flink; `ailake_search_multimodal()` DuckDB table function; `SearchMultimodal()` Go SDK + `ExtraVectorIndex` catalog parsing; `search_multimodal()` C++17 SDK + `DataFileEntry::extra_vector_indexes`.
+- **`extra_vector_indexes`** in Avro `key_metadata` JSON — secondary column HNSW offsets propagated to all catalog readers.
+- **CI** — `ci-duckdb.yml` multimodal test step; Go unit tests in `multimodal_test.go`; `check_jni_cabi.py` `ailake_search_multimodal_json` coverage; Python `check_ailake_py.py` section 19.

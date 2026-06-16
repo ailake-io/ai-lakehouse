@@ -89,6 +89,7 @@ impl ParquetVectorWriter {
                 self.policy.dim,
                 self.policy.metric,
                 self.policy.precision,
+                self.policy.modality,
             );
             let vec_field_id = batch.schema().fields().len() + 1;
             let new_fields: Vec<Field> = tabular_fields
@@ -313,6 +314,7 @@ mod tests {
             hnsw_ef_construction: None,
             ivf_residual: false,
             embedding_model: None,
+            modality: None,
         }
     }
 
@@ -329,6 +331,7 @@ mod tests {
             hnsw_ef_construction: None,
             ivf_residual: false,
             embedding_model: None,
+            modality: None,
         }
     }
 

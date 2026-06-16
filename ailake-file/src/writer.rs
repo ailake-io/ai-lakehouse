@@ -355,6 +355,7 @@ mod tests {
             hnsw_ef_construction: None,
             ivf_residual: false,
             embedding_model: None,
+            modality: None,
         }
     }
 
@@ -397,6 +398,7 @@ mod tests {
             hnsw_ef_construction: None,
             ivf_residual: false,
             embedding_model: None,
+            modality: None,
         };
 
         let writer = AilakeFileWriter::new(policy1.clone());

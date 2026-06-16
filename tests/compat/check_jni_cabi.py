@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #!/usr/bin/env python3
 """
-Validates the ailake-jni C-ABI: ailake_write_batch_json + ailake_search_json.
+Validates the ailake-jni C-ABI:
+  ailake_write_batch_json + ailake_search_json + ailake_search_multimodal_json.
 This is the common interface used by all JVM connectors (Flink, Spark, Trino) via JNA.
 
 Library location (in order):
@@ -68,6 +69,9 @@ lib.ailake_write_batch_json.restype = ctypes.c_void_p
 
 lib.ailake_search_json.argtypes = [ctypes.c_char_p]
 lib.ailake_search_json.restype = ctypes.c_void_p
+
+lib.ailake_search_multimodal_json.argtypes = [ctypes.c_char_p]
+lib.ailake_search_multimodal_json.restype = ctypes.c_void_p
 
 lib.ailake_free_string.argtypes = [ctypes.c_void_p]
 lib.ailake_free_string.restype = None
@@ -157,6 +161,30 @@ with tempfile.TemporaryDirectory() as tmp:
     assert resp.get("ok"), f"FAIL: write with embedding_model failed: {resp}"
     print(f"PASS (embedding_model write): snapshot_id={resp['snapshot_id']}")
 
+# ── ailake_search_multimodal_json — single-column RRF search ─────────────────
+
+with tempfile.TemporaryDirectory() as tmp:
+    write_fixture(tmp, "default", "mm_test")
+
+    resp = _call(lib.ailake_search_multimodal_json, {
+        "warehouse": tmp,
+        "namespace": "default",
+        "table": "mm_test",
+        "queries": [
+            {"col": "embedding", "query": make_embedding(3), "weight": 1.0, "dim": 0}
+        ],
+        "top_k": 5,
+    })
+    assert resp.get("ok"), f"FAIL: search_multimodal failed: {resp}"
+    results = resp["results"]
+    assert len(results) > 0, "FAIL: search_multimodal returned empty results"
+    best = max(results, key=lambda r: r["rrf_score"])
+    assert best["row_id"] == 3, (
+        f"FAIL: multimodal top-1 row_id={best['row_id']}, expected 3"
+    )
+    assert best["rrf_score"] > 0, f"FAIL: rrf_score={best['rrf_score']}, expected > 0"
+    print(f"PASS (search_multimodal): top-1 row_id={best['row_id']} rrf_score={best['rrf_score']:.6f}")
+
 # ── Optional: write Spark/Trino fixture (table="table") ───────────────────────
 
 spark_trino_fixture = os.environ.get("AILAKE_SPARK_TRINO_FIXTURE")
@@ -166,4 +194,4 @@ if spark_trino_fixture:
     print(f"PASS (spark/trino fixture): written to {spark_trino_fixture}/default/table")
 
 print()
-print("PASS: ailake-jni C-ABI (write + search) — JNA bridge interface validated.")
+print("PASS: ailake-jni C-ABI (write + search + search_multimodal) — JNA bridge interface validated.")

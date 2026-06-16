@@ -5,6 +5,31 @@
 
 from typing import Callable, Optional, Sequence
 
+
+class VectorColSpec:
+    """Specification for one vector column in a multimodal write or search.
+
+    Args:
+        column: Vector column name (e.g. ``"embedding"``, ``"image_embedding"``).
+        dim: Dimensionality of vectors in this column.
+        metric: ``"cosine"`` | ``"euclidean"`` | ``"dot_product"`` | ``"normalized_cosine"``.
+        modality: Optional tag — ``"text"`` | ``"image"`` | ``"audio"`` | ``"video"``.
+                  Stored as ``ailake.modality-<column>`` in Iceberg properties.
+    """
+
+    column: str
+    dim: int
+    metric: str
+    modality: Optional[str]
+
+    def __init__(
+        self,
+        column: str,
+        dim: int,
+        metric: str = "cosine",
+        modality: Optional[str] = None,
+    ) -> None: ...
+
 class TableWriter:
     """Python-facing table writer.  Wraps ``ailake_query::TableWriter``."""
 
@@ -101,6 +126,34 @@ class TableWriter:
             texts: One string per row.
             embeddings: One embedding per row.
             batch_id: Unique key for this batch (e.g. Airflow ``run_id + task_id``).
+        """
+        ...
+
+    def write_batch_multi(
+        self,
+        texts: Sequence[str],
+        columns: Sequence[tuple["VectorColSpec", Sequence[Sequence[float]]]],
+    ) -> None:
+        """Write a batch with N independent vector columns.
+
+        Each column gets its own HNSW index in the AILK section of the file footer.
+        Use this for multimodal tables where the same row has embeddings from
+        different models or modalities (e.g. text + image).
+
+        Args:
+            texts: One string per row (primary tabular column).
+            columns: List of ``(VectorColSpec, embeddings)`` tuples.
+                     Each embedding list must have the same length as *texts*.
+                     The first column determines the table-level HNSW policy.
+
+        Example::
+
+            text_spec  = ailake.VectorColSpec("embedding",       1536, "cosine", "text")
+            image_spec = ailake.VectorColSpec("image_embedding",  512, "cosine", "image")
+            writer.write_batch_multi(
+                texts,
+                [(text_spec, text_embs), (image_spec, image_embs)],
+            )
         """
         ...
 
@@ -228,5 +281,42 @@ def migrate_embeddings(
 
     Raises:
         ValueError: On invalid strategy, missing text column, or embed_fn error.
+    """
+    ...
+
+
+def search_multimodal(
+    path: str,
+    queries: Sequence[tuple[str, Sequence[float], float]],
+    top_k: int = 10,
+    dim: Optional[int] = None,
+) -> list[dict[str, object]]:
+    """Cross-modal search: fuse results from N vector columns via Reciprocal Rank Fusion.
+
+    Runs an independent HNSW search for each ``(column, query, weight)`` triple,
+    then fuses ranked lists using RRF: ``score = Σ weight_i / (60 + rank_i)``.
+
+    Args:
+        path: Table root — same value used when writing.
+        queries: List of ``(column_name, query_vec, weight)`` tuples.
+                 *weight* is the relative importance of each column (1.0 = equal).
+                 Typical: ``0.7`` for text, ``0.3`` for image.
+        top_k: Number of fused results to return (default 10).
+        dim: Vector dimension.  Auto-detected from Iceberg metadata when ``None``.
+
+    Returns:
+        List of dicts with keys ``row_id`` (int), ``rrf_score`` (float, higher = better),
+        ``file`` (str).  Ordered by descending ``rrf_score``.
+
+    Example::
+
+        results = ailake.search_multimodal(
+            "s3://my-lake/media/",
+            queries=[
+                ("embedding",       text_vec,  0.7),
+                ("image_embedding", image_vec, 0.3),
+            ],
+            top_k=20,
+        )
     """
     ...

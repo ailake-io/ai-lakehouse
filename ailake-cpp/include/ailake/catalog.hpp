@@ -32,6 +32,16 @@ namespace ailake {
 // DataFileEntry — mirrors ailake_catalog::provider::DataFileEntry
 // ---------------------------------------------------------------------------
 
+// Secondary vector column index entry (Phase 8 multi-column tables).
+struct ExtraVectorIndex {
+    std::string column;
+    uint32_t    dim          = 0;
+    uint64_t    hnsw_offset  = 0;
+    uint64_t    hnsw_len     = 0;
+    std::string centroid_b64; // base64-encoded F32 centroid (may be empty)
+    float       radius       = 0.f;
+};
+
 struct DataFileEntry {
     std::string path;
     uint64_t    record_count   = 0;
@@ -42,6 +52,7 @@ struct DataFileEntry {
     std::optional<uint64_t> hnsw_len;
     std::string vector_column;
     uint32_t    vector_dim     = 0;
+    std::vector<ExtraVectorIndex> extra_vector_indexes; // secondary columns (Phase 8)
     std::string index_status;   // "ready" | "indexing"
     std::string batch_id;
     std::string embedding_model; // "<name>" or "<name>@<version>"; empty if not set
@@ -470,9 +481,64 @@ private:
         if (!vc.empty()) e.vector_column = vc;
         auto vd = get_num("vector_dim");
         if (vd) e.vector_dim = (uint32_t)*vd;
-        e.index_status   = get_str("index_status");
-        e.batch_id       = get_str("batch_id");
+        e.index_status    = get_str("index_status");
+        e.batch_id        = get_str("batch_id");
         e.embedding_model = get_str("embedding_model");
+
+        // Parse extra_vector_indexes array (Phase 8 multi-column tables)
+        {
+            auto arr_pos = json.find("\"extra_vector_indexes\":");
+            if (arr_pos != std::string::npos) {
+                auto bracket = json.find('[', arr_pos);
+                auto bracket_end = json.find(']', arr_pos);
+                if (bracket != std::string::npos && bracket_end != std::string::npos) {
+                    std::string arr = json.substr(bracket + 1, bracket_end - bracket - 1);
+                    size_t obj_start = arr.find('{');
+                    while (obj_start != std::string::npos) {
+                        auto obj_end = arr.find('}', obj_start);
+                        if (obj_end == std::string::npos) break;
+                        std::string obj = arr.substr(obj_start, obj_end - obj_start + 1);
+
+                        auto xi_str = [&](const std::string& key) -> std::string {
+                            auto p = obj.find("\"" + key + "\":");
+                            if (p == std::string::npos) return {};
+                            p = obj.find('"', p + key.size() + 3);
+                            if (p == std::string::npos) return {};
+                            auto e2 = obj.find('"', p + 1);
+                            if (e2 == std::string::npos) return {};
+                            return obj.substr(p + 1, e2 - p - 1);
+                        };
+                        auto xi_u64 = [&](const std::string& key) -> uint64_t {
+                            auto p = obj.find("\"" + key + "\":");
+                            if (p == std::string::npos) return 0;
+                            p += key.size() + 3;
+                            while (p < obj.size() && obj[p] == ' ') ++p;
+                            if (p >= obj.size() || obj[p] == 'n') return 0;
+                            try { return std::stoull(obj.substr(p)); } catch (...) { return 0; }
+                        };
+                        auto xi_f32 = [&](const std::string& key) -> float {
+                            auto p = obj.find("\"" + key + "\":");
+                            if (p == std::string::npos) return 0.f;
+                            p += key.size() + 3;
+                            while (p < obj.size() && obj[p] == ' ') ++p;
+                            if (p >= obj.size() || obj[p] == 'n') return 0.f;
+                            try { return std::stof(obj.substr(p)); } catch (...) { return 0.f; }
+                        };
+
+                        ExtraVectorIndex xi;
+                        xi.column      = xi_str("column");
+                        xi.dim         = (uint32_t)xi_u64("dim");
+                        xi.hnsw_offset = xi_u64("hnsw_offset");
+                        xi.hnsw_len    = xi_u64("hnsw_len");
+                        xi.centroid_b64= xi_str("centroid_b64");
+                        xi.radius      = xi_f32("radius");
+                        if (!xi.column.empty()) e.extra_vector_indexes.push_back(std::move(xi));
+
+                        obj_start = arr.find('{', obj_end + 1);
+                    }
+                }
+            }
+        }
     }
 
     static std::string base64_decode(const std::string& in) {

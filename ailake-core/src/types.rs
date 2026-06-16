@@ -196,6 +196,41 @@ mod tests {
     }
 }
 
+/// Modality tag for a vector column.
+///
+/// Stored in Iceberg table properties as `ailake.modality-<col>` and in Parquet
+/// field key-value metadata as `ailake.modality-<col>`. Readers use this to
+/// select the correct HNSW index without inspecting raw data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VectorModality {
+    Text,
+    Image,
+    Audio,
+    Video,
+}
+
+impl VectorModality {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Image => "image",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "text" => Some(Self::Text),
+            "image" => Some(Self::Image),
+            "audio" => Some(Self::Audio),
+            "video" => Some(Self::Video),
+            _ => None,
+        }
+    }
+}
+
 /// Per-file geometric statistics used for pruning
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Centroid {

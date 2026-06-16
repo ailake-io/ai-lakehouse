@@ -102,6 +102,60 @@ object AilakeNativeLoader {
         }
     }
 
+    // ── Multimodal Search ─────────────────────────────────────────────────────
+
+    data class MultimodalSearchResultItem(
+        val row_id: Long,
+        val rrf_score: Float,
+        val file_path: String,
+    )
+
+    data class MultimodalSearchResponse(
+        val ok: Boolean,
+        val results: List<MultimodalSearchResultItem> = emptyList(),
+        val error: String? = null,
+    )
+
+    /**
+     * Cross-modal RRF search via the native library.
+     *
+     * @param queries  list of (column, query vector, weight) triples;
+     *                 dim=0 means auto-detect from Iceberg metadata
+     */
+    fun searchMultimodal(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        queries: List<Triple<String, FloatArray, Float>>,
+        topK: Int = 10,
+    ): List<MultimodalSearchResultItem> {
+        require(queries.isNotEmpty()) { "queries must not be empty" }
+        val queriesArr = queries.map { (col, q, w) ->
+            mapOf("col" to col, "query" to q.toList(), "weight" to w, "dim" to 0)
+        }
+        val req = mapper.writeValueAsString(
+            mapOf(
+                "warehouse" to warehouse,
+                "namespace" to namespace,
+                "table"     to table,
+                "queries"   to queriesArr,
+                "top_k"     to topK,
+            )
+        )
+        val ptr = lib.ailake_search_multimodal_json(req)
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<MultimodalSearchResponse>(json)
+            if (!resp.ok) {
+                log.error("[ailake] searchMultimodal error for table={}.{}: {}", namespace, table, resp.error)
+                throw RuntimeException("ailake_search_multimodal_json error: ${resp.error}")
+            }
+            resp.results
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
     // ── Write ─────────────────────────────────────────────────────────────────
 
     data class WriteResponse(

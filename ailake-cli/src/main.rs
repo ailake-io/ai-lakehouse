@@ -8,11 +8,12 @@ use ailake_catalog::{
     provider::{CatalogProvider, TableIdent, TableProperties},
 };
 use ailake_core::{
-    AilakeError, EmbeddingModelInfo, VectorMetric, VectorPrecision, VectorStoragePolicy,
+    AilakeError, EmbeddingModelInfo, VectorMetric, VectorModality, VectorPrecision,
+    VectorStoragePolicy,
 };
 use ailake_query::{
     CompactionConfig, CompactionExecutor, CompactionPlanner, EmbedFn, MigrationJob,
-    MigrationProgress, MigrationStrategy, ProgressFn, SearchConfig, TableWriter,
+    MigrationProgress, MigrationStrategy, MultiVectorBatch, ProgressFn, SearchConfig, TableWriter,
 };
 use ailake_store::store_from_url;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -76,6 +77,10 @@ enum Commands {
         /// Only effective when the auto index path selects IVF-PQ.
         #[arg(long, default_value_t = false)]
         ivf_residual: bool,
+        /// Modality tag for the primary vector column (text, image, audio, video).
+        /// Stored as ailake.modality-<column> in Iceberg properties.
+        #[arg(long, value_enum)]
+        modality: Option<ModalityArg>,
     },
     /// Insert a Parquet file (with an embedding column) into a table
     Insert {
@@ -83,9 +88,14 @@ enum Commands {
         table: String,
         /// Path to source Parquet file on the local filesystem
         file: String,
-        /// Name of the embeddings column in the source file
+        /// Name of the embeddings column in the source file (single-column mode)
         #[arg(long, default_value = "embedding")]
         embeddings: String,
+        /// Multi-column mode: comma-separated column specs, each as col:dim:metric[:modality].
+        /// Example: "embedding:1536:cosine,image_embedding:512:cosine:image"
+        /// When set, --embeddings is ignored.
+        #[arg(long)]
+        vector_cols: Option<String>,
         /// Idempotency key — no-op if this batch_id was already committed (safe for Airflow retries)
         #[arg(long)]
         batch_id: Option<String>,
@@ -246,6 +256,25 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(ValueEnum, Clone)]
+enum ModalityArg {
+    Text,
+    Image,
+    Audio,
+    Video,
+}
+
+impl From<ModalityArg> for VectorModality {
+    fn from(m: ModalityArg) -> Self {
+        match m {
+            ModalityArg::Text => VectorModality::Text,
+            ModalityArg::Image => VectorModality::Image,
+            ModalityArg::Audio => VectorModality::Audio,
+            ModalityArg::Video => VectorModality::Video,
+        }
+    }
+}
+
 /// Parse "namespace.table" → (namespace, table).
 /// Plain "table" → ("default", "table").
 fn parse_table_ident(s: &str) -> TableIdent {
@@ -300,6 +329,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             hnsw_ef,
             pq_only,
             ivf_residual,
+            modality,
         } => {
             let ident = parse_table_ident(&table);
             let policy = VectorStoragePolicy {
@@ -314,6 +344,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_ef_construction: hnsw_ef,
                 ivf_residual,
                 embedding_model: None,
+                modality: modality.map(VectorModality::from),
             };
 
             catalog
@@ -335,6 +366,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             table,
             file,
             embeddings,
+            vector_cols,
             batch_id,
         } => {
             let ident = parse_table_ident(&table);
@@ -343,28 +375,27 @@ async fn run(cli: Cli) -> Result<(), String> {
             let raw = std::fs::read(&file).map_err(|e| format!("failed to read {file}: {e}"))?;
             let bytes = bytes::Bytes::from(raw);
 
-            let reader = ailake_parquet::ParquetVectorReader::new(bytes, &embeddings);
-            let (batch, embs) = reader.read_all().map_err(|e| e.to_string())?;
+            if let Some(cols_spec) = vector_cols {
+                // Multi-column mode: col:dim:metric[:modality],...
+                let col_specs = parse_vector_cols(&cols_spec)?;
+                if col_specs.is_empty() {
+                    return Err("--vector-cols must have at least one column spec".into());
+                }
 
-            let dim = embs.first().map(|v| v.len() as u32).unwrap_or(0);
-            if dim == 0 {
-                return Err("source file has no embedding rows".into());
-            }
+                // Read tabular data + all embedding columns from source Parquet.
+                let first_col = &col_specs[0].0;
+                let reader = ailake_parquet::ParquetVectorReader::new(bytes.clone(), first_col);
+                let (batch, first_embs) = reader.read_all().map_err(|e| e.to_string())?;
+                let rows = first_embs.len();
 
-            // Load existing policy from catalog, or default to cosine/f16.
-            let policy = match catalog.load_table(&ident).await {
-                Ok(meta) => VectorStoragePolicy {
-                    column_name: embeddings.clone(),
-                    dim,
-                    metric: meta
-                        .properties
-                        .get("ailake.vector-metric")
-                        .map(|m| match m.as_str() {
-                            "euclidean" => VectorMetric::Euclidean,
-                            "dot" => VectorMetric::DotProduct,
-                            _ => VectorMetric::Cosine,
-                        })
-                        .unwrap_or(VectorMetric::Cosine),
+                // Build policies + embeddings for each column.
+                let mut mv_owned: Vec<(VectorStoragePolicy, Vec<Vec<f32>>)> =
+                    Vec::with_capacity(col_specs.len());
+                let (first_name, first_dim, first_metric, first_modality) = col_specs[0].clone();
+                let first_policy = VectorStoragePolicy {
+                    column_name: first_name,
+                    dim: first_dim,
+                    metric: first_metric,
                     precision: VectorPrecision::F16,
                     pq: None,
                     keep_raw_for_reranking: true,
@@ -373,41 +404,123 @@ async fn run(cli: Cli) -> Result<(), String> {
                     hnsw_ef_construction: None,
                     ivf_residual: false,
                     embedding_model: None,
-                },
-                Err(_) => VectorStoragePolicy {
-                    column_name: embeddings.clone(),
-                    dim,
-                    metric: VectorMetric::Cosine,
-                    precision: VectorPrecision::F16,
-                    pq: None,
-                    keep_raw_for_reranking: true,
-                    pre_normalize: false,
-                    hnsw_m: None,
-                    hnsw_ef_construction: None,
-                    ivf_residual: false,
-                    embedding_model: None,
-                },
-            };
+                    modality: first_modality,
+                };
+                mv_owned.push((first_policy, first_embs));
 
-            let mut writer =
-                TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident)
+                for (col_name, dim, metric, modality) in &col_specs[1..] {
+                    let reader =
+                        ailake_parquet::ParquetVectorReader::new(bytes.clone(), col_name);
+                    let (_, embs) = reader.read_all().map_err(|e| e.to_string())?;
+                    let policy = VectorStoragePolicy {
+                        column_name: col_name.clone(),
+                        dim: *dim,
+                        metric: *metric,
+                        precision: VectorPrecision::F16,
+                        pq: None,
+                        keep_raw_for_reranking: true,
+                        pre_normalize: false,
+                        hnsw_m: None,
+                        hnsw_ef_construction: None,
+                        ivf_residual: false,
+                        embedding_model: None,
+                        modality: *modality,
+                    };
+                    mv_owned.push((policy, embs));
+                }
+
+                // Use first policy as the table-level policy for create_or_open.
+                let table_policy = mv_owned[0].0.clone();
+                let mut writer =
+                    TableWriter::create_or_open(catalog, Arc::clone(&store), table_policy, ident)
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                let batches: Vec<MultiVectorBatch<'_>> = mv_owned
+                    .iter()
+                    .map(|(policy, embs)| MultiVectorBatch {
+                        policy: policy.clone(),
+                        embeddings: embs.as_slice(),
+                    })
+                    .collect();
+
+                writer
+                    .write_batch_multi(&batch, &batches)
                     .await
                     .map_err(|e| e.to_string())?;
+                writer.commit().await.map_err(|e| e.to_string())?;
 
-            let rows = embs.len();
-            match batch_id {
-                Some(ref id) => writer
-                    .write_batch_idempotent(&batch, &embs, id)
-                    .await
-                    .map_err(|e| e.to_string())?,
-                None => writer
-                    .write_batch(&batch, &embs)
-                    .await
-                    .map_err(|e| e.to_string())?,
+                println!("inserted {rows} rows into {table} ({} vector columns)", col_specs.len());
+            } else {
+                // Single-column mode (original behavior).
+                let reader = ailake_parquet::ParquetVectorReader::new(bytes, &embeddings);
+                let (batch, embs) = reader.read_all().map_err(|e| e.to_string())?;
+
+                let dim = embs.first().map(|v| v.len() as u32).unwrap_or(0);
+                if dim == 0 {
+                    return Err("source file has no embedding rows".into());
+                }
+
+                // Load existing policy from catalog, or default to cosine/f16.
+                let policy = match catalog.load_table(&ident).await {
+                    Ok(meta) => VectorStoragePolicy {
+                        column_name: embeddings.clone(),
+                        dim,
+                        metric: meta
+                            .properties
+                            .get("ailake.vector-metric")
+                            .map(|m| match m.as_str() {
+                                "euclidean" => VectorMetric::Euclidean,
+                                "dot" => VectorMetric::DotProduct,
+                                _ => VectorMetric::Cosine,
+                            })
+                            .unwrap_or(VectorMetric::Cosine),
+                        precision: VectorPrecision::F16,
+                        pq: None,
+                        keep_raw_for_reranking: true,
+                        pre_normalize: false,
+                        hnsw_m: None,
+                        hnsw_ef_construction: None,
+                        ivf_residual: false,
+                        embedding_model: None,
+                        modality: None,
+                    },
+                    Err(_) => VectorStoragePolicy {
+                        column_name: embeddings.clone(),
+                        dim,
+                        metric: VectorMetric::Cosine,
+                        precision: VectorPrecision::F16,
+                        pq: None,
+                        keep_raw_for_reranking: true,
+                        pre_normalize: false,
+                        hnsw_m: None,
+                        hnsw_ef_construction: None,
+                        ivf_residual: false,
+                        embedding_model: None,
+                        modality: None,
+                    },
+                };
+
+                let mut writer =
+                    TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident)
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                let rows = embs.len();
+                match batch_id {
+                    Some(ref id) => writer
+                        .write_batch_idempotent(&batch, &embs, id)
+                        .await
+                        .map_err(|e| e.to_string())?,
+                    None => writer
+                        .write_batch(&batch, &embs)
+                        .await
+                        .map_err(|e| e.to_string())?,
+                }
+                writer.commit().await.map_err(|e| e.to_string())?;
+
+                println!("inserted {rows} rows into {table}");
             }
-            writer.commit().await.map_err(|e| e.to_string())?;
-
-            println!("inserted {rows} rows into {table}");
             Ok(())
         }
 
@@ -531,6 +644,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_ef_construction: None,
                 ivf_residual: false,
                 embedding_model: None,
+                modality: None,
             };
 
             let files = catalog
@@ -585,6 +699,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 files: remaining,
                 operation: ailake_catalog::provider::SnapshotOperation::Replace,
                 iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
             };
             catalog
                 .commit_snapshot(&ident, snap)
@@ -631,6 +746,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 hnsw_ef_construction: None,
                 ivf_residual: false,
                 embedding_model: None,
+                modality: None,
             };
             serve::run(
                 catalog as Arc<dyn CatalogProvider>,
@@ -806,6 +922,44 @@ async fn run(cli: Cli) -> Result<(), String> {
         // Handled before store/catalog creation — unreachable here.
         Commands::Estimate { .. } => unreachable!(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Parse "--vector-cols" spec: "col:dim:metric[:modality],..."
+/// Returns Vec<(column_name, dim, metric, modality)>.
+fn parse_vector_cols(
+    spec: &str,
+) -> Result<Vec<(String, u32, VectorMetric, Option<VectorModality>)>, String> {
+    spec.split(',')
+        .map(|part| {
+            let parts: Vec<&str> = part.trim().splitn(4, ':').collect();
+            if parts.len() < 3 {
+                return Err(format!(
+                    "invalid vector-cols spec '{part}' — expected col:dim:metric[:modality]"
+                ));
+            }
+            let col = parts[0].to_string();
+            let dim: u32 = parts[1]
+                .parse()
+                .map_err(|_| format!("invalid dim '{}' in vector-cols spec '{part}'", parts[1]))?;
+            let metric = match parts[2] {
+                "cosine" => VectorMetric::Cosine,
+                "euclidean" => VectorMetric::Euclidean,
+                "dot" | "dot_product" | "dotproduct" => VectorMetric::DotProduct,
+                "normalized_cosine" => VectorMetric::NormalizedCosine,
+                other => {
+                    return Err(format!(
+                        "unknown metric '{other}' in vector-cols spec '{part}'"
+                    ))
+                }
+            };
+            let modality = parts.get(3).and_then(|m| VectorModality::from_str(m));
+            Ok((col, dim, metric, modality))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

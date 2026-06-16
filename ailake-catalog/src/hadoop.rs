@@ -221,6 +221,11 @@ impl CatalogProvider for HadoopCatalog {
             );
         }
 
+        // Merge secondary-column properties (ailake.dim-<col>, ailake.metric-<col>).
+        for (k, v) in snapshot.extra_properties {
+            meta.properties.insert(k, v);
+        }
+
         self.save_metadata(table, &meta).await?;
         Ok(snap_id)
     }
@@ -296,6 +301,7 @@ mod tests {
                 hnsw_ef_construction: None,
                 ivf_residual: false,
                 embedding_model: None,
+                modality: None,
             },
             extra: std::collections::HashMap::new(),
         }
@@ -343,6 +349,7 @@ mod tests {
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
         };
         let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 

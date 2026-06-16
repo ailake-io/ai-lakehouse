@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ailake_core::{VectorMetric, VectorPrecision};
+use ailake_core::{VectorMetric, VectorModality, VectorPrecision};
 use arrow_schema::{DataType, Field};
 
 pub fn metric_str(m: VectorMetric) -> &'static str {
@@ -30,9 +30,10 @@ pub fn vector_field(
     dim: u32,
     metric: VectorMetric,
     precision: VectorPrecision,
+    modality: Option<VectorModality>,
 ) -> Field {
     let byte_width = (dim as usize) * precision.bytes_per_element();
-    let meta = HashMap::from([
+    let mut meta = HashMap::from([
         ("ailake.dim".to_string(), dim.to_string()),
         ("ailake.metric".to_string(), metric_str(metric).to_string()),
         (
@@ -40,6 +41,9 @@ pub fn vector_field(
             precision_str(precision).to_string(),
         ),
     ]);
+    if let Some(m) = modality {
+        meta.insert(format!("ailake.modality-{name}"), m.as_str().to_string());
+    }
     Field::new(name, DataType::FixedSizeBinary(byte_width as i32), false).with_metadata(meta)
 }
 

@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence, Union
 
 from ailake._ailake import (  # type: ignore[import]
     TableWriter as _TableWriter,
+    VectorColSpec,
     assemble_context,
     migrate_embeddings,
     search as _search_raw,
+    search_multimodal,
     search_with_data as _search_with_data,
 )
 
@@ -27,9 +29,11 @@ _Vector = Union[Sequence[float], "np.ndarray"]
 __all__ = [
     "open_table",
     "search",
+    "search_multimodal",
     "Table",
     "SearchQuery",
     "TableWriter",
+    "VectorColSpec",
     "assemble_context",
     "migrate_embeddings",
 ]

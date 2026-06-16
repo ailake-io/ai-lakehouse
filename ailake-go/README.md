@@ -38,6 +38,57 @@ rows, err := ailake.Scan(catalog, "default", "docs", query, ailake.SearchOptions
 // Fields contains all Parquet columns; the vector column is decoded to []float32.
 ```
 
+## Cross-modal search (Phase 8)
+
+Tables with N vector columns (e.g. `embedding` + `image_embedding`) can be searched simultaneously via Reciprocal Rank Fusion:
+
+```go
+queries := []ailake.ModalQuery{
+    {Column: "embedding",       Query: textVec,  Weight: 0.7},
+    {Column: "image_embedding", Query: imageVec, Weight: 0.3},
+}
+
+results, err := ailake.SearchMultimodal(catalog, "default", "media", queries,
+    ailake.SearchOptions{TopK: 20})
+// results: []RRFResult{RowID, RRFScore, FilePath}
+// sorted descending by RRFScore = Σ weight_i / (60 + rank_i)
+```
+
+A single-column table can also use `SearchMultimodal` with one `ModalQuery` — it behaves identically to `Search` but returns `RRFScore` instead of `Distance`.
+
+### `ModalQuery`
+
+```go
+type ModalQuery struct {
+    Column string    // vector column name; empty → primary column
+    Query  []float32 // query embedding
+    Weight float32   // RRF weight; 0 → defaults to 1.0
+}
+```
+
+### `RRFResult`
+
+```go
+type RRFResult struct {
+    RowID    uint64
+    RRFScore float32 // Σ weight_i / (60 + rank_i); higher = more relevant
+    FilePath string
+}
+```
+
+### `SearchMultimodal`
+
+```go
+func SearchMultimodal(
+    catalog   *HadoopCatalog,
+    namespace, table string,
+    queries   []ModalQuery,
+    opts      SearchOptions,
+) ([]RRFResult, error)
+```
+
+Runs geometric pruning (using primary column centroid), then per-column HNSW search across all surviving files, then fuses ranked lists with RRF. Secondary column HNSW indexes are located via `ExtraVectorIndexes` in each file's `DataFileEntry`.
+
 ## API reference
 
 ### `HadoopCatalog`
@@ -103,17 +154,36 @@ type FileSearchResult struct {
 
 ```go
 type DataFileEntry struct {
-    Path           string
-    FileSizeBytes  int64
-    RecordCount    int64
-    Centroid       []float32
-    Radius         float32
-    FooterOffset   int64
-    EmbeddingModel string // "<name>" or "<name>@<version>"; empty if not set
+    Path               string
+    FileSizeBytes      uint64
+    RecordCount        uint64
+    Centroid           []float32
+    Radius             float32
+    HnswOffset         *uint64
+    HnswLen            *uint64
+    VectorColumn       string
+    VectorDim          uint32
+    ExtraVectorIndexes []ExtraVectorIndex // secondary columns (Phase 8)
+    IndexStatus        string             // "ready" | "indexing"
+    BatchID            string
+    EmbeddingModel     string // "<name>" or "<name>@<version>"; empty if not set
 }
 ```
 
-`EmbeddingModel` is read from the per-file Avro `key_metadata` JSON (`"embedding_model"` field) written by the AI-Lake SDK at ingest time. Use it to detect mixed-model tables before searching.
+`EmbeddingModel` is read from per-file Avro `key_metadata` JSON. `ExtraVectorIndexes` holds HNSW offset, length, and centroid for each secondary vector column — populated from the `extra_vector_indexes` JSON array in `key_metadata`.
+
+### `ExtraVectorIndex`
+
+```go
+type ExtraVectorIndex struct {
+    Column      string
+    Dim         uint32
+    HnswOffset  uint64
+    HnswLen     uint64
+    CentroidB64 *string
+    Radius      *float32
+}
+```
 
 ### `TableInfo`
 

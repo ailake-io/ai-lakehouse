@@ -53,6 +53,20 @@ interface AilakeNativeLib : Library {
     fun ailake_write_batch_json(requestJson: String): Pointer
 
     /**
+     * Cross-modal RRF search across multiple vector columns.
+     *
+     * Request JSON fields:
+     *   warehouse    (String)  warehouse root path
+     *   namespace    (String)  Iceberg namespace, default "default"
+     *   table        (String)  table name
+     *   queries      (Array)   [{col, query: Float[], weight: Float, dim: Int (0=auto)}]
+     *   top_k        (Int)     default 10
+     *
+     * Response JSON: `{"ok":true,"results":[{"row_id":N,"rrf_score":F,"file_path":"..."}]}`
+     */
+    fun ailake_search_multimodal_json(requestJson: String): Pointer
+
+    /**
      * Low-level search: f32 pointer + length variant.  Prefer [ailake_search_json] for
      * JVM callers.  Returns JSON array `[{"row_id":N,"distance":F,"file_path":"..."}]`.
      */

@@ -6,6 +6,7 @@ Writes multiple AI-Lake tables to demonstrate all SDK features:
   - PQ-only table   — 500 rows, dim=32, no raw vectors stored
   - Deferred table  — 200 rows, write_batch_auto_deferred
   - Residual-PQ     — 500 rows, ivf_residual=True
+  - Multimodal      — 200 rows, text embedding (dim=32) + image embedding (dim=16)
 
 Runs once at container startup via entrypoint.sh; skipped on restart if
 version-hint.text already exists in the main HNSW table.
@@ -18,15 +19,17 @@ import pathlib
 import random
 import sys
 
-TABLE_PATH     = os.environ.get("DEMO_TABLE_PATH", "/data/ailake_demo")
-PQ_PATH        = str(pathlib.Path(TABLE_PATH).parent / "ailake_pq")
-RESIDUAL_PATH  = str(pathlib.Path(TABLE_PATH).parent / "ailake_residual_pq")
-DEFERRED_PATH  = str(pathlib.Path(TABLE_PATH).parent / "ailake_deferred")
-MODEL_TRACKED_PATH = str(pathlib.Path(TABLE_PATH).parent / "ailake_model_tracked")
-DIM           = int(os.environ.get("DEMO_DIM", "32"))
-N_DOCS        = 500
-N_DEFERRED    = 200
-METRIC        = "cosine"
+TABLE_PATH          = os.environ.get("DEMO_TABLE_PATH", "/data/ailake_demo")
+PQ_PATH             = str(pathlib.Path(TABLE_PATH).parent / "ailake_pq")
+RESIDUAL_PATH       = str(pathlib.Path(TABLE_PATH).parent / "ailake_residual_pq")
+DEFERRED_PATH       = str(pathlib.Path(TABLE_PATH).parent / "ailake_deferred")
+MODEL_TRACKED_PATH  = str(pathlib.Path(TABLE_PATH).parent / "ailake_model_tracked")
+MULTIMODAL_PATH     = str(pathlib.Path(TABLE_PATH).parent / "ailake_multimodal")
+DIM                 = int(os.environ.get("DEMO_DIM", "32"))
+IMAGE_DIM           = 16   # synthetic "CLIP-like" image embeddings (half the text dim)
+N_DOCS              = 500
+N_DEFERRED          = 200
+METRIC              = "cosine"
 
 TOPICS = [
     "machine learning", "database systems", "vector search", "data lakes",
@@ -97,6 +100,30 @@ def _write_residual_pq(texts: list[str], embeddings: list[list[float]]) -> None:
     print(f"[Residual] Committed snapshot_id={snap_id}  rows={len(texts)}")
 
 
+def _write_multimodal(texts: list[str], embeddings: list[list[float]]) -> None:
+    """Multimodal table — text column (dim=DIM) + image column (dim=IMAGE_DIM)."""
+    from ailake import TableWriter, VectorColSpec
+
+    os.makedirs(MULTIMODAL_PATH, exist_ok=True)
+
+    # Synthetic "image" embeddings — different dim to demonstrate cross-modal
+    image_embs = [rand_unit_vec(IMAGE_DIM, seed=i + 10_000) for i in range(200)]
+
+    text_spec  = VectorColSpec("embedding",       DIM,       "cosine", "text")
+    image_spec = VectorColSpec("image_embedding", IMAGE_DIM, "cosine", "image")
+
+    w = TableWriter(MULTIMODAL_PATH, dim=DIM, metric="cosine")
+    w.write_batch_multi(
+        texts[:200],
+        [(text_spec, embeddings[:200]), (image_spec, image_embs)],
+    )
+    snap_id = w.commit()
+    print(
+        f"[Multimodal] Committed snapshot_id={snap_id}  rows=200"
+        f"  cols=embedding(dim={DIM})+image_embedding(dim={IMAGE_DIM})"
+    )
+
+
 def _write_model_tracked(texts: list[str], embeddings: list[list[float]]) -> None:
     """HNSW table with embedding model metadata — demonstrates model tracking feature."""
     import ailake
@@ -135,6 +162,13 @@ def _save_query_payload(embeddings: list[list[float]], texts: list[str]) -> None
             "residual":      RESIDUAL_PATH,
             "deferred":      DEFERRED_PATH,
             "model_tracked": MODEL_TRACKED_PATH,
+            "multimodal":    MULTIMODAL_PATH,
+        },
+        "multimodal": {
+            "text_dim":       DIM,
+            "image_dim":      IMAGE_DIM,
+            "text_column":    "embedding",
+            "image_column":   "image_embedding",
         },
     }
     query_path = os.path.join(os.path.dirname(TABLE_PATH), "demo_query.json")
@@ -158,6 +192,7 @@ def main() -> None:
     _write_residual_pq(texts, embeddings)
     _write_deferred(texts, embeddings)
     _write_model_tracked(texts, embeddings)
+    _write_multimodal(texts, embeddings)
     _save_query_payload(embeddings, texts)
 
     _maybe_register_nessie(TABLE_PATH)

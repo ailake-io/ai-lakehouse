@@ -332,6 +332,9 @@ mod tests {
                 pre_normalize: false,
                 hnsw_m: None,
                 hnsw_ef_construction: None,
+                ivf_residual: false,
+                embedding_model: None,
+                modality: None,
             },
             extra: HashMap::new(),
         };
@@ -361,6 +364,7 @@ mod tests {
             }],
             operation: SnapshotOperation::Append,
             iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
         };
         let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 
