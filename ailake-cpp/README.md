@@ -155,19 +155,40 @@ struct TableInfo {
 };
 ```
 
+### `ExtraVectorIndex`
+
+```cpp
+struct ExtraVectorIndex {
+    std::string column;
+    uint32_t    dim          = 0;
+    uint64_t    hnsw_offset  = 0; // absolute byte offset of AILK header in file
+    uint64_t    hnsw_len     = 0;
+    std::string centroid_b64; // base64 F32 centroid (may be empty)
+    float       radius       = 0.f;
+};
+```
+
 ### `DataFileEntry`
 
 ```cpp
 struct DataFileEntry {
     std::string path;
-    int64_t     file_size_bytes;
-    int64_t     record_count;
+    uint64_t    record_count   = 0;
+    uint64_t    file_size_bytes= 0;
     std::vector<float> centroid;
-    float       radius;
-    int64_t     footer_offset;
+    float       radius         = 0.f;
+    std::optional<uint64_t> hnsw_offset;
+    std::optional<uint64_t> hnsw_len;
+    std::string vector_column;
+    uint32_t    vector_dim     = 0;
+    std::vector<ExtraVectorIndex> extra_vector_indexes; // secondary columns (Phase 8)
+    std::string index_status;   // "ready" | "indexing"
+    std::string batch_id;
     std::string embedding_model; // from per-file key_metadata JSON; empty if not set
 };
 ```
+
+`extra_vector_indexes` is populated from the `extra_vector_indexes` JSON array in Avro `key_metadata`; used by `search_multimodal` to locate secondary column HNSW indexes.
 
 ### Dim validation in `search()`
 
@@ -176,6 +197,58 @@ struct DataFileEntry {
 ```
 ailake: query dim=512 does not match table dim=1536 (table model: text-embedding-3-small@v1)
 ```
+
+## Cross-modal search (Phase 8)
+
+Tables with N vector columns can be searched simultaneously via Reciprocal Rank Fusion:
+
+```cpp
+#include <ailake/ailake.hpp>
+
+ailake::HadoopCatalog catalog("/data/warehouse");
+
+std::vector<ailake::ModalQuery> queries = {
+    {"embedding",       text_vec,  0.7f},
+    {"image_embedding", image_vec, 0.3f},
+};
+
+auto results = ailake::search_multimodal(catalog, "default", "media", queries);
+// results: std::vector<MultimodalResult>{row_id, rrf_score, file_path}
+// sorted descending by rrf_score = Σ weight_i / (60 + rank_i)
+```
+
+### `ModalQuery`
+
+```cpp
+struct ModalQuery {
+    std::string        column; // vector column name; empty → primary column
+    std::vector<float> query;  // query embedding
+    float              weight = 1.0f;
+};
+```
+
+### `MultimodalResult`
+
+```cpp
+struct MultimodalResult {
+    uint64_t    row_id;
+    float       rrf_score; // higher = more relevant
+    std::string file_path;
+};
+```
+
+### `search_multimodal`
+
+```cpp
+std::vector<MultimodalResult>
+search_multimodal(HadoopCatalog& catalog,
+                  const std::string& ns,
+                  const std::string& table,
+                  const std::vector<ModalQuery>& queries,
+                  const SearchOptions& opts = {});
+```
+
+Uses geometric pruning on the primary column centroid, dispatches HNSW search per column (using `DataFileEntry::extra_vector_indexes` for secondary columns), then fuses ranked lists with RRF.
 
 ## Low-level index access
 
