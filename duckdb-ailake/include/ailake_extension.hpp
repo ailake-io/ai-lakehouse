@@ -30,6 +30,20 @@ struct SearchRow {
     std::string file_path;
 };
 
+// One query arm for cross-modal RRF search.
+struct ModalQueryArg {
+    std::string        col;
+    std::vector<float> query;
+    float              weight = 1.0f;
+};
+
+// One result row from ailake_search_multimodal.
+struct MultimodalRow {
+    int64_t     row_id;
+    float       rrf_score;
+    std::string file_path;
+};
+
 // ── ailake_scan column types ──────────────────────────────────────────────────
 
 enum class ScanColType { INT64, FLOAT32, FLOAT64, VARCHAR, BOOL, LIST_FLOAT32, UNKNOWN };
@@ -62,10 +76,11 @@ struct ScanResult {
 // Thread-safe after Load() completes.
 class AilakeLib {
 public:
-    using search_fn_t = char *(*)(const char *);
-    using scan_fn_t   = char *(*)(const char *);
-    using write_fn_t  = char *(*)(const char *);
-    using free_fn_t   = void (*)(char *);
+    using search_fn_t     = char *(*)(const char *);
+    using multimodal_fn_t = char *(*)(const char *);
+    using scan_fn_t       = char *(*)(const char *);
+    using write_fn_t      = char *(*)(const char *);
+    using free_fn_t       = void (*)(char *);
 
     static AilakeLib &get();
 
@@ -73,8 +88,9 @@ public:
     // Safe to call multiple times — no-ops after first successful load.
     bool load(const std::string &lib_path = "");
 
-    bool is_ready()      const { return search_fn_ != nullptr; }
-    bool is_scan_ready() const { return scan_fn_  != nullptr; }
+    bool is_ready()            const { return search_fn_     != nullptr; }
+    bool is_multimodal_ready() const { return multimodal_fn_ != nullptr; }
+    bool is_scan_ready()       const { return scan_fn_       != nullptr; }
 
     // Execute ailake_search_json. Returns empty on any error.
     std::vector<SearchRow> search(
@@ -96,6 +112,14 @@ public:
         int                       ef_search = 50
     ) const;
 
+    // Execute ailake_search_multimodal_json. Returns empty on any error.
+    std::vector<MultimodalRow> search_multimodal(
+        const std::string                 &warehouse,
+        const std::string                 &table_name,
+        const std::vector<ModalQueryArg>  &queries,
+        int                                top_k
+    ) const;
+
     // Execute ailake_write_batch_json. Returns snapshot_id or -1 on error.
     int64_t write_batch(
         const std::string              &warehouse,
@@ -112,11 +136,12 @@ public:
 private:
     AilakeLib() = default;
 
-    void        *handle_     = nullptr;
-    search_fn_t  search_fn_  = nullptr;
-    scan_fn_t    scan_fn_    = nullptr;
-    write_fn_t   write_fn_   = nullptr;
-    free_fn_t    free_fn_    = nullptr;
+    void          *handle_        = nullptr;
+    search_fn_t    search_fn_     = nullptr;
+    multimodal_fn_t multimodal_fn_= nullptr;
+    scan_fn_t      scan_fn_       = nullptr;
+    write_fn_t     write_fn_      = nullptr;
+    free_fn_t      free_fn_       = nullptr;
 };
 
 // Escape a string value for embedding in a JSON literal.

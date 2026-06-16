@@ -12,8 +12,9 @@
 
 using namespace duckdb;
 
-// Forward declarations from ailake_search.cpp and ailake_write.cpp
+// Forward declarations from ailake_search.cpp, ailake_search_multimodal.cpp, ailake_write.cpp
 void RegisterAilakeSearch(DatabaseInstance &db);
+void RegisterAilakeSearchMultimodal(DatabaseInstance &db);
 void RegisterAilakeWrite(DatabaseInstance &db);
 
 // ── AilakeLib implementation ──────────────────────────────────────────────────
@@ -42,22 +43,80 @@ bool AilakeLib::load(const std::string &lib_path) {
     void *sym_handle = h;
 #endif
 
-    auto s  = reinterpret_cast<search_fn_t>(AILAKE_DLSYM(sym_handle, "ailake_search_json"));
-    auto sc = reinterpret_cast<scan_fn_t>  (AILAKE_DLSYM(sym_handle, "ailake_scan_json"));
-    auto w  = reinterpret_cast<write_fn_t> (AILAKE_DLSYM(sym_handle, "ailake_write_batch_json"));
-    auto f  = reinterpret_cast<free_fn_t>  (AILAKE_DLSYM(sym_handle, "ailake_free_string"));
+    auto s  = reinterpret_cast<search_fn_t>    (AILAKE_DLSYM(sym_handle, "ailake_search_json"));
+    auto mm = reinterpret_cast<multimodal_fn_t>(AILAKE_DLSYM(sym_handle, "ailake_search_multimodal_json"));
+    auto sc = reinterpret_cast<scan_fn_t>      (AILAKE_DLSYM(sym_handle, "ailake_scan_json"));
+    auto w  = reinterpret_cast<write_fn_t>     (AILAKE_DLSYM(sym_handle, "ailake_write_batch_json"));
+    auto f  = reinterpret_cast<free_fn_t>      (AILAKE_DLSYM(sym_handle, "ailake_free_string"));
 
     if (!s || !w || !f) {
         if (h) AILAKE_DLCLOSE(h);
         return false;
     }
 
-    handle_    = h;
-    search_fn_ = s;
-    scan_fn_   = sc;  // may be nullptr for older libailake_jni builds — is_scan_ready() guards
-    write_fn_  = w;
-    free_fn_   = f;
+    handle_        = h;
+    search_fn_     = s;
+    multimodal_fn_ = mm; // may be nullptr for older builds — is_multimodal_ready() guards
+    scan_fn_       = sc; // may be nullptr for older builds — is_scan_ready() guards
+    write_fn_      = w;
+    free_fn_       = f;
     return true;
+}
+
+std::vector<MultimodalRow> AilakeLib::search_multimodal(
+    const std::string                 &warehouse,
+    const std::string                 &table_name,
+    const std::vector<ModalQueryArg>  &queries,
+    int                                top_k
+) const {
+    if (!multimodal_fn_ || !free_fn_ || queries.empty()) return {};
+
+    std::string queries_json = "[";
+    for (size_t i = 0; i < queries.size(); ++i) {
+        if (i > 0) queries_json += ',';
+        const auto &q = queries[i];
+        std::string qvec = "[";
+        for (size_t j = 0; j < q.query.size(); ++j) {
+            if (j > 0) qvec += ',';
+            qvec += std::to_string(q.query[j]);
+        }
+        qvec += ']';
+        queries_json += "{\"col\":" + json_escape(q.col) +
+                        ",\"query\":" + qvec +
+                        ",\"weight\":" + std::to_string(q.weight) +
+                        ",\"dim\":0}";
+    }
+    queries_json += ']';
+
+    std::string req =
+        "{\"warehouse\":"  + json_escape(warehouse)  +
+        ",\"namespace\":\"default\""                 +
+        ",\"table\":"      + json_escape(table_name) +
+        ",\"queries\":"    + queries_json             +
+        ",\"top_k\":"      + std::to_string(top_k)   +
+        "}";
+
+    char *raw = multimodal_fn_(req.c_str());
+    if (!raw) return {};
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    try {
+        auto j = nlohmann::json::parse(resp);
+        if (!j.value("ok", false)) return {};
+        std::vector<MultimodalRow> rows;
+        for (auto &r : j["results"]) {
+            rows.push_back({
+                r["row_id"].get<int64_t>(),
+                r["rrf_score"].get<float>(),
+                r["file_path"].get<std::string>()
+            });
+        }
+        return rows;
+    } catch (...) {
+        return {};
+    }
 }
 
 std::vector<SearchRow> AilakeLib::search(
@@ -339,6 +398,7 @@ DUCKDB_EXTENSION_API void ailake_init(DatabaseInstance &db) {
     ailake::AilakeLib::get().load();
 
     RegisterAilakeSearch(db);
+    RegisterAilakeSearchMultimodal(db);
     RegisterAilakeWrite(db);
     RegisterAilakeScan(db);
 }

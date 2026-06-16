@@ -14,8 +14,9 @@ use std::{
 use ailake_catalog::{HadoopCatalog, TableIdent};
 use ailake_core::{EmbeddingModelInfo, VectorMetric};
 use ailake_query::{
-    fetch_rows as rs_fetch_rows, search as rs_search, Chunk, ContextAssembler,
-    ContextAssemblerConfig, SearchConfig, SearchResult,
+    fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
+    Chunk, ContextAssembler, ContextAssemblerConfig, FusionMethod, ModalQuery, SearchConfig,
+    SearchResult,
 };
 use ailake_store::LocalStore;
 use serde::Serialize;
@@ -471,6 +472,152 @@ pub unsafe extern "C" fn ailake_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         drop(CString::from_raw(ptr));
     }
+}
+
+// ── ailake_search_multimodal_json — cross-modal RRF ──────────────────────────
+
+/// Cross-modal vector search via Reciprocal Rank Fusion.
+///
+/// `request_json` must be UTF-8 JSON:
+/// ```json
+/// {
+///   "warehouse": "/path/to/warehouse",
+///   "namespace": "default",
+///   "table": "my_table",
+///   "queries": [
+///     {"col": "embedding",       "query": [0.1, ...], "weight": 0.7, "dim": 0},
+///     {"col": "image_embedding", "query": [0.3, ...], "weight": 0.3, "dim": 0}
+///   ],
+///   "top_k": 10
+/// }
+/// ```
+/// `dim: 0` means auto-detect from `ailake.dim-<col>` / `ailake.vector-dim` in metadata.
+///
+/// Returns JSON: `{"ok":true,"results":[{"row_id":N,"rrf_score":F,"file_path":"..."}]}`
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_search_multimodal_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    struct ModalQueryReq {
+        col: String,
+        query: Vec<f32>,
+        #[serde(default = "default_weight")]
+        weight: f32,
+        #[serde(default)]
+        dim: u32,
+    }
+    fn default_weight() -> f32 {
+        1.0
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Req {
+        warehouse: String,
+        #[serde(default = "default_ns_multi")]
+        namespace: String,
+        table: String,
+        queries: Vec<ModalQueryReq>,
+        #[serde(default = "default_topk_multi")]
+        top_k: u32,
+    }
+    fn default_ns_multi() -> String {
+        "default".into()
+    }
+    fn default_topk_multi() -> u32 {
+        10
+    }
+
+    #[derive(serde::Serialize)]
+    struct RrfRow {
+        row_id: u64,
+        rrf_score: f32,
+        file_path: String,
+    }
+    #[derive(serde::Serialize)]
+    struct Resp {
+        ok: bool,
+        results: Vec<RrfRow>,
+    }
+
+    if request_json.is_null() {
+        return cstr_err_json("null request_json");
+    }
+    let json_str = match CStr::from_ptr(request_json).to_str() {
+        Ok(s) => s,
+        Err(e) => return cstr_err_json(e),
+    };
+    let req: Req = match serde_json::from_str(json_str) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("ailake_search_multimodal_json: JSON parse error: {}", e);
+            return cstr_err_json(e);
+        }
+    };
+    if req.queries.is_empty() {
+        return cstr_err_json("queries array must not be empty");
+    }
+
+    let table = TableIdent::new(&req.namespace, &req.table);
+    let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+    let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+
+    // Hold owned query vecs alive for the lifetime of ModalQuery borrows
+    let modal_queries_owned: Vec<(String, Vec<f32>, f32, u32)> = req
+        .queries
+        .into_iter()
+        .map(|q| (q.col, q.query, q.weight, q.dim))
+        .collect();
+    let modal_queries: Vec<ModalQuery<'_>> = modal_queries_owned
+        .iter()
+        .map(|(col, query, weight, dim)| ModalQuery {
+            column: col.as_str(),
+            query: query.as_slice(),
+            weight: *weight,
+            dim: *dim,
+        })
+        .collect();
+
+    let config = SearchConfig {
+        top_k: req.top_k as usize,
+        ..Default::default()
+    };
+
+    let results = match rt().block_on(rs_search_multimodal(
+        &table,
+        &modal_queries,
+        config,
+        catalog,
+        store,
+        FusionMethod::Rrf,
+    )) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("ailake_search_multimodal_json: search failed: {}", e);
+            return cstr_err_json(e);
+        }
+    };
+
+    // SearchResult.distance stores -rrf_score; negate to expose positive score.
+    let rrf_rows: Vec<RrfRow> = results
+        .into_iter()
+        .map(|r| RrfRow {
+            row_id: r.row_id.as_u64(),
+            rrf_score: -r.distance,
+            file_path: r.file_path,
+        })
+        .collect();
+
+    let body = Resp {
+        ok: true,
+        results: rrf_rows,
+    };
+    let json = serde_json::to_string(&body)
+        .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialize\"}".into());
+    CString::new(json).unwrap_or_default().into_raw()
 }
 
 // ── ailake_scan_json — search + fetch full rows ───────────────────────────────

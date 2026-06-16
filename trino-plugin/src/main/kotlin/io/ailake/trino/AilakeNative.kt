@@ -28,6 +28,9 @@ object AilakeNative {
         /** JSON-envelope search. Returns `{"ok":true,"results":[...]}`. Caller must free. */
         fun ailake_search_json(requestJson: String): Pointer?
 
+        /** Cross-modal RRF. Returns `{"ok":true,"results":[{"row_id":N,"rrf_score":F,"file_path":"..."}]}`. Caller must free. */
+        fun ailake_search_multimodal_json(requestJson: String): Pointer?
+
         /** JSON-envelope write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
         fun ailake_write_batch_json(requestJson: String): Pointer?
 
@@ -98,6 +101,59 @@ object AilakeNative {
         } catch (e: Exception) {
             log.error("[ailake] Failed to parse writeBatch response for table={}: {}", tableName, e.message, e)
             null
+        } finally {
+            runCatching { native.ailake_free_string(ptr) }
+        }
+    }
+
+    data class MultimodalSearchRow(val rowId: Long, val rrfScore: Float, val filePath: String)
+
+    /**
+     * Cross-modal vector search via Reciprocal Rank Fusion.
+     *
+     * @param tableUri  path/URI of the AI-Lake table root
+     * @param queries   list of (column, query vector, weight) triples
+     * @param topK      number of results to return
+     */
+    fun searchMultimodal(
+        tableUri: String,
+        queries: List<Triple<String, List<Float>, Float>>,
+        topK: Int,
+    ): List<MultimodalSearchRow> {
+        val native = lib ?: return emptyList()
+        if (queries.isEmpty()) return emptyList()
+
+        val queriesJson = queries.joinToString(",", "[", "]") { (col, q, w) ->
+            val qArr = q.joinToString(",", "[", "]")
+            """{"col":${mapper.writeValueAsString(col)},"query":$qArr,"weight":$w,"dim":0}"""
+        }
+        val requestJson = mapper.writeValueAsString(
+            mapOf("warehouse" to tableUri, "namespace" to "default", "table" to "table",
+                  "top_k" to topK)
+        ).dropLast(1) + ""","queries":$queriesJson}"""
+
+        val ptr = native.ailake_search_multimodal_json(requestJson) ?: run {
+            log.warn("[ailake] ailake_search_multimodal_json returned null for tableUri={}", tableUri)
+            return emptyList()
+        }
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) {
+                log.warn("[ailake] searchMultimodal ok=false for tableUri={}: {}", tableUri, resp["error"])
+                return emptyList()
+            }
+            @Suppress("UNCHECKED_CAST")
+            (resp["results"] as? List<Map<String, Any>> ?: emptyList()).map { m ->
+                MultimodalSearchRow(
+                    rowId    = (m["row_id"] as Number).toLong(),
+                    rrfScore = (m["rrf_score"] as Number).toFloat(),
+                    filePath = m["file_path"] as String,
+                )
+            }
+        } catch (e: Exception) {
+            log.error("[ailake] Failed to parse multimodal response for tableUri={}: {}", tableUri, e.message, e)
+            emptyList()
         } finally {
             runCatching { native.ailake_free_string(ptr) }
         }

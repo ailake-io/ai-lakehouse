@@ -34,6 +34,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 add_library(duckdb_ailake MODULE
     src/ailake_extension.cpp
     src/ailake_search.cpp
+    src/ailake_search_multimodal.cpp
     src/ailake_write.cpp
     src/ailake_scan_table.cpp
 )
