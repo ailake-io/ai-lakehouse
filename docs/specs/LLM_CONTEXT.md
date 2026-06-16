@@ -137,6 +137,25 @@ def build_context_string(chunk: Chunk) -> str:
 | Code search | `embedding` | Code is self-contained |
 | Narrative / thematic | `context_embedding` | Topic matters more than words |
 
+### Cross-modal search with `search_multimodal`
+
+For tables with multiple vector columns (text + image, dual embeddings, or any other combination), `search_multimodal` runs an independent HNSW search per column and fuses results via RRF:
+
+```python
+# Text + image cross-modal search
+results = ailake.search_multimodal(
+    "s3://my-lake/media/",
+    queries=[
+        ("embedding",       text_vec,  0.7),
+        ("image_embedding", image_vec, 0.3),
+    ],
+    top_k=20,
+)
+# → [{"row_id": int, "rrf_score": float, "file": str}]  — descending rrf_score
+```
+
+Columns may have different dimensions (`dim=1536` for text, `dim=512` for images). Per-column dims are auto-detected from `ailake.dim-<col>` Iceberg properties.
+
 ### Reciprocal Rank Fusion (RRF) for dual-embedding search
 
 ```rust
@@ -335,6 +354,54 @@ def ingest_document(doc, embed_fn, writer: ailake.TableWriter):
     )
     # Each batch creates one unified .parquet file with both HNSW graphs in its footer
 ```
+
+---
+
+---
+
+## `MultimodalContextSchema` — extending LLM context with media
+
+`MultimodalContextSchema` extends `LlmContextSchema` for tables that also carry media embeddings and references.
+
+### Canonical column names (`multimodal_columns` module)
+
+```rust
+// ailake-core/src/schema.rs
+pub mod multimodal_columns {
+    pub const MEDIA_URI:        &str = "media_uri";        // S3/GCS/HTTPS URI of the raw asset
+    pub const MEDIA_MIME:       &str = "media_mime";        // MIME type (image/jpeg, audio/mpeg, …)
+    pub const MEDIA_CAPTION:    &str = "media_caption";     // Caption from BLIP-2 / Whisper
+    pub const IMAGE_EMBEDDING:  &str = "image_embedding";   // CLIP/SigLIP dim=512, FIXED_LEN_BYTE_ARRAY F16
+    pub const AUDIO_TRANSCRIPT: &str = "audio_transcript";  // Whisper transcript
+    pub const THUMBNAIL_B64:    &str = "thumbnail_b64";     // Base64 JPEG ≤ 64×64 for inline LLM context
+}
+```
+
+### Design principle
+
+**AI-Lake is not a blob store.** Media files live in object storage (`s3://`, `gs://`, `az://`). AI-Lake stores only:
+- URIs pointing to the media (`media_uri`)
+- Embeddings derived from the media (`image_embedding`)
+- Derived text (`media_caption`, `audio_transcript`, `thumbnail_b64`)
+
+### Example multimodal table Arrow schema
+
+```
+chunk_id:          Utf8
+chunk_text:        LargeUtf8
+embedding:         FixedSizeBinary(3072)    -- text F16, dim=1536
+image_embedding:   FixedSizeBinary(1024)    -- image F16, dim=512  (ailake.modality-image_embedding = "image")
+media_uri:         Utf8                     -- s3://bucket/photo.jpg
+media_mime:        Utf8                     -- image/jpeg
+media_caption:     Utf8                     -- BLIP-2 caption
+audio_transcript:  Utf8                     -- Whisper (null for images)
+thumbnail_b64:     Utf8                     -- base64 JPEG 64×64
+```
+
+Each vector column (`embedding`, `image_embedding`) carries the `ailake.modality-<col>` Iceberg property,
+allowing readers to select the correct HNSW by modality tag without inspecting vector data.
+
+See [`07_multimodal.ipynb`](../../tests/docker/demo/notebooks/07_multimodal.ipynb) for a complete demo.
 
 ---
 

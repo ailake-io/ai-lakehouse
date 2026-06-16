@@ -191,6 +191,58 @@ df = table.search(query, top_k=10, fetch_data=True).to_pandas()
 
 Module-level search returning the same chainable `SearchQuery`.
 
+### `VectorColSpec(column, dim, metric="cosine", modality=None)`
+
+Declares one vector column for multi-column writes or searches.
+
+| Arg | Description | Example |
+|---|---|---|
+| `column` | Parquet column name | `"image_embedding"` |
+| `dim` | Embedding dimension | `512` |
+| `metric` | Distance metric | `"cosine"` |
+| `modality` | Optional tag — stored as `ailake.modality-<column>` | `"text"` / `"image"` / `"audio"` / `"video"` |
+
+### `TableWriter.write_batch_multi(texts, columns)`
+
+Write a batch with **N independent vector columns** in one call. Each column gets its own HNSW index in the AILK section of the file footer.
+
+```python
+from ailake import TableWriter, VectorColSpec
+
+text_spec  = VectorColSpec("embedding",       1536, "cosine", "text")
+image_spec = VectorColSpec("image_embedding",  512, "cosine", "image")
+
+writer = TableWriter("s3://my-lake/media/", dim=1536, metric="cosine")
+writer.write_batch_multi(
+    texts,
+    [(text_spec, text_embeddings), (image_spec, image_embeddings)],
+)
+snapshot_id = writer.commit()
+```
+
+### `search_multimodal(path, queries, top_k=10) → list[dict]`
+
+Cross-modal search: fuse results from N vector columns via **Reciprocal Rank Fusion**.
+
+`rrf_score = Σ weight_i / (60 + rank_i)` — higher is better.
+
+```python
+results = ailake.search_multimodal(
+    "s3://my-lake/media/",
+    queries=[
+        ("embedding",       text_vec,  0.7),   # 70% weight on text similarity
+        ("image_embedding", image_vec, 0.3),   # 30% weight on image similarity
+    ],
+    top_k=20,
+)
+# Returns: [{"row_id": int, "rrf_score": float, "file": str}, ...]
+# Ordered by descending rrf_score
+```
+
+Each column is searched by its own HNSW. Per-column dimensions are auto-detected
+from `ailake.dim-<col>` Iceberg properties written at `commit()` time — no `dim`
+argument needed when reading tables written with `write_batch_multi`.
+
 ### `migrate_embeddings(path, old_column, new_column, embed_fn, *, ...)`
 
 Re-embeds all chunks in a table with a new model, committing the result as a new Iceberg snapshot.

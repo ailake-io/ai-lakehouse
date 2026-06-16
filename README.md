@@ -56,11 +56,12 @@ Then open **http://localhost:8888** and run the notebooks:
 
 | Notebook | What it shows |
 |---|---|
-| `01_ailake_demo.ipynb` | Write, search, IVF-PQ, residual PQ, deferred write, HNSW tuning, async API, storage estimator, Iceberg compat, RAG context assembly, MinIO upload |
+| `01_ailake_demo.ipynb` | Write, search, IVF-PQ, residual PQ, deferred write, HNSW tuning, async API, storage estimator, Iceberg compat, RAG context assembly, MinIO upload, multi-column write, cross-modal RRF, `MultimodalContextSchema` |
 | `02_duckdb.ipynb` | DuckDB Parquet scan, filtered queries, per-file storage stats, F16 embedding decode |
 | `03_spark.ipynb` | PySpark local[*], Iceberg SQL, snapshot history, time-travel `VERSION AS OF` |
 | `04_trino.ipynb` | Trino SQL, AI-Lake table properties, `$files` / `$manifests` system tables |
 | `05_bigquery.ipynb` | BigQuery emulator inserts, F16 BYTES decode, production GCS + BigQuery Omni pattern |
+| `07_multimodal.ipynb` | `VectorColSpec`, `write_batch_multi`, modality tags, cross-modal RRF fusion, weight ablation, `MultimodalContextSchema` column constants |
 
 Notebooks 04 and 05 require the `engines` profile (adds Trino + BigQuery emulator):
 
@@ -82,7 +83,7 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 | [`docs/architecture/CATALOG_BACKENDS.md`](./docs/architecture/CATALOG_BACKENDS.md) | `CatalogProvider` trait + Hadoop / REST / Glue / Nessie / JDBC backends |
 | [`docs/specs/FILE_FORMAT.md`](./docs/specs/FILE_FORMAT.md) | Binary spec of the unified `.parquet` file with AI-Lake footer |
 | [`docs/specs/ICEBERG_COMPAT.md`](./docs/specs/ICEBERG_COMPAT.md) | Exactly how compatibility with Iceberg readers is maintained |
-| [`docs/specs/LLM_CONTEXT.md`](./docs/specs/LLM_CONTEXT.md) | `LlmContextSchema`, dual embeddings, `ContextAssembler` |
+| [`docs/specs/LLM_CONTEXT.md`](./docs/specs/LLM_CONTEXT.md) | `LlmContextSchema`, dual embeddings, `ContextAssembler`, `MultimodalContextSchema`, cross-modal RRF |
 | [`docs/specs/INTEGRATIONS.md`](./docs/specs/INTEGRATIONS.md) | Spark, Trino, Beam, AWS, GCP, Azure — config snippets and compatibility matrix |
 | [`docs/specs/CLOUD_DEPLOY.md`](./docs/specs/CLOUD_DEPLOY.md) | Step-by-step deployment on EMR, Glue, Lambda, Dataproc, Dataflow, Databricks, HDInsight, AzureML |
 | [`docs/specs/COMPACTION.md`](./docs/specs/COMPACTION.md) | Compaction job design, triggers, HNSW rebuild strategy |
@@ -96,9 +97,9 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 **Rust** (add to `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.17"
-ailake-query = "0.0.17"   # search(), TableWriter, ContextAssembler
-ailake-store = "0.0.17"   # S3 / GCS / Azure / local backends
+ailake-core  = "0.0.19"
+ailake-query = "0.0.19"   # search(), TableWriter, ContextAssembler, search_multimodal
+ailake-store = "0.0.19"   # S3 / GCS / Azure / local backends
 ```
 
 **Python**:
@@ -133,7 +134,7 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.17
+VERSION=0.0.19
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
@@ -321,15 +322,17 @@ tests/
     └── demo/
         ├── Dockerfile           # Two-stage: Rust/maturin → JupyterLab
         ├── entrypoint.sh        # Init fixture then start Jupyter
-        ├── init_demo.py         # Generates 4 fixture tables (HNSW, PQ-only, Residual-PQ, Deferred)
+        ├── init_demo.py         # Generates 5 fixture tables (HNSW, PQ-only, Residual-PQ, Deferred, Multimodal)
         ├── trino-catalog/
         │   └── ailake.properties # Trino Iceberg HadoopCatalog config
         └── notebooks/
-            ├── 01_ailake_demo.ipynb  # Write, search, IVF-PQ, residual PQ, deferred write, HNSW tuning, async, storage estimator
+            ├── 01_ailake_demo.ipynb  # Full SDK walkthrough (23 sections): write, search, IVF-PQ, deferred, HNSW tuning, async, RAG, multi-column, RRF
             ├── 02_duckdb.ipynb       # DuckDB Parquet scan, per-file stats, F16 decode, Iceberg metadata
             ├── 03_spark.ipynb        # PySpark + Iceberg SQL + time-travel VERSION AS OF
             ├── 04_trino.ipynb        # Trino SQL + $properties / $files / $manifests (--profile engines)
-            └── 05_bigquery.ipynb     # BigQuery emulator + F16 decode + GCS+BQ Omni pattern (--profile engines)
+            ├── 05_bigquery.ipynb     # BigQuery emulator + F16 decode + GCS+BQ Omni pattern (--profile engines)
+            ├── 06_airbyte_destination.ipynb  # Airbyte CDK destination, CmdEmbedder, StreamWriter
+            └── 07_multimodal.ipynb   # VectorColSpec, write_batch_multi, modality tags, cross-modal RRF fusion
 ```
 
 ## Performance
@@ -400,6 +403,7 @@ cargo check --workspace
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector; **IVF-PQ shared codebook** (single k-means training across all shards — ADC distances comparable cross-shard); **`write_batch_ivf_pq_deferred`** (~250k vec/s write, async IVF-PQ build); **k-means++ O(n×k) fix** + rayon parallelism (17× speedup); **`HadoopCatalog` Replace fix** (`IndexStatus::Ready` convergence with concurrent background tasks) |
 | **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP REST server, Apache Airflow provider, idempotent writes, Compat Heavy CI (Spark+Iceberg, Trino+REST, BigQuery emulator), TruffleHog secret scanning, cloud deployment guides |
 | **Phase 6** | ✅ Complete | Public distribution pipeline — crates.io, PyPI (manylinux abi3 wheels), Airflow provider on PyPI, pre-built JVM JARs + `libailake_jni.so` on GitHub Releases, dynamic Python versioning |
-| **Phase 7** | 🚧 In progress | Done: DuckDB extension (`duckdb-ailake/`), Python full-read (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` exposed in Python SDK, expanded JupyterLab demo (4 fixture tables, 17 notebook sections). Remaining: DuckLake catalog backend; dbt integration guide |
+| **Phase 7** | 🚧 In progress | Done: DuckDB extension (`duckdb-ailake/`), Python full-read (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` exposed in Python SDK, expanded JupyterLab demo (5 fixture tables, 23 notebook sections + `07_multimodal.ipynb`). Remaining: DuckLake catalog backend; dbt integration guide |
+| **Phase 8** | ✅ Complete | Multimodal — `VectorModality` enum, `ailake.modality-<col>` Iceberg property, N generalized vector columns with independent HNSW, `write_batch_multi`, CLI `--vector-cols`, `search_multimodal` (cross-modal RRF), `MultimodalContextSchema` + `multimodal_columns` constants, Python `VectorColSpec`, multimodal demo notebook + fixture |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.
