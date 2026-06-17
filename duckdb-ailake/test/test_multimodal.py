@@ -168,11 +168,28 @@ def test_multimodal_no_lib_returns_empty():
     conn2.close()
 
 
+def test_multimodal_partition_filter_named_param():
+    """partition_filter= is accepted as a named parameter without raising an error."""
+    conn = setup_connection()
+    queries_sql = "[{'col': 'embedding', 'query': [0.1, 0.2]::FLOAT[], 'weight': 1.0}]"
+    count = conn.execute(f"""
+        SELECT count(*) FROM ailake_search_multimodal(
+            '/nonexistent/path',
+            {queries_sql},
+            5,
+            partition_filter='nonexistent-agent'
+        )
+    """).fetchone()[0]
+    require(count >= 0, "partition_filter named param caused unexpected error")
+    print(f"PASS: partition_filter named param accepted (returned {count} rows)")
+
+
 if __name__ == "__main__":
     print("── ailake_search_multimodal tests ──────────────────────────────────────")
     test_extension_loads()
     test_multimodal_result_schema()
     test_multimodal_returns_rows()
     test_multimodal_no_lib_returns_empty()
+    test_multimodal_partition_filter_named_param()
     print(f"\n{'PASS' if FAIL == 0 else 'FAIL'}  {PASS} passed, {FAIL} failed")
     sys.exit(0 if FAIL == 0 else 1)

@@ -119,7 +119,8 @@ public:
         const std::string                 &warehouse,
         const std::string                 &table_name,
         const std::vector<ModalQueryArg>  &queries,
-        int                                top_k
+        int                                top_k,
+        const std::string                 &partition_filter = ""
     ) const;
 
     // Execute ailake_write_batch_json. Returns snapshot_id or -1 on error.

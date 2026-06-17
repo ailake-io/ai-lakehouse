@@ -67,7 +67,8 @@ std::vector<MultimodalRow> AilakeLib::search_multimodal(
     const std::string                 &warehouse,
     const std::string                 &table_name,
     const std::vector<ModalQueryArg>  &queries,
-    int                                top_k
+    int                                top_k,
+    const std::string                 &partition_filter
 ) const {
     if (!multimodal_fn_ || !free_fn_ || queries.empty()) return {};
 
@@ -93,8 +94,10 @@ std::vector<MultimodalRow> AilakeLib::search_multimodal(
         ",\"namespace\":\"default\""                 +
         ",\"table\":"      + json_escape(table_name) +
         ",\"queries\":"    + queries_json             +
-        ",\"top_k\":"      + std::to_string(top_k)   +
-        "}";
+        ",\"top_k\":"      + std::to_string(top_k);
+    if (!partition_filter.empty())
+        req += ",\"partition_filter\":" + json_escape(partition_filter);
+    req += "}";
 
     char *raw = multimodal_fn_(req.c_str());
     if (!raw) return {};
