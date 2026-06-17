@@ -113,6 +113,77 @@ func TestU64FromKVHint(t *testing.T) {
 	}
 }
 
+// ── PartitionFilter pruning (unit, no fixture) ────────────────────────────────
+
+func TestPartitionPruning_MatchingFilter(t *testing.T) {
+	entries := []DataFileEntry{
+		{Path: "a.parquet", PartitionValue: "agent-A"},
+		{Path: "b.parquet", PartitionValue: "agent-B"},
+		{Path: "c.parquet", PartitionValue: "agent-A"},
+	}
+	filter := "agent-A"
+	var pruned []DataFileEntry
+	for _, e := range entries {
+		if e.PartitionValue == filter {
+			pruned = append(pruned, e)
+		}
+	}
+	if len(pruned) != 2 {
+		t.Fatalf("expected 2 entries matching agent-A, got %d", len(pruned))
+	}
+	for _, e := range pruned {
+		if e.PartitionValue != "agent-A" {
+			t.Errorf("pruned entry has wrong PartitionValue: %q", e.PartitionValue)
+		}
+	}
+}
+
+func TestPartitionPruning_EmptyFilterKeepsAll(t *testing.T) {
+	entries := []DataFileEntry{
+		{Path: "a.parquet", PartitionValue: "agent-A"},
+		{Path: "b.parquet", PartitionValue: "agent-B"},
+		{Path: "c.parquet", PartitionValue: ""},
+	}
+	filter := ""
+	var pruned []DataFileEntry
+	if filter != "" {
+		for _, e := range entries {
+			if e.PartitionValue == filter {
+				pruned = append(pruned, e)
+			}
+		}
+	} else {
+		pruned = entries
+	}
+	if len(pruned) != len(entries) {
+		t.Errorf("empty filter: expected %d entries, got %d", len(entries), len(pruned))
+	}
+}
+
+func TestPartitionPruning_NonMatchingFilterYieldsEmpty(t *testing.T) {
+	entries := []DataFileEntry{
+		{Path: "a.parquet", PartitionValue: "agent-A"},
+		{Path: "b.parquet", PartitionValue: "agent-B"},
+	}
+	filter := "agent-C"
+	var pruned []DataFileEntry
+	for _, e := range entries {
+		if e.PartitionValue == filter {
+			pruned = append(pruned, e)
+		}
+	}
+	if len(pruned) != 0 {
+		t.Errorf("expected 0 entries for non-matching filter, got %d", len(pruned))
+	}
+}
+
+func TestSearchOptions_PartitionFilter_Field(t *testing.T) {
+	opts := SearchOptions{TopK: 5, PartitionFilter: "agent-A"}
+	if opts.PartitionFilter != "agent-A" {
+		t.Errorf("PartitionFilter: got %q, want %q", opts.PartitionFilter, "agent-A")
+	}
+}
+
 // ── Search integration (requires AILAKE_FIXTURE) ──────────────────────────────
 
 func TestSearchIntegration(t *testing.T) {

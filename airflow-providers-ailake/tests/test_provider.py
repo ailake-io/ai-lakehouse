@@ -126,6 +126,23 @@ class TestAilakeHook:
         assert len(results) == 1
         assert results[0]["row_id"] == 7
 
+    def test_search_partition_filter_passed_to_cli(self):
+        payload = json.dumps({"results": []})
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed(stdout=payload)) as mock_cli:
+            hook.search("default.docs", query=[0.1, 0.2], top_k=5, partition_filter="agent-A")
+        args = mock_cli.call_args[0]
+        assert "--partition-filter" in args, f"--partition-filter missing: {args}"
+        assert "agent-A" in args, f"partition_filter value missing: {args}"
+
+    def test_search_no_partition_filter_when_none(self):
+        payload = json.dumps({"results": []})
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed(stdout=payload)) as mock_cli:
+            hook.search("default.docs", query=[0.1], top_k=1, partition_filter=None)
+        args = mock_cli.call_args[0]
+        assert "--partition-filter" not in args, "--partition-filter should be absent when None"
+
 
 # ---------------------------------------------------------------------------
 # AilakeWriteOperator
@@ -158,6 +175,30 @@ class TestAilakeWriteOperator:
     def test_default_batch_id_is_templated(self):
         op = self._op()
         assert "run_id" in op.batch_id or "task" in op.batch_id
+
+    def test_write_operator_partition_by_passed_to_cli(self):
+        op = self._op(partition_by="agent_id", partition_value="agent-A")
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                    op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--partition-by" in args, f"--partition-by missing from CLI args: {args}"
+        assert "agent_id" in args, f"partition_by value missing from CLI args: {args}"
+        assert "--partition-value" in args, f"--partition-value missing from CLI args: {args}"
+        assert "agent-A" in args, f"partition_value missing from CLI args: {args}"
+
+    def test_write_operator_no_partition_args_when_not_set(self):
+        op = self._op()
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                    op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--partition-by" not in args, "--partition-by should be absent when not set"
+        assert "--partition-value" not in args, "--partition-value should be absent when not set"
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +248,8 @@ class TestAilakeSearchOperator:
                 returned = op.execute(context={})
 
         mock_search.assert_called_once_with(
-            "default.docs", query=[0.1, 0.2, 0.3], top_k=5, pruning_threshold=0.8
+            "default.docs", query=[0.1, 0.2, 0.3], top_k=5, pruning_threshold=0.8,
+            partition_filter=None,
         )
         assert returned == results
 
@@ -227,13 +269,30 @@ class TestAilakeSearchOperator:
             with patch.object(hook, "search", return_value=[]) as mock_search:
                 op.execute(context=context)
         mock_search.assert_called_once_with(
-            "default.docs", query=query, top_k=3, pruning_threshold=0.8
+            "default.docs", query=query, top_k=3, pruning_threshold=0.8,
+            partition_filter=None,
         )
 
     def test_execute_raises_without_query(self):
         op = AilakeSearchOperator(task_id="search", table="default.docs")
         with pytest.raises(ValueError, match="query_vector or query_xcom_task_id"):
             op.execute(context={"ti": MagicMock()})
+
+    def test_search_operator_partition_filter_passed_to_hook(self):
+        op = AilakeSearchOperator(
+            task_id="search",
+            table="default.docs",
+            query_vector=[0.1, 0.2],
+            partition_filter="agent-A",
+        )
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "search", return_value=[]) as mock_search:
+                op.execute(context={})
+        mock_search.assert_called_once_with(
+            "default.docs", query=[0.1, 0.2], top_k=10, pruning_threshold=0.8,
+            partition_filter="agent-A",
+        )
 
 
 # ---------------------------------------------------------------------------

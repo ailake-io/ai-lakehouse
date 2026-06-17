@@ -173,6 +173,24 @@ def test_search_vec_col_named_param():
     require(rows[0] >= 0, "named param vec_col raised unexpected error")
     print("PASS: named param vec_col accepted")
 
+def test_search_partition_filter_named_param():
+    """partition_filter= is accepted as a named parameter without raising an error."""
+    conn = setup_connection()
+    query = load_fixture_query()
+    q_sql = ", ".join(str(f) for f in query)
+
+    # 'nonexistent-agent' matches no files → 0 results, but no exception.
+    rows = conn.execute(f"""
+        SELECT count(*) FROM ailake_search(
+            '{table_path()}',
+            [{q_sql}]::FLOAT[],
+            10,
+            partition_filter='nonexistent-agent'
+        )
+    """).fetchone()
+    require(rows[0] >= 0, "partition_filter named param caused an unexpected error")
+    print(f"PASS: partition_filter named param accepted (returned {rows[0]} rows)")
+
 if __name__ == "__main__":
     if not pathlib.Path(EXT_PATH).exists():
         print(f"SKIP: extension not found at {EXT_PATH} — build first with cmake")
@@ -184,5 +202,6 @@ if __name__ == "__main__":
     test_search_ordered_by_distance()
     test_search_no_lib_returns_empty()
     test_search_vec_col_named_param()
+    test_search_partition_filter_named_param()
 
     print("\nAll search tests passed.")

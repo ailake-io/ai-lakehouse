@@ -77,6 +77,19 @@ class TestAilakeDestinationConfig:
         )
         assert cfg.table_path("my_stream") == "s3://bucket/lake/my_stream"
 
+    def test_partition_by_from_dict(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "cmd", "embed_cmd": "x",
+             "partition_by": "agent_id"}
+        )
+        assert cfg.partition_by == "agent_id"
+
+    def test_partition_by_default_empty(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "cmd", "embed_cmd": "x"}
+        )
+        assert cfg.partition_by == ""
+
 
 # ---------------------------------------------------------------------------
 # Text extraction
@@ -323,6 +336,44 @@ class TestStreamWriter:
         call_kwargs = fake_ailake.open_table.call_args[1]
         assert call_kwargs.get("embedding_model") == "text-embedding-3-small"
         assert call_kwargs.get("embedding_model_version") == "1"
+
+    def test_partition_by_passed_to_open_table(self):
+        """StreamWriter forwards partition_by from config to ailake.open_table()."""
+        cfg = _make_cfg(partition_by="agent_id")
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "x"})
+            writer.commit()
+
+        call_kwargs = fake_ailake.open_table.call_args[1]
+        assert call_kwargs.get("partition_by") == "agent_id", (
+            f"partition_by not forwarded to open_table; kwargs={call_kwargs}"
+        )
+
+    def test_partition_by_absent_when_empty(self):
+        """partition_by is NOT passed to open_table when config has empty string."""
+        cfg = _make_cfg()  # partition_by defaults to ""
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "x"})
+            writer.commit()
+
+        call_kwargs = fake_ailake.open_table.call_args[1]
+        assert "partition_by" not in call_kwargs, (
+            f"partition_by should be absent when empty; kwargs={call_kwargs}"
+        )
 
 
 # ---------------------------------------------------------------------------
