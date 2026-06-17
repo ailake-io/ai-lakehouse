@@ -108,6 +108,12 @@ impl IcebergMetadata {
                 );
             }
         }
+        if let Some(modality) = policy.modality {
+            properties.insert(
+                format!("ailake.modality-{}", policy.column_name),
+                modality.as_str().to_string(),
+            );
+        }
 
         let now_ms = now_ms();
         IcebergMetadata {
@@ -177,6 +183,7 @@ mod tests {
             hnsw_ef_construction: None,
             ivf_residual: false,
             embedding_model: None,
+            modality: None,
         }
     }
 

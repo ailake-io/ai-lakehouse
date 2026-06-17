@@ -17,7 +17,7 @@ File layout (in the 256-byte metadata region):
   field 3 (bytes  96-127): abi_metadata  → "CPP"
   field 4 (bytes 128-159): extension_version
   field 5 (bytes 160-191): duckdb_version
-  field 6 (bytes 192-223): platform      → e.g. "linux_amd64"
+  field 6 (bytes 192-223): platform      → e.g. "linux_amd64_gcc4"
   field 7 (bytes 224-255): magic_value   → "4" + 31 null bytes  (MUST be last)
 
 Usage:
@@ -45,6 +45,10 @@ def pad_field(s: str) -> bytes:
 
 def detect_platform() -> str:
     """Query the installed duckdb Python package for its platform string."""
+    import os as _os
+    # Allow CI / build scripts to pin the platform explicitly.
+    if "DUCKDB_PLATFORM" in _os.environ:
+        return _os.environ["DUCKDB_PLATFORM"]
     try:
         import duckdb as _ddb
         conn = _ddb.connect()
@@ -54,18 +58,23 @@ def detect_platform() -> str:
             return row[0]
     except Exception:
         pass
-    # Fallback: derive from Python's platform detection (matches platform.hpp logic)
+    # Fallback: derive from Python's platform detection.
+    # On Linux x86_64 we compile with _GLIBCXX_USE_CXX11_ABI=0 to match
+    # DuckDB manylinux wheels, so the correct platform tag is linux_amd64_gcc4.
     import struct as _s
     import platform as _p
-    os_name = "linux"
-    arch = "amd64" if _s.calcsize("P") == 8 else "i686"
-    if _p.system() == "Darwin":
-        os_name = "osx"
-    elif _p.system() == "Windows":
-        os_name = "windows"
-    if _p.machine().lower() in ("arm64", "aarch64"):
-        arch = "arm64"
-    return f"{os_name}_{arch}"
+    system  = _p.system()
+    machine = _p.machine().lower()
+    if system == "Darwin":
+        arch = "arm64" if machine in ("arm64", "aarch64") else "amd64"
+        return f"osx_{arch}"
+    if system == "Windows":
+        arch = "arm64" if machine in ("arm64", "aarch64") else "amd64"
+        return f"windows_{arch}"
+    # Linux — manylinux wheels use gcc4 ABI; match our _GLIBCXX_USE_CXX11_ABI=0.
+    if machine in ("arm64", "aarch64"):
+        return "linux_arm64"
+    return "linux_amd64_gcc4"
 
 
 ext_path   = sys.argv[1]

@@ -2,7 +2,7 @@
 #
 # Usage (from repo root):
 #
-#   Basic demo (notebooks 01-03, vector search + Iceberg compat + DuckDB + Spark):
+#   Basic demo (notebooks 01-03 + 07, vector search + Iceberg compat + DuckDB + Spark + multimodal):
 #     docker compose -f tests/docker/compose-demo.yml up -d
 #
 #   Full demo with engine plugins (notebooks 04-05, adds Trino + BigQuery emulator):
@@ -84,6 +84,7 @@ services:
       MINIO_SECRET_KEY: minioadmin
       NESSIE_URI: "http://nessie:19120/api/v1"
       DEMO_TABLE_PATH: /data/ailake_demo
+      DEMO_MULTIMODAL_PATH: /data/ailake_multimodal
       DEMO_DIM: "32"
       # Engine endpoints — consumed by notebooks 04/05 when engines profile is active.
       # Values match container names so they also work without the profile

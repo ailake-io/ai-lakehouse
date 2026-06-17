@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -233,6 +234,117 @@ search(HadoopCatalog& catalog,
     if ((int)all.size() > opts.top_k)
         all.resize((size_t)opts.top_k);
     return all;
+}
+
+// ---------------------------------------------------------------------------
+// Multimodal search — cross-modal RRF fusion (Phase 8)
+// ---------------------------------------------------------------------------
+
+// One arm of a cross-modal RRF search.
+struct ModalQuery {
+    std::string        column;
+    std::vector<float> query;
+    float              weight = 1.0f;
+};
+
+// Result from search_multimodal.
+struct MultimodalResult {
+    uint64_t    row_id;
+    float       rrf_score;
+    std::string file_path;
+};
+
+// search_multimodal runs independent HNSW searches per column, fuses via RRF:
+//   score_i = weight_i / (60 + rank_i),  final = Σ score_i
+inline std::vector<MultimodalResult>
+search_multimodal(HadoopCatalog& catalog,
+                  const std::string& ns, const std::string& tbl,
+                  const std::vector<ModalQuery>& queries,
+                  const SearchOptions& opts = {})
+{
+    if (queries.empty()) return {};
+
+    auto info    = catalog.load_table(ns, tbl);
+    auto entries = catalog.list_files(ns, tbl);
+    auto primary_metric = metric_from_str(info.vector_metric);
+
+    // Geometric pruning using primary column centroid.
+    const float* prune_q = nullptr;
+    for (auto& mq : queries) {
+        if (mq.column == info.vector_column || mq.column.empty()) {
+            prune_q = mq.query.data();
+            break;
+        }
+    }
+    if (!prune_q && !queries.empty()) prune_q = queries[0].query.data();
+
+    std::vector<DataFileEntry> survivors;
+    for (auto& e : entries) {
+        if (e.centroid.empty() || !prune_q) { survivors.push_back(e); continue; }
+        float d = compute_distance(primary_metric, prune_q, e.centroid.data(), e.centroid.size());
+        if (d - e.radius <= opts.pruning_threshold) survivors.push_back(e);
+    }
+
+    // Accumulate RRF scores keyed by (row_id, file_path).
+    std::map<std::pair<uint64_t, std::string>, float> rrf_accum;
+
+    for (auto& mq : queries) {
+        float w = mq.weight > 0.f ? mq.weight : 1.0f;
+
+        std::vector<FileSearchResult> col_hits;
+        for (auto& e : survivors) {
+            std::string abs = catalog.resolve_path(ns, tbl, e.path);
+
+            // Locate HNSW offsets for the requested column.
+            std::optional<uint64_t> off, len;
+            uint32_t dim = 0;
+            if (mq.column.empty() || mq.column == info.vector_column) {
+                off = e.hnsw_offset; len = e.hnsw_len; dim = e.vector_dim;
+            } else {
+                for (auto& xi : e.extra_vector_indexes) {
+                    if (xi.column == mq.column) {
+                        if (xi.hnsw_offset) off = xi.hnsw_offset;
+                        if (xi.hnsw_len)    len = xi.hnsw_len;
+                        dim = xi.dim;
+                        break;
+                    }
+                }
+            }
+            if (!off || !len) continue;
+
+            // Build temporary entry with selected column's index offsets.
+            DataFileEntry tmp   = e;
+            tmp.hnsw_offset     = off;
+            tmp.hnsw_len        = len;
+            tmp.vector_dim      = dim;
+            try {
+                auto hits = search_file(abs, tmp, mq.query.data(), opts);
+                for (auto& h : hits)
+                    col_hits.push_back({h.row_id, h.distance, e.path});
+            } catch (...) {}
+        }
+
+        std::sort(col_hits.begin(), col_hits.end(),
+            [](const FileSearchResult& a, const FileSearchResult& b){
+                return a.distance < b.distance; });
+
+        for (size_t rank = 0; rank < col_hits.size(); ++rank) {
+            auto& h = col_hits[rank];
+            rrf_accum[{h.row_id, h.file_path}] += w / float(60 + rank + 1);
+        }
+    }
+
+    std::vector<MultimodalResult> results;
+    results.reserve(rrf_accum.size());
+    for (auto& kv : rrf_accum)
+        results.push_back({kv.first.first, kv.second, kv.first.second});
+
+    std::sort(results.begin(), results.end(),
+        [](const MultimodalResult& a, const MultimodalResult& b){
+            return a.rrf_score > b.rrf_score; });
+    if ((int)results.size() > opts.top_k)
+        results.resize((size_t)opts.top_k);
+    return results;
 }
 
 } // namespace ailake

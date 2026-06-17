@@ -554,6 +554,105 @@ impl TableWriter {
         Ok(())
     }
 
+    /// Write a multi-column batch as Parquet-only immediately; build all N column
+    /// HNSW indexes in a single background task.
+    ///
+    /// Same semantics as `write_batch_deferred` but for N vector columns:
+    /// - Parquet (primary column bytes) is persisted immediately (~200k vec/s).
+    /// - A background tokio task rebuilds the full AILK file via `write_multi` and
+    ///   patches the catalog entry with primary + extra column offsets once ready.
+    /// - During the build window, `SearchSession` serves this shard via GPU/CPU flat
+    ///   scan. Transition to HNSW-indexed search is automatic on `IndexStatus::Ready`.
+    ///
+    /// All N column embeddings are cloned into the background task; choose batch size
+    /// so that N×rows×dim×4 bytes fits comfortably in RAM while the task runs.
+    pub async fn write_batch_multi_deferred(
+        &mut self,
+        batch: &RecordBatch,
+        columns: &[MultiVectorBatch<'_>],
+    ) -> AilakeResult<()> {
+        use ailake_core::AilakeError;
+        if columns.is_empty() {
+            return Err(AilakeError::InvalidArgument(
+                "write_batch_multi_deferred requires at least one column".into(),
+            ));
+        }
+        if self.captured_schema.is_none() {
+            self.captured_schema = Some(batch.schema());
+        }
+        if self.extra_vec_policies.is_empty() && columns.len() > 1 {
+            self.extra_vec_policies = columns[1..].iter().map(|c| c.policy.clone()).collect();
+        }
+
+        let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
+        let file_path = format!("data/part-{:05}.parquet", part_num);
+
+        // Immediate path: write Parquet with primary column only (no AILK sections yet).
+        let primary_policy = &columns[0].policy;
+        let file_writer = AilakeFileWriter::new(primary_policy.clone());
+        let parquet_bytes = file_writer.write_parquet_only(batch, columns[0].embeddings)?;
+        let file_size = parquet_bytes.len() as u64;
+        self.store.put(&file_path, parquet_bytes).await?;
+
+        // Primary centroid enables geometric pruning during the build window.
+        let primary_centroid =
+            compute_centroid_and_radius(columns[0].embeddings, primary_policy.metric);
+        let mut entry = make_data_file_entry_indexing(
+            &file_path,
+            columns[0].embeddings.len() as u64,
+            file_size,
+            &primary_centroid,
+            &primary_policy.column_name,
+            primary_policy.dim,
+        );
+        // Populate extra_vector_indexes with centroids/radii for pruning.
+        // hnsw_offset/len are 0 until the background task patches them to non-zero.
+        entry.extra_vector_indexes = columns[1..]
+            .iter()
+            .map(|c| {
+                let col_centroid = compute_centroid_and_radius(c.embeddings, c.policy.metric);
+                ExtraVectorIndex {
+                    column: c.policy.column_name.clone(),
+                    dim: c.policy.dim,
+                    hnsw_offset: 0,
+                    hnsw_len: 0,
+                    centroid_b64: Some(encode_centroid_b64(&col_centroid)),
+                    radius: Some(col_centroid.radius),
+                }
+            })
+            .collect();
+        entry.embedding_model = self
+            .policy
+            .embedding_model
+            .as_ref()
+            .map(|m| m.to_property_value());
+        self.pending_files.push(entry);
+
+        // Clone all column data for the background task.
+        let all_policies: Vec<VectorStoragePolicy> =
+            columns.iter().map(|c| c.policy.clone()).collect();
+        let all_embeddings: Vec<Vec<Vec<f32>>> =
+            columns.iter().map(|c| c.embeddings.to_vec()).collect();
+        let store = self.store.clone();
+        let catalog = self.catalog.clone();
+        let table = self.table.clone();
+        let fp = file_path.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                build_and_patch_multi_index(store, catalog, all_policies, table, fp, all_embeddings)
+                    .await
+            {
+                error!(
+                    "ailake: deferred multi-column HNSW build failed — shard stays in flat-scan \
+                     mode until next compaction rebuilds the index: {}",
+                    e
+                );
+            }
+        });
+
+        Ok(())
+    }
+
     /// Commit all staged files as a new Iceberg snapshot.
     ///
     /// No-op when `pending_files` is empty (e.g., all `write_batch_idempotent`
@@ -574,12 +673,23 @@ impl TableWriter {
             .captured_schema
             .as_deref()
             .map(|s| arrow_schema_to_iceberg_update(s, &self.policy, &self.extra_vec_policies));
+        // Store secondary column dims/metrics as table-level properties so
+        // search_multimodal can discover them without reading Parquet files.
+        let mut extra_properties = std::collections::HashMap::new();
+        for ep in &self.extra_vec_policies {
+            extra_properties.insert(format!("ailake.dim-{}", ep.column_name), ep.dim.to_string());
+            extra_properties.insert(
+                format!("ailake.metric-{}", ep.column_name),
+                ailake_parquet::schema::metric_str(ep.metric).to_string(),
+            );
+        }
         let snapshot = NewSnapshot {
             snapshot_id: new_snapshot_id(),
             parent_snapshot_id: self.parent_snapshot_id,
             files: std::mem::take(&mut self.pending_files),
             operation: SnapshotOperation::Append,
             iceberg_schema,
+            extra_properties,
         };
         self.catalog.commit_snapshot(&self.table, snapshot).await
     }
@@ -839,13 +949,23 @@ async fn build_and_patch_index(
     // Overwrite the Parquet-only file with the full AILK version.
     store.put(&file_path, full_bytes).await?;
 
-    // Wait for the initial writer commit to appear (HNSW builds can finish before
-    // the main write loop calls commit_snapshot, so the catalog has no snapshot yet).
+    // Wait for the initial writer commit to appear (max 60 s).
+    // HNSW builds can finish before the main write loop calls commit_snapshot.
+    let mut committed = false;
     for _ in 0..120u32 {
         match catalog.load_table(&table).await {
-            Ok(meta) if meta.current_snapshot_id.is_some() => break,
+            Ok(meta) if meta.current_snapshot_id.is_some() => {
+                committed = true;
+                break;
+            }
             _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
         }
+    }
+    if !committed {
+        return Err(ailake_core::AilakeError::Store(format!(
+            "deferred HNSW build: no snapshot committed for {file_path} after 60 s — \
+             did you call TableWriter::commit()?"
+        )));
     }
 
     // Update the catalog with CAS-like retry to handle concurrent background tasks.
@@ -882,6 +1002,7 @@ async fn build_and_patch_index(
                     files,
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
                 },
             )
             .await?;
@@ -958,12 +1079,22 @@ async fn build_ivf_pq_and_patch_index(
 
     store.put(&file_path, full_bytes).await?;
 
-    // Wait for initial commit to appear then patch IndexStatus::Ready (same CAS loop as HNSW).
+    // Wait for initial commit to appear then patch IndexStatus::Ready (max 60 s).
+    let mut committed = false;
     for _ in 0..120u32 {
         match catalog.load_table(&table).await {
-            Ok(meta) if meta.current_snapshot_id.is_some() => break,
+            Ok(meta) if meta.current_snapshot_id.is_some() => {
+                committed = true;
+                break;
+            }
             _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
         }
+    }
+    if !committed {
+        return Err(ailake_core::AilakeError::Store(format!(
+            "deferred IVF-PQ build: no snapshot committed for {file_path} after 60 s — \
+             did you call TableWriter::commit()?"
+        )));
     }
 
     for attempt in 0..50u32 {
@@ -995,6 +1126,7 @@ async fn build_ivf_pq_and_patch_index(
                     files,
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
                 },
             )
             .await?;
@@ -1013,6 +1145,151 @@ async fn build_ivf_pq_and_patch_index(
     info!(
         "ailake: deferred IVF-PQ index built for {} (offset={}, len={})",
         file_path, hnsw_abs_offset, hnsw_len
+    );
+    Ok(())
+}
+
+/// Background task: rebuild full multi-column AILK file and patch all column offsets.
+///
+/// Reads the Parquet-only shard, calls `write_multi` with all N column embeddings
+/// (cloned from the caller), extracts per-column HNSW offsets, overwrites the file,
+/// then applies the same CAS retry loop used by single-column deferred tasks.
+async fn build_and_patch_multi_index(
+    store: Arc<dyn Store>,
+    catalog: Arc<dyn CatalogProvider>,
+    policies: Vec<VectorStoragePolicy>,
+    table: TableIdent,
+    file_path: String,
+    all_embeddings: Vec<Vec<Vec<f32>>>,
+) -> AilakeResult<()> {
+    // Read the Parquet-only shard (primary column only).
+    let parquet_bytes = store.get(&file_path).await?;
+    let primary_reader =
+        AilakeFileReader::new(parquet_bytes, &policies[0].column_name, policies[0].dim);
+    let (batch, _) = primary_reader.read_parquet()?;
+
+    // Build full AILK file with all N column HNSW sections on the blocking pool.
+    let full_bytes = tokio::task::spawn_blocking({
+        let policies = policies.clone();
+        let all_embeddings = all_embeddings.clone();
+        move || {
+            let col_batches: Vec<VectorColumnBatch<'_>> = policies
+                .iter()
+                .zip(all_embeddings.iter())
+                .map(|(p, embs)| VectorColumnBatch {
+                    policy: p,
+                    embeddings: embs.as_slice(),
+                })
+                .collect();
+            let file_writer = AilakeFileWriter::new(policies[0].clone());
+            file_writer.write_multi(&batch, &col_batches)
+        }
+    })
+    .await
+    .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))??;
+
+    // Extract primary HNSW offsets.
+    let primary_reader = AilakeFileReader::new(
+        full_bytes.clone(),
+        &policies[0].column_name,
+        policies[0].dim,
+    );
+    let primary_header = primary_reader.read_header()?;
+    let primary_ailk_start = primary_reader.ailk_offset()?;
+    let primary_hnsw_abs = primary_ailk_start + primary_header.hnsw_offset;
+    let primary_hnsw_len = primary_header.hnsw_len;
+
+    // Extract extra column HNSW offsets (one reader per column).
+    // Must use ailk_offset_for_column / read_header_for_column so each column's
+    // own `ailake.{col}.footer_offset` is used — ailk_offset() always returns the
+    // primary column offset, which is wrong for extra columns.
+    let mut extra_offsets: Vec<(u64, u64)> = Vec::with_capacity(policies.len().saturating_sub(1));
+    for col_policy in policies.iter().skip(1) {
+        let col_reader =
+            AilakeFileReader::new(full_bytes.clone(), &col_policy.column_name, col_policy.dim);
+        let col_ailk_start = col_reader.ailk_offset_for_column(&col_policy.column_name)?;
+        let col_header = col_reader.read_header_for_column(&col_policy.column_name)?;
+        extra_offsets.push((col_ailk_start + col_header.hnsw_offset, col_header.hnsw_len));
+    }
+
+    // Overwrite the Parquet-only shard with the full AILK file.
+    store.put(&file_path, full_bytes).await?;
+
+    // Wait for the initial writer commit to appear (max 60 s).
+    let mut committed = false;
+    for _ in 0..120u32 {
+        match catalog.load_table(&table).await {
+            Ok(meta) if meta.current_snapshot_id.is_some() => {
+                committed = true;
+                break;
+            }
+            _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        }
+    }
+    if !committed {
+        return Err(ailake_core::AilakeError::Store(format!(
+            "deferred index build: no snapshot committed for {file_path} after 60 s — \
+             did you call TableWriter::commit()?"
+        )));
+    }
+
+    // CAS retry loop: patch primary offsets + extra_vector_indexes + IndexStatus::Ready.
+    for attempt in 0..50u32 {
+        let table_meta = catalog.load_table(&table).await?;
+        let parent_snapshot_id = table_meta.current_snapshot_id;
+        let mut files = catalog.list_files(&table, None).await?;
+
+        if files
+            .iter()
+            .any(|f| f.path == file_path && f.index_status == IndexStatus::Ready)
+        {
+            break;
+        }
+
+        for f in &mut files {
+            if f.path == file_path {
+                f.hnsw_offset = Some(primary_hnsw_abs);
+                f.hnsw_len = Some(primary_hnsw_len);
+                f.index_status = IndexStatus::Ready;
+                for (i, &(off, len)) in extra_offsets.iter().enumerate() {
+                    if let Some(xi) = f.extra_vector_indexes.get_mut(i) {
+                        xi.hnsw_offset = off;
+                        xi.hnsw_len = len;
+                    }
+                }
+                break;
+            }
+        }
+        catalog
+            .commit_snapshot(
+                &table,
+                NewSnapshot {
+                    snapshot_id: new_snapshot_id(),
+                    parent_snapshot_id,
+                    files,
+                    operation: SnapshotOperation::Replace,
+                    iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
+                },
+            )
+            .await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(10 + attempt as u64 * 5)).await;
+
+        let verify = catalog.list_files(&table, None).await?;
+        if verify
+            .iter()
+            .any(|f| f.path == file_path && f.index_status == IndexStatus::Ready)
+        {
+            break;
+        }
+    }
+
+    info!(
+        "ailake: deferred multi-column HNSW built for {} ({} cols, primary offset={})",
+        file_path,
+        policies.len(),
+        primary_hnsw_abs
     );
     Ok(())
 }
@@ -1036,6 +1313,7 @@ mod tests {
             hnsw_ef_construction: None,
             ivf_residual: false,
             embedding_model: None,
+            modality: None,
         }
     }
 
@@ -1237,5 +1515,69 @@ mod tests {
 
         // One pending file should be staged even before commit.
         assert_eq!(writer.pending_files.len(), 1);
+    }
+
+    /// Smoke-test write_batch_multi_deferred: verifies Parquet staged immediately,
+    /// placeholder extra_vector_indexes populated, and background task spawned.
+    #[tokio::test]
+    async fn write_batch_multi_deferred_stages_file_with_extra_indexes() {
+        use ailake_catalog::{HadoopCatalog, IndexStatus, TableIdent};
+        use ailake_store::LocalStore;
+        use arrow_schema::{DataType, Field, Schema};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: std::sync::Arc<dyn ailake_store::Store> =
+            std::sync::Arc::new(LocalStore::new(dir.path().to_str().unwrap()));
+        let catalog = std::sync::Arc::new(HadoopCatalog::new(std::sync::Arc::clone(&store), ""));
+        let primary_pol = policy("embedding", 4);
+        let ident = TableIdent::new("default", "t");
+
+        let mut writer = TableWriter::create_or_open(catalog, store, primary_pol, ident)
+            .await
+            .unwrap();
+
+        let schema =
+            std::sync::Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let batch = arrow_array::RecordBatch::try_new(
+            schema,
+            vec![std::sync::Arc::new(arrow_array::StringArray::from(vec![
+                "hello", "world",
+            ]))],
+        )
+        .unwrap();
+
+        let text_embs = vec![vec![1.0f32, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
+        let img_embs = vec![vec![1.0f32, 0.0], vec![0.0, 1.0]];
+
+        let columns = vec![
+            MultiVectorBatch {
+                policy: policy("embedding", 4),
+                embeddings: &text_embs,
+            },
+            MultiVectorBatch {
+                policy: policy("img_embedding", 2),
+                embeddings: &img_embs,
+            },
+        ];
+
+        writer
+            .write_batch_multi_deferred(&batch, &columns)
+            .await
+            .unwrap();
+
+        assert_eq!(writer.pending_files.len(), 1);
+        let entry = &writer.pending_files[0];
+        // IndexStatus::Indexing — index build is async
+        assert_eq!(entry.index_status, IndexStatus::Indexing);
+        // Primary centroid populated for pruning during build window
+        assert!(entry.centroid_b64.is_some());
+        // Placeholder extra column entry (centroid present, offsets zero)
+        assert_eq!(entry.extra_vector_indexes.len(), 1);
+        let xi = &entry.extra_vector_indexes[0];
+        assert_eq!(xi.column, "img_embedding");
+        assert_eq!(xi.dim, 2);
+        assert_eq!(xi.hnsw_offset, 0); // not yet built
+        assert_eq!(xi.hnsw_len, 0); // not yet built
+        assert!(xi.centroid_b64.is_some());
     }
 }

@@ -85,6 +85,46 @@ Optional fields:
 
 ---
 
+### `ailake_search_multimodal_json`
+
+```
+fn ailake_search_multimodal_json(request_json: *const c_char) -> *mut c_char
+```
+
+Cross-modal vector search with Reciprocal Rank Fusion. Accepts N column queries with individual weights; fuses ranked lists via RRF: `score = Σ weight_i / (60 + rank_i)`.
+
+**Request JSON:**
+
+```json
+{
+  "warehouse": "/path/to/warehouse",
+  "namespace": "default",
+  "table":     "my_table",
+  "queries": [
+    { "col": "embedding",       "query": [0.1, -0.2, "..."], "weight": 0.7, "dim": 0 },
+    { "col": "image_embedding", "query": [0.3,  0.4, "..."], "weight": 0.3, "dim": 0 }
+  ],
+  "top_k": 10
+}
+```
+
+`dim: 0` means auto-detect from table metadata. Each `col` is a vector column name; if the column is the table's primary column, its main HNSW index is used; otherwise the secondary index from `extra_vector_indexes` in the file manifest is used.
+
+**Response JSON:**
+
+```json
+{
+  "ok": true,
+  "results": [
+    { "row_id": 42, "rrf_score": 0.0284, "file_path": "data/part-00001.parquet" }
+  ]
+}
+```
+
+`rrf_score` is positive (higher = more relevant). On error: `{"ok": false, "error": "..."}`.
+
+---
+
 ### `ailake_free_string`
 
 ```

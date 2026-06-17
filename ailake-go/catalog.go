@@ -27,18 +27,19 @@ import (
 
 // DataFileEntry mirrors ailake_catalog::provider::DataFileEntry.
 type DataFileEntry struct {
-	Path                string
-	RecordCount         uint64
-	FileSizeBytes       uint64
-	Centroid            []float32 // decoded from centroid_b64
-	Radius              float32
-	HnswOffset          *uint64
-	HnswLen             *uint64
-	VectorColumn        string
-	VectorDim           uint32
-	IndexStatus         string // "ready" | "indexing"
-	BatchID             string
-	EmbeddingModel      string // "<name>" or "<name>@<version>"; empty if not set
+	Path               string
+	RecordCount        uint64
+	FileSizeBytes      uint64
+	Centroid           []float32 // decoded from centroid_b64
+	Radius             float32
+	HnswOffset         *uint64
+	HnswLen            *uint64
+	VectorColumn       string
+	VectorDim          uint32
+	ExtraVectorIndexes []ExtraVectorIndex // secondary vector columns (Phase 8)
+	IndexStatus        string             // "ready" | "indexing"
+	BatchID            string
+	EmbeddingModel     string // "<name>" or "<name>@<version>"; empty if not set
 }
 
 // TableInfo mirrors the JSON output of "ailake info --format json".
@@ -192,17 +193,29 @@ func readManifestList(path string) ([]string, error) {
 	return paths, ocf.Err()
 }
 
+// ExtraVectorIndex mirrors ailake_catalog::provider::ExtraVectorIndex.
+// Populated for secondary vector columns in multi-column tables.
+type ExtraVectorIndex struct {
+	Column      string   `json:"column"`
+	Dim         uint32   `json:"dim"`
+	HnswOffset  uint64   `json:"hnsw_offset"`
+	HnswLen     uint64   `json:"hnsw_len"`
+	CentroidB64 *string  `json:"centroid_b64"`
+	Radius      *float32 `json:"radius"`
+}
+
 // ailakeEntryExt mirrors the JSON structure stored in key_metadata.
 type ailakeEntryExt struct {
-	CentroidB64    *string  `json:"centroid_b64"`
-	Radius         *float32 `json:"radius"`
-	HnswOffset     *uint64  `json:"hnsw_offset"`
-	HnswLen        *uint64  `json:"hnsw_len"`
-	VectorCol      *string  `json:"vector_column"`
-	VectorDim      *uint32  `json:"vector_dim"`
-	IndexStatus    string   `json:"index_status"`
-	BatchID        *string  `json:"batch_id"`
-	EmbeddingModel *string  `json:"embedding_model"`
+	CentroidB64        *string            `json:"centroid_b64"`
+	Radius             *float32           `json:"radius"`
+	HnswOffset         *uint64            `json:"hnsw_offset"`
+	HnswLen            *uint64            `json:"hnsw_len"`
+	VectorCol          *string            `json:"vector_column"`
+	VectorDim          *uint32            `json:"vector_dim"`
+	IndexStatus        string             `json:"index_status"`
+	BatchID            *string            `json:"batch_id"`
+	EmbeddingModel     *string            `json:"embedding_model"`
+	ExtraVectorIndexes []ExtraVectorIndex `json:"extra_vector_indexes"`
 }
 
 // readManifestFile reads an Iceberg manifest file (Avro OCF) and returns DataFileEntry list.
@@ -289,6 +302,7 @@ func readManifestFile(path string) ([]DataFileEntry, error) {
 		if ext.EmbeddingModel != nil {
 			entry.EmbeddingModel = *ext.EmbeddingModel
 		}
+		entry.ExtraVectorIndexes = ext.ExtraVectorIndexes
 		entries = append(entries, entry)
 	}
 	return entries, ocf.Err()

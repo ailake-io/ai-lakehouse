@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "airbyte-destination-ailake"
+version = "0.0.1"
+description = "Airbyte destination connector for AI-Lake Format — writes records to AI-Lake vector tables"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Thiago Egon Lange", email = "thiago.egon@gmail.com" }]
+requires-python = ">=3.9"
+dependencies = [
+    "airbyte-cdk>=1.0",
+    "ailake>=0.0.17",
+]
+keywords = ["airbyte", "destination", "ailake", "lakehouse", "iceberg", "vector", "embeddings"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+openai  = ["openai>=1.0"]
+cohere  = ["cohere>=4.0"]
+dev     = ["pytest>=7", "pytest-mock"]
+
+[project.urls]
+Repository    = "https://github.com/ThiagoLange/ai-lakehouse"
+"Bug Tracker" = "https://github.com/ThiagoLange/ai-lakehouse/issues"
+
+[project.scripts]
+airbyte-destination-ailake = "airbyte_destination_ailake.destination:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["airbyte_destination_ailake"]

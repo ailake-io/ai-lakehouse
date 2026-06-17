@@ -1,0 +1,159 @@
+{
+  "documentationUrl": "https://github.com/ThiagoLange/ai-lakehouse/tree/main/airbyte-destination-ailake",
+  "supportsIncremental": true,
+  "supportsNormalization": false,
+  "supportsDBT": false,
+  "supported_destination_sync_modes": ["overwrite", "append"],
+  "connectionSpecification": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "AI-Lake Destination Spec",
+    "type": "object",
+    "required": ["table_base_path", "embed_mode"],
+    "additionalProperties": false,
+    "properties": {
+      "table_base_path": {
+        "type": "string",
+        "title": "Table Base Path",
+        "description": "Base path for AI-Lake tables. Each stream writes to {table_base_path}/{stream_name}/. Supports s3://, gs://, az://, or local paths.",
+        "examples": ["s3://my-lake/airbyte", "/data/ailake"],
+        "order": 0
+      },
+      "embed_mode": {
+        "type": "string",
+        "title": "Embedding Mode",
+        "description": "How to produce embeddings from record text.",
+        "enum": ["cmd", "openai", "cohere", "http"],
+        "default": "openai",
+        "order": 1
+      },
+      "text_field": {
+        "type": "string",
+        "title": "Text Field",
+        "description": "Record field used as embedding input. Supports dot notation for nested fields (e.g. meta.body).",
+        "default": "content",
+        "order": 2
+      },
+      "embedding_dim": {
+        "type": "integer",
+        "title": "Embedding Dimension",
+        "description": "Vector dimensionality — must match the chosen model.",
+        "default": 1536,
+        "order": 3
+      },
+      "embedding_metric": {
+        "type": "string",
+        "title": "Distance Metric",
+        "enum": ["cosine", "euclidean", "dot_product", "normalized_cosine"],
+        "default": "cosine",
+        "order": 4
+      },
+      "embedding_model": {
+        "type": "string",
+        "title": "Embedding Model Name",
+        "description": "Stored as ailake.embedding-model Iceberg property for model tracking.",
+        "default": "",
+        "order": 5
+      },
+      "embedding_model_version": {
+        "type": "string",
+        "title": "Embedding Model Version",
+        "default": "",
+        "order": 6
+      },
+      "embed_cmd": {
+        "type": "string",
+        "title": "Embed Command (cmd mode)",
+        "description": "Shell command. Receives JSON string array on stdin, writes JSON float[][] to stdout.",
+        "examples": ["python my_embedder.py"],
+        "order": 7
+      },
+      "openai_api_key": {
+        "type": "string",
+        "title": "OpenAI API Key",
+        "airbyte_secret": true,
+        "order": 8
+      },
+      "openai_model": {
+        "type": "string",
+        "title": "OpenAI Model",
+        "default": "text-embedding-3-small",
+        "order": 9
+      },
+      "openai_base_url": {
+        "type": "string",
+        "title": "OpenAI Base URL",
+        "description": "Override for compatible endpoints (Azure OpenAI, local proxies).",
+        "default": "",
+        "order": 10
+      },
+      "cohere_api_key": {
+        "type": "string",
+        "title": "Cohere API Key",
+        "airbyte_secret": true,
+        "order": 11
+      },
+      "cohere_model": {
+        "type": "string",
+        "title": "Cohere Model",
+        "default": "embed-english-v3.0",
+        "order": 12
+      },
+      "cohere_input_type": {
+        "type": "string",
+        "title": "Cohere Input Type",
+        "default": "search_document",
+        "order": 13
+      },
+      "http_url": {
+        "type": "string",
+        "title": "HTTP Embed URL",
+        "description": "OpenAI-compatible POST endpoint. Body: {\"model\": \"...\", \"input\": [...]}; response: {\"data\": [{\"embedding\": [...]}]}. Works with Ollama (/v1/embeddings), vLLM, LM Studio, Together.ai, Azure OpenAI, and any OpenAI-compatible server.",
+        "examples": ["http://localhost:11434/v1/embeddings", "https://api.together.xyz/v1/embeddings"],
+        "default": "",
+        "order": 17
+      },
+      "http_model": {
+        "type": "string",
+        "title": "HTTP Model Name",
+        "description": "Model name sent in the request body. Example: nomic-embed-text, mxbai-embed-large. Leave empty to omit.",
+        "default": "",
+        "order": 18
+      },
+      "http_auth_header": {
+        "type": "string",
+        "title": "HTTP Authorization Header",
+        "description": "Full value of the Authorization header. Example: Bearer sk-... Leave empty for unauthenticated endpoints (e.g. local Ollama).",
+        "airbyte_secret": true,
+        "default": "",
+        "order": 19
+      },
+      "http_timeout": {
+        "type": "integer",
+        "title": "HTTP Timeout (seconds)",
+        "default": 60,
+        "order": 20
+      },
+      "batch_size": {
+        "type": "integer",
+        "title": "Batch Size",
+        "description": "Records per embed API call and per write_batch call.",
+        "default": 512,
+        "order": 14
+      },
+      "pre_normalize": {
+        "type": "boolean",
+        "title": "Pre-normalize Vectors",
+        "description": "Normalize to unit L2 at write time. Recommended for cosine metric.",
+        "default": false,
+        "order": 15
+      },
+      "pq_only": {
+        "type": "boolean",
+        "title": "PQ-only (Discard Raw Vectors)",
+        "description": "Maximum compression — raw F16 vectors discarded after index build. No reranking.",
+        "default": false,
+        "order": 16
+      }
+    }
+  }
+}

@@ -433,7 +433,7 @@ Readers MUST return an error rather than silently returning wrong results.
 ## 11. Multi-Column Files
 
 A file may embed more than one vector column (e.g., `embedding` and
-`context_embedding`). Each column gets its own AILK section.
+`image_embedding`). Each column gets its own AILK section.
 
 Layout:
 ```
@@ -446,6 +446,54 @@ Parquet KV entries:
 
 Readers looking for column `ctx` MUST check `ailake.ctx.footer_offset` first;
 fall back to `ailake.footer_offset` only for single-column files.
+
+### 11.1 `extra_vector_indexes` in key_metadata JSON
+
+Secondary column HNSW info is also embedded in the Avro manifest entry's
+`key_metadata` bytes (JSON-encoded `AilakeEntryExt`):
+
+```json
+{
+  "centroid_b64": "AAAA...",
+  "radius": 0.342,
+  "hnsw_offset": 12582912,
+  "hnsw_len": 4194304,
+  "vector_column": "embedding",
+  "vector_dim": 1536,
+  "index_status": "ready",
+  "extra_vector_indexes": [
+    {
+      "column": "image_embedding",
+      "dim": 512,
+      "hnsw_offset": 16777216,
+      "hnsw_len": 2097152,
+      "centroid_b64": "BBBB...",
+      "radius": 0.289
+    }
+  ]
+}
+```
+
+`extra_vector_indexes` is an array — one entry per secondary column. Readers
+that only support single-column search MUST ignore unknown array elements.
+An absent or empty `extra_vector_indexes` array means the file has only one
+vector column (backward-compatible).
+
+### 11.2 Cross-modal search (Phase 8)
+
+The AI-Lake SDK supports cross-modal Reciprocal Rank Fusion (RRF) search over
+N vector columns:
+
+1. For each `ModalQuery{column, query, weight}`:
+   - If `column` is the primary column: use `hnsw_offset` / `hnsw_len` from `key_metadata`.
+   - Otherwise: look up the matching entry in `extra_vector_indexes`.
+   - Run HNSW search → ranked list for this column.
+2. Merge ranked lists with RRF: `score_i = weight_i / (60 + rank_i)`;
+   `final_score = Σ score_i` across all columns for each row.
+3. Return top-K rows sorted descending by `final_score` (called `rrf_score` in the response).
+
+The C-ABI entry point is `ailake_search_multimodal_json`. All JVM plugins,
+the DuckDB extension, Go SDK, and C++ SDK expose RRF fusion via this path.
 
 ---
 

@@ -6,6 +6,10 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   DUCKDB_VERSION: "v1.1.3"
+  # DuckDB manylinux pip wheels require extensions tagged linux_amd64_gcc4.
+  # Set explicitly so append_extension_metadata.py uses this regardless of
+  # whether duckdb is importable at cmake build time (Python setup runs after).
+  DUCKDB_PLATFORM: "linux_amd64_gcc4"
 
 jobs:
   build-and-test:
@@ -67,6 +71,13 @@ jobs:
 
       - name: Run scan tests
         run: python duckdb-ailake/test/test_scan.py
+        env:
+          AILAKE_LIB:     target/release/libailake_jni.so
+          AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_FIXTURE: ./compat-fixture
+
+      - name: Run multimodal search tests
+        run: python duckdb-ailake/test/test_multimodal.py
         env:
           AILAKE_LIB:     target/release/libailake_jni.so
           AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
