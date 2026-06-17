@@ -4,7 +4,7 @@
 // ailake_search_multimodal(table_path, queries, top_k)
 //   → TABLE(row_id BIGINT, rrf_score FLOAT, file_path VARCHAR)
 //
-// queries is a STRUCT array: [{col VARCHAR, query FLOAT[], weight FLOAT}, ...]
+// queries is a STRUCT array: [{col VARCHAR, query FLOAT[], weight DOUBLE}, ...]
 //
 // Example:
 //   SELECT * FROM ailake_search_multimodal(
@@ -53,7 +53,7 @@ static unique_ptr<FunctionData> AilakeMultimodalBind(
     // arg 0: table_path VARCHAR
     data->warehouse = StringValue::Get(input.inputs[0]);
 
-    // arg 1: queries — LIST(STRUCT(col VARCHAR, query FLOAT[], weight FLOAT))
+    // arg 1: queries — LIST(STRUCT(col VARCHAR, query FLOAT[], weight DOUBLE))
     if (input.inputs[1].type().id() != LogicalTypeId::LIST) {
         throw InvalidInputException("ailake_search_multimodal: queries must be a LIST of STRUCTs");
     }
@@ -86,11 +86,16 @@ static unique_ptr<FunctionData> AilakeMultimodalBind(
                     if (!f.IsNull()) arg.query.push_back(FloatValue::Get(f));
                 }
             } else if (fname == "weight") {
-                // SQL literal 1.0 is DOUBLE; handle both FLOAT and DOUBLE safely.
+                // Struct type declares weight as DOUBLE, so fval is guaranteed DOUBLE.
+                // Fallback handles explicit FLOAT cast or any other numeric type.
                 if (fval.type().id() == LogicalTypeId::DOUBLE) {
                     arg.weight = static_cast<float>(DoubleValue::Get(fval));
                 } else {
-                    arg.weight = FloatValue::Get(fval);
+                    try {
+                        arg.weight = FloatValue::Get(fval.DefaultCastAs(LogicalType::FLOAT));
+                    } catch (...) {
+                        arg.weight = 1.0f;
+                    }
                 }
             }
         }
@@ -176,11 +181,12 @@ static void AilakeMultimodalScan(
 // ── Registration ──────────────────────────────────────────────────────────────
 
 void RegisterAilakeSearchMultimodal(duckdb::DatabaseInstance &db) {
-    // queries arg: LIST(STRUCT(col VARCHAR, query FLOAT[], weight FLOAT))
+    // weight is declared DOUBLE so SQL literal 1.0 (DOUBLE) matches without coercion.
+    // queries arg: LIST(STRUCT(col VARCHAR, query FLOAT[], weight DOUBLE))
     auto struct_type = LogicalType::STRUCT({
         {"col",    LogicalType::VARCHAR},
         {"query",  LogicalType::LIST(LogicalType::FLOAT)},
-        {"weight", LogicalType::FLOAT},
+        {"weight", LogicalType::DOUBLE},
     });
 
     TableFunction func(
