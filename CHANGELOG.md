@@ -21,6 +21,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Partition by `agent_id` — manifest-level file pruning** — `VectorStoragePolicy::partition_by: Option<String>` stores an Iceberg identity partition spec in `metadata.json`. At write time, `partition_value: Option<String>` (runtime-only, `#[serde(skip)]`) tags each `DataFileEntry` via `key_metadata` JSON in Avro manifests. At search time, `SearchConfig::partition_filter: Option<String>` prunes the manifest file list BEFORE geometric centroid pruning and HNSW load — per-agent isolated search with zero post-scan filtering. Python: `TableWriter(partition_by="agent_id", partition_value=uuid)` and `search_with_data(path, query, top_k, partition_value=uuid)`. `Agent.recall()` passes `self._agent_id` automatically.
 - **Phase 9 propagated to all native plugins** — `partition_by`, `partition_value`, and `partition_filter` added to every SDK and connector (Spark, Trino, Flink, Go, C++, DuckDB, Airbyte, Airflow).
 - **Demo fixture + notebooks Phase 9** — `_write_agent_memory` fixture, §24–§28 in `01_ailake_demo.ipynb`, new `08_agents.ipynb` (26 cells).
+- **`CompactionConfig::max_files_per_pass`** — new field (default 20) caps the number of files merged in a single compaction run. `CompactionPlanner::plan()` now sorts candidates by size ascending and truncates to this limit, bounding peak RAM and HNSW rebuild CPU cost to O(max_files_per_pass × avg_file) rather than O(whole_table). Set to `usize::MAX` to restore prior unbounded behaviour.
+- **`CompactionExecutor::compact_deferred()` + `run_deferred()`** — deferred compaction variant: merges input files and persists the merged Parquet immediately via `write_parquet_only()`, registers the output as `IndexStatus::Indexing`, commits the catalog snapshot, then spawns a background Tokio task to build the HNSW / IVF-PQ index and patch the entry to `IndexStatus::Ready`. Same pattern as `write_batch_deferred`. Use for large tables where inline HNSW rebuild (O(N log N)) would block the compaction job for minutes.
+- **`CompactionIndexStrategy::ForceIvfPq` doc update** — documents the recommendation to use `ForceIvfPq` for large compactions (N > 100 000) on CPU-only machines where HNSW rebuild is prohibitive.
 
 ### Fixed
 
@@ -30,6 +33,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Python SDK `partition_filter` missing from `search()` and `search_multimodal()`** — all three Rust functions now accept `partition_filter: Option<String>` and pass it to `SearchConfig`.
 - **Python SDK `score_fn` not wired in `SearchQuery`** — `_apply_score_fn()` helper added; `score_fn: Callable | None` exposed on `search()` and `SearchQuery`.
 - **GPU flat-scan (`SearchSession.search_batch`) does not apply `score_fn`** — documented in `GPU_FFI_EVALUATION.md §9` and `SETUP.md §8F-7`.
+- **Compaction parallel file reads** — `CompactionExecutor::compact()` (and `compact_deferred()`) now reads input files concurrently via `futures::future::try_join_all` instead of sequentially. Eliminates per-file latency stacking on S3 or high-latency object stores.
+- **Stale `partition_value` / `partition_by` fields removed from compaction tests** — `DataFileEntry` and `VectorStoragePolicy` struct literals in `compaction::tests` referenced fields that no longer exist in the structs; test code was never compiled (cargo check skips test modules). All stale fields removed; tests now compile and pass under `cargo test`.
 
 ---
 
