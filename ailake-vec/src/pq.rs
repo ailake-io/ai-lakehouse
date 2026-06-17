@@ -84,7 +84,7 @@ impl PQCodebook {
                 .iter()
                 .enumerate()
                 .map(|(k, c)| (k, l2_sq(sub, c)))
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(k, _)| k)
                 .unwrap_or(0);
             codes.push(best as u8);
@@ -215,7 +215,7 @@ fn nearest_centroid(point: &[f32], centroids: &[Vec<f32>]) -> usize {
         .iter()
         .enumerate()
         .map(|(i, c)| (i, l2_sq(point, c)))
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
         .unwrap_or(0)
 }
