@@ -209,6 +209,7 @@ def search(
     path: str,
     query: Sequence[float],
     top_k: int = 10,
+    partition_filter: Optional[str] = None,
 ) -> list[dict[str, object]]:
     """Search a table for the top-*k* nearest vectors to *query*.
 
@@ -216,6 +217,8 @@ def search(
         path: Table root — same value used when writing.
         query: Query embedding as a flat list of floats.
         top_k: Number of neighbours to return (default 10).
+        partition_filter: When set, only files tagged with this partition value are
+                          searched (manifest-level pruning).
 
     Returns:
         List of dicts with keys ``row_id`` (int), ``distance`` (float),
@@ -228,7 +231,7 @@ def search_with_data(
     path: str,
     query: Sequence[float],
     top_k: int = 10,
-    partition_value: Optional[str] = None,
+    partition_filter: Optional[str] = None,
 ) -> bytes:
     """Search and return full row data serialized as Arrow IPC bytes.
 
@@ -241,9 +244,9 @@ def search_with_data(
         path: Table root — same value used when writing.
         query: Query embedding as a flat list of floats.
         top_k: Number of neighbours to return (default 10).
-        partition_value: When set, only files tagged with this partition value are
-                         searched (manifest-level pruning). Pass ``agent_id`` for
-                         per-agent isolated search without post-scan filtering.
+        partition_filter: When set, only files tagged with this partition value are
+                          searched (manifest-level pruning). Pass ``agent_id`` for
+                          per-agent isolated search without post-scan filtering.
 
     Returns:
         Arrow IPC file-format bytes.  Deserialize to a ``pyarrow.Table``
@@ -326,6 +329,7 @@ def search_multimodal(
     queries: Sequence[tuple[str, Sequence[float], float]],
     top_k: int = 10,
     dim: Optional[int] = None,
+    partition_filter: Optional[str] = None,
 ) -> list[dict[str, object]]:
     """Cross-modal search: fuse results from N vector columns via Reciprocal Rank Fusion.
 

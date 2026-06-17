@@ -79,11 +79,21 @@ class SearchQuery:
     dicts.  ``.to_list()`` always returns ``[{row_id, distance, file}]`` regardless.
     """
 
-    def __init__(self, path: str, query: list[float], top_k: int, fetch_data: bool = False) -> None:
+    def __init__(
+        self,
+        path: str,
+        query: list[float],
+        top_k: int,
+        fetch_data: bool = False,
+        partition_filter: "str | None" = None,
+        score_fn: "Callable[[float, Any], float] | None" = None,
+    ) -> None:
         self._path = path
         self._query = query
         self._top_k = top_k
         self._fetch_data = fetch_data
+        self._partition_filter = partition_filter
+        self._score_fn = score_fn
         self._results: list[dict] | None = None      # lazy — pointer-only
         self._arrow_batch = None                      # lazy — full RecordBatch
 
@@ -100,15 +110,22 @@ class SearchQuery:
 
     def _execute(self) -> list[dict]:
         if self._results is None:
-            self._results = _search_raw(self._path, self._query, self._top_k)
+            self._results = _search_raw(
+                self._path, self._query, self._top_k, self._partition_filter
+            )
         return self._results
 
     def _execute_arrow(self):
         if self._arrow_batch is None:
             import io
             import pyarrow as pa  # noqa: PLC0415
-            ipc_bytes: bytes = _search_with_data(self._path, self._query, self._top_k)
-            self._arrow_batch = pa.ipc.open_file(io.BytesIO(ipc_bytes)).read_all()
+            ipc_bytes: bytes = _search_with_data(
+                self._path, self._query, self._top_k, self._partition_filter
+            )
+            table = pa.ipc.open_file(io.BytesIO(ipc_bytes)).read_all()
+            if self._score_fn is not None:
+                table = _apply_score_fn(table, self._score_fn)
+            self._arrow_batch = table
         return self._arrow_batch
 
     def to_list(self) -> list[dict]:
@@ -466,6 +483,30 @@ class Table:
             f"</table>"
             f"</div>"
         )
+
+
+def _apply_score_fn(table, score_fn):
+    """Re-rank a pyarrow Table using a Python-level score_fn(distance, row) -> float.
+
+    score_fn receives (distance: float, row: dict) where row maps column names to
+    scalar Python values for that row. Returns float; lower = better (matches
+    distance semantics). Table is re-sorted by the new score; ``_score`` column appended.
+    """
+    import pyarrow as pa  # noqa: PLC0415
+    import pyarrow.compute as pc  # noqa: PLC0415
+
+    n = table.num_rows
+    col_names = table.schema.names
+    scores = []
+    dist_col = table.column("_distance")
+    for i in range(n):
+        dist = dist_col[i].as_py()
+        row = {name: table.column(name)[i].as_py() for name in col_names}
+        scores.append(score_fn(dist, row))
+    score_array = pa.array(scores, type=pa.float32())
+    table = table.append_column("_score", score_array)
+    order = pc.sort_indices(table, sort_keys=[("_score", "ascending")])
+    return table.take(order)
 
 
 # ── module-level helpers ──────────────────────────────────────────────────────
@@ -911,7 +952,14 @@ class Agent:
 
 # ── module-level helpers ──────────────────────────────────────────────────────
 
-def search(path: str, query: _Vector, top_k: int = 10, fetch_data: bool = False) -> SearchQuery:
+def search(
+    path: str,
+    query: _Vector,
+    top_k: int = 10,
+    fetch_data: bool = False,
+    partition_filter: "str | None" = None,
+    score_fn: "Callable[[float, Any], float] | None" = None,
+) -> SearchQuery:
     """Module-level search returning a chainable :class:`SearchQuery`.
 
     Args:
@@ -921,6 +969,11 @@ def search(path: str, query: _Vector, top_k: int = 10, fetch_data: bool = False)
         fetch_data: When ``True``, ``.to_arrow()`` / ``.to_pandas()`` / ``.to_polars()``
                     return full row data (all Parquet columns + ``_distance``).
                     When ``False`` (default), only ``row_id``, ``distance``, ``file``.
+        partition_filter: Optional partition value to restrict search (e.g. agent_id).
+                          Pruned at manifest level — no files from other partitions opened.
+        score_fn: Optional Python callable ``(distance: float, row: pyarrow.RecordBatch) -> float``
+                  applied post-search to re-rank results. Requires ``fetch_data=True``.
+                  Note: not applied during GPU deferred-build window (SearchSession flat-scan).
 
     Example::
 
@@ -928,13 +981,31 @@ def search(path: str, query: _Vector, top_k: int = 10, fetch_data: bool = False)
         results = ailake.search("s3://my-lake/docs/", query_vec, top_k=20)
         df = results.to_pandas()  # columns: row_id, distance, file
 
-        # Full row data
-        results = ailake.search("s3://my-lake/docs/", query_vec, top_k=20, fetch_data=True)
+        # Full row data with partition isolation
+        results = ailake.search(
+            "s3://my-lake/docs/", query_vec, top_k=20,
+            fetch_data=True, partition_filter="agent-A",
+        )
         df = results.to_pandas()  # columns: id, text, embedding, ..., _distance
+
+        # Hybrid scoring (recency × distance)
+        def hybrid(dist, row):
+            recency = row.column("recency_weight")[0].as_py()
+            return dist / (recency + 1e-6)
+
+        results = ailake.search(
+            "s3://my-lake/docs/", query_vec, top_k=20,
+            fetch_data=True, score_fn=hybrid,
+        )
     """
     _q: list[float] = (
         query.tolist()  # type: ignore[union-attr]
         if hasattr(query, "tolist")
         else list(query)
     )
-    return SearchQuery(path, _q, top_k, fetch_data=fetch_data)
+    return SearchQuery(
+        path, _q, top_k,
+        fetch_data=fetch_data,
+        partition_filter=partition_filter,
+        score_fn=score_fn,
+    )

@@ -371,14 +371,21 @@ impl TableWriter {
 ///
 /// Returns a list of dicts: [{"row_id": int, "distance": float, "file": str}, ...]
 #[pyfunction]
-#[pyo3(signature = (path, query, top_k=10))]
-fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (path, query, top_k=10, partition_filter=None))]
+fn search(
+    py: Python<'_>,
+    path: &str,
+    query: Vec<f32>,
+    top_k: usize,
+    partition_filter: Option<String>,
+) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
-        "ailake-py: search path={} dim={} top_k={}",
+        "ailake-py: search path={} dim={} top_k={} partition={:?}",
         path,
         query.len(),
-        top_k
+        top_k,
+        partition_filter
     );
     let (catalog, store) = local_catalog_store(path);
     let table = TableIdent::new("default", "table");
@@ -403,7 +410,7 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
         score_fn: None,
-        partition_filter: None,
+        partition_filter,
     };
 
     let results = rt
@@ -437,13 +444,13 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
 ///
 /// Python side deserializes with: `pyarrow.ipc.open_file(io.BytesIO(bytes)).read_all()`
 #[pyfunction]
-#[pyo3(signature = (path, query, top_k=10, partition_value=None))]
+#[pyo3(signature = (path, query, top_k=10, partition_filter=None))]
 fn search_with_data(
     py: Python<'_>,
     path: &str,
     query: Vec<f32>,
     top_k: usize,
-    partition_value: Option<String>,
+    partition_filter: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
@@ -451,7 +458,7 @@ fn search_with_data(
         path,
         query.len(),
         top_k,
-        partition_value
+        partition_filter
     );
 
     let (catalog, store) = local_catalog_store(path);
@@ -477,7 +484,7 @@ fn search_with_data(
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
         score_fn: None,
-        partition_filter: partition_value,
+        partition_filter,
     };
 
     let results = rt
@@ -741,13 +748,14 @@ impl VectorColSpec {
 /// Returns a list of dicts: [{"row_id": int, "rrf_score": float, "file": str}, ...]
 /// rrf_score is higher for better results.
 #[pyfunction]
-#[pyo3(signature = (path, queries, top_k=10, dim=None))]
+#[pyo3(signature = (path, queries, top_k=10, dim=None, partition_filter=None))]
 fn search_multimodal(
     py: Python<'_>,
     path: &str,
     queries: Vec<(String, Vec<f32>, f32)>,
     top_k: usize,
     dim: Option<u32>,
+    partition_filter: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     let (catalog, store) = local_catalog_store(path);
@@ -799,7 +807,7 @@ fn search_multimodal(
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
         score_fn: None,
-        partition_filter: None,
+        partition_filter,
     };
 
     let results = rt
