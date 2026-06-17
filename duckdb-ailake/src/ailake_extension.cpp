@@ -125,7 +125,8 @@ std::vector<SearchRow> AilakeLib::search(
     const std::string        &vec_col,
     const std::vector<float> &query,
     int                       top_k,
-    int                       ef_search
+    int                       ef_search,
+    const std::string        &partition_filter
 ) const {
     if (!search_fn_ || !free_fn_ || query.empty()) return {};
 
@@ -145,8 +146,10 @@ std::vector<SearchRow> AilakeLib::search(
         ",\"dim\":"        + std::to_string(query.size()) +
         ",\"query\":"      + q_json                   +
         ",\"top_k\":"      + std::to_string(top_k)    +
-        ",\"ef_search\":"  + std::to_string(ef_search) +
-        "}";
+        ",\"ef_search\":"  + std::to_string(ef_search);
+    if (!partition_filter.empty())
+        req += ",\"partition_filter\":" + json_escape(partition_filter);
+    req += "}";
 
     char *raw = search_fn_(req.c_str());
     if (!raw) return {};
@@ -181,7 +184,9 @@ int64_t AilakeLib::write_batch(
     const std::string              &metric,
     const std::string              &precision,
     const std::vector<int64_t>     &ids,
-    const std::vector<std::vector<float>> &embeddings
+    const std::vector<std::vector<float>> &embeddings,
+    const std::string              &partition_by,
+    const std::string              &partition_value
 ) const {
     if (!write_fn_ || !free_fn_ || ids.empty()) return -1;
 
@@ -215,8 +220,12 @@ int64_t AilakeLib::write_batch(
         ",\"metric\":"     + json_escape(metric)      +
         ",\"precision\":"  + json_escape(precision)   +
         ",\"ids\":"        + ids_json                 +
-        ",\"embeddings\":" + emb_json                 +
-        "}";
+        ",\"embeddings\":" + emb_json;
+    if (!partition_by.empty())
+        req += ",\"partition_by\":"    + json_escape(partition_by);
+    if (!partition_value.empty())
+        req += ",\"partition_value\":" + json_escape(partition_value);
+    req += "}";
 
     char *raw = write_fn_(req.c_str());
     if (!raw) return -1;

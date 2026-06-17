@@ -21,14 +21,15 @@ interface AilakeNativeLib : Library {
      * Perform ANN vector search via a JSON request envelope.
      *
      * Request JSON fields:
-     *   warehouse    (String)  warehouse root path
-     *   namespace    (String)  Iceberg namespace, default "default"
-     *   table        (String)  table name
-     *   vec_col      (String)  vector column name, default "embedding"
-     *   dim          (Int)     vector dimensionality
-     *   query        (Float[]) query vector as JSON float array
-     *   top_k        (Int)     default 10
-     *   ef_search    (Int)     default 50
+     *   warehouse         (String)  warehouse root path
+     *   namespace         (String)  Iceberg namespace, default "default"
+     *   table             (String)  table name
+     *   vec_col           (String)  vector column name, default "embedding"
+     *   dim               (Int)     vector dimensionality
+     *   query             (Float[]) query vector as JSON float array
+     *   top_k             (Int)     default 10
+     *   ef_search         (Int)     default 50
+     *   partition_filter  (String?) optional — restrict search to files where partition value matches
      *
      * Response JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
      */
@@ -38,15 +39,17 @@ interface AilakeNativeLib : Library {
      * Write a batch of records to an AI-Lake table.
      *
      * Request JSON fields:
-     *   warehouse    (String)    warehouse root path
-     *   namespace    (String)    Iceberg namespace
-     *   table        (String)    table name
-     *   vec_col      (String)    vector column name
-     *   dim          (Int)       vector dimensionality
-     *   metric       (String?)   "euclidean" | "cosine" | "dot_product"
-     *   precision    (String?)   "f32" | "f16" | "i8"
-     *   ids          (Long[])    row IDs
-     *   embeddings   (Float[][]) one embedding per row
+     *   warehouse        (String)    warehouse root path
+     *   namespace        (String)    Iceberg namespace
+     *   table            (String)    table name
+     *   vec_col          (String)    vector column name
+     *   dim              (Int)       vector dimensionality
+     *   metric           (String?)   "euclidean" | "cosine" | "dot_product"
+     *   precision        (String?)   "f32" | "f16" | "i8"
+     *   ids              (Long[])    row IDs
+     *   embeddings       (Float[][]) one embedding per row
+     *   partition_by     (String?)   optional — Iceberg identity partition column (e.g. "agent_id")
+     *   partition_value  (String?)   optional — value for partition_by in key_metadata of written files
      *
      * Response JSON: `{"ok":true,"snapshot_id":N}` or `{"ok":false,"error":"..."}`
      */
@@ -56,11 +59,12 @@ interface AilakeNativeLib : Library {
      * Cross-modal RRF search across multiple vector columns.
      *
      * Request JSON fields:
-     *   warehouse    (String)  warehouse root path
-     *   namespace    (String)  Iceberg namespace, default "default"
-     *   table        (String)  table name
-     *   queries      (Array)   [{col, query: Float[], weight: Float, dim: Int (0=auto)}]
-     *   top_k        (Int)     default 10
+     *   warehouse         (String)  warehouse root path
+     *   namespace         (String)  Iceberg namespace, default "default"
+     *   table             (String)  table name
+     *   queries           (Array)   [{col, query: Float[], weight: Float, dim: Int (0=auto)}]
+     *   top_k             (Int)     default 10
+     *   partition_filter  (String?) optional — restrict to files matching partition value
      *
      * Response JSON: `{"ok":true,"results":[{"row_id":N,"rrf_score":F,"file_path":"..."}]}`
      */

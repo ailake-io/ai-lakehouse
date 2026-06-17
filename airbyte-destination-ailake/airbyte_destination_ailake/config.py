@@ -76,6 +76,10 @@ class AilakeDestinationConfig:
     pq_only: bool = False
     """Discard raw F16 vectors after index build — max compression, no reranking."""
 
+    # --- Agent partitioning (Phase 9) ---
+    partition_by: str = ""
+    """Iceberg identity partition column (e.g. ``agent_id``). Empty = no partitioning."""
+
     @classmethod
     def from_dict(cls, raw: dict) -> "AilakeDestinationConfig":
         embed_mode = raw.get("embed_mode", "cmd")
@@ -105,6 +109,7 @@ class AilakeDestinationConfig:
             batch_size=int(raw.get("batch_size", 512)),
             pre_normalize=bool(raw.get("pre_normalize", False)),
             pq_only=bool(raw.get("pq_only", False)),
+            partition_by=raw.get("partition_by", ""),
         )
 
     def validate(self) -> list[str]:

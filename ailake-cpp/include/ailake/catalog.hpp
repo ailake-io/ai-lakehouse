@@ -56,6 +56,7 @@ struct DataFileEntry {
     std::string index_status;   // "ready" | "indexing"
     std::string batch_id;
     std::string embedding_model; // "<name>" or "<name>@<version>"; empty if not set
+    std::string partition_value; // agent_id or other partition value (Phase 9)
 };
 
 // ---------------------------------------------------------------------------
@@ -484,6 +485,7 @@ private:
         e.index_status    = get_str("index_status");
         e.batch_id        = get_str("batch_id");
         e.embedding_model = get_str("embedding_model");
+        e.partition_value = get_str("partition_value");
 
         // Parse extra_vector_indexes array (Phase 8 multi-column tables)
         {

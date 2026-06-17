@@ -38,6 +38,8 @@ class AilakeWriteOperator(BaseOperator):
         source_file: str,
         embeddings_column: str = "embedding",
         batch_id: str = "{{ run_id }}_{{ task.task_id }}",
+        partition_by: str | None = None,
+        partition_value: str | None = None,
         ailake_conn_id: str = AilakeHook.default_conn_name,
         **kwargs: Any,
     ) -> None:
@@ -46,6 +48,8 @@ class AilakeWriteOperator(BaseOperator):
         self.source_file = source_file
         self.embeddings_column = embeddings_column
         self.batch_id = batch_id
+        self.partition_by = partition_by
+        self.partition_value = partition_value
         self.ailake_conn_id = ailake_conn_id
 
     def execute(self, context: Context) -> None:
@@ -55,8 +59,6 @@ class AilakeWriteOperator(BaseOperator):
         info = hook.get_table_info(self.table)
         snapshot_id = info.get("snapshot_id")
         if snapshot_id is not None:
-            # Ask the CLI if batch_id is present — we use ailake insert which
-            # internally calls write_batch_idempotent when --batch-id is supplied.
             self.log.info(
                 "table %s has snapshot %s; inserting with batch_id=%s",
                 self.table,
@@ -64,12 +66,19 @@ class AilakeWriteOperator(BaseOperator):
                 self.batch_id,
             )
 
+        extra_args: list[str] = []
+        if self.partition_by:
+            extra_args += ["--partition-by", self.partition_by]
+        if self.partition_value:
+            extra_args += ["--partition-value", self.partition_value]
+
         result = hook.run_cli(
             "insert",
             self.table,
             self.source_file,
             "--embeddings", self.embeddings_column,
             "--batch-id", self.batch_id,
+            *extra_args,
         )
         self.log.info(result.stdout.strip())
 
@@ -145,6 +154,7 @@ class AilakeSearchOperator(BaseOperator):
         query_xcom_key: str = "return_value",
         top_k: int = 10,
         pruning_threshold: float = 0.8,
+        partition_filter: str | None = None,
         ailake_conn_id: str = AilakeHook.default_conn_name,
         **kwargs: Any,
     ) -> None:
@@ -155,6 +165,7 @@ class AilakeSearchOperator(BaseOperator):
         self.query_xcom_key = query_xcom_key
         self.top_k = top_k
         self.pruning_threshold = pruning_threshold
+        self.partition_filter = partition_filter
         self.ailake_conn_id = ailake_conn_id
 
     def execute(self, context: Context) -> list[dict[str, Any]]:
@@ -179,6 +190,7 @@ class AilakeSearchOperator(BaseOperator):
             query=query,
             top_k=self.top_k,
             pruning_threshold=self.pruning_threshold,
+            partition_filter=self.partition_filter,
         )
         self.log.info("search returned %d results", len(results))
         return results

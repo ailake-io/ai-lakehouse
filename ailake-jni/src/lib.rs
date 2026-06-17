@@ -98,6 +98,7 @@ fn do_search(
     query: Vec<f32>,
     top_k: u32,
     ef_search: u32,
+    partition_filter: Option<String>,
 ) -> ailake_core::AilakeResult<Vec<SearchResult>> {
     let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&warehouse));
     let catalog = Arc::new(HadoopCatalog::new(store.clone(), &warehouse));
@@ -108,7 +109,7 @@ fn do_search(
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
         score_fn: None,
-        partition_filter: None,
+        partition_filter,
     };
     rt().block_on(rs_search(
         &table, &query, config, vec_col, dim, catalog, store,
@@ -200,7 +201,7 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     let query = std::slice::from_raw_parts(query_ptr, query_len as usize).to_vec();
     let dim = query.len() as u32;
     let results: Vec<RowResultJson> =
-        match do_search(uri, "default", "table", "embedding", dim, query, top_k, 50) {
+        match do_search(uri, "default", "table", "embedding", dim, query, top_k, 50, None) {
             Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
             Err(e) => return cstr_err_json(e),
         };
@@ -236,6 +237,8 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         top_k: u32,
         #[serde(default = "default_ef")]
         ef_search: u32,
+        #[serde(default)]
+        partition_filter: Option<String>,
     }
     fn default_ns() -> String {
         "default".into()
@@ -282,6 +285,7 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         req.query,
         req.top_k,
         req.ef_search,
+        req.partition_filter,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -350,6 +354,12 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         /// Format: ``"<name>"`` or ``"<name>@<version>"`` (same as ``EmbeddingModelInfo::to_property_value``).
         #[serde(default)]
         embedding_model: Option<String>,
+        /// Iceberg identity partition column (e.g. "agent_id"). Stored in metadata.json.
+        #[serde(default)]
+        partition_by: Option<String>,
+        /// Runtime partition value for this write (e.g. agent UUID). Stored per-file in key_metadata.
+        #[serde(default)]
+        partition_value: Option<String>,
         ids: Vec<i64>,
         embeddings: Vec<Vec<f32>>,
     }
@@ -419,8 +429,8 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         ivf_residual: req.ivf_residual,
         embedding_model,
         modality: None,
-        partition_by: None,
-        partition_value: None,
+        partition_by: req.partition_by,
+        partition_value: req.partition_value,
     };
 
     let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
@@ -525,6 +535,8 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
         queries: Vec<ModalQueryReq>,
         #[serde(default = "default_topk_multi")]
         top_k: u32,
+        #[serde(default)]
+        partition_filter: Option<String>,
     }
     fn default_ns_multi() -> String {
         "default".into()
@@ -585,6 +597,7 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
 
     let config = SearchConfig {
         top_k: req.top_k as usize,
+        partition_filter: req.partition_filter,
         ..Default::default()
     };
 
@@ -899,6 +912,8 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         top_k: u32,
         #[serde(default = "scan_default_ef")]
         ef_search: u32,
+        #[serde(default)]
+        partition_filter: Option<String>,
     }
     fn scan_default_ns() -> String {
         "default".into()
@@ -942,6 +957,7 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         req.query,
         req.top_k,
         req.ef_search,
+        req.partition_filter,
     ) {
         Ok(v) => v,
         Err(e) => {

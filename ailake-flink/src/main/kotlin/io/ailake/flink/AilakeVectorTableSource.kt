@@ -36,25 +36,27 @@ class AilakeVectorTableSource(
     private val topK: Int,
     private val efSearch: Int,
     private val schema: ResolvedSchema,
+    private val partitionFilter: String? = null,
 ) : ScanTableSource {
 
     override fun getChangelogMode(): ChangelogMode = ChangelogMode.insertOnly()
 
     override fun getScanRuntimeProvider(context: ScanTableSource.ScanContext): ScanTableSource.ScanRuntimeProvider {
         val format = AilakeInputFormat(
-            warehouse = warehouse,
-            namespace = namespace,
-            tableName = tableName,
-            vecCol    = vecCol,
-            dim       = dim,
-            topK      = topK,
-            efSearch  = efSearch,
+            warehouse       = warehouse,
+            namespace       = namespace,
+            tableName       = tableName,
+            vecCol          = vecCol,
+            dim             = dim,
+            topK            = topK,
+            efSearch        = efSearch,
+            partitionFilter = partitionFilter,
         )
         return InputFormatProvider.of(format)
     }
 
     override fun copy(): DynamicTableSource = AilakeVectorTableSource(
-        warehouse, namespace, tableName, vecCol, dim, topK, efSearch, schema
+        warehouse, namespace, tableName, vecCol, dim, topK, efSearch, schema, partitionFilter
     )
 
     override fun asSummaryString(): String = "AI-Lake[$namespace.$tableName]"
@@ -74,28 +76,32 @@ class AilakeInputFormat(
     private val dim: Int,
     private val topK: Int,
     private val efSearch: Int,
+    private val partitionFilter: String? = null,
 ) : GenericInputFormat<RowData>() {
 
     @Transient private var results: Iterator<AilakeNativeLoader.SearchResultItem>? = null
 
     override fun open(split: GenericInputSplit) {
-        val queryParam = runtimeContext.executionConfig
-            .globalJobParameters
-            .toMap()["ailake.query.vector"]
+        val params = runtimeContext.executionConfig.globalJobParameters.toMap()
+        val queryParam = params["ailake.query.vector"]
             ?: throw IllegalStateException(
                 "Job parameter 'ailake.query.vector' not set — " +
                 "provide comma-separated f32 values for the query vector"
             )
+        // partition_filter from job params overrides constructor value (constructor wins if both set)
+        val effectivePartition = partitionFilter ?: params["ailake.partition.filter"]
+
         val query = queryParam.split(",").map { it.trim().toFloat() }.toFloatArray()
         results = AilakeNativeLoader.search(
-            warehouse = warehouse,
-            namespace = namespace,
-            table     = tableName,
-            vecCol    = vecCol,
-            dim       = dim,
-            query     = query,
-            topK      = topK,
-            efSearch  = efSearch,
+            warehouse       = warehouse,
+            namespace       = namespace,
+            table           = tableName,
+            vecCol          = vecCol,
+            dim             = dim,
+            query           = query,
+            topK            = topK,
+            efSearch        = efSearch,
+            partitionFilter = effectivePartition,
         ).iterator()
     }
 

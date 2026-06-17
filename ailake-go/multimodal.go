@@ -53,6 +53,18 @@ func SearchMultimodal(
 
 	primaryMetric := metricFromString(info.VectorMetric)
 
+	// Partition pruning (Phase 9): apply before geometric pruning.
+	partitioned := entries
+	if opts.PartitionFilter != "" {
+		var pf []DataFileEntry
+		for _, e := range entries {
+			if e.PartitionValue == opts.PartitionFilter {
+				pf = append(pf, e)
+			}
+		}
+		partitioned = pf
+	}
+
 	// Geometric pruning using primary column centroid with primary-column query vector.
 	pruneQ := queries[0].Query
 	for _, mq := range queries {
@@ -63,7 +75,7 @@ func SearchMultimodal(
 	}
 
 	var survivors []DataFileEntry
-	for _, e := range entries {
+	for _, e := range partitioned {
 		if len(e.Centroid) == 0 {
 			survivors = append(survivors, e)
 			continue
