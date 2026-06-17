@@ -107,6 +107,7 @@ fn do_search(
         ef_search: ef_search as usize,
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
+        score_fn: None,
     };
     rt().block_on(rs_search(
         &table, &query, config, vec_col, dim, catalog, store,

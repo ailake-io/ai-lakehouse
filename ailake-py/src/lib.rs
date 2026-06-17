@@ -398,6 +398,7 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
         ef_search: 50,
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
+        score_fn: None,
     };
 
     let results = rt
@@ -468,6 +469,7 @@ fn search_with_data(
         ef_search: 50,
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
+        score_fn: None,
     };
 
     let results = rt
@@ -788,6 +790,7 @@ fn search_multimodal(
         ef_search: 50,
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
+        score_fn: None,
     };
 
     let results = rt

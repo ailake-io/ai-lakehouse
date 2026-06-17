@@ -566,6 +566,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 ef_search: top_k * 5,
                 pruning_threshold,
                 rerank_factor: None,
+                score_fn: None,
             };
 
             let results = ailake_query::search(
