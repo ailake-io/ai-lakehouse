@@ -3,7 +3,7 @@
 # Stubs for the compiled Rust extension ailake._ailake.
 # This file is the authoritative type source for type checkers and IDEs.
 
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, Union
 
 
 class VectorColSpec:
@@ -350,3 +350,95 @@ def search_multimodal(
         )
     """
     ...
+
+
+# ── Agent (Phase 9) ────────────────────────────────────────────────────────────
+
+_Vector = Union[Sequence[float], Any]  # list[float] or numpy/torch array with .tolist()
+
+class Agent:
+    """High-level agent memory helper — Phase 9.
+
+    Wraps ``TableWriter`` + vector search + ``assemble_context`` for agent
+    frameworks (LangChain, CrewAI, AutoGen).
+
+    Args:
+        table_path: Local path or object-storage URI for the memory table.
+        embed_fn:   ``Callable[[list[str]], list[list[float]]]``.
+        agent_id:   Stable UUID string (auto-generated if omitted).
+        session_id: Current session UUID (auto-generated if omitted).
+        metric:     Distance metric (default ``"cosine"``).
+        lambda_:    Recency decay rate (default 0.099 ≈ weekly half-life).
+    """
+
+    def __init__(
+        self,
+        table_path: str,
+        embed_fn: Callable[[list[str]], list[list[float]]],
+        agent_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        metric: str = "cosine",
+        lambda_: float = 0.099,
+    ) -> None: ...
+
+    @property
+    def agent_id(self) -> str: ...
+
+    @property
+    def session_id(self) -> str: ...
+
+    def remember(self, text: str, importance: float = 1.0) -> str:
+        """Buffer *text* as an episodic memory.  Returns ``mem_id`` UUID.
+
+        Call :meth:`commit` to persist.
+        """
+        ...
+
+    def log_tool_call(
+        self,
+        name: str,
+        input: object,
+        output: object,
+        outcome: str = "success",
+        latency_ms: int = 0,
+        importance: float = 0.5,
+    ) -> str:
+        """Buffer a tool-call record.  Returns ``call_id`` UUID.
+
+        Call :meth:`commit` to persist.
+        """
+        ...
+
+    def commit(self) -> int:
+        """Persist buffered records as a new Iceberg snapshot.  Returns snapshot id."""
+        ...
+
+    def recall(
+        self,
+        query: _Vector,
+        top_k: int = 10,
+        oversample: int = 3,
+    ) -> list[dict]:
+        """Retrieve *top_k* memories with hybrid scoring.
+
+        Returns list of dicts sorted by hybrid score (lower = better), each with:
+        ``text``, ``distance``, ``score``, ``recency``, ``importance``,
+        ``type`` (``"memory"`` or ``"tool_call"``), ``agent_id``, ``session_id``,
+        ``created_at``, and type-specific fields (``mem_id`` or ``call_id``,
+        ``tool_name``, ``tool_input_json``, ``tool_output_json``, ``outcome``).
+        """
+        ...
+
+    def assemble_context(self, query: _Vector, max_tokens: int = 4096) -> str:
+        """Recall memories and format as XML context for an LLM.
+
+        Returns XML string ready for inclusion in a Claude / GPT-4 prompt.
+        """
+        ...
+
+    async def remember_async(self, text: str, importance: float = 1.0) -> str: ...
+    async def recall_async(self, query: _Vector, top_k: int = 10) -> list[dict]: ...
+    async def commit_async(self) -> int: ...
+
+    def __enter__(self) -> "Agent": ...
+    def __exit__(self, *_: Any) -> None: ...
