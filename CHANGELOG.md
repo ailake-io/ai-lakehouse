@@ -11,6 +11,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`NormalizedCosine` + F16 in-memory HNSW** — `quantize_to_f16()` no longer skips `NormalizedCosine`. F16 is now used during HNSW graph traversal (half memory bandwidth, ~2× cache efficiency) for all metrics. After traversal, `HnswIndex::search()` re-scores the final `top_k` candidates with exact F32 from `flat_vecs` to correct F16 rounding errors (~0.001 error vs ~0.0002 true `1-dot` distance for very similar unit vectors). Re-score cost is O(top_k × dim) — negligible vs. O(ef × dim) traversal. Users can now pair `NormalizedCosine` + `pre_normalize=true` with `precision=F16` Parquet storage and F16 in-memory quantization simultaneously without precision trade-offs.
+
+### Fixed
+
+- **`quantize_to_f16()` was no-op for `NormalizedCosine`** — previous implementation returned early for this metric, forcing in-memory HNSW search to use F32 (double memory bandwidth). Fixed by removing the guard and adding an exact F32 re-score pass over the final top-k candidates inside `HnswIndex::search()` when `flat_vecs_f16` is populated.
+
 - **`AilakeFileWriter::write_single_pass()` / `write_multi_single_pass()`** — single-pass streaming write that emits a valid AI-Lake file without any footer seek or second Parquet write. Safe for append-only / write-once destinations (HDFS strict mode, piped stdout, object stores that do not support partial PUT). Readers bootstrap the AILK section offset from the `AilakeTrailer` (24 bytes immediately before the Parquet footer); no `ailake.footer_offset` KV injection needed.
 - **`AilakeFileReader` trailer bootstrap fallback** — `ailk_offset()` / `ailk_offset_for_column()` now fall back to reading the `AilakeTrailer` when `ailake.footer_offset` is absent from the Parquet KV. Trailer bytes are always present in the initial footer range-GET (same bytes already fetched to read the Parquet footer), so the fallback costs no extra I/O vs the KV path. Backward-compatible: existing files with KV still use the faster KV path.
 - **`parquet_footer_start()` promoted to `pub`** in `ailake-file::footer` — shared by writer and reader; re-exported from `ailake-file` root.
