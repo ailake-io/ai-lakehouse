@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.19] — 2026-06-17
+
 ### Added
 
 - **`write_batch_multi_deferred`** — deferred variant of `write_batch_multi` for N-column multimodal ingest with GPU acceleration. Persists Parquet immediately and builds all N column HNSW indexes in a single background tokio task (`build_and_patch_multi_index`). During the build window, `SearchSession` serves the shard via GPU flat scan (CUDA/ROCm, exact) with automatic fallback to CPU flat scan. CAS retry loop patches both primary HNSW offsets and `extra_vector_indexes[].hnsw_offset/len` atomically on completion. Python: `writer.write_batch_multi_deferred(texts, [(spec, embs), ...])`. All N column embeddings are cloned into the task; recommended batch size: N×rows×dim×4 bytes fits in RAM. The gap between `write_batch_multi` (synchronous HNSW on CPU) and `write_batch_auto_deferred` (single-column) is now closed for multi-column GPU workloads.
