@@ -548,6 +548,7 @@ mod tests {
                 index_status: IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
+                partition_value: None,
             })
             .collect();
         let selected = planner.plan(&files);
@@ -573,6 +574,7 @@ mod tests {
                 centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                partition_value: None,
             },
             DataFileEntry {
                 path: "a.parquet".into(),
@@ -581,6 +583,7 @@ mod tests {
                 centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                partition_value: None,
             },
             DataFileEntry {
                 path: "b.parquet".into(),
@@ -589,6 +592,7 @@ mod tests {
                 centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                partition_value: None,
             },
         ];
         let selected = planner.plan(&files);
@@ -733,6 +737,8 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         };
 
         use ailake_catalog::TableProperties;
@@ -778,6 +784,7 @@ mod tests {
                 centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                partition_value: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -786,6 +793,7 @@ mod tests {
                 centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                partition_value: None,
             },
         ];
 

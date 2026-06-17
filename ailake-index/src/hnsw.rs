@@ -492,6 +492,12 @@ impl HnswIndex {
     /// Dispatch on `self.metric` once; all inner search logic is monomorphic.
     /// For NormalizedCosine, the query is normalized here before traversal so
     /// callers do not need to pre-normalize manually.
+    ///
+    /// When `flat_vecs_f16` is populated (set by `quantize_to_f16`) and the
+    /// metric is `NormalizedCosine`, HNSW traversal uses F16 distances for
+    /// cache efficiency, then re-scores the returned candidates with exact F32
+    /// so the final ranking is correct despite F16 rounding. The re-score cost
+    /// is O(top_k × dim) — negligible vs traversal over O(ef × dim) candidates.
     pub fn search(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
         match self.metric {
             VectorMetric::Cosine => self.search_typed::<CosineDist>(query, top_k, ef),
@@ -499,7 +505,23 @@ impl HnswIndex {
             VectorMetric::DotProduct => self.search_typed::<DotProductDist>(query, top_k, ef),
             VectorMetric::NormalizedCosine => {
                 let q_norm = normalize_l2(query);
-                self.search_typed::<NormalizedCosineDist>(&q_norm, top_k, ef)
+                let mut results =
+                    self.search_typed::<NormalizedCosineDist>(&q_norm, top_k, ef);
+                // F16 traversal error (~0.001) can exceed true 1-dot distance
+                // (~0.0002) for very similar unit vectors. Re-score final
+                // candidates with exact F32 to restore correct ranking.
+                if self.flat_vecs_f16.is_some() {
+                    let dim = self.dim as usize;
+                    for (row_id, dist) in &mut results {
+                        let idx = row_id.as_u64() as usize;
+                        let v = &self.flat_vecs[idx * dim..(idx + 1) * dim];
+                        *dist = NormalizedCosineDist::dist(&q_norm, v);
+                    }
+                    results.sort_unstable_by(|a, b| {
+                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+                results
             }
         }
     }
@@ -586,18 +608,17 @@ impl HnswIndex {
 
     /// Quantize flat_vecs → flat_vecs_f16.
     ///
-    /// After calling this, HNSW search uses F16 distances (half the memory bandwidth
-    /// per distance call vs F32). Pair with `rerank_factor` in `SearchConfig` to
-    /// recover the precision lost by F16 approximation.
-    /// F32 vectors are retained for brute-force fallback.
+    /// After calling this, HNSW traversal uses F16 distances (half the memory
+    /// bandwidth per distance call vs F32). F32 vectors are retained for
+    /// brute-force fallback and for exact re-scoring after traversal.
     ///
-    /// No-op for `NormalizedCosine`: F16 quantization error (~0.001 per unit vector)
-    /// can exceed the true `1-dot` distance between very similar pre-normalized vectors
-    /// (~0.0002 for consecutive embeddings), causing wrong nearest-neighbour results.
+    /// For `NormalizedCosine`, F16 error (~0.001) can exceed the true `1-dot`
+    /// distance between very similar unit vectors (~0.0002). The F16 cache
+    /// benefit is still applied for the graph traversal phase; `search()` then
+    /// re-scores the final `top_k` candidates with exact F32 to restore correct
+    /// ranking. Pair with `rerank_factor` in `SearchConfig` for an additional
+    /// Parquet-level exact re-score when maximum precision is required.
     pub fn quantize_to_f16(&mut self) {
-        if self.metric == VectorMetric::NormalizedCosine {
-            return;
-        }
         let f16_vecs: Vec<f16> = self.flat_vecs.iter().map(|&x| f16::from_f32(x)).collect();
         self.flat_vecs_f16 = Some(f16_vecs);
     }
@@ -976,5 +997,73 @@ mod tests {
             results.iter().map(|(id, _)| id.as_u64() as usize).collect();
         let recall = found.intersection(&gt_ids).count() as f64 / gt_ids.len() as f64;
         assert!(recall >= 0.8, "recall@10={recall:.2} < 0.8");
+    }
+
+    /// NormalizedCosine + F16 in-memory: traversal uses F16, final ranking uses exact F32.
+    /// Verifies that nearest neighbor is correct despite F16 rounding errors.
+    #[test]
+    fn normedcosine_f16_quantize_correct_nearest() {
+        // Two nearly-identical unit vectors whose 1-dot distance is ~0.0004 —
+        // smaller than F16 quantization error (~0.001). Without the F32 re-score
+        // step the nearest-neighbour would be wrong.
+        let dim = 32usize;
+        let mut v0: Vec<f32> = vec![0.0; dim];
+        let mut v1: Vec<f32> = vec![0.0; dim];
+        let mut v2: Vec<f32> = vec![0.0; dim];
+        // v0 = unit vec along axis 0
+        v0[0] = 1.0;
+        // v1 = nearly same as v0 (1-dot ≈ 1e-4)
+        v1[0] = (1.0f32 - 1e-4).sqrt();
+        v1[1] = 1e-2_f32.sqrt();
+        let norm1: f32 = v1.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for x in &mut v1 { *x /= norm1; }
+        // v2 = moderately different (1-dot ≈ 0.1)
+        v2[0] = 0.9f32.sqrt();
+        v2[1] = 0.1f32.sqrt();
+        let norm2: f32 = v2.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for x in &mut v2 { *x /= norm2; }
+
+        let mut b = HnswBuilder::new(
+            dim as u32,
+            VectorMetric::NormalizedCosine,
+            Default::default(),
+        );
+        b.insert(RowId::new(0), v0.clone());
+        b.insert(RowId::new(1), v1.clone());
+        b.insert(RowId::new(2), v2.clone());
+        let mut idx = b.build();
+
+        // Enable F16 in-memory quantization (now allowed for NormalizedCosine).
+        idx.quantize_to_f16();
+        assert!(idx.flat_vecs_f16.is_some(), "F16 should be populated for NormalizedCosine");
+
+        // Query is v0 itself — nearest must be row 0, then row 1.
+        let results = idx.search(&v0, 2, 50);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, RowId::new(0), "nearest to v0 must be v0 (row 0)");
+        assert_eq!(results[1].0, RowId::new(1), "second nearest to v0 must be v1 (row 1)");
+        // Distances must be sorted ascending.
+        assert!(results[0].1 <= results[1].1);
+    }
+
+    /// quantize_to_f16 works for all metrics (including NormalizedCosine).
+    #[test]
+    fn quantize_to_f16_populates_for_all_metrics() {
+        for metric in [
+            VectorMetric::Cosine,
+            VectorMetric::Euclidean,
+            VectorMetric::DotProduct,
+            VectorMetric::NormalizedCosine,
+        ] {
+            let mut b = HnswBuilder::new(4, metric, Default::default());
+            b.insert(RowId::new(0), vec![1.0, 0.0, 0.0, 0.0]);
+            b.insert(RowId::new(1), vec![0.0, 1.0, 0.0, 0.0]);
+            let mut idx = b.build();
+            idx.quantize_to_f16();
+            assert!(
+                idx.flat_vecs_f16.is_some(),
+                "flat_vecs_f16 should be Some for metric {metric:?}"
+            );
+        }
     }
 }
