@@ -60,7 +60,9 @@ impl TryFrom<u8> for Precision {
             1 => Ok(Precision::F16),
             2 => Ok(Precision::I8),
             3 => Ok(Precision::Binary),
-            _ => Err(AilakeError::UnsupportedFormatVersion(v as u16)),
+            _ => Err(AilakeError::InvalidArgument(format!(
+                "invalid precision byte: {v} (valid: 0=F32, 1=F16, 2=I8, 3=Binary)"
+            ))),
         }
     }
 }
@@ -73,7 +75,9 @@ impl TryFrom<u8> for DistanceMetric {
             1 => Ok(DistanceMetric::Euclidean),
             2 => Ok(DistanceMetric::DotProduct),
             3 => Ok(DistanceMetric::NormalizedCosine),
-            _ => Err(AilakeError::UnsupportedFormatVersion(v as u16)),
+            _ => Err(AilakeError::InvalidArgument(format!(
+                "invalid distance metric byte: {v} (valid: 0=Cosine, 1=Euclidean, 2=DotProduct, 3=NormalizedCosine)"
+            ))),
         }
     }
 }

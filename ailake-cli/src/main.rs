@@ -379,7 +379,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 // Multi-column mode: col:dim:metric[:modality],...
                 let col_specs = parse_vector_cols(&cols_spec)?;
                 if col_specs.is_empty() {
-                    return Err("--vector-cols must have at least one column spec".into());
+                    return Err("--vector-cols requires at least one column spec (format: col:dim:metric[:modality],...)".into());
                 }
 
                 // Read tabular data + all embedding columns from source Parquet.
@@ -460,7 +460,10 @@ async fn run(cli: Cli) -> Result<(), String> {
 
                 let dim = embs.first().map(|v| v.len() as u32).unwrap_or(0);
                 if dim == 0 {
-                    return Err("source file has no embedding rows".into());
+                    return Err(format!(
+                        "embedding column '{}' is empty or contains no vectors in source file",
+                        embeddings
+                    ).into());
                 }
 
                 // Load existing policy from catalog, or default to cosine/f16.

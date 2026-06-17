@@ -159,7 +159,7 @@ fn cstr_empty_json() -> *mut c_char {
 }
 
 fn cstr_err_json(msg: impl std::fmt::Display) -> *mut c_char {
-    let s = format!("{{\"ok\":false,\"error\":\"{msg}\"}}");
+    let s = serde_json::json!({"ok": false, "error": msg.to_string()}).to_string();
     CString::new(s).unwrap_or_default().into_raw()
 }
 

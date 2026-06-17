@@ -91,7 +91,10 @@ impl ParquetVectorReader {
             .as_any()
             .downcast_ref::<FixedSizeBinaryArray>()
             .ok_or_else(|| {
-                AilakeError::Parquet("vector column is not FixedSizeBinary".to_string())
+                AilakeError::Parquet(format!(
+                    "vector column '{}' is not FixedSizeBinary (expected F16-encoded floats)",
+                    self.vector_column
+                ))
             })?;
 
         let embeddings: Vec<Vec<f32>> = (0..vec_col.len())
@@ -184,16 +187,20 @@ impl ParquetVectorReader {
             .column(vec_idx)
             .as_any()
             .downcast_ref::<ListArray>()
-            .ok_or_else(|| AilakeError::Parquet("failed to downcast to ListArray".to_string()))?;
+            .ok_or_else(|| AilakeError::Parquet(format!(
+                "multi-vector column '{}' expected ListArray but got incompatible Arrow type",
+                self.vector_column
+            )))?;
 
         let values = list_col
             .values()
             .as_any()
             .downcast_ref::<FixedSizeBinaryArray>()
             .ok_or_else(|| {
-                AilakeError::Parquet(
-                    "ListArray values are not FixedSizeBinary — unexpected column type".to_string(),
-                )
+                AilakeError::Parquet(format!(
+                    "multi-vector column '{}': ListArray values are not FixedSizeBinary (expected F16-encoded floats)",
+                    self.vector_column
+                ))
             })?;
 
         let mut embeddings_per_row: Vec<Vec<Vec<f32>>> = Vec::with_capacity(list_col.len());
