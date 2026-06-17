@@ -682,6 +682,12 @@ impl TableWriter {
                 format!("ailake.metric-{}", ep.column_name),
                 ailake_parquet::schema::metric_str(ep.metric).to_string(),
             );
+            if let Some(modality) = ep.modality {
+                extra_properties.insert(
+                    format!("ailake.modality-{}", ep.column_name),
+                    modality.as_str().to_string(),
+                );
+            }
         }
         let snapshot = NewSnapshot {
             snapshot_id: new_snapshot_id(),
