@@ -47,6 +47,8 @@ class TableWriter:
         embedding_model: Optional[str] = None,
         embedding_model_version: Optional[str] = None,
         embed_fn: Optional[Callable[[list[str]], list[list[float]]]] = None,
+        partition_by: Optional[str] = None,
+        partition_value: Optional[str] = None,
     ) -> None:
         """Open or create an AI-Lake table at *path*.
 
@@ -226,6 +228,7 @@ def search_with_data(
     path: str,
     query: Sequence[float],
     top_k: int = 10,
+    partition_value: Optional[str] = None,
 ) -> bytes:
     """Search and return full row data serialized as Arrow IPC bytes.
 
@@ -238,6 +241,9 @@ def search_with_data(
         path: Table root — same value used when writing.
         query: Query embedding as a flat list of floats.
         top_k: Number of neighbours to return (default 10).
+        partition_value: When set, only files tagged with this partition value are
+                         searched (manifest-level pruning). Pass ``agent_id`` for
+                         per-agent isolated search without post-scan filtering.
 
     Returns:
         Arrow IPC file-format bytes.  Deserialize to a ``pyarrow.Table``
@@ -420,6 +426,9 @@ class Agent:
         oversample: int = 3,
     ) -> list[dict]:
         """Retrieve *top_k* memories with hybrid scoring.
+
+        Uses manifest-level partition pruning: only files written by this agent
+        (tagged with ``partition_value=agent_id``) are searched — no post-scan filter.
 
         Returns list of dicts sorted by hybrid score (lower = better), each with:
         ``text``, ``distance``, ``score``, ``recency``, ``importance``,

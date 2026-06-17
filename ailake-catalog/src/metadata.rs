@@ -114,6 +114,27 @@ impl IcebergMetadata {
                 modality.as_str().to_string(),
             );
         }
+        if let Some(col) = &policy.partition_by {
+            properties.insert("ailake.partition-by".to_string(), col.clone());
+        }
+
+        // When partition_by is set, emit an Iceberg identity partition spec so
+        // Iceberg-aware engines (Spark, Trino, PyIceberg) can push down filters.
+        let (partition_specs, default_spec_id, last_partition_id) =
+            if let Some(col) = &policy.partition_by {
+                let spec = serde_json::json!({
+                    "spec-id": 1,
+                    "fields": [{
+                        "name": col,
+                        "transform": "identity",
+                        "source-id": 1000,
+                        "field-id": 1000
+                    }]
+                });
+                (vec![serde_json::json!({"spec-id": 0, "fields": []}), spec], 1, 1000)
+            } else {
+                (vec![serde_json::json!({"spec-id": 0, "fields": []})], 0, 999)
+            };
 
         let now_ms = now_ms();
         IcebergMetadata {
@@ -125,9 +146,9 @@ impl IcebergMetadata {
             last_column_id: 0,
             schemas: vec![serde_json::json!({"schema-id": 0, "type": "struct", "fields": []})],
             current_schema_id: 0,
-            partition_specs: vec![serde_json::json!({"spec-id": 0, "fields": []})],
-            default_spec_id: 0,
-            last_partition_id: 999,
+            partition_specs,
+            default_spec_id,
+            last_partition_id,
             properties,
             current_snapshot_id: None,
             snapshots: vec![],
@@ -184,6 +205,8 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         }
     }
 

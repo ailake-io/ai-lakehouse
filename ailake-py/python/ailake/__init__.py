@@ -626,6 +626,8 @@ class Agent:
                 vector_column="embedding",
                 dim=dim,
                 metric=self._metric,
+                partition_by="agent_id",
+                partition_value=self._agent_id,
             )
         return self._writer
 
@@ -775,7 +777,7 @@ class Agent:
         q: list[float] = query.tolist() if hasattr(query, "tolist") else list(query)
         candidate_k = top_k * max(1, oversample)
 
-        raw_ipc: bytes = _search_with_data(self._table_path, q, candidate_k)
+        raw_ipc: bytes = _search_with_data(self._table_path, q, candidate_k, self._agent_id)
         batch = pa.ipc.open_file(io.BytesIO(raw_ipc)).read_all()
 
         now = int(time.time())

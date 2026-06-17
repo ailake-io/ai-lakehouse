@@ -64,7 +64,7 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None))]
     fn new(
         py: Python<'_>,
         path: &str,
@@ -79,11 +79,13 @@ impl TableWriter {
         embedding_model: Option<&str>,
         embedding_model_version: Option<&str>,
         embed_fn: Option<Py<PyAny>>,
+        partition_by: Option<String>,
+        partition_value: Option<String>,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
-            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} pq_only={} ivf_residual={} embedding_model={:?}",
-            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction, pq_only, ivf_residual, embedding_model
+            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} pq_only={} ivf_residual={} embedding_model={:?} partition_by={:?}",
+            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction, pq_only, ivf_residual, embedding_model, partition_by
         );
         let mut policy =
             VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
@@ -92,6 +94,8 @@ impl TableWriter {
         policy.hnsw_ef_construction = hnsw_ef_construction;
         policy.keep_raw_for_reranking = !pq_only;
         policy.ivf_residual = ivf_residual;
+        policy.partition_by = partition_by;
+        policy.partition_value = partition_value;
         if let Some(model_name) = embedding_model {
             let mut model_info = EmbeddingModelInfo::new(model_name).with_dim(dim);
             if let Some(version) = embedding_model_version {
@@ -399,6 +403,7 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
         score_fn: None,
+        partition_filter: None,
     };
 
     let results = rt
@@ -432,19 +437,21 @@ fn search(py: Python<'_>, path: &str, query: Vec<f32>, top_k: usize) -> PyResult
 ///
 /// Python side deserializes with: `pyarrow.ipc.open_file(io.BytesIO(bytes)).read_all()`
 #[pyfunction]
-#[pyo3(signature = (path, query, top_k=10))]
+#[pyo3(signature = (path, query, top_k=10, partition_value=None))]
 fn search_with_data(
     py: Python<'_>,
     path: &str,
     query: Vec<f32>,
     top_k: usize,
+    partition_value: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
-        "ailake-py: search_with_data path={} dim={} top_k={}",
+        "ailake-py: search_with_data path={} dim={} top_k={} partition={:?}",
         path,
         query.len(),
-        top_k
+        top_k,
+        partition_value
     );
 
     let (catalog, store) = local_catalog_store(path);
@@ -470,6 +477,7 @@ fn search_with_data(
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
         score_fn: None,
+        partition_filter: partition_value,
     };
 
     let results = rt
@@ -791,6 +799,7 @@ fn search_multimodal(
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
         score_fn: None,
+        partition_filter: None,
     };
 
     let results = rt

@@ -95,6 +95,10 @@ pub struct SearchConfig {
     /// Use `ScoreFn::new(|d, row| ...)` to construct. See `ScoreFn` docs
     /// for an example using `hybrid_score` with episodic memory columns.
     pub score_fn: Option<ScoreFn>,
+    /// Partition filter: only search files whose `DataFileEntry::partition_value`
+    /// matches this string. `None` searches all files (no partition pruning).
+    /// Set to `agent_id` in Agent.recall() for per-agent isolated search.
+    pub partition_filter: Option<String>,
 }
 
 impl Default for SearchConfig {
@@ -105,6 +109,7 @@ impl Default for SearchConfig {
             pruning_threshold: f32::INFINITY,
             rerank_factor: None,
             score_fn: None,
+            partition_filter: None,
         }
     }
 }
@@ -202,6 +207,24 @@ pub async fn search(
             .map(String::as_str)
             .unwrap_or("cosine"),
     );
+
+    // Partition pruning: skip files not belonging to the requested partition value.
+    let all_files = if let Some(ref pv) = config.partition_filter {
+        let before = all_files.len();
+        let filtered: Vec<_> = all_files
+            .into_iter()
+            .filter(|f| f.partition_value.as_deref() == Some(pv.as_str()))
+            .collect();
+        debug!(
+            "ailake: partition pruning '{}' — {}/{} files survive",
+            pv,
+            filtered.len(),
+            before
+        );
+        filtered
+    } else {
+        all_files
+    };
 
     // Geometric pruning: skip files whose centroid is too far from the query
     let total_files = all_files.len();
@@ -388,6 +411,7 @@ pub async fn search_multimodal(
             pruning_threshold: config.pruning_threshold,
             rerank_factor: config.rerank_factor,
             score_fn: None,
+            partition_filter: config.partition_filter.clone(),
         };
         let results = search(
             table,
@@ -938,6 +962,8 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         }
     }
 
@@ -984,6 +1010,8 @@ mod tests {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: Some(2),
+            score_fn: None,
+            partition_filter: None,
         };
 
         let results = search(
@@ -1019,6 +1047,8 @@ mod tests {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: Some(4),
+            score_fn: None,
+            partition_filter: None,
         };
 
         let results = search(
@@ -1063,12 +1093,16 @@ mod tests {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
         };
         let cfg_rerank = SearchConfig {
             top_k: 2,
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: Some(2),
+            score_fn: None,
+            partition_filter: None,
         };
 
         let plain = search(
@@ -1134,6 +1168,8 @@ mod tests {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
         };
 
         let results =
@@ -1194,6 +1230,8 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         };
 
         let mut writer = crate::TableWriter::create_or_open(
@@ -1241,6 +1279,8 @@ mod tests {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
         };
 
         let results =

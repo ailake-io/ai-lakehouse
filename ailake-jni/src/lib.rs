@@ -108,6 +108,7 @@ fn do_search(
         pruning_threshold: f32::INFINITY,
         rerank_factor: None,
         score_fn: None,
+        partition_filter: None,
     };
     rt().block_on(rs_search(
         &table, &query, config, vec_col, dim, catalog, store,
@@ -418,6 +419,8 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         ivf_residual: req.ivf_residual,
         embedding_model,
         modality: None,
+        partition_by: None,
+        partition_value: None,
     };
 
     let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);

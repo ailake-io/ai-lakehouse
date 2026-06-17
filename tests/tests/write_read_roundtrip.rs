@@ -34,6 +34,8 @@ async fn write_10k_rows_search_top10() {
         ivf_residual: false,
         embedding_model: None,
         modality: None,
+        partition_by: None,
+        partition_value: None,
     };
 
     // Create table and write 10k rows split across 2 batches
@@ -62,6 +64,8 @@ async fn write_10k_rows_search_top10() {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
         },
         "embedding",
         dim,

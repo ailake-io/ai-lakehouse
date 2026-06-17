@@ -345,6 +345,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 ivf_residual,
                 embedding_model: None,
                 modality: modality.map(VectorModality::from),
+                partition_by: None,
+                partition_value: None,
             };
 
             catalog
@@ -405,6 +407,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                     ivf_residual: false,
                     embedding_model: None,
                     modality: first_modality,
+                    partition_by: None,
+                    partition_value: None,
                 };
                 mv_owned.push((first_policy, first_embs));
 
@@ -424,6 +428,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                         ivf_residual: false,
                         embedding_model: None,
                         modality: *modality,
+                        partition_by: None,
+                        partition_value: None,
                     };
                     mv_owned.push((policy, embs));
                 }
@@ -489,6 +495,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                         ivf_residual: false,
                         embedding_model: None,
                         modality: None,
+                        partition_by: None,
+                        partition_value: None,
                     },
                     Err(_) => VectorStoragePolicy {
                         column_name: embeddings.clone(),
@@ -503,6 +511,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                         ivf_residual: false,
                         embedding_model: None,
                         modality: None,
+                        partition_by: None,
+                        partition_value: None,
                     },
                 };
 
@@ -567,6 +577,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 pruning_threshold,
                 rerank_factor: None,
                 score_fn: None,
+                partition_filter: None,
             };
 
             let results = ailake_query::search(
@@ -651,6 +662,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 ivf_residual: false,
                 embedding_model: None,
                 modality: None,
+                partition_by: None,
+                partition_value: None,
             };
 
             let files = catalog
@@ -753,6 +766,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 ivf_residual: false,
                 embedding_model: None,
                 modality: None,
+                partition_by: None,
+                partition_value: None,
             };
             serve::run(
                 catalog as Arc<dyn CatalogProvider>,

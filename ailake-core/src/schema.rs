@@ -67,6 +67,17 @@ pub struct VectorStoragePolicy {
     /// Allows readers to select the correct HNSW by modality without reading data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modality: Option<VectorModality>,
+    /// Column to partition by (e.g. "agent_id"). Stored in Iceberg metadata as an identity
+    /// partition spec, enabling file-level pruning for per-agent search without post-scan filtering.
+    /// Set this at table creation time; all files written to this table carry the partition column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_by: Option<String>,
+    /// Runtime partition value for this writer instance (not stored in table metadata).
+    /// When set, each file written by this TableWriter is tagged with this value, enabling
+    /// the search path to prune files from other partitions (e.g., other agents).
+    /// Typical usage: set to `agent_id` in Agent.__init__.
+    #[serde(skip)]
+    pub partition_value: Option<String>,
 }
 
 impl VectorStoragePolicy {
@@ -84,6 +95,8 @@ impl VectorStoragePolicy {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         }
     }
 }

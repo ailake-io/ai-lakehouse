@@ -115,6 +115,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
 
         // Spawn background HNSW build (fire-and-forget; errors are logged).
@@ -172,6 +173,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
 
         let store = self.store.clone();
@@ -314,6 +316,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
         Ok(())
     }
@@ -443,6 +446,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
         Ok(())
     }
@@ -550,6 +554,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
         Ok(())
     }
@@ -626,6 +631,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
 
         // Clone all column data for the background task.
@@ -1320,6 +1326,8 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         }
     }
 

@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`ToolCallSchema`** — extends `LlmContextSchema` with agent fields: `agent_id: Uuid`, `session_id: Uuid`, `step_index: u32`, `tool_name: String`, `tool_input_json: String`, `tool_output_json: String`, `outcome: Enum(Success, Failure, Timeout)`, `latency_ms: u32`. Enables vector search over tool call history ("when did tool X fail in similar contexts?"). Exposed in `ailake-core/src/schema.rs` as `ToolCallSchema` + `ToolCallOutcome` enum.
+- **`EpisodicMemorySchema`** — extends `LlmContextSchema` with episodic memory fields: `recency_weight: f32` (decays over time via `exp(-λ * days_since_access)`), `access_count: u32`, `last_accessed_at: Timestamp`, `importance_score: f32` (agent-defined). Scoring at search time: `final_score = distance * recency_weight * importance_score`. Schema struct in `ailake-core`.
+- **Injectable `ScoreFn` for hybrid search scoring** — `SearchConfig` gains `score_fn: Option<ScoreFn>` where `ScoreFn = Arc<dyn Fn(f32, &RecordBatch) -> f32 + Send + Sync>`. Agents inject recency, importance, or any contextual signal into the final ranking without rewriting the index. Applied in `ailake-query` merge loop after HNSW candidates collected.
+- **Python `ailake.Agent` helper** — `ailake.Agent(table_path, embed_fn, agent_id=None)` with methods: `remember(text, importance=1.0)`, `recall(query, top_k=5)`, `log_tool_call(name, input, output, outcome="success", latency_ms=0)`, `assemble_context(query, max_tokens=4096)`. High-level abstraction over `TableWriter` + `search` + `ContextAssembler` for agent frameworks (LangChain, CrewAI, AutoGen). Hybrid scoring (distance × recency × importance) applied automatically in `recall()`.
+- **Partition by `agent_id` — manifest-level file pruning** — `VectorStoragePolicy::partition_by: Option<String>` stores an Iceberg identity partition spec in `metadata.json`. At write time, `partition_value: Option<String>` (runtime-only, `#[serde(skip)]`) tags each `DataFileEntry` via `key_metadata` JSON in Avro manifests. At search time, `SearchConfig::partition_filter: Option<String>` prunes the manifest file list BEFORE geometric centroid pruning and HNSW load — per-agent isolated search with zero post-scan filtering. Python: `TableWriter(partition_by="agent_id", partition_value=uuid)` and `search_with_data(path, query, top_k, partition_value=uuid)`. `Agent.recall()` passes `self._agent_id` automatically.
+
 ---
 
 ## [0.0.19] — 2026-06-17

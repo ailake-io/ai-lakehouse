@@ -158,6 +158,7 @@ async fn handle_search(
         pruning_threshold: req.pruning_threshold,
         rerank_factor: None,
         score_fn: None,
+        partition_filter: None,
     };
 
     let results = ailake_query::search(

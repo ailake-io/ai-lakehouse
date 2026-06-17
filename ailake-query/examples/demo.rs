@@ -139,6 +139,8 @@ async fn main() {
         ivf_residual: false,
         embedding_model: None,
         modality: None,
+        partition_by: None,
+        partition_value: None,
     };
 
     // ---- write ----
@@ -181,6 +183,8 @@ async fn main() {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
         },
         "embedding",
         dim,

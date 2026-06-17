@@ -136,6 +136,7 @@ pub fn write_manifest_file(
             index_status: f.index_status.clone(),
             batch_id: f.batch_id.clone(),
             embedding_model: f.embedding_model.clone(),
+            partition_value: f.partition_value.clone(),
         };
         match serde_json::to_vec(&ext) {
             Ok(bytes) => encode_union_bytes(1, &bytes, &mut rec), // key_metadata=bytes
@@ -317,6 +318,7 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                             .unwrap_or_default(),
                         batch_id: ext.as_ref().and_then(|e| e.batch_id.clone()),
                         embedding_model: ext.as_ref().and_then(|e| e.embedding_model.clone()),
+                        partition_value: ext.as_ref().and_then(|e| e.partition_value.clone()),
                     });
                 }
             }
@@ -348,6 +350,8 @@ struct AilakeEntryExt {
     pub batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_value: Option<String>,
 }
 
 /// Read manifest file paths from an Iceberg manifest list (Avro).
@@ -403,6 +407,7 @@ mod tests {
             index_status: IndexStatus::Ready,
             batch_id: None,
             embedding_model: None,
+            partition_value: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -430,6 +435,7 @@ mod tests {
             index_status: IndexStatus::Ready,
             batch_id: Some("dag_run_2026-05-28_taskA".to_string()),
             embedding_model: None,
+            partition_value: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
