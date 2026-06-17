@@ -10,8 +10,8 @@ pub mod types;
 
 pub use error::{AilakeError, AilakeResult};
 pub use schema::{
-    llm_columns, multimodal_columns, LlmContextSchema, MultimodalContextSchema, PQConfig,
-    VectorStoragePolicy,
+    llm_columns, multimodal_columns, tool_call_columns, LlmContextSchema, MultimodalContextSchema,
+    PQConfig, ToolCallOutcome, ToolCallSchema, VectorStoragePolicy,
 };
 pub use types::{
     ByteLen, ByteOffset, Centroid, Dim, EmbeddingModelInfo, RowId, VectorMetric, VectorModality,
