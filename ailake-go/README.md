@@ -136,8 +136,18 @@ type SearchOptions struct {
     TopK             int            // number of results (default: 10)
     EfSearch         int            // HNSW ef_search (default: TopK*5)
     PruningThreshold float32        // geometric pruning cutoff (default: 0.8)
+    PartitionFilter  string         // restrict to files with matching partition_value; "" = no filter (Phase 9)
     Hardware         *HardwareProfile // nil = auto-detect
 }
+```
+
+Set `PartitionFilter` to an agent UUID to restrict search to that agent's files — pruning happens at the manifest level before any HNSW I/O:
+
+```go
+results, err := ailake.Search(catalog, "default", "agents", query, ailake.SearchOptions{
+    TopK:            10,
+    PartitionFilter: "agent-uuid-here",
+})
 ```
 
 ### `FileSearchResult`

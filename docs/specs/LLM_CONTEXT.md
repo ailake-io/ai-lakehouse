@@ -359,6 +359,109 @@ def ingest_document(doc, embed_fn, writer: ailake.TableWriter):
 
 ---
 
+---
+
+## Phase 9 — Agent Memory Schemas
+
+### `ToolCallSchema` — searchable tool call history
+
+Extends `LlmContextSchema` with agent execution fields. Enables vector search over tool call history ("when did tool X fail in similar contexts?").
+
+```rust
+// ailake-core/src/schema.rs
+pub mod tool_call_columns {
+    pub const AGENT_ID:          &str = "agent_id";
+    pub const SESSION_ID:        &str = "session_id";
+    pub const STEP_INDEX:        &str = "step_index";
+    pub const TOOL_NAME:         &str = "tool_name";
+    pub const TOOL_INPUT_JSON:   &str = "tool_input_json";
+    pub const TOOL_OUTPUT_JSON:  &str = "tool_output_json";
+    pub const OUTCOME:           &str = "outcome";  // "success" | "failure" | "timeout"
+    pub const LATENCY_MS:        &str = "latency_ms";
+}
+```
+
+| Column | Arrow type | Notes |
+|---|---|---|
+| `agent_id` | `Utf8` | UUID or name of the agent instance |
+| `session_id` | `Utf8` | Conversation / run identifier |
+| `step_index` | `UInt32` | Tool call ordinal within the session |
+| `tool_name` | `Utf8` | Name of the tool invoked |
+| `tool_input_json` | `LargeUtf8` | JSON-serialized tool arguments |
+| `tool_output_json` | `LargeUtf8` | JSON-serialized tool result |
+| `outcome` | `Utf8` | `"success"` / `"failure"` / `"timeout"` |
+| `latency_ms` | `UInt32` | Wall-clock time for the tool call |
+
+The `chunk_text` field from `LlmContextSchema` should contain a human-readable summary of the tool call (e.g. `"web_search('python asyncio') → 5 results"`); this is the text embedded for similarity search.
+
+### `EpisodicMemorySchema` — recency-weighted episodic memory
+
+```rust
+pub mod episodic_columns {
+    pub const RECENCY_WEIGHT:     &str = "recency_weight";    // exp(-λ * days_since_access)
+    pub const ACCESS_COUNT:       &str = "access_count";
+    pub const LAST_ACCESSED_AT:   &str = "last_accessed_at";
+    pub const IMPORTANCE_SCORE:   &str = "importance_score";  // agent-assigned [0.0, 1.0]
+}
+```
+
+| Column | Arrow type | Notes |
+|---|---|---|
+| `recency_weight` | `Float32` | Updated by `MemoryDecayJob`; starts at 1.0 |
+| `access_count` | `UInt32` | Incremented each time this memory is recalled |
+| `last_accessed_at` | `Timestamp(Micros, UTC)` | Updated on each recall |
+| `importance_score` | `Float32` | Agent-assigned importance; multiplied into final score |
+
+### Hybrid scoring with `ScoreFn`
+
+`SearchConfig::score_fn` lets agents inject per-row signals into the final ranking without modifying the index:
+
+```python
+import ailake
+
+results = ailake.search(
+    "s3://my-lake/agents/",
+    query_vec,
+    top_k=10,
+    score_fn=lambda distance, row: (
+        distance
+        * float(row["recency_weight"][0])
+        * float(row["importance_score"][0])
+    ),
+    partition_filter="agent-42",
+)
+```
+
+`score_fn` receives the HNSW distance and the full `RecordBatch` row for the candidate. The return value replaces `distance` in the ranked result. Lower is still better (agents typically set score = distance / recency / importance so high-recency, high-importance results surface first).
+
+### Partition isolation — per-agent file pruning
+
+Writing with `partition_by` + `partition_value` enables zero-cost per-agent isolation. The manifest-level `partition_filter` at search time prunes files before any HNSW I/O — no post-scan filtering:
+
+```python
+# Write — tag each file with the agent's UUID
+writer = ailake.TableWriter(
+    "s3://my-lake/agents/",
+    dim=1536,
+    partition_by="agent_id",
+    partition_value="agent-uuid-here",
+)
+writer.write_batch(texts, embeddings)
+writer.commit()
+
+# Read — restrict to this agent only
+results = ailake.search(
+    "s3://my-lake/agents/",
+    query_vec,
+    top_k=10,
+    partition_filter="agent-uuid-here",
+)
+```
+
+For 10 000 files in a shared table across 1 000 agents, partition pruning reduces I/O to ~10 files per search (one HNSW per file). Geometric centroid pruning then further reduces this count before any network I/O.
+
+---
+
 ## `MultimodalContextSchema` — extending LLM context with media
 
 `MultimodalContextSchema` extends `LlmContextSchema` for tables that also carry media embeddings and references.

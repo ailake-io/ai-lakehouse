@@ -95,7 +95,8 @@ The library exports C-ABI symbols consumed by JNA. All three plugins use the JSO
 
 ```c
 // request_json: {"warehouse":"...","namespace":"default","table":"...","vec_col":"embedding",
-//                "dim":1536,"query":[...],"top_k":10}
+//                "dim":1536,"query":[...],"top_k":10,
+//                "partition_filter":"agent-42"}  ← optional (Phase 9)
 // Returns: {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
 // Caller must free with ailake_free_string.
 char* ailake_search_json(const char* request_json);
@@ -103,7 +104,9 @@ char* ailake_search_json(const char* request_json);
 // request_json: {"warehouse":"...","namespace":"default","table":"...",
 //                "dim":1536,"ids":[...],"embeddings":[[...],...],
 //                "metric":"cosine","precision":"f16",
-//                "embedding_model":"text-embedding-3-small@v1"}  ← optional
+//                "embedding_model":"text-embedding-3-small@v1",  ← optional
+//                "partition_by":"agent_id",     ← optional (Phase 9)
+//                "partition_value":"agent-42"}  ← optional (Phase 9)
 // Returns: {"ok":true,"snapshot_id":N}
 // On dim mismatch: {"ok":false,"error":"query dim=512 does not match table dim=1536 (...)"}
 char* ailake_write_batch_json(const char* request_json);
@@ -113,6 +116,16 @@ void ailake_free_string(char* ptr);
 // Static version string — do NOT free.
 const char* ailake_version();
 ```
+
+### Phase 9 — partition fields
+
+All JSON-envelope fields added in Phase 9 are `#[serde(default)]` — absent fields deserialize to empty string / `None`, preserving backward compatibility with callers that do not set them.
+
+| Field | Function | Type | Description |
+|---|---|---|---|
+| `partition_filter` | `ailake_search_json`, `ailake_search_multimodal_json` | string | Restrict search to files with this `partition_value`. Pruning before centroid check and HNSW load. |
+| `partition_by` | `ailake_write_batch_json` | string | Iceberg identity partition column name. Written to `metadata.json` partition spec on first commit. |
+| `partition_value` | `ailake_write_batch_json` | string | Value for this write. Tagged in each file's `key_metadata` JSON in the Avro manifest. |
 
 ---
 

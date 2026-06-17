@@ -20,16 +20,20 @@ Performs a nearest-neighbor vector search on a local AI-Lake table.
 
 ```json
 {
-  "warehouse": "/path/to/warehouse",
-  "namespace": "default",
-  "table":     "my_table",
-  "vec_col":   "embedding",
-  "dim":       1536,
-  "query":     [0.1, -0.2, 0.3, "..."],
-  "top_k":     10,
-  "ef_search": 50
+  "warehouse":        "/path/to/warehouse",
+  "namespace":        "default",
+  "table":            "my_table",
+  "vec_col":          "embedding",
+  "dim":              1536,
+  "query":            [0.1, -0.2, 0.3, "..."],
+  "top_k":            10,
+  "ef_search":        50,
+  "partition_filter": "agent-42"
 }
 ```
+
+Optional fields:
+- `partition_filter` (string, default absent) — restrict search to manifest entries where `partition_value` matches this string. Pruning happens before geometric centroid check and HNSW load (Phase 9).
 
 **Response JSON:**
 
@@ -73,13 +77,17 @@ Writes a batch of records and their embeddings to an AI-Lake table.
   "ids":             [1, 2, 3],
   "embeddings":      [[0.1, 0.2, "..."], [0.3, 0.4, "..."], [0.5, 0.6, "..."]],
   "ivf_residual":    false,
-  "embedding_model": "text-embedding-3-small@v1"
+  "embedding_model": "text-embedding-3-small@v1",
+  "partition_by":    "agent_id",
+  "partition_value": "agent-42"
 }
 ```
 
 Optional fields:
 - `ivf_residual` (bool, default `false`) — enable residual PQ encoding (`vec - cluster_centroid`); improves recall@10 by ~2-4 pp at same storage.
 - `embedding_model` (string, default absent) — model identifier stored in Iceberg properties (`ailake.embedding-model`) and in the per-file Avro `key_metadata`. Format: `"<name>"` or `"<name>@<version>"`. Used for mismatch detection and migration tracking.
+- `partition_by` (string, default absent) — Iceberg identity partition column (e.g. `"agent_id"`). Stored in `metadata.json` as an Iceberg partition spec; subsequent readers can prune files by this column (Phase 9).
+- `partition_value` (string, default absent) — value for this write, tagged in per-file `key_metadata` JSON in the Avro manifest. Must be set whenever `partition_by` is set.
 
 **Response JSON:** `{"ok": true, "snapshot_id": 7}` or `{"ok": false, "error": "..."}`.
 
@@ -97,18 +105,19 @@ Cross-modal vector search with Reciprocal Rank Fusion. Accepts N column queries 
 
 ```json
 {
-  "warehouse": "/path/to/warehouse",
-  "namespace": "default",
-  "table":     "my_table",
+  "warehouse":        "/path/to/warehouse",
+  "namespace":        "default",
+  "table":            "my_table",
   "queries": [
     { "col": "embedding",       "query": [0.1, -0.2, "..."], "weight": 0.7, "dim": 0 },
     { "col": "image_embedding", "query": [0.3,  0.4, "..."], "weight": 0.3, "dim": 0 }
   ],
-  "top_k": 10
+  "top_k":            10,
+  "partition_filter": "agent-42"
 }
 ```
 
-`dim: 0` means auto-detect from table metadata. Each `col` is a vector column name; if the column is the table's primary column, its main HNSW index is used; otherwise the secondary index from `extra_vector_indexes` in the file manifest is used.
+`dim: 0` means auto-detect from table metadata. `partition_filter` is optional — restricts to files with a matching `partition_value` (Phase 9). Each `col` is a vector column name; if the column is the table's primary column, its main HNSW index is used; otherwise the secondary index from `extra_vector_indexes` in the file manifest is used.
 
 **Response JSON:**
 
