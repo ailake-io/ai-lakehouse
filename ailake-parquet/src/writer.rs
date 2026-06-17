@@ -315,6 +315,8 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         }
     }
 
@@ -332,6 +334,8 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         }
     }
 

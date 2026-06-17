@@ -143,9 +143,13 @@ class AilakeHook(BaseHook):
         query: list[float],
         top_k: int = 10,
         pruning_threshold: float = 0.8,
+        partition_filter: str | None = None,
     ) -> list[dict[str, Any]]:
         """Run vector search and return results as a list of dicts."""
         query_csv = ",".join(str(v) for v in query)
+        extra: list[str] = []
+        if partition_filter:
+            extra += ["--partition-filter", partition_filter]
         result = self.run_cli(
             "search",
             table,
@@ -153,5 +157,6 @@ class AilakeHook(BaseHook):
             "--top-k", str(top_k),
             "--pruning-threshold", str(pruning_threshold),
             "--format", "json",
+            *extra,
         )
         return json.loads(result.stdout).get("results", [])

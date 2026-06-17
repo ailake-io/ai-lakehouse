@@ -42,6 +42,7 @@ pip install "airbyte-destination-ailake[cohere]"  # + Cohere Embed API
 | `batch_size` | int | `512` | Records per embed call and per write_batch. |
 | `pre_normalize` | bool | `false` | Normalize vectors to unit L2 at write time (recommended for cosine). |
 | `pq_only` | bool | `false` | Discard raw F16 vectors after index build — maximum compression, no reranking. |
+| `partition_by` | string | `` | Iceberg identity partition column (e.g. `"agent_id"`). When set, every write is tagged with the value of this field read from the Airbyte record. Enables per-agent/per-tenant manifest-level pruning at search time (Phase 9). |
 
 ## Embedding modes
 

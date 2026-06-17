@@ -290,6 +290,7 @@ mod tests {
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
+                partition_value: None,
             })
             .collect();
         assert!(planner.plan(&files).is_empty());
@@ -317,6 +318,7 @@ mod tests {
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
+                partition_value: None,
             },
             DataFileEntry {
                 path: "large.parquet".into(),
@@ -332,6 +334,7 @@ mod tests {
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
+                partition_value: None,
             },
             DataFileEntry {
                 path: "also-small.parquet".into(),
@@ -347,6 +350,7 @@ mod tests {
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
+                partition_value: None,
             },
         ];
         let selected = planner.plan(&files);
@@ -379,6 +383,8 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         };
 
         // Write two small files
@@ -420,6 +426,7 @@ mod tests {
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
+                partition_value: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -435,6 +442,7 @@ mod tests {
                 index_status: ailake_catalog::IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
+                partition_value: None,
             },
         ];
 

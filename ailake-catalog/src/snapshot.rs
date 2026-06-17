@@ -60,6 +60,7 @@ mod tests {
                 index_status: crate::provider::IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
+                partition_value: None,
             }],
         };
         let json = manifest.to_json().unwrap();

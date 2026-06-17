@@ -164,3 +164,32 @@ func TestExtraVectorIndexes_Multiple(t *testing.T) {
 		t.Errorf("entry[1].HnswOffset: got %d, want 2000", ext.ExtraVectorIndexes[1].HnswOffset)
 	}
 }
+
+// ── PartitionValue in ailakeEntryExt (Phase 9) ────────────────────────────────
+
+func TestAilakeEntryExt_PartitionValue_Parsed(t *testing.T) {
+	ext := unmarshalExt(t, `{"hnsw_offset": 4096, "partition_value": "agent-A"}`)
+	if ext.PartitionValue == nil {
+		t.Fatal("PartitionValue: expected non-nil, got nil")
+	}
+	if *ext.PartitionValue != "agent-A" {
+		t.Errorf("PartitionValue: got %q, want %q", *ext.PartitionValue, "agent-A")
+	}
+}
+
+func TestAilakeEntryExt_PartitionValue_Missing_IsNil(t *testing.T) {
+	ext := unmarshalExt(t, `{"hnsw_offset": 4096}`)
+	if ext.PartitionValue != nil {
+		t.Errorf("PartitionValue: expected nil when absent, got %q", *ext.PartitionValue)
+	}
+}
+
+func TestAilakeEntryExt_PartitionValue_EmptyString_IsNonNil(t *testing.T) {
+	ext := unmarshalExt(t, `{"partition_value": ""}`)
+	if ext.PartitionValue == nil {
+		t.Fatal("PartitionValue: expected non-nil pointer for empty string field")
+	}
+	if *ext.PartitionValue != "" {
+		t.Errorf("PartitionValue: got %q, want empty string", *ext.PartitionValue)
+	}
+}

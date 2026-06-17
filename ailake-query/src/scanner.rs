@@ -15,6 +15,60 @@ use bytes::Bytes;
 
 use crate::pruner::VectorPruner;
 
+/// Injectable per-result scoring function for hybrid ranking.
+///
+/// Called after HNSW retrieval with the HNSW distance and a single-row
+/// `RecordBatch` containing all Parquet columns for that result. Returns a
+/// replacement score (lower = better rank, same convention as distance).
+///
+/// Typical use: combine HNSW distance with recency and importance signals
+/// from the `episodic_columns` for agent memory tables:
+///
+/// ```rust,no_run
+/// use ailake_core::{hybrid_score, episodic_columns};
+/// use ailake_query::scanner::ScoreFn;
+/// use arrow_array::{RecordBatch, cast::AsArray};
+/// use arrow_array::types::Float32Type;
+///
+/// let score_fn = ScoreFn::new(|distance, row| {
+///     let recency = row
+///         .column_by_name(episodic_columns::RECENCY_WEIGHT)
+///         .and_then(|c| c.as_primitive_opt::<Float32Type>())
+///         .and_then(|a| a.iter().next().flatten())
+///         .unwrap_or(1.0);
+///     let importance = row
+///         .column_by_name(episodic_columns::IMPORTANCE_SCORE)
+///         .and_then(|c| c.as_primitive_opt::<Float32Type>())
+///         .and_then(|a| a.iter().next().flatten())
+///         .unwrap_or(1.0);
+///     hybrid_score(distance, recency, importance)
+/// });
+/// ```
+pub struct ScoreFn(pub std::sync::Arc<dyn Fn(f32, &RecordBatch) -> f32 + Send + Sync>);
+
+impl ScoreFn {
+    pub fn new(f: impl Fn(f32, &RecordBatch) -> f32 + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(f))
+    }
+
+    #[inline]
+    pub fn call(&self, distance: f32, row: &RecordBatch) -> f32 {
+        (self.0)(distance, row)
+    }
+}
+
+impl Clone for ScoreFn {
+    fn clone(&self) -> Self {
+        Self(std::sync::Arc::clone(&self.0))
+    }
+}
+
+impl std::fmt::Debug for ScoreFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ScoreFn(<fn>)")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
     pub top_k: usize,
@@ -28,6 +82,23 @@ pub struct SearchConfig {
     /// Corrects the approximation error introduced by PQ-compressed HNSW distances.
     /// `None` (default) disables reranking.
     pub rerank_factor: Option<usize>,
+    /// Optional scoring function for hybrid ranking.
+    ///
+    /// When set, the search pipeline reads the Parquet row for each HNSW
+    /// candidate and calls `score_fn(distance, &single_row_batch)`. The
+    /// returned value replaces `distance` in `SearchResult` and determines
+    /// final ranking (lower = better).
+    ///
+    /// If `rerank_factor` is also set, `score_fn` receives the exact
+    /// (non-approximated) distance from the reranking step.
+    ///
+    /// Use `ScoreFn::new(|d, row| ...)` to construct. See `ScoreFn` docs
+    /// for an example using `hybrid_score` with episodic memory columns.
+    pub score_fn: Option<ScoreFn>,
+    /// Partition filter: only search files whose `DataFileEntry::partition_value`
+    /// matches this string. `None` searches all files (no partition pruning).
+    /// Set to `agent_id` in Agent.recall() for per-agent isolated search.
+    pub partition_filter: Option<String>,
 }
 
 impl Default for SearchConfig {
@@ -37,6 +108,8 @@ impl Default for SearchConfig {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
         }
     }
 }
@@ -49,6 +122,11 @@ impl SearchConfig {
 
     pub fn with_reranking(mut self, factor: usize) -> Self {
         self.rerank_factor = Some(factor);
+        self
+    }
+
+    pub fn with_score_fn(mut self, f: impl Fn(f32, &RecordBatch) -> f32 + Send + Sync + 'static) -> Self {
+        self.score_fn = Some(ScoreFn::new(f));
         self
     }
 }
@@ -130,6 +208,24 @@ pub async fn search(
             .unwrap_or("cosine"),
     );
 
+    // Partition pruning: skip files not belonging to the requested partition value.
+    let all_files = if let Some(ref pv) = config.partition_filter {
+        let before = all_files.len();
+        let filtered: Vec<_> = all_files
+            .into_iter()
+            .filter(|f| f.partition_value.as_deref() == Some(pv.as_str()))
+            .collect();
+        debug!(
+            "ailake: partition pruning '{}' — {}/{} files survive",
+            pv,
+            filtered.len(),
+            before
+        );
+        filtered
+    } else {
+        all_files
+    };
+
     // Geometric pruning: skip files whose centroid is too far from the query
     let total_files = all_files.len();
     let surviving_files = VectorPruner::prune(all_files, query, metric, config.pruning_threshold);
@@ -151,17 +247,25 @@ pub async fn search(
         let file_bytes: Bytes = store.get(&file_entry.path).await?;
         let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
 
+        // Determine whether we need to read Parquet row data for this file.
+        // Required for: (a) flat scan fallback, (b) exact reranking, (c) score_fn.
+        let need_parquet = file_entry.index_status == IndexStatus::Indexing
+            || !reader.is_ailake_file()
+            || config.rerank_factor.is_some()
+            || config.score_fn.is_some();
+
         if file_entry.index_status == IndexStatus::Indexing || !reader.is_ailake_file() {
             // HNSW not yet built — flat scan over raw vectors.
             debug!(
                 "ailake: flat scan fallback for {} (index_status={:?})",
                 file_entry.path, file_entry.index_status
             );
-            let (_, raw_vectors) = reader.read_parquet()?;
+            let (batch, raw_vectors) = reader.read_parquet()?;
             for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
+                let final_score = apply_score_fn(&config.score_fn, distance, row_id, &batch);
                 all_results.push(SearchResult {
                     row_id,
-                    distance,
+                    distance: final_score,
                     file_path: file_entry.path.clone(),
                 });
             }
@@ -171,49 +275,52 @@ pub async fn search(
         let index = reader.load_any_index_for_column(vector_column)?;
         let local_results = index.search(query, candidate_k, config.ef_search);
 
-        if config.rerank_factor.is_some() {
-            // Read raw F32 vectors for exact distance reranking; file bytes already loaded.
-            let (_, raw_vectors) = reader.read_parquet()?;
-            for (row_id, _approx_dist) in local_results {
-                let idx = row_id.as_u64() as usize;
-                let exact_dist = match raw_vectors.get(idx) {
+        // Conditionally read Parquet once for reranking and/or score_fn.
+        let parquet_data = if need_parquet {
+            Some(reader.read_parquet()?)
+        } else {
+            None
+        };
+
+        for (row_id, approx_dist) in local_results {
+            let idx = row_id.as_u64() as usize;
+
+            // Step 1: optionally replace approximated distance with exact distance.
+            let distance = if config.rerank_factor.is_some() {
+                match parquet_data.as_ref().and_then(|(_, vecs)| vecs.get(idx)) {
                     Some(v) => exact_distance(metric, query, v),
                     None => {
                         error!(
                             "ailake: invariant violated — row_id {} out of bounds \
-                             (raw_vectors.len={}, file={}); \
-                             Parquet row count and HNSW node count are out of sync; \
-                             file may be corrupt — run compaction to rebuild",
-                            idx,
-                            raw_vectors.len(),
-                            file_entry.path
+                             (file={}); Parquet and HNSW node count out of sync; \
+                             run compaction to rebuild",
+                            idx, file_entry.path
                         );
                         f32::INFINITY
                     }
-                };
-                all_results.push(SearchResult {
-                    row_id,
-                    distance: exact_dist,
-                    file_path: file_entry.path.clone(),
-                });
-            }
-        } else {
-            for (row_id, distance) in local_results {
-                all_results.push(SearchResult {
-                    row_id,
-                    distance,
-                    file_path: file_entry.path.clone(),
-                });
-            }
+                }
+            } else {
+                approx_dist
+            };
+
+            // Step 2: optionally apply injectable scoring function.
+            let final_score = if let Some((ref batch, _)) = parquet_data {
+                apply_score_fn(&config.score_fn, distance, row_id, batch)
+            } else {
+                distance
+            };
+
+            all_results.push(SearchResult {
+                row_id,
+                distance: final_score,
+                file_path: file_entry.path.clone(),
+            });
         }
     }
 
-    // Global merge: sort all candidates by distance, keep top-k
-    all_results.sort_by(|a, b| {
-        a.distance
-            .partial_cmp(&b.distance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // Global merge: sort all candidates by final score, keep top-k.
+    // Use total_cmp so NaN values from user-supplied score_fn don't panic.
+    all_results.sort_by(|a, b| a.distance.total_cmp(&b.distance));
     all_results.truncate(config.top_k);
     Ok(all_results)
 }
@@ -303,6 +410,8 @@ pub async fn search_multimodal(
             ef_search: config.ef_search,
             pruning_threshold: config.pruning_threshold,
             rerank_factor: config.rerank_factor,
+            score_fn: None,
+            partition_filter: config.partition_filter.clone(),
         };
         let results = search(
             table,
@@ -363,6 +472,30 @@ pub async fn search_multimodal(
     let _ = fusion; // only RRF implemented; enum is extensible
 
     Ok(fused)
+}
+
+/// Apply `score_fn` to a single result row, or return `distance` unchanged.
+///
+/// Slices the batch to a 1-row RecordBatch at `row_id` and calls the fn.
+/// If `score_fn` is `None` or the row index is out of bounds, returns `distance`.
+#[inline]
+fn apply_score_fn(
+    score_fn: &Option<ScoreFn>,
+    distance: f32,
+    row_id: RowId,
+    batch: &RecordBatch,
+) -> f32 {
+    match score_fn {
+        None => distance,
+        Some(f) => {
+            let idx = row_id.as_u64() as usize;
+            if idx < batch.num_rows() {
+                f.call(distance, &batch.slice(idx, 1))
+            } else {
+                distance
+            }
+        }
+    }
 }
 
 /// Brute-force top-k search over raw vectors. Used for Indexing shards.
@@ -829,6 +962,8 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         }
     }
 
@@ -875,6 +1010,8 @@ mod tests {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: Some(2),
+            score_fn: None,
+            partition_filter: None,
         };
 
         let results = search(
@@ -910,6 +1047,8 @@ mod tests {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: Some(4),
+            score_fn: None,
+            partition_filter: None,
         };
 
         let results = search(
@@ -954,12 +1093,16 @@ mod tests {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
         };
         let cfg_rerank = SearchConfig {
             top_k: 2,
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: Some(2),
+            score_fn: None,
+            partition_filter: None,
         };
 
         let plain = search(
@@ -1025,6 +1168,8 @@ mod tests {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
         };
 
         let results =
@@ -1085,6 +1230,8 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         };
 
         let mut writer = crate::TableWriter::create_or_open(
@@ -1132,6 +1279,8 @@ mod tests {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
         };
 
         let results =

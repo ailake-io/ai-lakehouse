@@ -105,3 +105,36 @@ func TestSearchFileCol_SecondaryColumnZeroOffset(t *testing.T) {
 		t.Errorf("expected nil hits for zero-offset index, got %v", hits)
 	}
 }
+
+// ── SearchMultimodal partition filter (Phase 9) ───────────────────────────────
+
+func TestSearchMultimodal_PartitionFilter_FieldAccepted(t *testing.T) {
+	opts := SearchOptions{TopK: 5, PartitionFilter: "agent-A"}
+	if opts.PartitionFilter != "agent-A" {
+		t.Errorf("SearchOptions.PartitionFilter: got %q, want %q", opts.PartitionFilter, "agent-A")
+	}
+}
+
+func TestSearchMultimodal_PartitionPruning_Logic(t *testing.T) {
+	// Simulate the partition pruning loop inside SearchMultimodal.
+	entries := []DataFileEntry{
+		{Path: "a.parquet", PartitionValue: "agent-A", VectorDim: 4},
+		{Path: "b.parquet", PartitionValue: "agent-B", VectorDim: 4},
+		{Path: "c.parquet", PartitionValue: "agent-A", VectorDim: 4},
+	}
+	filter := "agent-A"
+	var partitioned []DataFileEntry
+	for _, e := range entries {
+		if e.PartitionValue == filter {
+			partitioned = append(partitioned, e)
+		}
+	}
+	if len(partitioned) != 2 {
+		t.Fatalf("expected 2 entries for agent-A, got %d", len(partitioned))
+	}
+	for _, e := range partitioned {
+		if e.PartitionValue != "agent-A" {
+			t.Errorf("unexpected PartitionValue %q in pruned list", e.PartitionValue)
+		}
+	}
+}

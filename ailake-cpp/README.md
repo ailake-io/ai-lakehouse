@@ -113,12 +113,24 @@ Runs geometric pruning across all manifest entries, then per-file HNSW or IVF-PQ
 
 ```cpp
 struct SearchOptions {
-    int   top_k             = 10;
-    int   ef_search         = 0;     // 0 → top_k * 5
-    float pruning_threshold = 0.8f;
-    bool  use_flat_fallback = true;  // flat scan when index not yet built
-    const HardwareProfile* hw = nullptr; // nullptr = auto-detect
+    int         top_k             = 10;
+    int         ef_search         = 0;        // 0 → top_k * 5
+    float       pruning_threshold = 0.8f;
+    bool        use_flat_fallback = true;     // flat scan when index not yet built
+    std::string partition_filter;             // "" = no filter; restrict to matching partition_value (Phase 9)
+    const HardwareProfile* hw = nullptr;     // nullptr = auto-detect
 };
+```
+
+Set `partition_filter` to restrict search to files written with a matching `partition_value`. Pruning happens at the manifest level before any HNSW I/O:
+
+```cpp
+ailake::SearchOptions opts;
+opts.top_k            = 10;
+opts.partition_filter = "agent-42";
+
+auto results = ailake::search(catalog, "default", "agents",
+                              query.data(), query.size(), opts);
 ```
 
 ### `FileSearchResult`

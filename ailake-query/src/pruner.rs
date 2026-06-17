@@ -115,6 +115,7 @@ mod tests {
             index_status: ailake_catalog::IndexStatus::Ready,
             batch_id: None,
             embedding_model: None,
+            partition_value: None,
         };
         let query = vec![0.0f32, 0.0, 1.0];
         let kept = VectorPruner::prune(vec![entry], &query, VectorMetric::Cosine, 0.0);

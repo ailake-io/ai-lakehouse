@@ -28,6 +28,8 @@ fn make_policy(dim: u32) -> VectorStoragePolicy {
         ivf_residual: false,
         embedding_model: None,
         modality: None,
+        partition_by: None,
+        partition_value: None,
     }
 }
 

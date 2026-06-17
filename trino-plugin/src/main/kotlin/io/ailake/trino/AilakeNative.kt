@@ -67,6 +67,8 @@ object AilakeNative {
         ids: List<Long>,
         embeddings: List<List<Float>>,
         embeddingModel: String? = null,
+        partitionBy: String? = null,
+        partitionValue: String? = null,
     ): Long? {
         val native = lib ?: return null
         if (ids.isEmpty()) return null
@@ -83,6 +85,8 @@ object AilakeNative {
             "embeddings" to embeddings,
         )
         if (embeddingModel != null) payload["embedding_model"] = embeddingModel
+        if (partitionBy    != null) payload["partition_by"]    = partitionBy
+        if (partitionValue != null) payload["partition_value"] = partitionValue
         val requestJson = mapper.writeValueAsString(payload)
 
         val ptr = native.ailake_write_batch_json(requestJson) ?: run {
@@ -119,6 +123,7 @@ object AilakeNative {
         tableUri: String,
         queries: List<Triple<String, List<Float>, Float>>,
         topK: Int,
+        partitionFilter: String? = null,
     ): List<MultimodalSearchRow> {
         val native = lib ?: return emptyList()
         if (queries.isEmpty()) return emptyList()
@@ -127,10 +132,11 @@ object AilakeNative {
             val qArr = q.joinToString(",", "[", "]")
             """{"col":${mapper.writeValueAsString(col)},"query":$qArr,"weight":$w,"dim":0}"""
         }
+        val partJson = if (partitionFilter != null) ""","partition_filter":${mapper.writeValueAsString(partitionFilter)}""" else ""
         val requestJson = mapper.writeValueAsString(
             mapOf("warehouse" to tableUri, "namespace" to "default", "table" to "table",
                   "top_k" to topK)
-        ).dropLast(1) + ""","queries":$queriesJson}"""
+        ).dropLast(1) + ""","queries":$queriesJson$partJson}"""
 
         val ptr = native.ailake_search_multimodal_json(requestJson) ?: run {
             log.warn("[ailake] ailake_search_multimodal_json returned null for tableUri={}", tableUri)
@@ -166,7 +172,7 @@ object AilakeNative {
      * @param queryBytes  Base64-encoded little-endian f32 array
      * @param topK        number of nearest neighbors
      */
-    fun search(tableUri: String, queryBytes: String, topK: Int): List<SearchRow> {
+    fun search(tableUri: String, queryBytes: String, topK: Int, partitionFilter: String? = null): List<SearchRow> {
         val native = lib ?: return emptyList()
         if (queryBytes.isBlank()) return emptyList()
 
@@ -180,16 +186,16 @@ object AilakeNative {
         }
         if (floats.isEmpty()) return emptyList()
 
-        val requestJson = mapper.writeValueAsString(
-            mapOf(
-                "warehouse" to tableUri,
-                "namespace" to "default",
-                "table" to "table",
-                "query" to floats,
-                "dim" to floats.size,
-                "top_k" to topK,
-            )
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to tableUri,
+            "namespace" to "default",
+            "table" to "table",
+            "query" to floats,
+            "dim" to floats.size,
+            "top_k" to topK,
         )
+        if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        val requestJson = mapper.writeValueAsString(payload)
 
         val ptr = native.ailake_search_json(requestJson) ?: run {
             log.warn("[ailake] ailake_search_json returned null pointer for tableUri={}", tableUri)

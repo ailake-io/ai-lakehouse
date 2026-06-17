@@ -475,6 +475,9 @@ Or set `ailake.native.lib` system property or `AILAKE_NATIVE_LIB` env var to poi
 | `search.top-k` | | `10` | Results per query |
 | `search.ef` | | `50` | HNSW ef_search parameter (ignored for IVF-PQ index type) |
 | `search.rerank-factor` | | `1` | Rerank multiplier for IVF-PQ (fetches `top_k × factor` candidates, reranks with exact distances). Ignored for HNSW. |
+| `partition.by` | | `` | Iceberg identity partition column (e.g. `agent_id`). Enables manifest-level per-agent pruning (Phase 9). |
+| `partition.value` | | `` | Partition value for this table source/sink instance. |
+| `search.partition-filter` | | `` | Restrict search to files with this partition_value (Phase 9). |
 
 ---
 
@@ -486,8 +489,11 @@ Or set `ailake.native.lib` system property or `AILAKE_NATIVE_LIB` env var to poi
 
 | Function | Signature | Description |
 |---|---|---|
-| `ailake_search` | `(table_path VARCHAR, query FLOAT[], top_k INTEGER) → TABLE(row_id BIGINT, distance FLOAT, file_path VARCHAR)` | Vector nearest-neighbor search |
-| `ailake_write_batch` | `(table_path VARCHAR, ids BIGINT[], embeddings FLOAT[][]) → BIGINT` | Write a batch; returns snapshot ID or -1 on error |
+| `ailake_search` | `(table_path VARCHAR, query FLOAT[], top_k INTEGER [, vec_col VARCHAR, ef_search INTEGER, partition_filter VARCHAR]) → TABLE(row_id BIGINT, distance FLOAT, file_path VARCHAR)` | Vector nearest-neighbor search |
+| `ailake_search_multimodal` | `(table_path VARCHAR, queries LIST(STRUCT(...)), top_k INTEGER [, partition_filter VARCHAR]) → TABLE(row_id BIGINT, rrf_score FLOAT, file_path VARCHAR)` | Cross-modal RRF search |
+| `ailake_write_batch` | `(table_path VARCHAR, ids BIGINT[], embeddings FLOAT[][] [, vec_col, metric, precision, partition_by, partition_value]) → BIGINT` | Write a batch; returns snapshot ID or -1 on error |
+
+`partition_filter` (search) and `partition_by` / `partition_value` (write) are optional named parameters that enable per-agent/per-tenant manifest-level file pruning (Phase 9). All three functions degrade gracefully when `libailake_jni.so` is not loaded.
 
 The extension uses the same JSON-envelope C-ABI protocol as the Spark and Trino plugins — no additional Rust code required.
 

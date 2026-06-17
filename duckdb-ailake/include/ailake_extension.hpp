@@ -93,13 +93,15 @@ public:
     bool is_scan_ready()       const { return scan_fn_       != nullptr; }
 
     // Execute ailake_search_json. Returns empty on any error.
+    // partition_filter: if non-empty, restrict to files with matching partition_value.
     std::vector<SearchRow> search(
         const std::string        &warehouse,
         const std::string        &table_name,
         const std::string        &vec_col,
         const std::vector<float> &query,
         int                       top_k,
-        int                       ef_search = 50
+        int                       ef_search        = 50,
+        const std::string        &partition_filter = ""
     ) const;
 
     // Execute ailake_scan_json. Returns pre-parsed columnar data.
@@ -117,10 +119,13 @@ public:
         const std::string                 &warehouse,
         const std::string                 &table_name,
         const std::vector<ModalQueryArg>  &queries,
-        int                                top_k
+        int                                top_k,
+        const std::string                 &partition_filter = ""
     ) const;
 
     // Execute ailake_write_batch_json. Returns snapshot_id or -1 on error.
+    // partition_by: identity partition column stored in metadata.json (e.g. "agent_id").
+    // partition_value: per-write value tagged in key_metadata per file (e.g. agent UUID).
     int64_t write_batch(
         const std::string              &warehouse,
         const std::string              &ns,
@@ -130,7 +135,9 @@ public:
         const std::string              &metric,
         const std::string              &precision,
         const std::vector<int64_t>     &ids,
-        const std::vector<std::vector<float>> &embeddings
+        const std::vector<std::vector<float>> &embeddings,
+        const std::string              &partition_by    = "",
+        const std::string              &partition_value = ""
     ) const;
 
 private:

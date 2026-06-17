@@ -72,6 +72,12 @@ pub struct DataFileEntry {
     /// can be identified without reading the main metadata.json.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
+    /// Partition value for this file (e.g. the agent_id UUID).
+    /// Written per-file when `VectorStoragePolicy::partition_by` is set.
+    /// Enables manifest-level pruning: search skips files whose partition_value
+    /// doesn't match the requested partition filter, avoiding all HNSW I/O.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_value: Option<String>,
 }
 
 /// Iceberg-compatible table metadata read from the catalog.
@@ -202,6 +208,7 @@ pub fn make_multi_column_data_file_entry(
         index_status: IndexStatus::Ready,
         batch_id: None,
         embedding_model: None,
+        partition_value: None,
     }
 }
 
@@ -238,6 +245,7 @@ pub fn make_data_file_entry_indexing(
         index_status: IndexStatus::Indexing,
         batch_id: None,
         embedding_model: None,
+        partition_value: None,
     }
 }
 

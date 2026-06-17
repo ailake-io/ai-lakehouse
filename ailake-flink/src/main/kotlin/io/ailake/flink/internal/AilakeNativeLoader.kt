@@ -74,19 +74,20 @@ object AilakeNativeLoader {
         query: FloatArray,
         topK: Int = 10,
         efSearch: Int = 50,
+        partitionFilter: String? = null,
     ): List<SearchResultItem> {
-        val req = mapper.writeValueAsString(
-            mapOf(
-                "warehouse" to warehouse,
-                "namespace" to namespace,
-                "table" to table,
-                "vec_col" to vecCol,
-                "dim" to dim,
-                "query" to query.toList(),
-                "top_k" to topK,
-                "ef_search" to efSearch,
-            )
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse,
+            "namespace" to namespace,
+            "table" to table,
+            "vec_col" to vecCol,
+            "dim" to dim,
+            "query" to query.toList(),
+            "top_k" to topK,
+            "ef_search" to efSearch,
         )
+        if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_json(req)
         return try {
             val json = ptr.getString(0)
@@ -128,20 +129,21 @@ object AilakeNativeLoader {
         table: String,
         queries: List<Triple<String, FloatArray, Float>>,
         topK: Int = 10,
+        partitionFilter: String? = null,
     ): List<MultimodalSearchResultItem> {
         require(queries.isNotEmpty()) { "queries must not be empty" }
         val queriesArr = queries.map { (col, q, w) ->
             mapOf("col" to col, "query" to q.toList(), "weight" to w, "dim" to 0)
         }
-        val req = mapper.writeValueAsString(
-            mapOf(
-                "warehouse" to warehouse,
-                "namespace" to namespace,
-                "table"     to table,
-                "queries"   to queriesArr,
-                "top_k"     to topK,
-            )
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse,
+            "namespace" to namespace,
+            "table"     to table,
+            "queries"   to queriesArr,
+            "top_k"     to topK,
         )
+        if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_multimodal_json(req)
         return try {
             val json = ptr.getString(0)
@@ -175,6 +177,8 @@ object AilakeNativeLoader {
         ids: LongArray,
         embeddings: Array<FloatArray>,
         embeddingModel: String? = null,
+        partitionBy: String? = null,
+        partitionValue: String? = null,
     ): Long {
         require(ids.size == embeddings.size) { "ids.size != embeddings.size" }
         val payload = mutableMapOf<String, Any>(
@@ -188,7 +192,9 @@ object AilakeNativeLoader {
             "ids" to ids.toList(),
             "embeddings" to embeddings.map { it.toList() },
         )
-        if (embeddingModel != null) payload["embedding_model"] = embeddingModel
+        if (embeddingModel  != null) payload["embedding_model"] = embeddingModel
+        if (partitionBy     != null) payload["partition_by"]    = partitionBy
+        if (partitionValue  != null) payload["partition_value"] = partitionValue
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_write_batch_json(req)
         return try {

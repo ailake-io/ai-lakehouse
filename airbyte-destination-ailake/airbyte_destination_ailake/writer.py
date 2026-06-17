@@ -60,6 +60,8 @@ class StreamWriter:
                 kwargs["embedding_model"] = self._cfg.embedding_model
             if self._cfg.embedding_model_version:
                 kwargs["embedding_model_version"] = self._cfg.embedding_model_version
+            if self._cfg.partition_by:
+                kwargs["partition_by"] = self._cfg.partition_by
             self._table = ailake.open_table(self._table_path, **kwargs)
         return self._table
 

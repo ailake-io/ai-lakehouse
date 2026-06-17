@@ -66,6 +66,8 @@ object AilakeNative {
     ids:            Seq[Long],
     embeddings:     Seq[Seq[Float]],
     embeddingModel: Option[String] = None,
+    partitionBy:    Option[String] = None,
+    partitionValue: Option[String] = None,
   ): Option[Long] = {
     if (ids.isEmpty) return None
     lib match {
@@ -74,11 +76,13 @@ object AilakeNative {
         val idsJson  = ids.mkString("[", ",", "]")
         val embJson  = embeddings.map(_.mkString("[", ",", "]")).mkString("[", ",", "]")
         val modelJson = embeddingModel.map(m => s""","embedding_model":${jsonStr(m)}""").getOrElse("")
+        val partByJson  = partitionBy.map(v => s""","partition_by":${jsonStr(v)}""").getOrElse("")
+        val partValJson = partitionValue.map(v => s""","partition_value":${jsonStr(v)}""").getOrElse("")
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
           s""""table":${jsonStr(tableName)},"vec_col":${jsonStr(vectorColumn)},""" +
           s""""dim":$dim,"metric":${jsonStr(metric)},"precision":${jsonStr(precision)},""" +
-          s""""ids":$idsJson,"embeddings":$embJson$modelJson}"""
+          s""""ids":$idsJson,"embeddings":$embJson$modelJson$partByJson$partValJson}"""
         val ptr = native.ailake_write_batch_json(requestJson)
         if (ptr == null) {
           log.warn(s"[ailake] ailake_write_batch_json returned null for table=$tableName")
@@ -110,15 +114,21 @@ object AilakeNative {
    * @param query     f32 query vector
    * @param topK      number of nearest neighbors
    */
-  def search(tableUri: String, query: Array[Float], topK: Int): Seq[SearchRow] = {
+  def search(
+    tableUri:        String,
+    query:           Array[Float],
+    topK:            Int,
+    partitionFilter: Option[String] = None,
+  ): Seq[SearchRow] = {
     if (query.isEmpty) return Seq.empty
     lib match {
       case None => Seq.empty
       case Some(native) =>
         val queryJson = query.mkString("[", ",", "]")
+        val partJson  = partitionFilter.map(v => s""","partition_filter":${jsonStr(v)}""").getOrElse("")
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":"default","table":"table",""" +
-          s""""query":$queryJson,"dim":${query.length},"top_k":$topK}"""
+          s""""query":$queryJson,"dim":${query.length},"top_k":$topK$partJson}"""
         val ptr = native.ailake_search_json(requestJson)
         if (ptr == null) {
           log.warn("[ailake] ailake_search_json returned null pointer for tableUri={}", tableUri)
@@ -147,9 +157,10 @@ object AilakeNative {
    * @param topK      number of results to return
    */
   def searchMultimodal(
-    tableUri: String,
-    queries: Seq[(String, Array[Float], Float)],
-    topK: Int,
+    tableUri:        String,
+    queries:         Seq[(String, Array[Float], Float)],
+    topK:            Int,
+    partitionFilter: Option[String] = None,
   ): Seq[MultimodalSearchRow] = {
     if (queries.isEmpty) return Seq.empty
     lib match {
@@ -158,9 +169,10 @@ object AilakeNative {
         val queriesJson = queries.map { case (col, q, w) =>
           s"""{"col":${jsonStr(col)},"query":${q.mkString("[", ",", "]")},"weight":$w,"dim":0}"""
         }.mkString("[", ",", "]")
+        val partJson = partitionFilter.map(v => s""","partition_filter":${jsonStr(v)}""").getOrElse("")
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":"default","table":"table",""" +
-          s""""queries":$queriesJson,"top_k":$topK}"""
+          s""""queries":$queriesJson,"top_k":$topK$partJson}"""
         val ptr = native.ailake_search_multimodal_json(requestJson)
         if (ptr == null) {
           log.warn("[ailake] ailake_search_multimodal_json returned null for tableUri={}", tableUri)

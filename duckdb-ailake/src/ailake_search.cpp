@@ -32,11 +32,12 @@ using namespace duckdb;
 
 struct AilakeSearchBindData : public TableFunctionData {
     std::string        warehouse;
-    std::string        table_name  = "table";
-    std::string        vec_col     = "embedding";
+    std::string        table_name      = "table";
+    std::string        vec_col         = "embedding";
     std::vector<float> query;
-    int                top_k       = 10;
-    int                ef_search   = 50;
+    int                top_k           = 10;
+    int                ef_search       = 50;
+    std::string        partition_filter; // Phase 9: restrict to one agent's files
 };
 
 // ── Global state (search executed once in Init, results cached) ───────────────
@@ -89,6 +90,9 @@ static unique_ptr<FunctionData> AilakeSearchBind(
             data->ef_search = IntegerValue::Get(named.second);
         } else if (named.first == "table_name") {
             data->table_name = StringValue::Get(named.second);
+        } else if (named.first == "partition_filter") {
+            if (!named.second.IsNull())
+                data->partition_filter = StringValue::Get(named.second);
         }
     }
 
@@ -120,7 +124,8 @@ static unique_ptr<GlobalTableFunctionState> AilakeSearchInit(
         bind.vec_col,
         bind.query,
         bind.top_k,
-        bind.ef_search
+        bind.ef_search,
+        bind.partition_filter
     );
 
     return std::move(state);
@@ -171,9 +176,10 @@ void RegisterAilakeSearch(duckdb::DatabaseInstance &db) {
         AilakeSearchInit
     );
 
-    func.named_parameters["vec_col"]    = LogicalType::VARCHAR;
-    func.named_parameters["ef_search"]  = LogicalType::INTEGER;
-    func.named_parameters["table_name"] = LogicalType::VARCHAR;
+    func.named_parameters["vec_col"]          = LogicalType::VARCHAR;
+    func.named_parameters["ef_search"]        = LogicalType::INTEGER;
+    func.named_parameters["table_name"]       = LogicalType::VARCHAR;
+    func.named_parameters["partition_filter"] = LogicalType::VARCHAR;
 
     ExtensionUtil::RegisterFunction(db, func);
 }

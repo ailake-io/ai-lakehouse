@@ -115,6 +115,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
 
         // Spawn background HNSW build (fire-and-forget; errors are logged).
@@ -172,6 +173,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
 
         let store = self.store.clone();
@@ -314,6 +316,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
         Ok(())
     }
@@ -443,6 +446,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
         Ok(())
     }
@@ -550,6 +554,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
         Ok(())
     }
@@ -626,6 +631,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
 
         // Clone all column data for the background task.
@@ -707,7 +713,10 @@ impl TableWriter {
         policy: VectorStoragePolicy,
         table: TableIdent,
     ) -> AilakeResult<Self> {
-        // Try to load; if not found, create
+        // Track existing file count so new writers start their part counter past
+        // any already-committed files, preventing name collisions on sequential writes.
+        let existing_file_count: u32;
+
         match catalog.load_table(&table).await {
             Ok(existing_meta) => {
                 // Warn when writing with a different model name into an existing table.
@@ -728,6 +737,11 @@ impl TableWriter {
                         }
                     }
                 }
+                existing_file_count = catalog
+                    .list_files(&table, None)
+                    .await
+                    .unwrap_or_default()
+                    .len() as u32;
             }
             Err(_) => {
                 catalog
@@ -739,9 +753,12 @@ impl TableWriter {
                         },
                     )
                     .await?;
+                existing_file_count = 0;
             }
         }
-        Ok(Self::new(catalog, store, policy, table))
+        let mut writer = Self::new(catalog, store, policy, table);
+        writer.part_counter = Arc::new(AtomicU32::new(existing_file_count));
+        Ok(writer)
     }
 }
 
@@ -1320,6 +1337,8 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
         }
     }
 

@@ -312,3 +312,33 @@ recall/latency tradeoff but requires the most complex build setup.
 **Binary size impact (Phase 4 final):** `ailake-bench` 13 MB unstripped → 9.3 MB (auto-stripped, panic=abort, no candle-core). `libailake_jni.so` 12 MB → 9.0 MB.
 
 **Next step (Phase 5):** cuVS FFI remains deferred — reopen condition: ≥2 conditions from §7 Step 3 hold simultaneously. Current SGEMM GPU path is adequate for files up to ~500k vectors at dim=1536.
+
+---
+
+## 9. Phase 9 — Agent Memory Features and GPU Interaction
+
+### `partition_filter` (Phase 9)
+
+`SearchConfig.partition_filter` prunes at manifest level before any GPU or HNSW work begins.
+The GPU flat-scan path (`SearchSession.search_batch()`) also respects `partition_filter` — files
+from other partitions are excluded by `scanner.rs:212` before the shard list is handed to the GPU.
+No GPU-specific changes required; filter is applied at the Rust layer uniformly.
+
+### `score_fn` limitation during deferred build window
+
+`score_fn: Option<ScoreFn>` is applied in `scanner.rs` at lines 265 and 308, after each HNSW
+candidate is read alongside Parquet row data. However, `SearchSession.search_batch()` — the GPU
+flat-scan path used during the deferred index build window — does **not** have access to Parquet
+row data and therefore **cannot apply `score_fn`**.
+
+**Implication**: during the brief window between `write_batch_auto_deferred` completing the
+Parquet write and the background HNSW/IVF-PQ build finishing, queries served via the GPU
+flat-scan will ignore `score_fn` and return results ordered by pure distance only.
+
+**Mitigation**: this window is typically seconds to minutes depending on dataset size. For
+production agent workloads where hybrid scoring is critical, use synchronous `write_batch()`
+or wait for `IndexStatus::Ready` before querying with `score_fn`.
+
+Python bindings expose `score_fn` as a Python-level post-processing step in `_apply_score_fn`
+(applied after `search_with_data()` returns IPC bytes) — the GPU flat-scan limitation applies
+only to the Rust-level `score_fn` in `SearchConfig`, not the Python wrapper.

@@ -40,6 +40,7 @@ type DataFileEntry struct {
 	IndexStatus        string             // "ready" | "indexing"
 	BatchID            string
 	EmbeddingModel     string // "<name>" or "<name>@<version>"; empty if not set
+	PartitionValue     string // agent_id or other partition value (Phase 9)
 }
 
 // TableInfo mirrors the JSON output of "ailake info --format json".
@@ -216,6 +217,7 @@ type ailakeEntryExt struct {
 	BatchID            *string            `json:"batch_id"`
 	EmbeddingModel     *string            `json:"embedding_model"`
 	ExtraVectorIndexes []ExtraVectorIndex `json:"extra_vector_indexes"`
+	PartitionValue     *string            `json:"partition_value"`
 }
 
 // readManifestFile reads an Iceberg manifest file (Avro OCF) and returns DataFileEntry list.
@@ -303,6 +305,9 @@ func readManifestFile(path string) ([]DataFileEntry, error) {
 			entry.EmbeddingModel = *ext.EmbeddingModel
 		}
 		entry.ExtraVectorIndexes = ext.ExtraVectorIndexes
+		if ext.PartitionValue != nil {
+			entry.PartitionValue = *ext.PartitionValue
+		}
 		entries = append(entries, entry)
 	}
 	return entries, ocf.Err()

@@ -19,7 +19,7 @@ pub use mem_table::{MemTableConfig, MemTableWriter};
 pub use migration::{EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy, ProgressFn};
 pub use pruner::VectorPruner;
 pub use scanner::{
-    fetch_rows, search, search_multimodal, FusionMethod, ModalQuery, SearchConfig, SearchResult,
-    SearchSession,
+    fetch_rows, search, search_multimodal, FusionMethod, ModalQuery, ScoreFn, SearchConfig,
+    SearchResult, SearchSession,
 };
 pub use writer::{MultiVectorBatch, TableWriter};

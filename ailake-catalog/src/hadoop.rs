@@ -302,6 +302,8 @@ mod tests {
                 ivf_residual: false,
                 embedding_model: None,
                 modality: None,
+                partition_by: None,
+                partition_value: None,
             },
             extra: std::collections::HashMap::new(),
         }
@@ -346,6 +348,7 @@ mod tests {
                 index_status: crate::provider::IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
+                partition_value: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,

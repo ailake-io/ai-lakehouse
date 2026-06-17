@@ -782,6 +782,24 @@ CPU fallback        →  kmeans_centroids (parallel rayon)
 cargo build --release
 ```
 
+### 8F-7. Phase 9 agent features and GPU interaction
+
+**`partition_filter`** — applied at manifest level in `scanner.rs` before any file is opened.
+The GPU flat-scan path (`SearchSession.search_batch()`) also respects it; no GPU-specific changes.
+
+**`score_fn` limitation** — `score_fn: Option<ScoreFn>` is applied after HNSW candidate
+rows are read from Parquet (lines 265/308 in `scanner.rs`). The GPU flat-scan path used
+during the deferred index build window (`write_batch_auto_deferred`, `IndexStatus::Indexing`)
+has no Parquet row data available and therefore **ignores `score_fn`**. Results during this
+window are ordered by pure distance only.
+
+If hybrid scoring is required from the first query, use synchronous `write_batch()` instead
+of deferred variants, or poll `IndexStatus` until `Ready` before querying.
+
+Python-level `score_fn` (passed to `ailake.search()` / `SearchQuery`) runs as a Python
+post-processing step after `search_with_data()` returns IPC bytes and is not affected by
+this limitation.
+
 ---
 
 ## 8F-2. Storage estimator (`ailake estimate`)

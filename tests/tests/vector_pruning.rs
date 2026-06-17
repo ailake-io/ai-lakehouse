@@ -33,6 +33,8 @@ async fn pruning_eliminates_distant_file() {
         ivf_residual: false,
         embedding_model: None,
         modality: None,
+        partition_by: None,
+        partition_value: None,
     };
 
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
@@ -83,6 +85,8 @@ async fn pruning_eliminates_distant_file() {
             ef_search: 50,
             pruning_threshold: 0.5, // file B centroid is ~1.0 distance away → pruned
             rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
         },
         "embedding",
         4,

@@ -7,6 +7,7 @@ Writes multiple AI-Lake tables to demonstrate all SDK features:
   - Deferred table  — 200 rows, write_batch_auto_deferred
   - Residual-PQ     — 500 rows, ivf_residual=True
   - Multimodal      — 200 rows, text embedding (dim=32) + image embedding (dim=16)
+  - Agent memory    — 100 rows across 2 agents (Phase 9 partition isolation demo)
 
 Runs once at container startup via entrypoint.sh; skipped on restart if
 version-hint.text already exists in the main HNSW table.
@@ -25,10 +26,13 @@ RESIDUAL_PATH       = str(pathlib.Path(TABLE_PATH).parent / "ailake_residual_pq"
 DEFERRED_PATH       = str(pathlib.Path(TABLE_PATH).parent / "ailake_deferred")
 MODEL_TRACKED_PATH  = str(pathlib.Path(TABLE_PATH).parent / "ailake_model_tracked")
 MULTIMODAL_PATH     = str(pathlib.Path(TABLE_PATH).parent / "ailake_multimodal")
+AGENT_PATH          = os.environ.get("DEMO_AGENT_PATH",
+                          str(pathlib.Path(TABLE_PATH).parent / "ailake_agent"))
 DIM                 = int(os.environ.get("DEMO_DIM", "32"))
 IMAGE_DIM           = 16   # synthetic "CLIP-like" image embeddings (half the text dim)
 N_DOCS              = 500
 N_DEFERRED          = 200
+N_AGENT_DOCS        = 50   # per agent — 50 × 2 agents = 100 rows total
 METRIC              = "cosine"
 
 TOPICS = [
@@ -124,6 +128,44 @@ def _write_multimodal(texts: list[str], embeddings: list[list[float]]) -> None:
     )
 
 
+def _write_agent_memory(texts: list[str], embeddings: list[list[float]]) -> None:
+    """Phase 9 — two agents writing to the same table with partition isolation.
+
+    agent-A owns rows 0..N_AGENT_DOCS, agent-B owns rows N_AGENT_DOCS..2*N_AGENT_DOCS.
+    Embeddings for each agent cluster around an orthogonal centroid so partition
+    pruning is visibly effective in notebook §25.
+    """
+    import ailake
+    os.makedirs(AGENT_PATH, exist_ok=True)
+
+    # Agent-A: topics 0..N_AGENT_DOCS (first N rows of corpus)
+    writer_a = ailake.TableWriter(
+        AGENT_PATH, dim=DIM, metric=METRIC,
+        partition_by="agent_id", partition_value="agent-A",
+    )
+    writer_a.write_batch(texts[:N_AGENT_DOCS], embeddings[:N_AGENT_DOCS])
+    snap_a = writer_a.commit()
+    print(
+        f"[Agent-A]  Committed snapshot_id={snap_a}"
+        f"  rows={N_AGENT_DOCS}  partition=agent_id/agent-A"
+    )
+
+    # Agent-B: topics N_AGENT_DOCS..2*N_AGENT_DOCS (next N rows of corpus)
+    writer_b = ailake.TableWriter(
+        AGENT_PATH, dim=DIM, metric=METRIC,
+        partition_by="agent_id", partition_value="agent-B",
+    )
+    writer_b.write_batch(
+        texts[N_AGENT_DOCS : N_AGENT_DOCS * 2],
+        embeddings[N_AGENT_DOCS : N_AGENT_DOCS * 2],
+    )
+    snap_b = writer_b.commit()
+    print(
+        f"[Agent-B]  Committed snapshot_id={snap_b}"
+        f"  rows={N_AGENT_DOCS}  partition=agent_id/agent-B"
+    )
+
+
 def _write_model_tracked(texts: list[str], embeddings: list[list[float]]) -> None:
     """HNSW table with embedding model metadata — demonstrates model tracking feature."""
     import ailake
@@ -163,12 +205,18 @@ def _save_query_payload(embeddings: list[list[float]], texts: list[str]) -> None
             "deferred":      DEFERRED_PATH,
             "model_tracked": MODEL_TRACKED_PATH,
             "multimodal":    MULTIMODAL_PATH,
+            "agent":         AGENT_PATH,
         },
         "multimodal": {
             "text_dim":       DIM,
             "image_dim":      IMAGE_DIM,
             "text_column":    "embedding",
             "image_column":   "image_embedding",
+        },
+        "agent": {
+            "agent_ids":        ["agent-A", "agent-B"],
+            "partition_column": "agent_id",
+            "n_docs_per_agent": N_AGENT_DOCS,
         },
     }
     query_path = os.path.join(os.path.dirname(TABLE_PATH), "demo_query.json")
@@ -193,6 +241,7 @@ def main() -> None:
     _write_deferred(texts, embeddings)
     _write_model_tracked(texts, embeddings)
     _write_multimodal(texts, embeddings)
+    _write_agent_memory(texts, embeddings)
     _save_query_payload(embeddings, texts)
 
     _maybe_register_nessie(TABLE_PATH)

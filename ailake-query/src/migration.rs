@@ -344,6 +344,8 @@ impl MigrationJob {
             ivf_residual: false,
             embedding_model: self.new_model.clone(),
             modality: None,
+            partition_by: None,
+            partition_value: None,
         })
     }
 }
