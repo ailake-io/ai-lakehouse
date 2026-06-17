@@ -182,6 +182,26 @@ impl AilakeTrailer {
     }
 }
 
+/// Returns the byte offset in `buf` where the Parquet footer thrift starts.
+///
+/// Parquet tail layout: `[...footer_thrift...][footer_len: u32 LE][PAR1: 4 bytes]`
+///
+/// Used by both the writer (to know where to splice AILK sections) and the reader
+/// (to locate the AILK trailer for KV-less bootstrap).
+pub fn parquet_footer_start(buf: &[u8]) -> AilakeResult<usize> {
+    let len = buf.len();
+    if len < 8 {
+        return Err(AilakeError::Parquet("file too small".into()));
+    }
+    if &buf[len - 4..] != b"PAR1" {
+        return Err(AilakeError::Parquet("missing PAR1 footer magic".into()));
+    }
+    let footer_thrift_len =
+        u32::from_le_bytes(buf[len - 8..len - 4].try_into().unwrap()) as usize;
+    len.checked_sub(8 + footer_thrift_len)
+        .ok_or_else(|| AilakeError::Parquet("footer length overflow".into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
