@@ -938,7 +938,7 @@ fn arrow_type_to_iceberg(dt: &arrow_schema::DataType, nested_id: &mut i32) -> se
 }
 
 /// Background task: reads a Parquet-only shard, builds full AILK file, patches catalog.
-async fn build_and_patch_index(
+pub(crate) async fn build_and_patch_index(
     store: Arc<dyn Store>,
     catalog: Arc<dyn CatalogProvider>,
     policy: VectorStoragePolicy,

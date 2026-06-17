@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use ailake_catalog::{
-    make_data_file_entry, CatalogProvider, DataFileEntry, NewSnapshot, SnapshotOperation,
-    TableIdent, VectorIndexInfo,
+    make_data_file_entry, make_data_file_entry_indexing, CatalogProvider, DataFileEntry,
+    NewSnapshot, SnapshotOperation, TableIdent, VectorIndexInfo,
 };
 use ailake_core::{AilakeResult, VectorStoragePolicy};
 use ailake_file::{AilakeFileReader, AilakeFileWriter};
@@ -13,6 +13,9 @@ use ailake_vec::compute_centroid_and_radius;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
+use futures::future::try_join_all;
+
+use crate::writer::build_and_patch_index;
 
 /// Index strategy for the merged file produced by compaction.
 #[derive(Debug, Clone, Default)]
@@ -24,6 +27,9 @@ pub enum CompactionIndexStrategy {
     /// Always rebuild with HNSW — highest recall, larger index.
     ForceHnsw,
     /// Always rebuild with IVF-PQ — smaller index, better S3 throughput.
+    ///
+    /// Recommended for large compactions (N > 100 000) on CPU-only machines
+    /// where HNSW rebuild cost becomes prohibitive.
     ForceIvfPq,
 }
 
@@ -35,6 +41,13 @@ pub struct CompactionConfig {
     pub target_file_size_bytes: u64,
     /// Index algorithm for the merged output file.
     pub index_strategy: CompactionIndexStrategy,
+    /// Maximum files merged in a single compaction pass.
+    ///
+    /// Candidates are sorted smallest-first; only the first `max_files_per_pass`
+    /// are compacted each run. This bounds peak RAM and HNSW rebuild CPU cost —
+    /// O(N log N) stays proportional to this limit rather than table size.
+    /// Default: 20. Set to `usize::MAX` to compact all eligible files at once.
+    pub max_files_per_pass: usize,
 }
 
 impl Default for CompactionConfig {
@@ -43,6 +56,7 @@ impl Default for CompactionConfig {
             min_files_to_compact: 4,
             target_file_size_bytes: 128 * 1024 * 1024, // 128 MB
             index_strategy: CompactionIndexStrategy::Auto,
+            max_files_per_pass: 20,
         }
     }
 }
@@ -62,10 +76,14 @@ impl CompactionPlanner {
         Self { config }
     }
 
-    /// Select files to compact: all files smaller than `target_file_size_bytes`,
-    /// provided at least `min_files_to_compact` qualify.
+    /// Select files to compact.
+    ///
+    /// Picks files smaller than `target_file_size_bytes`, sorts them smallest-first
+    /// (cheapest to read), and caps the selection at `max_files_per_pass`. This
+    /// tiered approach prevents a single pass from compacting the entire table into
+    /// memory when thousands of small files exist.
     pub fn plan(&self, files: &[DataFileEntry]) -> Vec<DataFileEntry> {
-        let candidates: Vec<DataFileEntry> = files
+        let mut candidates: Vec<DataFileEntry> = files
             .iter()
             .filter(|f| f.file_size_bytes < self.config.target_file_size_bytes)
             .cloned()
@@ -78,6 +96,10 @@ impl CompactionPlanner {
             );
             return vec![];
         }
+        // Sort smallest-first so each pass handles the cheapest files first.
+        // This bounds peak RAM to max_files_per_pass * avg_small_file_size.
+        candidates.sort_unstable_by_key(|f| f.file_size_bytes);
+        candidates.truncate(self.config.max_files_per_pass);
         let total_bytes: u64 = candidates.iter().map(|f| f.file_size_bytes).sum();
         info!(
             "ailake: compaction plan — {} files ({} bytes) → 1 merged file",
@@ -94,6 +116,10 @@ impl CompactionPlanner {
 /// The index algorithm is chosen via `CompactionIndexStrategy` (default: `Auto`,
 /// which detects GPU / CPU cores at compaction time — the same heuristic used
 /// by `write_batch_auto`).
+///
+/// For large tables use `compact_deferred` / `run_deferred`: the merged Parquet
+/// is persisted immediately and the HNSW build runs in a background Tokio task,
+/// decoupling I/O cost from CPU cost.
 pub struct CompactionExecutor {
     store: Arc<dyn Store>,
     policy: VectorStoragePolicy,
@@ -115,7 +141,40 @@ impl CompactionExecutor {
         self
     }
 
+    /// Read all input files in parallel, returning ordered (batch, embeddings) pairs.
+    async fn read_files_parallel(
+        &self,
+        files: &[DataFileEntry],
+    ) -> AilakeResult<Vec<(RecordBatch, Vec<Vec<f32>>)>> {
+        let futs = files.iter().map(|entry| {
+            let store = self.store.clone();
+            let path = entry.path.clone();
+            let column = self.policy.column_name.clone();
+            let dim = self.policy.dim;
+            async move {
+                let bytes: Bytes = store.get(&path).await?;
+                let reader = AilakeFileReader::new(bytes, &column, dim);
+                if !reader.is_ailake_file() {
+                    debug!("ailake: compaction skipping {} — not an AI-Lake file", path);
+                    return Ok::<Option<(RecordBatch, Vec<Vec<f32>>)>, ailake_core::AilakeError>(
+                        None,
+                    );
+                }
+                let pair = reader.read_parquet()?;
+                Ok(Some(pair))
+            }
+        });
+        let results = try_join_all(futs).await?;
+        Ok(results.into_iter().flatten().collect())
+    }
+
     /// Merge `files` into a single new file at `output_path`.
+    ///
+    /// Reads all input files **in parallel** to minimise S3 latency, then
+    /// rebuilds the HNSW / IVF-PQ index synchronously. For very large merges
+    /// (N > 100 000 vectors) prefer `compact_deferred`, which offloads the
+    /// index build to a background Tokio task.
+    ///
     /// Returns the DataFileEntry for the merged file.
     pub async fn compact(
         &self,
@@ -128,40 +187,20 @@ impl CompactionExecutor {
             ));
         }
 
-        let mut all_batches: Vec<RecordBatch> = Vec::new();
-        let mut all_embeddings: Vec<Vec<f32>> = Vec::new();
-        let mut schema: Option<SchemaRef> = None;
+        let pairs = self.read_files_parallel(files).await?;
 
-        for entry in files {
-            let bytes: Bytes = self.store.get(&entry.path).await?;
-            let reader = AilakeFileReader::new(bytes, &self.policy.column_name, self.policy.dim);
-            if !reader.is_ailake_file() {
-                debug!(
-                    "ailake: compaction skipping {} — not an AI-Lake file",
-                    entry.path
-                );
-                continue;
-            }
-            let (batch, embs) = reader.read_parquet()?;
-            if schema.is_none() {
-                schema = Some(batch.schema());
-            }
-            all_batches.push(batch);
-            all_embeddings.extend(embs);
-        }
-
-        if all_batches.is_empty() {
+        if pairs.is_empty() {
             return Err(ailake_core::AilakeError::Catalog(
                 "compact: no valid AI-Lake files in input".into(),
             ));
         }
 
+        let schema: SchemaRef = pairs[0].0.schema();
+        let (all_batches, all_embeddings): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        let all_embeddings: Vec<Vec<f32>> = all_embeddings.into_iter().flatten().collect();
+
         // Concatenate all row groups into one batch
-        // SAFETY: schema is set whenever a batch is pushed; all_batches non-empty above.
-        let merged_batch = concat_batches(
-            schema.expect("schema set because all_batches is non-empty"),
-            &all_batches,
-        )?;
+        let merged_batch = concat_batches(schema, &all_batches)?;
         let record_count = merged_batch.num_rows() as u64;
 
         // Write merged file with adaptive index selection.
@@ -204,7 +243,80 @@ impl CompactionExecutor {
         Ok(entry)
     }
 
-    /// Full compaction workflow: plan, compact, drop old files from catalog, commit.
+    /// Merge `files` into a single new file at `output_path`, writing Parquet
+    /// immediately and building the HNSW / IVF-PQ index in a background Tokio task.
+    ///
+    /// The merged file appears in the catalog as `IndexStatus::Indexing` until
+    /// the background task completes; queries fall back to flat scan during that
+    /// window (same behaviour as `write_batch_deferred`).
+    ///
+    /// Returns the `DataFileEntry` with `IndexStatus::Indexing`. The entry
+    /// transitions to `Ready` automatically when the background build finishes.
+    pub async fn compact_deferred(
+        &self,
+        files: &[DataFileEntry],
+        output_path: &str,
+        catalog: Arc<dyn CatalogProvider>,
+        table: &TableIdent,
+    ) -> AilakeResult<DataFileEntry> {
+        if files.is_empty() {
+            return Err(ailake_core::AilakeError::Catalog(
+                "compact_deferred: no files provided".into(),
+            ));
+        }
+
+        let pairs = self.read_files_parallel(files).await?;
+
+        if pairs.is_empty() {
+            return Err(ailake_core::AilakeError::Catalog(
+                "compact_deferred: no valid AI-Lake files in input".into(),
+            ));
+        }
+
+        let schema: SchemaRef = pairs[0].0.schema();
+        let (all_batches, all_embeddings): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        let all_embeddings: Vec<Vec<f32>> = all_embeddings.into_iter().flatten().collect();
+
+        let merged_batch = concat_batches(schema, &all_batches)?;
+        let record_count = merged_batch.num_rows() as u64;
+
+        // Write Parquet-only immediately — fast path, no HNSW build.
+        let file_writer = AilakeFileWriter::new(self.policy.clone());
+        let parquet_bytes = file_writer.write_parquet_only(&merged_batch, &all_embeddings)?;
+        let file_size = parquet_bytes.len() as u64;
+        self.store.put(output_path, parquet_bytes).await?;
+
+        // Centroid available for geometric pruning during the build window.
+        let centroid = compute_centroid_and_radius(&all_embeddings, self.policy.metric);
+        let entry = make_data_file_entry_indexing(
+            output_path,
+            record_count,
+            file_size,
+            &centroid,
+            &self.policy.column_name,
+            self.policy.dim,
+        );
+
+        // Spawn background index build; errors are logged, not propagated.
+        let store = self.store.clone();
+        let policy = self.policy.clone();
+        let table_id = table.clone();
+        let fp = output_path.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = build_and_patch_index(store, catalog, policy, table_id, fp).await {
+                error!(
+                    "ailake: compaction deferred HNSW build failed — file indexed as \
+                     Parquet-only until next compaction rebuilds the index: {}",
+                    e
+                );
+            }
+        });
+
+        Ok(entry)
+    }
+
+    /// Full compaction workflow: plan, compact (synchronous HNSW rebuild),
+    /// drop old files from catalog, commit.
     pub async fn run(
         &self,
         planner: &CompactionPlanner,
@@ -220,13 +332,13 @@ impl CompactionExecutor {
 
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_else(|e| e.duration()) // handle misconfigured system clocks
+            .unwrap_or_else(|e| e.duration())
             .as_millis();
         let output_path = format!("{output_prefix}/compacted-{ts}.parquet");
 
         let merged = self.compact(&to_compact, &output_path).await?;
 
-        // Commit: add merged file, remove input files (via Overwrite snapshot)
+        // Commit: add merged file, remove input files (via Replace snapshot)
         let snapshot = NewSnapshot {
             snapshot_id: ailake_catalog::new_snapshot_id(),
             parent_snapshot_id: None,
@@ -243,19 +355,72 @@ impl CompactionExecutor {
             output_path
         );
 
-        // Delete old files from store
-        for entry in &to_compact {
-            if let Err(e) = self.store.delete(&entry.path).await {
-                error!(
-                    "ailake: compaction cleanup failed — could not delete {}: {} \
-                     (orphan file in object store after successful catalog commit; \
-                     delete manually to reclaim storage)",
-                    entry.path, e
-                );
-            }
-        }
+        delete_old_files(&self.store, &to_compact).await;
 
         Ok(Some(merged))
+    }
+
+    /// Full compaction workflow with deferred HNSW build: plan, write merged
+    /// Parquet immediately, commit as `Indexing`, spawn background index build.
+    ///
+    /// Use for large tables where inline HNSW rebuild blocks too long.
+    pub async fn run_deferred(
+        &self,
+        planner: &CompactionPlanner,
+        table: &TableIdent,
+        catalog: Arc<dyn CatalogProvider>,
+        output_prefix: &str,
+    ) -> AilakeResult<Option<DataFileEntry>> {
+        let all_files = catalog.list_files(table, None).await?;
+        let to_compact = planner.plan(&all_files);
+        if to_compact.is_empty() {
+            return Ok(None);
+        }
+
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|e| e.duration())
+            .as_millis();
+        let output_path = format!("{output_prefix}/compacted-{ts}.parquet");
+
+        let merged = self
+            .compact_deferred(&to_compact, &output_path, catalog.clone(), table)
+            .await?;
+
+        // Commit immediately: merged file in Indexing state replaces input files.
+        let snapshot = NewSnapshot {
+            snapshot_id: ailake_catalog::new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![merged.clone()],
+            operation: SnapshotOperation::Replace,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+        };
+        catalog.commit_snapshot(table, snapshot).await?;
+
+        info!(
+            "ailake: compaction committed (deferred) — merged {} files into {} \
+             (index building in background)",
+            to_compact.len(),
+            output_path
+        );
+
+        delete_old_files(&self.store, &to_compact).await;
+
+        Ok(Some(merged))
+    }
+}
+
+async fn delete_old_files(store: &Arc<dyn Store>, files: &[DataFileEntry]) {
+    for entry in files {
+        if let Err(e) = store.delete(&entry.path).await {
+            error!(
+                "ailake: compaction cleanup failed — could not delete {}: {} \
+                 (orphan file in object store after successful catalog commit; \
+                 delete manually to reclaim storage)",
+                entry.path, e
+            );
+        }
     }
 }
 
@@ -267,6 +432,7 @@ fn concat_batches(schema: SchemaRef, batches: &[RecordBatch]) -> AilakeResult<Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ailake_catalog::IndexStatus;
 
     #[test]
     fn plan_returns_empty_if_too_few_files() {
@@ -279,7 +445,7 @@ mod tests {
             .map(|i| DataFileEntry {
                 path: format!("file-{i}.parquet"),
                 record_count: 10,
-                file_size_bytes: 100, // below target
+                file_size_bytes: 100,
                 centroid_b64: None,
                 radius: None,
                 hnsw_offset: None,
@@ -287,7 +453,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
-                index_status: ailake_catalog::IndexStatus::Ready,
+                index_status: IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -315,7 +481,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
-                index_status: ailake_catalog::IndexStatus::Ready,
+                index_status: IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -331,7 +497,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
-                index_status: ailake_catalog::IndexStatus::Ready,
+                index_status: IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -347,7 +513,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
-                index_status: ailake_catalog::IndexStatus::Ready,
+                index_status: IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -357,6 +523,78 @@ mod tests {
         assert_eq!(selected.len(), 2);
         assert!(selected.iter().any(|f| f.path == "small.parquet"));
         assert!(selected.iter().any(|f| f.path == "also-small.parquet"));
+    }
+
+    #[test]
+    fn plan_respects_max_files_per_pass() {
+        let planner = CompactionPlanner::new(CompactionConfig {
+            min_files_to_compact: 2,
+            target_file_size_bytes: 1_000_000,
+            max_files_per_pass: 3,
+            ..Default::default()
+        });
+        let files: Vec<DataFileEntry> = (0..5)
+            .map(|i| DataFileEntry {
+                path: format!("f{i}.parquet"),
+                record_count: 10,
+                file_size_bytes: 100 + i as u64 * 100,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+            })
+            .collect();
+        let selected = planner.plan(&files);
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected[0].file_size_bytes, 100);
+        assert_eq!(selected[1].file_size_bytes, 200);
+        assert_eq!(selected[2].file_size_bytes, 300);
+    }
+
+    #[test]
+    fn plan_sorts_smallest_first() {
+        let planner = CompactionPlanner::new(CompactionConfig {
+            min_files_to_compact: 2,
+            target_file_size_bytes: 10_000,
+            max_files_per_pass: 4,
+            ..Default::default()
+        });
+        let files = vec![
+            DataFileEntry {
+                path: "c.parquet".into(),
+                record_count: 1,
+                file_size_bytes: 300,
+                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
+                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+            },
+            DataFileEntry {
+                path: "a.parquet".into(),
+                record_count: 1,
+                file_size_bytes: 100,
+                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
+                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+            },
+            DataFileEntry {
+                path: "b.parquet".into(),
+                record_count: 1,
+                file_size_bytes: 200,
+                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
+                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+            },
+        ];
+        let selected = planner.plan(&files);
+        assert_eq!(selected[0].file_size_bytes, 100);
+        assert_eq!(selected[1].file_size_bytes, 200);
+        assert_eq!(selected[2].file_size_bytes, 300);
     }
 
     #[tokio::test]
@@ -387,7 +625,6 @@ mod tests {
             partition_value: None,
         };
 
-        // Write two small files
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let embs_a: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
         let embs_b: Vec<Vec<f32>> = vec![vec![0.0, 0.0, 1.0, 0.0], vec![0.0, 0.0, 0.0, 1.0]];
@@ -423,7 +660,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
-                index_status: ailake_catalog::IndexStatus::Ready,
+                index_status: IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -439,7 +676,7 @@ mod tests {
                 vector_column: None,
                 vector_dim: None,
                 extra_vector_indexes: vec![],
-                index_status: ailake_catalog::IndexStatus::Ready,
+                index_status: IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -455,12 +692,117 @@ mod tests {
         assert_eq!(merged.record_count, 4);
         assert_eq!(merged.path, "data/merged.parquet");
 
-        // Verify merged file is a valid AI-Lake file with all 4 rows
         let merged_bytes = store.get("data/merged.parquet").await.unwrap();
         let reader = AilakeFileReader::new(merged_bytes, "embedding", 4);
         reader.verify_integrity().unwrap();
         let (batch, embs) = reader.read_parquet().unwrap();
         assert_eq!(batch.num_rows(), 4);
         assert_eq!(embs.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn compact_deferred_produces_parquet_only_file() {
+        use ailake_catalog::HadoopCatalog;
+        use ailake_core::{VectorMetric, VectorPrecision};
+        use ailake_store::LocalStore;
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let catalog_dir = TempDir::new().unwrap();
+        let catalog_store = Arc::new(LocalStore::new(catalog_dir.path()));
+        let catalog = Arc::new(HadoopCatalog::new(catalog_store, ""));
+        let table = TableIdent {
+            namespace: "ns".into(),
+            name: "tbl".into(),
+        };
+
+        let policy = VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim: 4,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+        };
+
+        use ailake_catalog::TableProperties;
+        catalog
+            .create_table(
+                &table,
+                &TableProperties {
+                    policy: policy.clone(),
+                    extra: std::collections::HashMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let embs_a: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
+        let batch_a = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![0i32, 1]))],
+        )
+        .unwrap();
+        let bytes_a = AilakeFileWriter::new(policy.clone())
+            .write(&batch_a, &embs_a)
+            .unwrap();
+        store.put("data/a.parquet", bytes_a.clone()).await.unwrap();
+
+        let embs_b: Vec<Vec<f32>> = vec![vec![0.0, 0.0, 1.0, 0.0], vec![0.0, 0.0, 0.0, 1.0]];
+        let batch_b = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![2i32, 3]))],
+        )
+        .unwrap();
+        let bytes_b = AilakeFileWriter::new(policy.clone())
+            .write(&batch_b, &embs_b)
+            .unwrap();
+        store.put("data/b.parquet", bytes_b.clone()).await.unwrap();
+
+        let entries = vec![
+            DataFileEntry {
+                path: "data/a.parquet".into(),
+                record_count: 2,
+                file_size_bytes: bytes_a.len() as u64,
+                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
+                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+            },
+            DataFileEntry {
+                path: "data/b.parquet".into(),
+                record_count: 2,
+                file_size_bytes: bytes_b.len() as u64,
+                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
+                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+            },
+        ];
+
+        let executor = CompactionExecutor::new(store.clone(), policy.clone());
+        let entry = executor
+            .compact_deferred(&entries, "data/merged.parquet", catalog.clone(), &table)
+            .await
+            .unwrap();
+
+        // Entry is Indexing — HNSW build pending in background
+        assert_eq!(entry.index_status, IndexStatus::Indexing);
+        assert_eq!(entry.record_count, 4);
+
+        // The written file must be valid Parquet (readable) even without HNSW
+        let merged_bytes = store.get("data/merged.parquet").await.unwrap();
+        let pq_reader = ailake_parquet::ParquetVectorReader::new(merged_bytes, "embedding");
+        let count = pq_reader.record_count().unwrap();
+        assert_eq!(count, 4);
     }
 }
