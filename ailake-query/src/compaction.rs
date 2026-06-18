@@ -228,7 +228,11 @@ impl CompactionExecutor {
         let header = reader.read_header()?;
         let ailk_start = reader.ailk_offset()?;
 
-        let entry = make_data_file_entry(
+        // Preserve row-ID continuity: merged file inherits the minimum first_row_id of
+        // its sources so commit_snapshot doesn't allocate fresh IDs and grow next_row_id.
+        let source_first_row_id = files.iter().filter_map(|f| f.first_row_id).min();
+
+        let mut entry = make_data_file_entry(
             output_path,
             record_count,
             file_size,
@@ -240,6 +244,7 @@ impl CompactionExecutor {
                 hnsw_len: header.hnsw_len,
             },
         );
+        entry.first_row_id = source_first_row_id;
         Ok(entry)
     }
 
@@ -408,7 +413,12 @@ impl CompactionExecutor {
         let header = reader.read_header()?;
         let ailk_start = reader.ailk_offset()?;
 
-        let entry = make_data_file_entry(
+        // Dominant file goes first in the merged output, so the merged file's first
+        // logical row was the dominant file's first row.  Use its first_row_id so
+        // commit_snapshot doesn't grow next_row_id unnecessarily.
+        let source_first_row_id = files[dom_idx].first_row_id;
+
+        let mut entry = make_data_file_entry(
             output_path,
             record_count,
             file_size,
@@ -420,6 +430,7 @@ impl CompactionExecutor {
                 hnsw_len: header.hnsw_len,
             },
         );
+        entry.first_row_id = source_first_row_id;
 
         info!(
             "ailake: compact_incremental — merged {} files into {} \
@@ -478,7 +489,8 @@ impl CompactionExecutor {
 
         // Centroid available for geometric pruning during the build window.
         let centroid = compute_centroid_and_radius(&all_embeddings, self.policy.metric);
-        let entry = make_data_file_entry_indexing(
+        let source_first_row_id = files.iter().filter_map(|f| f.first_row_id).min();
+        let mut entry = make_data_file_entry_indexing(
             output_path,
             record_count,
             file_size,
@@ -486,6 +498,7 @@ impl CompactionExecutor {
             &self.policy.column_name,
             self.policy.dim,
         );
+        entry.first_row_id = source_first_row_id;
 
         // Spawn background index build; errors are logged, not propagated.
         let store = self.store.clone();

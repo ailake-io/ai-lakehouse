@@ -171,8 +171,12 @@ impl CatalogProvider for HadoopCatalog {
         if meta.format_version >= 3 {
             let mut next_id = meta.next_row_id;
             for f in abs_files.iter_mut() {
-                f.first_row_id = Some(next_id);
-                next_id += f.record_count as i64;
+                // Compaction pre-sets first_row_id from source files — respect it.
+                // Only allocate fresh IDs (and advance the counter) for brand-new files.
+                if f.first_row_id.is_none() {
+                    f.first_row_id = Some(next_id);
+                    next_id += f.record_count as i64;
+                }
             }
             meta.next_row_id = next_id;
         }
@@ -811,5 +815,125 @@ mod tests {
 
         let files = catalog.list_files(&table, None).await.unwrap();
         assert_eq!(files[0].first_row_id, None, "V2 tables must not have first_row_id");
+    }
+
+    /// Compaction pre-sets `first_row_id` on the merged file.
+    /// `commit_snapshot` must not overwrite it and must not advance `next_row_id`.
+    #[tokio::test]
+    async fn compaction_preserves_first_row_id_and_next_row_id_does_not_balloon() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let catalog = HadoopCatalog::new(Arc::clone(&store) as Arc<dyn Store>, "warehouse");
+        let table = TableIdent::new("default", "compact_rowid");
+
+        let mut props = make_props();
+        props.format_version = 3;
+        catalog.create_table(&table, &props).await.unwrap();
+
+        // Write two files: 10 rows + 25 rows → next_row_id advances to 35.
+        let snap1 = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00001.parquet".to_string(),
+                record_count: 10,
+                file_size_bytes: 1024,
+                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
+                vector_column: Some("embedding".into()), vector_dim: Some(4),
+                extra_vector_indexes: vec![], index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None, embedding_model: None, partition_value: None,
+                deletion_vector: None, first_row_id: None,
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap1).await.unwrap();
+
+        let snap2 = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00002.parquet".to_string(),
+                record_count: 25,
+                file_size_bytes: 2048,
+                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
+                vector_column: Some("embedding".into()), vector_dim: Some(4),
+                extra_vector_indexes: vec![], index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None, embedding_model: None, partition_value: None,
+                deletion_vector: None, first_row_id: None,
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap2).await.unwrap();
+
+        // Simulate compaction: merged file pre-sets first_row_id=0 (min of source files).
+        // next_row_id is 35; compaction must NOT push it to 70.
+        let snap_compact = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-merged.parquet".to_string(),
+                record_count: 35,
+                file_size_bytes: 3072,
+                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
+                vector_column: Some("embedding".into()), vector_dim: Some(4),
+                extra_vector_indexes: vec![], index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None, embedding_model: None, partition_value: None,
+                deletion_vector: None,
+                first_row_id: Some(0), // pre-set by compaction — must be respected
+            }],
+            operation: crate::provider::SnapshotOperation::Replace,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap_compact).await.unwrap();
+
+        let files = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(files.len(), 1);
+        // first_row_id must remain 0 — commit_snapshot must not overwrite it.
+        assert_eq!(
+            files[0].first_row_id,
+            Some(0),
+            "compaction first_row_id=0 must survive commit_snapshot"
+        );
+
+        // next fresh write must start at 35 (not 70).
+        let snap_new = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00004.parquet".to_string(),
+                record_count: 5,
+                file_size_bytes: 512,
+                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
+                vector_column: Some("embedding".into()), vector_dim: Some(4),
+                extra_vector_indexes: vec![], index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None, embedding_model: None, partition_value: None,
+                deletion_vector: None, first_row_id: None, // fresh write
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap_new).await.unwrap();
+
+        let files = catalog.list_files(&table, None).await.unwrap();
+        let new_file = files.iter().find(|f| f.path.ends_with("part-00004.parquet")).unwrap();
+        assert_eq!(
+            new_file.first_row_id,
+            Some(35),
+            "fresh write after compaction must start at 35, not 70"
+        );
     }
 }
