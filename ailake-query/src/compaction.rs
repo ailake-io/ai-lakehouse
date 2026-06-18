@@ -838,6 +838,7 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
+        partition_column_type: None,
         };
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
@@ -945,6 +946,7 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
+        partition_column_type: None,
         };
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
@@ -1094,6 +1096,7 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
+        partition_column_type: None,
         };
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
@@ -1192,6 +1195,7 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
+        partition_column_type: None,
         };
 
         use ailake_catalog::TableProperties;
@@ -1202,6 +1206,7 @@ mod tests {
                     policy: policy.clone(),
                     extra: std::collections::HashMap::new(),
                     format_version: 2,
+                    partition_column_type: None,
                 },
             )
             .await

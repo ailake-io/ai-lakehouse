@@ -31,6 +31,7 @@ fn policy(partition_by: Option<String>, partition_value: Option<String>) -> Vect
         modality: None,
         partition_by,
         partition_value,
+        partition_column_type: None,
     }
 }
 

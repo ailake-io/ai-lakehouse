@@ -1354,6 +1354,7 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
+        partition_column_type: None,
         }
     }
 
@@ -1627,6 +1628,7 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
+        partition_column_type: None,
         };
 
         let mut writer = crate::TableWriter::create_or_open(

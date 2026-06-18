@@ -290,9 +290,11 @@ mod tests {
                 modality: None,
                 partition_by: None,
                 partition_value: None,
+            partition_column_type: None,
             },
             extra: std::collections::HashMap::new(),
             format_version,
+            partition_column_type: None,
         }
     }
 

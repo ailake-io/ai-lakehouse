@@ -36,6 +36,7 @@ async fn write_10k_rows_search_top10() {
         modality: None,
         partition_by: None,
         partition_value: None,
+    partition_column_type: None,
     };
 
     // Create table and write 10k rows split across 2 batches

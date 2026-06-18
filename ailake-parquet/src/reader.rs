@@ -253,6 +253,7 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
+        partition_column_type: None,
         }
     }
 

@@ -97,6 +97,7 @@ async fn main() {
         modality: None,
         partition_by: None,
         partition_value: None,
+    partition_column_type: None,
     };
 
     let mut writer = TableWriter::create_or_open(

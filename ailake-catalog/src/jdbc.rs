@@ -127,7 +127,11 @@ impl JdbcCatalog {
 impl CatalogProvider for JdbcCatalog {
     async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
         let location = self.table_root(name);
-        let mut meta = IcebergMetadata::new(&location, &props.policy, props.format_version);
+        let pct = props
+            .partition_column_type
+            .as_deref()
+            .or(props.policy.partition_column_type.as_deref());
+        let mut meta = IcebergMetadata::new(&location, &props.policy, props.format_version, pct);
         for (k, v) in &props.extra {
             meta.properties.insert(k.clone(), v.clone());
         }
@@ -340,6 +344,7 @@ mod tests {
             },
             extra: HashMap::new(),
             format_version: 2,
+            partition_column_type: None,
         };
 
         // create

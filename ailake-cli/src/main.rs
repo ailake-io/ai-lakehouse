@@ -401,6 +401,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 modality: modality.map(VectorModality::from),
                 partition_by: None,
                 partition_value: None,
+            partition_column_type: None,
             };
 
             catalog
@@ -410,6 +411,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                         policy,
                         extra: std::collections::HashMap::new(),
                         format_version,
+                        partition_column_type: None,
                     },
                 )
                 .await
@@ -464,6 +466,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     modality: first_modality,
                     partition_by: None,
                     partition_value: None,
+                partition_column_type: None,
                 };
                 mv_owned.push((first_policy, first_embs));
 
@@ -485,6 +488,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                         modality: *modality,
                         partition_by: None,
                         partition_value: None,
+                    partition_column_type: None,
                     };
                     mv_owned.push((policy, embs));
                 }
@@ -552,6 +556,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                         modality: None,
                         partition_by: None,
                         partition_value: None,
+                    partition_column_type: None,
                     },
                     Err(_) => VectorStoragePolicy {
                         column_name: embeddings.clone(),
@@ -568,6 +573,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                         modality: None,
                         partition_by: None,
                         partition_value: None,
+                    partition_column_type: None,
                     },
                 };
 
@@ -720,6 +726,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 modality: None,
                 partition_by: None,
                 partition_value: None,
+            partition_column_type: None,
             };
 
             let files = catalog
@@ -827,6 +834,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 modality: None,
                 partition_by: None,
                 partition_value: None,
+            partition_column_type: None,
             };
             serve::run(
                 catalog as Arc<dyn CatalogProvider>,

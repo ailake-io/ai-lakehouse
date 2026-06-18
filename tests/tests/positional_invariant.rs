@@ -24,6 +24,7 @@ async fn positional_invariant_holds_for_1k_rows() {
         modality: None,
         partition_by: None,
         partition_value: None,
+    partition_column_type: None,
     };
     let (batch, embs) = fixtures::generate_batch(1000, dim as usize);
     let writer = AilakeFileWriter::new(policy);

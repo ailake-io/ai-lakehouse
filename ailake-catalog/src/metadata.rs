@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::provider::{SnapshotId, TableMetadata};
+use crate::provider::{PartitionField, PartitionSpec, SnapshotId, TableMetadata};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IcebergMetadata {
@@ -114,7 +114,14 @@ impl IcebergMetadata {
     /// `format_version`: 2 = Iceberg V2 (default); 3 = Iceberg V3 opt-in.
     /// V3 tables are append/update compatible; equality deletes and partition
     /// statistics require future phases (see docs/specs/ICEBERG_V3.md).
-    pub fn new(location: &str, policy: &VectorStoragePolicy, format_version: u8) -> Self {
+    /// `partition_column_type`: Iceberg type of the partition column ("string", "uuid", "int", "long").
+    /// Defaults to "string" when `None`. Only used when `policy.partition_by` is set.
+    pub fn new(
+        location: &str,
+        policy: &VectorStoragePolicy,
+        format_version: u8,
+        partition_column_type: Option<&str>,
+    ) -> Self {
         let mut properties = HashMap::new();
         properties.insert("ailake.format-version".to_string(), "1".to_string());
         properties.insert(
@@ -161,22 +168,49 @@ impl IcebergMetadata {
             properties.insert("ailake.partition-by".to_string(), col.clone());
         }
 
-        // When partition_by is set, emit an Iceberg identity partition spec so
-        // Iceberg-aware engines (Spark, Trino, PyIceberg) can push down filters.
-        let (partition_specs, default_spec_id, last_partition_id) =
+        // When partition_by is set, emit a real Iceberg identity partition spec and add
+        // the partition column to the table schema so source-id resolves correctly for
+        // Spark, Trino, and PyIceberg partition pruning.
+        let (schemas, last_column_id, partition_specs, default_spec_id, last_partition_id) =
             if let Some(col) = &policy.partition_by {
+                let col_type = partition_column_type.unwrap_or("string");
+                // source field in schema: id=1, the partition column
+                let schema = serde_json::json!({
+                    "schema-id": 0,
+                    "type": "struct",
+                    "fields": [{
+                        "id": 1,
+                        "name": col,
+                        "required": false,
+                        "type": col_type
+                    }]
+                });
+                // spec-id=0 is the empty (unpartitioned) spec kept for history;
+                // spec-id=1 is the identity partition spec (source-id=1 matches schema field id=1).
                 let spec = serde_json::json!({
                     "spec-id": 1,
                     "fields": [{
                         "name": col,
                         "transform": "identity",
-                        "source-id": 1000,
+                        "source-id": 1,
                         "field-id": 1000
                     }]
                 });
-                (vec![serde_json::json!({"spec-id": 0, "fields": []}), spec], 1, 1000)
+                (
+                    vec![schema],
+                    1,
+                    vec![serde_json::json!({"spec-id": 0, "fields": []}), spec],
+                    1,
+                    1000,
+                )
             } else {
-                (vec![serde_json::json!({"spec-id": 0, "fields": []})], 0, 999)
+                (
+                    vec![serde_json::json!({"schema-id": 0, "type": "struct", "fields": []})],
+                    0,
+                    vec![serde_json::json!({"spec-id": 0, "fields": []})],
+                    0,
+                    999,
+                )
             };
 
         let format_version = format_version.max(2) as i32;
@@ -195,8 +229,8 @@ impl IcebergMetadata {
             last_sequence_number: 0,
             next_row_id: 0,
             last_updated_ms: now_ms,
-            last_column_id: 0,
-            schemas: vec![serde_json::json!({"schema-id": 0, "type": "struct", "fields": []})],
+            last_column_id,
+            schemas,
             current_schema_id: 0,
             partition_specs,
             default_spec_id,
@@ -269,6 +303,38 @@ impl IcebergMetadata {
             })
             .unwrap_or_default();
 
+        // Phase I: parse the active partition spec from partition_specs JSON.
+        // source_type is resolved from schema_fields (Iceberg spec says type comes from schema).
+        let partition_spec = self
+            .partition_specs
+            .iter()
+            .find(|s| s["spec-id"].as_i64() == Some(self.default_spec_id as i64))
+            .and_then(|s| {
+                let spec_id = s["spec-id"].as_i64()? as i32;
+                let fields: Vec<PartitionField> = s["fields"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|f| {
+                        let source_id = f["source-id"].as_i64()? as i32;
+                        let field_id = f["field-id"].as_i64()? as i32;
+                        let name = f["name"].as_str()?.to_string();
+                        let transform = f["transform"].as_str().unwrap_or("identity").to_string();
+                        // Resolve source type from schema fields.
+                        let source_type = schema_fields
+                            .iter()
+                            .find(|sf| sf.id == source_id)
+                            .map(|sf| sf.iceberg_type.clone())
+                            .unwrap_or_else(|| "string".to_string());
+                        Some(PartitionField { source_id, field_id, name, transform, source_type })
+                    })
+                    .collect();
+                if fields.is_empty() {
+                    None
+                } else {
+                    Some(PartitionSpec { spec_id, fields })
+                }
+            });
+
         TableMetadata {
             table_uuid: self.table_uuid.clone(),
             format_version: self.format_version,
@@ -278,6 +344,7 @@ impl IcebergMetadata {
             current_statistics_path,
             schema_fields,
             equality_delete_files: vec![], // populated lazily via list_equality_deletes
+            partition_spec,
         }
     }
 }
@@ -310,12 +377,13 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
+            partition_column_type: None,
         }
     }
 
     #[test]
     fn roundtrip_json() {
-        let meta = IcebergMetadata::new("s3://my-lake/my_table", &make_policy(), 2);
+        let meta = IcebergMetadata::new("s3://my-lake/my_table", &make_policy(), 2, None);
         let json = meta.to_json().unwrap();
         let meta2 = IcebergMetadata::from_json(&json).unwrap();
         assert_eq!(meta2.format_version, 2);
@@ -327,7 +395,7 @@ mod tests {
 
     #[test]
     fn properties_contain_ailake_keys() {
-        let meta = IcebergMetadata::new("file:///tmp/tbl", &make_policy(), 2);
+        let meta = IcebergMetadata::new("file:///tmp/tbl", &make_policy(), 2, None);
         assert!(meta.properties.contains_key("ailake.format-version"));
         assert!(meta.properties.contains_key("ailake.vector-dim"));
     }
@@ -338,7 +406,7 @@ mod tests {
         let mut policy = make_policy();
         policy.embedding_model =
             Some(EmbeddingModelInfo::new("text-embedding-3-small").with_version("2024-01"));
-        let meta = IcebergMetadata::new("file:///tmp/tbl", &policy, 2);
+        let meta = IcebergMetadata::new("file:///tmp/tbl", &policy, 2, None);
         assert_eq!(
             meta.properties
                 .get("ailake.embedding-model")
@@ -349,7 +417,7 @@ mod tests {
 
     #[test]
     fn format_version_v3_emitted() {
-        let meta = IcebergMetadata::new("s3://my-lake/v3_table", &make_policy(), 3);
+        let meta = IcebergMetadata::new("s3://my-lake/v3_table", &make_policy(), 3, None);
         let json = meta.to_json().unwrap();
         let meta2 = IcebergMetadata::from_json(&json).unwrap();
         assert_eq!(meta2.format_version, 3);
@@ -357,7 +425,67 @@ mod tests {
 
     #[test]
     fn format_version_defaults_to_v2() {
-        let meta = IcebergMetadata::new("s3://my-lake/v2_table", &make_policy(), 2);
+        let meta = IcebergMetadata::new("s3://my-lake/v2_table", &make_policy(), 2, None);
         assert_eq!(meta.format_version, 2);
+    }
+
+    #[test]
+    fn partition_spec_written_to_metadata_json() {
+        let mut policy = make_policy();
+        policy.partition_by = Some("agent_id".to_string());
+        let meta = IcebergMetadata::new("s3://my-lake/agents", &policy, 2, Some("string"));
+
+        // Schema must contain the partition column.
+        let schema = &meta.schemas[0];
+        let fields = schema["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0]["name"].as_str(), Some("agent_id"));
+        assert_eq!(fields[0]["id"].as_i64(), Some(1));
+        assert_eq!(fields[0]["type"].as_str(), Some("string"));
+
+        // Partition spec must reference source-id=1 (schema field id).
+        assert_eq!(meta.default_spec_id, 1);
+        let active = meta
+            .partition_specs
+            .iter()
+            .find(|s| s["spec-id"] == 1)
+            .unwrap();
+        let pf = &active["fields"][0];
+        assert_eq!(pf["name"].as_str(), Some("agent_id"));
+        assert_eq!(pf["transform"].as_str(), Some("identity"));
+        assert_eq!(pf["source-id"].as_i64(), Some(1));
+        assert_eq!(pf["field-id"].as_i64(), Some(1000));
+        assert_eq!(meta.last_partition_id, 1000);
+        assert_eq!(meta.last_column_id, 1);
+
+        // to_table_metadata() must parse partition_spec.
+        let tm = meta.to_table_metadata();
+        let spec = tm.partition_spec.expect("partition_spec must be Some");
+        assert_eq!(spec.spec_id, 1);
+        assert_eq!(spec.fields.len(), 1);
+        assert_eq!(spec.fields[0].name, "agent_id");
+        assert_eq!(spec.fields[0].source_id, 1);
+        assert_eq!(spec.fields[0].field_id, 1000);
+        assert_eq!(spec.fields[0].transform, "identity");
+        assert_eq!(spec.fields[0].source_type, "string");
+    }
+
+    #[test]
+    fn unpartitioned_table_has_no_partition_spec() {
+        let meta = IcebergMetadata::new("s3://my-lake/simple", &make_policy(), 2, None);
+        let tm = meta.to_table_metadata();
+        assert!(tm.partition_spec.is_none());
+    }
+
+    #[test]
+    fn partition_spec_int_type() {
+        let mut policy = make_policy();
+        policy.partition_by = Some("shard_id".to_string());
+        let meta = IcebergMetadata::new("s3://my-lake/shards", &policy, 2, Some("int"));
+        let schema = &meta.schemas[0];
+        assert_eq!(schema["fields"][0]["type"].as_str(), Some("int"));
+        let tm = meta.to_table_metadata();
+        let spec = tm.partition_spec.unwrap();
+        assert_eq!(spec.fields[0].source_type, "int");
     }
 }

@@ -94,7 +94,12 @@ impl HadoopCatalog {
 impl CatalogProvider for HadoopCatalog {
     async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
         let location = self.table_root(name);
-        let mut meta = IcebergMetadata::new(&location, &props.policy, props.format_version);
+        // Prefer TableProperties.partition_column_type; fall back to policy field (set via Python/CLI).
+        let pct = props
+            .partition_column_type
+            .as_deref()
+            .or(props.policy.partition_column_type.as_deref());
+        let mut meta = IcebergMetadata::new(&location, &props.policy, props.format_version, pct);
         for (k, v) in &props.extra {
             meta.properties.insert(k.clone(), v.clone());
         }
@@ -116,9 +121,23 @@ impl CatalogProvider for HadoopCatalog {
         let seq = meta.last_sequence_number + 1;
         let table_root = self.table_root(table);
 
-        // Minimal Iceberg schema JSON for this table (empty fields; readers get column info from Parquet)
-        let table_schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
-        let partition_spec_json = r#"[{"spec-id":0,"fields":[]}]"#;
+        // Serialize the actual Iceberg schema for this table (phase I: may contain partition column).
+        let current_schema = meta
+            .schemas
+            .iter()
+            .find(|s| s["schema-id"].as_i64() == Some(meta.current_schema_id as i64))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"schema-id":0,"type":"struct","fields":[]}));
+        let table_schema_json = serde_json::to_string(&current_schema).unwrap_or_else(|_| {
+            r#"{"schema-id":0,"type":"struct","fields":[]}"#.to_string()
+        });
+        let partition_spec_json =
+            serde_json::to_string(&meta.partition_specs).unwrap_or_else(|_| {
+                r#"[{"spec-id":0,"fields":[]}]"#.to_string()
+            });
+
+        // Parse the active partition spec for native partition value encoding.
+        let active_partition_spec = meta.to_table_metadata().partition_spec;
 
         // Write Avro manifest file for the new data files.
         // Iceberg spec requires absolute file paths in manifests. Prefix relative paths
@@ -162,9 +181,10 @@ impl CatalogProvider for HadoopCatalog {
             &abs_files,
             snap_id,
             seq,
-            table_schema_json,
-            partition_spec_json,
+            &table_schema_json,
+            &partition_spec_json,
             meta.format_version as u8,
+            active_partition_spec.as_ref(),
         );
         let manifest_len = manifest_bytes.len();
         self.store.put(&manifest_file_path, manifest_bytes).await?;
@@ -554,9 +574,11 @@ mod tests {
                 modality: None,
                 partition_by: None,
                 partition_value: None,
+                partition_column_type: None,
             },
             extra: std::collections::HashMap::new(),
             format_version: 2,
+            partition_column_type: None,
         }
     }
 

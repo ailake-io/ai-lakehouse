@@ -16,7 +16,7 @@
 use apache_avro::types::Value;
 use bytes::Bytes;
 
-use crate::provider::{DataFileEntry, IndexStatus, SnapshotId};
+use crate::provider::{DataFileEntry, IndexStatus, PartitionField, PartitionSpec, SnapshotId};
 
 // ---------------------------------------------------------------------------
 // Schema constants — field IDs follow Iceberg Spec v2 §3.5
@@ -89,11 +89,89 @@ const MANIFEST_LIST_SCHEMA_STR: &str = r#"{
 }"#;
 
 // ---------------------------------------------------------------------------
+// Dynamic schema helpers (Phase I)
+// ---------------------------------------------------------------------------
+
+/// Build the Avro type string for the partition record (r102) based on the
+/// active partition spec.  Returns `{"type":"record","name":"r102","fields":[]}`
+/// (empty) when `spec` is None or unpartitioned.
+fn build_partition_record_schema(spec: Option<&PartitionSpec>) -> String {
+    let fields: Vec<String> = spec
+        .map(|s| s.fields.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .map(|f| {
+            let avro_type = match f.source_type.as_str() {
+                "int" | "integer" => "int",
+                "long" => "long",
+                _ => "string", // string, uuid, and unknown types → string
+            };
+            format!(
+                r#"{{"name":"{name}","type":["null","{avro_type}"],"default":null,"field-id":{fid}}}"#,
+                name = f.name,
+                avro_type = avro_type,
+                fid = f.field_id
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"type":"record","name":"r102","fields":[{}]}}"#,
+        fields.join(",")
+    )
+}
+
+/// Build the full manifest entry schema string, injecting the dynamic partition
+/// record in place of the static empty r102.
+pub fn build_manifest_entry_schema(spec: Option<&PartitionSpec>) -> String {
+    let partition_record = build_partition_record_schema(spec);
+    // Replace the hard-coded empty r102 placeholder in MANIFEST_ENTRY_SCHEMA_STR.
+    MANIFEST_ENTRY_SCHEMA_STR.replace(
+        r#"{"type": "record", "name": "r102", "fields": []}"#,
+        &partition_record,
+    )
+}
+
+/// Encode a partition value for one partition field into an Avro binary record.
+/// The field type is `["null", T]` so encoding is: union-index (0=null, 1=value) + value.
+fn encode_partition_value(field: &PartitionField, value: Option<&str>, buf: &mut Vec<u8>) {
+    use crate::avro_raw::{encode_long, encode_string};
+    match value {
+        None => encode_long(0, buf), // union index 0 = null
+        Some(v) => {
+            encode_long(1, buf); // union index 1 = non-null
+            match field.source_type.as_str() {
+                "int" | "integer" => {
+                    if let Ok(n) = v.parse::<i32>() {
+                        encode_long(n as i64, buf); // Avro int = zigzag varint
+                    } else {
+                        // Fallback: re-encode as null (malformed value)
+                        let last = buf.len() - 1;
+                        buf[last] = 0x00; // overwrite union index back to 0
+                    }
+                }
+                "long" => {
+                    if let Ok(n) = v.parse::<i64>() {
+                        encode_long(n, buf);
+                    } else {
+                        let last = buf.len() - 1;
+                        buf[last] = 0x00;
+                    }
+                }
+                _ => encode_string(v, buf), // string / uuid
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Write an Iceberg Spec v2 manifest file (Avro) from a list of DataFileEntry.
 /// Returns the raw bytes of the Avro file.
+///
+/// `partition_spec`: when `Some`, encodes partition values in the native Avro
+/// `data_file.partition` record field so Spark/Trino can do partition pruning.
 pub fn write_manifest_file(
     files: &[DataFileEntry],
     snapshot_id: SnapshotId,
@@ -101,6 +179,7 @@ pub fn write_manifest_file(
     table_schema_json: &str,
     partition_spec_json: &str,
     format_version: u8,
+    partition_spec: Option<&PartitionSpec>,
 ) -> Bytes {
     use crate::avro_raw::{
         encode_empty_array, encode_int, encode_long, encode_string, encode_union_bytes,
@@ -118,7 +197,14 @@ pub fn write_manifest_file(
         encode_int(0, &mut rec); // content=DATA
         encode_string(&f.path, &mut rec); // file_path
         encode_string("PARQUET", &mut rec); // file_format
-                                            // partition r102: empty record → 0 bytes
+        // partition r102: encode native partition value when spec is active;
+        // empty record (0 bytes) for unpartitioned tables.
+        match partition_spec.and_then(|s| s.fields.first()) {
+            Some(field) => {
+                encode_partition_value(field, f.partition_value.as_deref(), &mut rec);
+            }
+            None => {} // empty record = 0 bytes
+        }
         encode_long(f.record_count as i64, &mut rec); // record_count
         encode_long(f.file_size_bytes as i64, &mut rec); // file_size_in_bytes
         encode_union_null(&mut rec); // column_sizes
@@ -158,18 +244,18 @@ pub fn write_manifest_file(
     }
 
     let fv_str: &[u8] = if format_version >= 3 { b"3" } else { b"2" };
+    let spec_id_str = partition_spec
+        .map(|s| s.spec_id.to_string())
+        .unwrap_or_else(|| "0".to_string());
     let extra_meta: &[(&str, &[u8])] = &[
         ("schema", table_schema_json.as_bytes()),
         ("partition-spec", partition_spec_json.as_bytes()),
-        ("partition-spec-id", b"0"),
+        ("partition-spec-id", spec_id_str.as_bytes()),
         ("format-version", fv_str),
         ("content", b"data"),
     ];
-    Bytes::from(write_avro_container(
-        MANIFEST_ENTRY_SCHEMA_STR,
-        extra_meta,
-        &records,
-    ))
+    let schema_str = build_manifest_entry_schema(partition_spec);
+    Bytes::from(write_avro_container(&schema_str, extra_meta, &records))
 }
 
 /// Write an Iceberg Spec v2 manifest list (Avro) pointing to one manifest file.
@@ -314,6 +400,31 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                     // Falls back to key_metadata JSON for old AI-Lake manifests.
                     let native_first_row_id = parse_v3_first_row_id(df_fields);
 
+                    // Phase I: read native partition value from data_file.partition record.
+                    // Newly-written manifests carry the value here; old manifests carry it
+                    // in key_metadata JSON.  Native takes priority.
+                    let native_partition_value = df_fields
+                        .iter()
+                        .find(|(k, _)| k == "partition")
+                        .and_then(|(_, v)| {
+                            if let Value::Record(parts) = v {
+                                parts.first().and_then(|(_, pv)| match pv {
+                                    Value::Union(idx, inner) if *idx > 0 => match inner.as_ref() {
+                                        Value::String(s) => Some(s.clone()),
+                                        Value::Int(n) => Some(n.to_string()),
+                                        Value::Long(n) => Some(n.to_string()),
+                                        _ => None,
+                                    },
+                                    Value::String(s) => Some(s.clone()),
+                                    Value::Int(n) => Some(n.to_string()),
+                                    Value::Long(n) => Some(n.to_string()),
+                                    _ => None,
+                                })
+                            } else {
+                                None
+                            }
+                        });
+
                     results.push(DataFileEntry {
                         path,
                         record_count,
@@ -334,7 +445,8 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                             .unwrap_or_default(),
                         batch_id: ext.as_ref().and_then(|e| e.batch_id.clone()),
                         embedding_model: ext.as_ref().and_then(|e| e.embedding_model.clone()),
-                        partition_value: ext.as_ref().and_then(|e| e.partition_value.clone()),
+                        partition_value: native_partition_value
+                            .or_else(|| ext.as_ref().and_then(|e| e.partition_value.clone())),
                         deletion_vector: ext
                             .as_ref()
                             .and_then(|e| e.deletion_vector.clone())
@@ -755,7 +867,7 @@ mod tests {
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
-        let bytes = write_manifest_file(&[file], 99, 1, schema_json, partition_spec, 2);
+        let bytes = write_manifest_file(&[file], 99, 1, schema_json, partition_spec, 2, None);
         let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "data/part-0.parquet");
@@ -785,7 +897,7 @@ mod tests {
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
-        let bytes = write_manifest_file(&[file], 42, 1, schema_json, partition_spec, 2);
+        let bytes = write_manifest_file(&[file], 42, 1, schema_json, partition_spec, 2, None);
         let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
         assert_eq!(
             entries[0].batch_id.as_deref(),
@@ -815,7 +927,7 @@ mod tests {
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
-        let bytes = write_manifest_file(&[file], 77, 1, schema_json, partition_spec, 3);
+        let bytes = write_manifest_file(&[file], 77, 1, schema_json, partition_spec, 3, None);
         let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
         assert_eq!(entries[0].first_row_id, Some(5000));
     }
@@ -842,7 +954,7 @@ mod tests {
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
-        let bytes = write_manifest_file(&[file], 88, 1, schema_json, partition_spec, 2);
+        let bytes = write_manifest_file(&[file], 88, 1, schema_json, partition_spec, 2, None);
         let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
         assert_eq!(entries[0].first_row_id, None);
     }
@@ -880,5 +992,130 @@ mod tests {
         assert_eq!(typed[0].1, 0); // data
         assert_eq!(typed[1].0, "metadata/m0-eq-del.avro");
         assert_eq!(typed[1].1, 1); // delete
+    }
+
+    #[test]
+    fn partition_spec_native_roundtrip() {
+        use crate::provider::{PartitionField, PartitionSpec};
+        let spec = PartitionSpec {
+            spec_id: 1,
+            fields: vec![PartitionField {
+                source_id: 1,
+                field_id: 1000,
+                name: "agent_id".to_string(),
+                transform: "identity".to_string(),
+                source_type: "string".to_string(),
+            }],
+        };
+        let file = DataFileEntry {
+            path: "data/part-agent-a.parquet".to_string(),
+            record_count: 50,
+            file_size_bytes: 2048,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: Some("embedding".to_string()),
+            vector_dim: Some(4),
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: Some("agent-abc-123".to_string()),
+            deletion_vector: None,
+            first_row_id: None,
+        };
+        let schema_json = r#"{"schema-id":0,"type":"struct","fields":[{"id":1,"name":"agent_id","required":false,"type":"string"}]}"#;
+        let partition_spec_json = r#"[{"spec-id":0,"fields":[]},{"spec-id":1,"fields":[{"name":"agent_id","transform":"identity","source-id":1,"field-id":1000}]}]"#;
+        let bytes = write_manifest_file(
+            &[file],
+            200,
+            1,
+            schema_json,
+            partition_spec_json,
+            2,
+            Some(&spec),
+        );
+        let entries = read_manifest_file(&bytes).expect("partition roundtrip failed");
+        assert_eq!(entries.len(), 1);
+        // Native partition value must be read back correctly.
+        assert_eq!(
+            entries[0].partition_value.as_deref(),
+            Some("agent-abc-123")
+        );
+    }
+
+    #[test]
+    fn partition_spec_int_native_roundtrip() {
+        use crate::provider::{PartitionField, PartitionSpec};
+        let spec = PartitionSpec {
+            spec_id: 1,
+            fields: vec![PartitionField {
+                source_id: 1,
+                field_id: 1000,
+                name: "shard_id".to_string(),
+                transform: "identity".to_string(),
+                source_type: "int".to_string(),
+            }],
+        };
+        let file = DataFileEntry {
+            path: "data/part-shard-7.parquet".to_string(),
+            record_count: 10,
+            file_size_bytes: 512,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: None,
+            vector_dim: None,
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: Some("7".to_string()),
+            deletion_vector: None,
+            first_row_id: None,
+        };
+        let schema_json = r#"{"schema-id":0,"type":"struct","fields":[{"id":1,"name":"shard_id","required":false,"type":"int"}]}"#;
+        let partition_spec_json = r#"[{"spec-id":1,"fields":[{"name":"shard_id","transform":"identity","source-id":1,"field-id":1000}]}]"#;
+        let bytes = write_manifest_file(
+            &[file],
+            201,
+            1,
+            schema_json,
+            partition_spec_json,
+            2,
+            Some(&spec),
+        );
+        let entries = read_manifest_file(&bytes).expect("int partition roundtrip failed");
+        assert_eq!(entries[0].partition_value.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn build_manifest_entry_schema_no_spec() {
+        let s = build_manifest_entry_schema(None);
+        // Empty partition record must be present (no partition fields).
+        assert!(s.contains("r102"));
+        assert!(s.contains(r#""fields":[]"#));
+        assert!(!s.contains("tenant_id")); // no partition fields injected
+    }
+
+    #[test]
+    fn build_manifest_entry_schema_with_string_spec() {
+        use crate::provider::{PartitionField, PartitionSpec};
+        let spec = PartitionSpec {
+            spec_id: 1,
+            fields: vec![PartitionField {
+                source_id: 1,
+                field_id: 1000,
+                name: "tenant_id".to_string(),
+                transform: "identity".to_string(),
+                source_type: "string".to_string(),
+            }],
+        };
+        let s = build_manifest_entry_schema(Some(&spec));
+        assert!(s.contains("tenant_id"));
+        assert!(s.contains("1000")); // field-id
+        assert!(s.contains(r#""null","string""#));
     }
 }

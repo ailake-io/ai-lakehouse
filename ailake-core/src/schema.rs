@@ -91,6 +91,11 @@ pub struct VectorStoragePolicy {
     /// Typical usage: set to `agent_id` in Agent.__init__.
     #[serde(skip)]
     pub partition_value: Option<String>,
+    /// Iceberg type of the partition column ("string", "uuid", "int", "long").
+    /// Used when writing the Iceberg schema and partition spec at table creation.
+    /// Defaults to "string" when `None`.  Only relevant when `partition_by` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_column_type: Option<String>,
 }
 
 impl VectorStoragePolicy {
@@ -110,6 +115,7 @@ impl VectorStoragePolicy {
             modality: None,
             partition_by: None,
             partition_value: None,
+            partition_column_type: None,
         }
     }
 }

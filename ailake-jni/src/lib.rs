@@ -457,6 +457,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         modality: None,
         partition_by: req.partition_by,
         partition_value: req.partition_value,
+        partition_column_type: None,
     };
 
     let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);

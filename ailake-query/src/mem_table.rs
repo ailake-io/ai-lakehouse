@@ -364,6 +364,7 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
+        partition_column_type: None,
         }
     }
 
@@ -397,6 +398,7 @@ mod tests {
                     policy: make_policy(),
                     extra: Default::default(),
                     format_version: 2,
+                    partition_column_type: None,
                 },
             )
             .await
@@ -529,6 +531,7 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
+        partition_column_type: None,
         };
         catalog
             .create_table(
@@ -537,6 +540,7 @@ mod tests {
                     policy: policy.clone(),
                     extra: Default::default(),
                     format_version: 2,
+                    partition_column_type: None,
                 },
             )
             .await

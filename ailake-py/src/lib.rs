@@ -125,7 +125,7 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, bm25_text_column=None, format_version=2))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, partition_column_type=None, bm25_text_column=None, format_version=2))]
     fn new(
         py: Python<'_>,
         path: &str,
@@ -142,6 +142,7 @@ impl TableWriter {
         embed_fn: Option<Py<PyAny>>,
         partition_by: Option<String>,
         partition_value: Option<String>,
+        partition_column_type: Option<String>,
         bm25_text_column: Option<String>,
         format_version: u8,
     ) -> PyResult<Self> {
@@ -159,6 +160,7 @@ impl TableWriter {
         policy.ivf_residual = ivf_residual;
         policy.partition_by = partition_by;
         policy.partition_value = partition_value;
+        policy.partition_column_type = partition_column_type;
         if let Some(model_name) = embedding_model {
             let mut model_info = EmbeddingModelInfo::new(model_name).with_dim(dim);
             if let Some(version) = embedding_model_version {

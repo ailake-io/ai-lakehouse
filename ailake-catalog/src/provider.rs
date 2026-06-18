@@ -150,6 +150,10 @@ pub struct TableMetadata {
     /// Populated by `CatalogProvider::list_equality_deletes` — empty until first call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub equality_delete_files: Vec<EqualityDeleteFile>,
+    /// Active partition spec for this table (Phase I).
+    /// `None` for unpartitioned tables or tables created before Phase I.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_spec: Option<PartitionSpec>,
 }
 
 /// Iceberg schema update carried inside a snapshot commit.
@@ -211,15 +215,50 @@ pub enum SnapshotOperation {
     Replace,
 }
 
+/// One field in an Iceberg partition spec (Phase I).
+///
+/// For an `identity` partition on column "agent_id":
+/// `source_id=1` (must match the field id in the table schema),
+/// `field_id=1000` (Iceberg convention: partition fields start at 1000).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionField {
+    /// Field ID of the source column in the table schema.
+    pub source_id: i32,
+    /// Partition field ID (≥ 1000 by convention).
+    pub field_id: i32,
+    /// Partition column name (usually same as the source column).
+    pub name: String,
+    /// Transform function: "identity", "bucket[N]", "truncate[W]", "year", etc.
+    pub transform: String,
+    /// Iceberg type of the source column ("string", "int", "long", "uuid").
+    /// Derived from the table schema at read time; stored here for encoding.
+    pub source_type: String,
+}
+
+/// Iceberg partition spec (Phase I).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionSpec {
+    pub spec_id: i32,
+    pub fields: Vec<PartitionField>,
+}
+
+impl PartitionSpec {
+    /// True when this spec has no partition fields (unpartitioned table).
+    pub fn is_unpartitioned(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
 /// Schema properties passed at table creation time.
 #[derive(Debug, Clone)]
 pub struct TableProperties {
     pub policy: VectorStoragePolicy,
     pub extra: HashMap<String, String>,
     /// Iceberg format version to write. 2 = default (V2). 3 = opt-in V3.
-    /// V3: append/update workloads fully supported. Equality deletes and
-    /// equality deletes not implemented (see docs/specs/ICEBERG_V3.md).
     pub format_version: u8,
+    /// Iceberg type of the partition column when `policy.partition_by` is set.
+    /// Defaults to `"string"` when `None`. Supported: "string", "uuid", "int", "long".
+    pub partition_column_type: Option<String>,
 }
 
 /// Unified catalog interface. All backends implement this trait.

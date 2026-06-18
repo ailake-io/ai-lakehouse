@@ -33,15 +33,15 @@ pub use databricks::{databricks_aws, databricks_azure, databricks_gcp, Databrick
 pub use hadoop::HadoopCatalog;
 pub use metadata::{BlobRef, IcebergStatisticsRef};
 pub use avro_manifest::{
-    read_equality_delete_values, write_equality_delete_avro, write_equality_delete_manifest,
-    write_manifest_list_multi_typed,
+    build_manifest_entry_schema, read_equality_delete_values, write_equality_delete_avro,
+    write_equality_delete_manifest, write_manifest_list_multi_typed,
 };
 pub use provider::{
     decode_centroid, encode_centroid_b64, make_data_file_entry, make_data_file_entry_indexing,
     make_multi_column_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,
     EqualityDeleteFile, ExtraVectorIndex, IcebergSchemaUpdate, IndexStatus, NewSnapshot,
-    SchemaField, SnapshotId, SnapshotOperation, TableIdent, TableMetadata, TableProperties,
-    VectorIndexInfo,
+    PartitionField, PartitionSpec, SchemaField, SnapshotId, SnapshotOperation, TableIdent,
+    TableMetadata, TableProperties, VectorIndexInfo,
 };
 pub use schema_evolution::{AddColumnRequest, RenameColumnRequest, SchemaEvolution};
 pub use puffin::{

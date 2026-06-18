@@ -861,6 +861,7 @@ impl TableWriter {
                     .create_table(
                         &table,
                         &TableProperties {
+                            partition_column_type: policy.partition_column_type.clone(),
                             policy: policy.clone(),
                             extra: std::collections::HashMap::new(),
                             format_version,
@@ -1459,6 +1460,7 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
+        partition_column_type: None,
         }
     }
 
