@@ -12,8 +12,9 @@ use ailake_core::{
     VectorStoragePolicy,
 };
 use ailake_query::{
-    CompactionConfig, CompactionExecutor, CompactionPlanner, EmbedFn, MigrationJob,
-    MigrationProgress, MigrationStrategy, MultiVectorBatch, ProgressFn, SearchConfig, TableWriter,
+    delete_rows as rs_delete_rows, CompactionConfig, CompactionExecutor, CompactionPlanner,
+    EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy, MultiVectorBatch, ProgressFn,
+    SearchConfig, TableWriter,
 };
 use ailake_store::store_from_url;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -185,6 +186,18 @@ enum Commands {
         /// Optional version tag appended to --model-name (stored as "<name>@<version>")
         #[arg(long)]
         model_version: Option<String>,
+    },
+    /// Mark rows as deleted in a V3 table using Iceberg Deletion Vectors
+    DeleteRows {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// Path of the Parquet data file containing the rows to delete
+        /// (as reported by `ailake info`, e.g. "data/part-00001.parquet")
+        #[arg(long)]
+        file: String,
+        /// Comma-separated 0-based row positions to delete (e.g. "0,5,42")
+        #[arg(long)]
+        rows: String,
     },
     /// Estimate storage usage before writing (no I/O — pure math)
     Estimate {
@@ -946,6 +959,31 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
 
             println!("migration complete");
+            Ok(())
+        }
+
+        Commands::DeleteRows { table, file, rows } => {
+            let ident = parse_table_ident(&table);
+            let row_ids: Vec<u32> = rows
+                .split(',')
+                .map(|s| {
+                    s.trim()
+                        .parse::<u32>()
+                        .map_err(|e| format!("invalid row id '{}': {e}", s.trim()))
+                })
+                .collect::<Result<_, _>>()?;
+
+            rs_delete_rows(
+                catalog as Arc<dyn CatalogProvider>,
+                store,
+                &ident,
+                &file,
+                &row_ids,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+            println!("deleted {} rows from {table} file {file}", row_ids.len());
             Ok(())
         }
 

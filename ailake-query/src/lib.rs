@@ -6,6 +6,7 @@
 
 pub mod bm25;
 pub mod compaction;
+pub mod delete;
 pub mod dv;
 pub mod context_assembler;
 pub mod mem_table;
@@ -27,4 +28,5 @@ pub use scanner::{
     fetch_rows, search, search_multimodal, search_text, FusionMethod, ModalQuery, ScoreFn,
     SearchConfig, SearchResult, SearchSession,
 };
+pub use delete::{delete_rows, PuffinWriter};
 pub use writer::{MultiVectorBatch, TableWriter};

@@ -35,6 +35,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `dv::tests::load_dv_roundtrip` — writes bitmap bytes at a simulated Puffin offset; `load_deletion_vector` fetches via range GET and verifies all deleted row IDs.
 - `dv::tests::has_deletions_detects_overlap` — `has_deletions` returns true iff any row_id in the candidate set appears in the bitmap.
 
+- **Iceberg V3 Deletion Vector write support (Phase C)** — `ailake-query/src/delete.rs`: `delete_rows(catalog, store, table, file_path, &[u32])` logically deletes rows from a V3 table without modifying the Parquet file. Flow: (1) verifies `format-version=3`; (2) reads current file list; (3) merges new row IDs into existing DV bitmap (or creates new one); (4) serializes via `PuffinWriter::write_single_dv` into a minimal Puffin `.dvd` file at `{table_location}/metadata/dv-{snap_id}.dvd`; (5) commits `SnapshotOperation::Replace` snapshot carrying all files with the updated `deletion_vector` pointer. `PuffinWriter` produces a spec-compliant Puffin file (magic `PFAc` + blob + footer JSON + footer_len LE + magic). Multiple `delete_rows` calls accumulate — each call reads the existing bitmap and merges. CLI: `ailake delete-rows --table t --file data/part-00001.parquet --rows 5,10,42`. Python: `ailake.delete_rows(table_path, file_path, [5, 10, 42])`. V2 tables: returns `InvalidArgument` error.
+
+### Tests (Phase C additions)
+
+- `delete::tests::writes_dv_and_manifest_reflects_cardinality` — end-to-end: commit file, delete 3 rows, verify DV in manifest, verify bitmap content via `load_deletion_vector`.
+- `delete::tests::merges_with_existing_dv_across_calls` — two sequential `delete_rows` calls accumulate into a single bitmap (4 total deleted rows).
+- `delete::tests::rejects_v2_table` — `InvalidArgument` error when table is format-version 2.
+- `delete::tests::noop_when_row_ids_empty` — empty `row_ids` slice returns immediately without writing any DV.
+- `delete::tests::puffin_magic_and_structure_valid` — verifies Puffin file starts/ends with magic `PFAc` and bitmap bytes at declared offset decode correctly.
+
 ### Docs
 
 - **`docs/guides/DBT_INTEGRATION.md`** — complete dbt integration guide covering: project layout; global vars (`ailake_vec_col`, `ailake_dim`, `ailake_metric`, `ailake_precision`); `ailake_write_batch` adapter macro (Spark / Trino / DuckDB); `ailake_compact` operation macro; full model chain `stg_documents → int_chunks → ailake_embeddings` (incremental append); three embedding generation patterns (Spark UDF, pre-computed table, Python dbt model); dbt recall assertion test via `ailake_search()`; Spark cluster configuration; Trino plugin deployment; known limitations table.

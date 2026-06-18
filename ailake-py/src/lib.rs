@@ -24,10 +24,10 @@ use ailake_catalog::{
 };
 use ailake_core::{EmbeddingModelInfo, VectorMetric, VectorModality, VectorStoragePolicy};
 use ailake_query::{
-    fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
-    Chunk, ContextAssembler, ContextAssemblerConfig, EmbedFn, FusionMethod, MigrationJob,
-    MigrationProgress, MigrationStrategy, ModalQuery, MultiVectorBatch, ProgressFn, SearchConfig,
-    TableWriter as RsTableWriter,
+    delete_rows as rs_delete_rows, fetch_rows as rs_fetch_rows, search as rs_search,
+    search_multimodal as rs_search_multimodal, Chunk, ContextAssembler, ContextAssemblerConfig,
+    EmbedFn, FusionMethod, MigrationJob, MigrationProgress, MigrationStrategy, ModalQuery,
+    MultiVectorBatch, ProgressFn, SearchConfig, TableWriter as RsTableWriter,
 };
 use ailake_store::{store::Store, LocalStore};
 
@@ -1083,6 +1083,38 @@ fn decay_memories(path: &str, decay_lambda: f32) -> PyResult<usize> {
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Mark rows as deleted in a V3 AI-Lake table using Iceberg Deletion Vectors.
+///
+/// Writes a Roaring Bitmap blob into a Puffin `.dvd` file and commits a new
+/// snapshot so the deleted rows are invisible to all subsequent searches.
+/// The data file itself is not modified; DVs are incremental and mergeable.
+///
+/// Args:
+///     table_path: path to the table directory (local or object-store URL).
+///     file_path: path of the Parquet data file (as shown by `ailake.info()`).
+///     row_ids: list of 0-based row positions to delete.
+///
+/// Raises:
+///     ValueError: if the table is format-version < 3, or file_path not found.
+///
+/// Example::
+///
+///     ailake.delete_rows(
+///         "s3://my-lake/docs",
+///         "data/part-00001.parquet",
+///         [5, 10, 42],
+///     )
+#[pyfunction]
+#[pyo3(signature = (table_path, file_path, row_ids))]
+fn delete_rows(table_path: &str, file_path: &str, row_ids: Vec<u32>) -> PyResult<()> {
+    let rt = rt()?;
+    let (catalog, store) = local_catalog_store(table_path);
+    let table = TableIdent::new("default", "table");
+
+    rt.block_on(rs_delete_rows(catalog, store, &table, file_path, &row_ids))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
@@ -1095,5 +1127,6 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(assemble_context, m)?)?;
     m.add_function(wrap_pyfunction!(migrate_embeddings, m)?)?;
     m.add_function(wrap_pyfunction!(decay_memories, m)?)?;
+    m.add_function(wrap_pyfunction!(delete_rows, m)?)?;
     Ok(())
 }
