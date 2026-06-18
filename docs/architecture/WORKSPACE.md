@@ -446,8 +446,10 @@ Delivered in Phase 7:
 - **Demo expansion** — `07_multimodal.ipynb`, 5 fixture tables in `init_demo.py`.
 
 Remaining:
-- **DuckLake catalog backend** — `DuckLakeCatalog` on top of `duckdb` crate (awaiting spec stabilization).
-- **dbt integration guide** — `dbt (transform) → AI-Lake SDK (ingest + HNSW)` for dbt-spark and dbt-trino.
+- **DuckLake catalog backend** — `DuckLakeCatalog` on top of `duckdb` crate (awaiting spec stabilization; introduces C++ dep — deferred indefinitely, `HadoopCatalog` covers the use case).
+
+Delivered:
+- **dbt integration guide** (`docs/guides/DBT_INTEGRATION.md`) — end-to-end guide: `stg_documents → int_chunks → ailake_embeddings`; `ailake_write_batch` post-hook macro for Spark/Trino/DuckDB; compaction operation; embedding generation patterns (UDF, pre-computed table, Python dbt model); recall assertion test; Spark and Trino cluster configuration.
 
 ### Phase 8 — Multimodal ✅
 

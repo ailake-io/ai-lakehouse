@@ -27,6 +27,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `compaction::tests::compact_incremental_merges_dominant_plus_small` — 6-row dominant + 2-row small file; verifies merged row count, dominant rows first, HNSW searchable with correct RowIds after incremental insertion.
 - `compaction::tests::compact_incremental_falls_back_when_no_dominant` — 50/50 split triggers full-rebuild fallback; merged file still valid.
 
+### Docs
+
+- **`docs/guides/DBT_INTEGRATION.md`** — complete dbt integration guide covering: project layout; global vars (`ailake_vec_col`, `ailake_dim`, `ailake_metric`, `ailake_precision`); `ailake_write_batch` adapter macro (Spark / Trino / DuckDB); `ailake_compact` operation macro; full model chain `stg_documents → int_chunks → ailake_embeddings` (incremental append); three embedding generation patterns (Spark UDF, pre-computed table, Python dbt model); dbt recall assertion test via `ailake_search()`; Spark cluster configuration; Trino plugin deployment; known limitations table.
+- **`docs/architecture/WORKSPACE.md`** — dbt guide marked delivered; DuckLake deferred with rationale (C++ dep + `HadoopCatalog` coverage).
+
 ---
 
 ## [0.0.20] — 2026-06-18
