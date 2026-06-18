@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`HnswIndex::insert_node`** — online single-node insertion into a live HNSW graph (`ailake-index/src/hnsw.rs`). Mirrors the `build_serial_typed` algorithm (Algorithm 1, Malkov & Yashunin 2018): random level assignment, greedy descent above the insertion layer, bidirectional connections with `select_neighbors_heuristic`, and connection pruning. O(log N) per call. Invalidates the F16 cache (call `quantize_to_f16()` after bulk inserts). Used by incremental compaction.
+
+- **`AilakeFileWriter::write_with_prebuilt_hnsw`** — write path that accepts a pre-built `HnswIndex` instead of rebuilding from scratch (`ailake-file/src/writer.rs`). Same two-pass Parquet + KV injection as `write()` but serializes the provided HNSW bytes directly into the AILK section. `build_ailk_section_from_index_bytes` is the private helper that assembles the AILK header + centroid + pre-serialized index + trailer.
+
+- **`CompactionExecutor::compact_incremental`** — incremental HNSW compaction (`ailake-query/src/compaction.rs`). Identifies the *dominant file* (≥ 40 % of total rows), loads its existing HNSW from the AILK section via `AilakeFileReader::load_index`, appends smaller files' vectors via `HnswIndex::insert_node`, then writes the merged file via `write_with_prebuilt_hnsw`. Falls back to `compact` (full rebuild) when: no dominant file exists, or the dominant file's HNSW cannot be loaded (IVF-PQ, `IndexStatus::Indexing`, corrupt). `run()` now calls `compact_incremental` by default.
+
+- **Speedup**: for a 90 % / 10 % dominant split at N = 1 M vectors (dim = 1536), incremental compaction reduces HNSW build cost from O(N log N) to O(N_dom) deserialization + O(N_small × log N_dom) — approximately **7× faster** than full rebuild.
+
+### Tests
+
+- `hnsw::tests::insert_node_extends_existing_graph` — inserts a 4th node and verifies nearest-neighbour correctness.
+- `hnsw::tests::insert_node_normalized_cosine` — insert with unnormalised input; node is pre-normalised internally.
+- `hnsw::tests::insert_node_into_single_node_graph` — insert into a 1-node graph (edge case: entry point with no neighbours yet).
+- `compaction::tests::compact_incremental_merges_dominant_plus_small` — 6-row dominant + 2-row small file; verifies merged row count, dominant rows first, HNSW searchable with correct RowIds after incremental insertion.
+- `compaction::tests::compact_incremental_falls_back_when_no_dominant` — 50/50 split triggers full-rebuild fallback; merged file still valid.
+
 ---
 
 ## [0.0.20] — 2026-06-18
