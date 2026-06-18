@@ -43,19 +43,38 @@ type DataFileEntry struct {
 	PartitionValue     string // agent_id or other partition value (Phase 9)
 }
 
+// PartitionDef mirrors ailake_core::PartitionDef.
+// Transform is "identity" or "truncate[W]" (e.g. "truncate[4]").
+type PartitionDef struct {
+	Column     string `json:"column"`
+	Transform  string `json:"transform"`
+	ColumnType string `json:"column_type"` // Iceberg type: "string", "int", "long", …
+}
+
+// SchemaField mirrors one field in the Iceberg table schema.
+type SchemaField struct {
+	ID      int    `json:"id"`
+	Name    string `json:"name"`
+	Type    string `json:"type"`    // Iceberg primitive type string
+	Required bool  `json:"required"`
+}
+
 // TableInfo mirrors the JSON output of "ailake info --format json".
 type TableInfo struct {
-	Table          string  `json:"table"`
-	Location       string  `json:"location"`
-	VectorColumn   string  `json:"vector_column"`
-	VectorDim      string  `json:"vector_dim"`
-	VectorMetric   string  `json:"vector_metric"`
-	EmbeddingModel string  `json:"embedding_model,omitempty"`
-	Files          int     `json:"files"`
-	IndexedFiles   int     `json:"indexed_files"`
-	Rows           uint64  `json:"rows"`
-	SizeBytes      uint64  `json:"size_bytes"`
-	SnapshotID     *int64  `json:"snapshot_id"`
+	Table           string         `json:"table"`
+	Location        string         `json:"location"`
+	VectorColumn    string         `json:"vector_column"`
+	VectorDim       string         `json:"vector_dim"`
+	VectorMetric    string         `json:"vector_metric"`
+	EmbeddingModel  string         `json:"embedding_model,omitempty"`
+	Files           int            `json:"files"`
+	IndexedFiles    int            `json:"indexed_files"`
+	Rows            uint64         `json:"rows"`
+	SizeBytes       uint64         `json:"size_bytes"`
+	SnapshotID      *int64         `json:"snapshot_id"`
+	FormatVersion   int            `json:"format_version"`   // 2 or 3
+	PartitionFields []PartitionDef `json:"partition_fields"` // empty for unpartitioned tables
+	SchemaFields    []SchemaField  `json:"schema_fields"`    // current schema fields
 }
 
 // HadoopCatalog reads an AI-Lake table from a local filesystem path.
@@ -77,8 +96,9 @@ func (c *HadoopCatalog) LoadTable(namespace, name string) (*TableInfo, error) {
 	}
 
 	info := &TableInfo{
-		Table:    namespace + "." + name,
-		Location: dir,
+		Table:         namespace + "." + name,
+		Location:      dir,
+		FormatVersion: 2, // default; overwritten below if present
 	}
 	if props, ok := meta["properties"].(map[string]any); ok {
 		info.VectorColumn, _ = props["ailake.vector-column"].(string)
@@ -86,11 +106,120 @@ func (c *HadoopCatalog) LoadTable(namespace, name string) (*TableInfo, error) {
 		info.VectorMetric, _ = props["ailake.vector-metric"].(string)
 		info.EmbeddingModel, _ = props["ailake.embedding-model"].(string)
 	}
+	if fv, ok := meta["format-version"].(float64); ok {
+		info.FormatVersion = int(fv)
+	}
 	if sid, ok := meta["current-snapshot-id"].(float64); ok {
 		id := int64(sid)
 		info.SnapshotID = &id
 	}
+
+	// Parse current schema fields for schema-evolution context.
+	currentSchemaID := -1
+	if v, ok := meta["current-schema-id"].(float64); ok {
+		currentSchemaID = int(v)
+	}
+	if schemas, ok := meta["schemas"].([]any); ok {
+		for _, s := range schemas {
+			sm, ok := s.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, ok := sm["schema-id"].(float64); !ok || int(id) != currentSchemaID {
+				continue
+			}
+			if fields, ok := sm["fields"].([]any); ok {
+				for _, f := range fields {
+					fm, ok := f.(map[string]any)
+					if !ok {
+						continue
+					}
+					sf := SchemaField{
+						Name:     str(fm["name"]),
+						Required: boolVal(fm["required"]),
+					}
+					if id, ok := fm["id"].(float64); ok {
+						sf.ID = int(id)
+					}
+					// type can be a string or nested object; stringify either way.
+					switch t := fm["type"].(type) {
+					case string:
+						sf.Type = t
+					case map[string]any:
+						if raw, err := json.Marshal(t); err == nil {
+							sf.Type = string(raw)
+						}
+					}
+					info.SchemaFields = append(info.SchemaFields, sf)
+				}
+			}
+			break
+		}
+	}
+
+	// Parse partition fields from current partition spec + schema.
+	// Build field-id → schema field type map for column_type lookup.
+	fieldTypeByID := make(map[int]string, len(info.SchemaFields))
+	for _, sf := range info.SchemaFields {
+		fieldTypeByID[sf.ID] = sf.Type
+	}
+	// Also build name → field for name-based fallback.
+	fieldTypeByName := make(map[string]string, len(info.SchemaFields))
+	for _, sf := range info.SchemaFields {
+		fieldTypeByName[sf.Name] = sf.Type
+	}
+
+	defaultSpecID := -1
+	if v, ok := meta["default-spec-id"].(float64); ok {
+		defaultSpecID = int(v)
+	}
+	if specs, ok := meta["partition-specs"].([]any); ok {
+		for _, s := range specs {
+			sm, ok := s.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, ok := sm["spec-id"].(float64); !ok || int(id) != defaultSpecID {
+				continue
+			}
+			if fields, ok := sm["fields"].([]any); ok {
+				for _, f := range fields {
+					fm, ok := f.(map[string]any)
+					if !ok {
+						continue
+					}
+					pd := PartitionDef{
+						Column:    str(fm["name"]),
+						Transform: str(fm["transform"]),
+					}
+					// source-id links to schema field id for type resolution.
+					if srcID, ok := fm["source-id"].(float64); ok {
+						pd.ColumnType = fieldTypeByID[int(srcID)]
+					}
+					if pd.ColumnType == "" {
+						pd.ColumnType = fieldTypeByName[pd.Column]
+					}
+					if pd.ColumnType == "" {
+						pd.ColumnType = "string"
+					}
+					info.PartitionFields = append(info.PartitionFields, pd)
+				}
+			}
+			break
+		}
+	}
+
 	return info, nil
+}
+
+func str(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+func boolVal(v any) bool {
+	b, _ := v.(bool)
+	return b
 }
 
 // ListFiles returns all DataFileEntry for the current snapshot.
