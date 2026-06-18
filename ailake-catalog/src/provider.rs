@@ -100,6 +100,11 @@ pub struct DataFileEntry {
     /// When present, scanner masks these row IDs from HNSW results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletion_vector: Option<DeletionVector>,
+    /// Iceberg V3 Row Lineage: globally unique first row ID assigned to this file.
+    /// Computed at commit time from the table's cumulative `next-row-id` counter.
+    /// None for V2 tables (row lineage requires format-version=3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_row_id: Option<i64>,
 }
 
 /// Iceberg-compatible table metadata read from the catalog.
@@ -156,7 +161,7 @@ pub struct TableProperties {
     pub extra: HashMap<String, String>,
     /// Iceberg format version to write. 2 = default (V2). 3 = opt-in V3.
     /// V3: append/update workloads fully supported. Equality deletes and
-    /// partition statistics not implemented (see docs/specs/ICEBERG_V3.md).
+    /// equality deletes not implemented (see docs/specs/ICEBERG_V3.md).
     pub format_version: u8,
 }
 
@@ -236,6 +241,7 @@ pub fn make_multi_column_data_file_entry(
         embedding_model: None,
         partition_value: None,
         deletion_vector: None,
+        first_row_id: None,
     }
 }
 
@@ -274,6 +280,7 @@ pub fn make_data_file_entry_indexing(
         embedding_model: None,
         partition_value: None,
         deletion_vector: None,
+        first_row_id: None,
     }
 }
 

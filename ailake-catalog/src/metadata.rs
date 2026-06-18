@@ -20,6 +20,11 @@ pub struct IcebergMetadata {
     pub location: String,
     #[serde(rename = "last-sequence-number", default)]
     pub last_sequence_number: i64,
+    /// Iceberg V3 Row Lineage: next available globally-unique row ID.
+    /// Incremented by record_count for each new data file at commit time.
+    /// Absent (0) in V2 tables — field is ignored when format-version < 3.
+    #[serde(rename = "next-row-id", default)]
+    pub next_row_id: i64,
     #[serde(rename = "last-updated-ms")]
     pub last_updated_ms: i64,
     #[serde(rename = "last-column-id", default)]
@@ -145,7 +150,7 @@ impl IcebergMetadata {
             eprintln!(
                 "[ailake] WARN: creating Iceberg V3 table at {location} — \
                  append/update workloads fully supported; \
-                 equality deletes and partition statistics not implemented"
+                 equality deletes not implemented"
             );
         }
         let now_ms = now_ms();
@@ -154,6 +159,7 @@ impl IcebergMetadata {
             table_uuid: Uuid::new_v4().to_string(),
             location: location.to_string(),
             last_sequence_number: 0,
+            next_row_id: 0,
             last_updated_ms: now_ms,
             last_column_id: 0,
             schemas: vec![serde_json::json!({"schema-id": 0, "type": "struct", "fields": []})],

@@ -48,7 +48,8 @@ const MANIFEST_ENTRY_SCHEMA_STR: &str = r#"{
         {"name": "key_metadata",      "type": ["null", "bytes"], "default": null, "field-id": 131},
         {"name": "split_offsets",     "type": ["null", {"type": "array", "items": "long", "element-id": 133}], "default": null, "field-id": 132},
         {"name": "equality_ids",      "type": ["null", {"type": "array", "items": "int",  "element-id": 136}], "default": null, "field-id": 135},
-        {"name": "sort_order_id",     "type": ["null", "int"],  "default": null, "field-id": 140}
+        {"name": "sort_order_id",     "type": ["null", "int"],  "default": null, "field-id": 140},
+        {"name": "first_row_id",      "type": ["null", "long"], "default": null, "field-id": 141}
       ]
     }, "field-id": 2}
   ]
@@ -139,6 +140,7 @@ pub fn write_manifest_file(
             embedding_model: f.embedding_model.clone(),
             partition_value: f.partition_value.clone(),
             deletion_vector: f.deletion_vector.clone(),
+            first_row_id: f.first_row_id,
         };
         match serde_json::to_vec(&ext) {
             Ok(bytes) => encode_union_bytes(1, &bytes, &mut rec), // key_metadata=bytes
@@ -147,7 +149,10 @@ pub fn write_manifest_file(
         encode_union_null(&mut rec); // split_offsets
         encode_union_null(&mut rec); // equality_ids
         encode_union_null(&mut rec); // sort_order_id
-                                     // (encode_empty_array not needed here — only arrays that aren't union-wrapped)
+        match f.first_row_id {
+            Some(id) => encode_union_long(1, id, &mut rec),
+            None => encode_union_null(&mut rec),
+        } // first_row_id (V3 row lineage; null for V2 tables)
         let _ = encode_empty_array; // suppress unused warning
         records.push(rec);
     }
@@ -305,6 +310,10 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                     // AI-Lake-written DVs come from key_metadata JSON (Phase C).
                     let native_dv = parse_v3_deletion_vector(df_fields);
 
+                    // Parse V3 first_row_id from native Avro field (Phase D).
+                    // Falls back to key_metadata JSON for old AI-Lake manifests.
+                    let native_first_row_id = parse_v3_first_row_id(df_fields);
+
                     results.push(DataFileEntry {
                         path,
                         record_count,
@@ -330,6 +339,8 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                             .as_ref()
                             .and_then(|e| e.deletion_vector.clone())
                             .or(native_dv),
+                        first_row_id: native_first_row_id
+                            .or_else(|| ext.as_ref().and_then(|e| e.first_row_id)),
                     });
                 }
             }
@@ -367,6 +378,11 @@ struct AilakeEntryExt {
     /// external engines (Spark/Trino/PyIceberg), parse from native Avro field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletion_vector: Option<crate::provider::DeletionVector>,
+    /// V3 Row Lineage (Phase D) — first_row_id as recorded in key_metadata JSON.
+    /// Canonical value comes from the native Avro field; this is a fallback for
+    /// manifests written by older AI-Lake versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_row_id: Option<i64>,
 }
 
 /// Extract a V3 Deletion Vector reference from the native Avro `data_file.deletion_vector`
@@ -410,6 +426,21 @@ fn parse_v3_deletion_vector(
     let cardinality = get_long("cardinality").unwrap_or(-1);
 
     Some(crate::provider::DeletionVector { path, offset, length, cardinality })
+}
+
+/// Extract V3 `first_row_id` from the native Avro `data_file.first_row_id` field.
+/// Returns None for V2 manifests or when the field is absent / null.
+fn parse_v3_first_row_id(df_fields: &[(String, Value)]) -> Option<i64> {
+    df_fields
+        .iter()
+        .find(|(k, _)| k == "first_row_id")
+        .and_then(|(_, v)| match v {
+            Value::Union(_, inner) => {
+                if let Value::Long(n) = inner.as_ref() { Some(*n) } else { None }
+            }
+            Value::Long(n) => Some(*n),
+            _ => None,
+        })
 }
 
 /// Read manifest file paths from an Iceberg manifest list (Avro).
@@ -467,6 +498,7 @@ mod tests {
             embedding_model: None,
             partition_value: None,
             deletion_vector: None,
+            first_row_id: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -496,6 +528,7 @@ mod tests {
             embedding_model: None,
             partition_value: None,
             deletion_vector: None,
+            first_row_id: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -505,5 +538,59 @@ mod tests {
             entries[0].batch_id.as_deref(),
             Some("dag_run_2026-05-28_taskA")
         );
+    }
+
+    #[test]
+    fn first_row_id_roundtrip_v3() {
+        let file = DataFileEntry {
+            path: "data/part-2.parquet".to_string(),
+            record_count: 200,
+            file_size_bytes: 8192,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: Some(300),
+            hnsw_len: Some(100),
+            vector_column: Some("embedding".to_string()),
+            vector_dim: Some(4),
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: Some(5000),
+        };
+        let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
+        let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
+        let bytes = write_manifest_file(&[file], 77, 1, schema_json, partition_spec, 3);
+        let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
+        assert_eq!(entries[0].first_row_id, Some(5000));
+    }
+
+    #[test]
+    fn first_row_id_none_for_v2() {
+        let file = DataFileEntry {
+            path: "data/part-3.parquet".to_string(),
+            record_count: 100,
+            file_size_bytes: 4096,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: None,
+            vector_dim: None,
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+        };
+        let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
+        let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
+        let bytes = write_manifest_file(&[file], 88, 1, schema_json, partition_spec, 2);
+        let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
+        assert_eq!(entries[0].first_row_id, None);
     }
 }

@@ -649,6 +649,7 @@ mod tests {
                 embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             })
             .collect();
         assert!(planner.plan(&files).is_empty());
@@ -678,6 +679,7 @@ mod tests {
                 embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "large.parquet".into(),
@@ -695,6 +697,7 @@ mod tests {
                 embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "also-small.parquet".into(),
@@ -712,6 +715,7 @@ mod tests {
                 embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
         ];
         let selected = planner.plan(&files);
@@ -745,6 +749,7 @@ mod tests {
                 embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             })
             .collect();
         let selected = planner.plan(&files);
@@ -772,6 +777,7 @@ mod tests {
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "a.parquet".into(),
@@ -782,6 +788,7 @@ mod tests {
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "b.parquet".into(),
@@ -792,6 +799,7 @@ mod tests {
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
         ];
         let selected = planner.plan(&files);
@@ -868,6 +876,7 @@ mod tests {
                 embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -885,6 +894,7 @@ mod tests {
                 embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
         ];
 
@@ -994,6 +1004,7 @@ mod tests {
                 embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "data/small.parquet".into(),
@@ -1011,6 +1022,7 @@ mod tests {
                 embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
         ];
 
@@ -1112,6 +1124,7 @@ mod tests {
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -1122,6 +1135,7 @@ mod tests {
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
         ];
 
@@ -1222,6 +1236,7 @@ mod tests {
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -1232,6 +1247,7 @@ mod tests {
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             },
         ];
 

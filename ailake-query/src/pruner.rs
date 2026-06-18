@@ -117,6 +117,7 @@ mod tests {
             embedding_model: None,
             partition_value: None,
             deletion_vector: None,
+            first_row_id: None,
         };
         let query = vec![0.0f32, 0.0, 1.0];
         let kept = VectorPruner::prune(vec![entry], &query, VectorMetric::Cosine, 0.0);

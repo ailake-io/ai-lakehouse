@@ -242,6 +242,7 @@ mod tests {
             embedding_model: None,
             partition_value: None,
             deletion_vector: None,
+            first_row_id: None,
         }
     }
 

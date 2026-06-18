@@ -129,7 +129,9 @@ impl CatalogProvider for HadoopCatalog {
             } else {
                 None
             };
-        let abs_files: Vec<DataFileEntry> = snapshot
+        // Build absolute-path file list. For V3 tables, assign first_row_id from
+        // the table's next-row-id counter so every row has a globally unique ID.
+        let mut abs_files: Vec<DataFileEntry> = snapshot
             .files
             .iter()
             .map(|f| {
@@ -143,6 +145,15 @@ impl CatalogProvider for HadoopCatalog {
                 DataFileEntry { path, ..f.clone() }
             })
             .collect();
+
+        if meta.format_version >= 3 {
+            let mut next_id = meta.next_row_id;
+            for f in abs_files.iter_mut() {
+                f.first_row_id = Some(next_id);
+                next_id += f.record_count as i64;
+            }
+            meta.next_row_id = next_id;
+        }
         let added_rows: i64 = abs_files.iter().map(|f| f.record_count as i64).sum();
         let manifest_file_path = format!("{}/metadata/{}-m0.avro", table_root, snap_id);
         let manifest_bytes = write_manifest_file(
@@ -352,6 +363,7 @@ mod tests {
                 embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
+                first_row_id: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
@@ -362,5 +374,123 @@ mod tests {
         let files = catalog.list_files(&table, Some(snap_id)).await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "data/part-00001.parquet");
+    }
+
+    #[tokio::test]
+    async fn v3_assigns_first_row_id_monotonically() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let catalog = HadoopCatalog::new(store, "warehouse");
+        let table = TableIdent::new("default", "v3docs");
+
+        let mut props = make_props();
+        props.format_version = 3;
+        catalog.create_table(&table, &props).await.unwrap();
+
+        // First commit — 10 rows → first_row_id=0, next_row_id advances to 10.
+        let snap1 = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00001.parquet".to_string(),
+                record_count: 10,
+                file_size_bytes: 1024,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".to_string()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None, // assigned by catalog at commit time
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+        };
+        catalog.commit_snapshot(&table, snap1).await.unwrap();
+
+        // Second commit — 25 rows → first_row_id=10.
+        let snap2_id = new_snapshot_id();
+        let snap2 = NewSnapshot {
+            snapshot_id: snap2_id,
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00002.parquet".to_string(),
+                record_count: 25,
+                file_size_bytes: 2048,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".to_string()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+        };
+        catalog.commit_snapshot(&table, snap2).await.unwrap();
+
+        let files = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(files.len(), 2);
+        // File 1: first_row_id=0
+        let f1 = files.iter().find(|f| f.path.ends_with("part-00001.parquet")).unwrap();
+        assert_eq!(f1.first_row_id, Some(0), "first file must start at row 0");
+        // File 2: first_row_id=10 (after the 10 rows of file 1)
+        let f2 = files.iter().find(|f| f.path.ends_with("part-00002.parquet")).unwrap();
+        assert_eq!(f2.first_row_id, Some(10), "second file must start after first file's rows");
+    }
+
+    #[tokio::test]
+    async fn v2_does_not_assign_first_row_id() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let catalog = HadoopCatalog::new(store, "warehouse");
+        let table = TableIdent::new("default", "v2docs");
+
+        catalog.create_table(&table, &make_props()).await.unwrap();
+
+        let snap = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00001.parquet".to_string(),
+                record_count: 10,
+                file_size_bytes: 1024,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".to_string()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+        };
+        catalog.commit_snapshot(&table, snap).await.unwrap();
+
+        let files = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(files[0].first_row_id, None, "V2 tables must not have first_row_id");
     }
 }
