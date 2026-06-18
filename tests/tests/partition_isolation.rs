@@ -107,6 +107,7 @@ async fn partition_filter_isolates_per_agent_search() {
             rerank_factor: None,
             score_fn: None,
             partition_filter: Some("agent-A".to_string()),
+            hybrid: None,
         },
         "embedding",
         dim as u32,
@@ -135,6 +136,7 @@ async fn partition_filter_isolates_per_agent_search() {
             rerank_factor: None,
             score_fn: None,
             partition_filter: Some("agent-B".to_string()),
+            hybrid: None,
         },
         "embedding",
         dim as u32,
@@ -182,6 +184,7 @@ async fn partition_filter_nonexistent_returns_empty() {
             rerank_factor: None,
             score_fn: None,
             partition_filter: Some("nonexistent-agent".to_string()),
+            hybrid: None,
         },
         "embedding",
         dim as u32,
@@ -228,6 +231,7 @@ async fn unfiltered_search_spans_all_partitions() {
         rerank_factor: None,
         score_fn: None,
         partition_filter: None,
+        hybrid: None,
     };
 
     let results_all = search(
@@ -302,6 +306,7 @@ async fn score_fn_is_invoked_during_search() {
                 distance
             })),
             partition_filter: None,
+            hybrid: None,
         },
         "embedding",
         dim as u32,
@@ -354,6 +359,7 @@ async fn score_fn_constant_zero_returns_rows() {
             rerank_factor: None,
             score_fn: Some(ScoreFn::new(|_d, _row| 0.0)),
             partition_filter: None,
+            hybrid: None,
         },
         "embedding",
         dim as u32,

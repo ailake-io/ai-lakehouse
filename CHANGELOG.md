@@ -11,6 +11,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`WorkingMemoryBuffer`** — bounded in-memory FIFO queue for agent short-term memory (`ailake-query/src/mem_table.rs`). Stores at most `max_rows` `(text, embedding, importance)` tuples; evicts oldest on overflow. `search(query, top_k)` brute-force cosine flat scan; `drain_to_table(&mut TableWriter)` persists all entries and clears the buffer. Python: `ailake.WorkingMemoryBuffer(max_rows=1000)`. Replaces MemTable for single-session agents; cascade pattern: buffer first, drain to AI-Lake when full.
+
+- **`MemoryDecayJob`** — async recomputation of `recency_weight = exp(-λ × days_since_access)` for episodic memory tables (`ailake-query/src/memory_decay.rs`). Reads `last_accessed_at` column (ISO 8601 string), rewrites each data file with updated `recency_weight`, commits a new `Overwrite` snapshot. Python: `ailake.decay_memories(path, decay_lambda=0.1)` returns number of updated files. No new crate deps (JDN date arithmetic inline, no chrono).
+
+- **`extra_columns` support in `write_batch` / `write_batch_auto_deferred` / `write_batch_idempotent`** — all Python write methods now accept `extra_columns: dict[str, list]` keyword argument. Column types are inferred from the first element: `bool` → `Boolean`, `float` → `Float32`, `int` → `Int64`, `str` / other → `Utf8`. Enables writing `EpisodicMemorySchema`, `ToolCallSchema`, and custom agent columns without constructing PyArrow schemas manually.
+
+- **`search_text` and `WorkingMemoryBuffer` exported from `ailake` Python module** — `ailake.search_text(path, query_text, top_k, text_column, partition_filter)` and `ailake.WorkingMemoryBuffer` now in `__all__`. `ailake.decay_memories` added to module.
+
+- **BM25 integration tests** — `tests/tests/hybrid_search.rs` (6 tests): `search_text_returns_most_relevant_doc`, `search_text_returns_top_k_limit`, `hybrid_search_rrf_returns_top_k`, `idf_stats_serialization_roundtrip`, `bm25_scorer_ranks_rust_docs_above_python`, `write_batch_auto_deferred_creates_file`.
+
+- **`WorkingMemoryBuffer` unit tests** — 4 tests in `ailake-query/src/mem_table.rs`: eviction correctness, cosine ranking, empty buffer, drain-to-table roundtrip.
+
+- **`MemoryDecayJob` unit tests** — 4 tests in `ailake-query/src/memory_decay.rs`: ISO date parse (epoch, known date, short string error), `apply_decay` correct weight.
+
+- **Demo fixture `ailake_bm25`** — `init_demo.py` now writes a BM25-indexed table (`_write_bm25`, 200 rows, `bm25_text_column="text"`). Path exposed in `demo_query.json` as `table_paths.bm25`. `main()` calls `_write_bm25` alongside other fixtures.
+
+- **Notebook `09_hybrid_search.ipynb`** — 7 sections: BM25 write, `search_text` pure lexical, hybrid RRF, weight ablation, pre-built fixture, `WorkingMemoryBuffer` demo, `decay_memories` demo.
+
 - **Hybrid BM25+vector search** — `SearchConfig::hybrid: Option<HybridConfig>` adds first-class BM25 lexical scoring to the vector search pipeline, eliminating the need for external FTS infrastructure for RAG/hybrid workloads:
   - `BM25Scorer` in pure Rust (no Tantivy dep) — BM25+ formula (k1=1.2, b=0.75), always-positive IDF, 50k-term vocabulary cap with automatic pruning.
   - `IdfStats` accumulated at write time from `TableWriter::with_bm25("chunk_text")` — serialized as zstd-compressed bincode, persisted to `metadata/ailake_bm25_stats.bin` alongside the Iceberg catalog. Updated on every `write_batch` / `write_batch_deferred` call. Compaction rebuilds stats accurately.
