@@ -19,10 +19,23 @@ pub mod llm_columns {
     pub const CHUNK_SUMMARY: &str = "chunk_summary";
     pub const SOURCE_URI: &str = "source_uri";
     pub const PAGE_NUMBER: &str = "page_number";
+    /// Arrow type: `Timestamp(Nanosecond, Some("UTC"))` — use `ailake_core::now_ns()` to populate.
     pub const CREATED_AT: &str = "created_at";
     pub const DOCUMENT_DATE: &str = "document_date";
     pub const EMBEDDING: &str = "embedding";
     pub const CONTEXT_EMBEDDING: &str = "context_embedding";
+}
+
+/// Current UTC time as Unix epoch nanoseconds.
+///
+/// Use for `created_at` and `last_accessed_at` columns in `LlmContextSchema`
+/// and `EpisodicMemorySchema` tables. Arrow type for these columns must be
+/// `Timestamp(Nanosecond, Some("UTC"))` — Iceberg maps this to `timestamptz`.
+pub fn now_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
 }
 
 /// Vector storage configuration applied at table creation time.

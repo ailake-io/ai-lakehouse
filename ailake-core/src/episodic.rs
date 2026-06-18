@@ -26,7 +26,8 @@ pub mod episodic_columns {
     /// Higher access count signals relevance; used by agents for importance inference.
     pub const ACCESS_COUNT: &str = "access_count";
 
-    /// Timestamp of the most recent retrieval (Unix seconds, Int64).
+    /// Timestamp of the most recent retrieval.
+    /// Arrow type: `Timestamp(Nanosecond, Some("UTC"))` — use `ailake_core::now_ns()` to populate.
     /// Updated in-place via logical delete + reinsert on each `recall()` hit.
     pub const LAST_ACCESSED_AT: &str = "last_accessed_at";
 
@@ -42,7 +43,8 @@ pub mod episodic_columns {
     /// UUID of the conversation / task session this memory was created in.
     pub const SESSION_ID: &str = "session_id";
 
-    /// Timestamp when this memory was first written (Unix seconds, Int64).
+    /// Timestamp when this memory was first written.
+    /// Arrow type: `Timestamp(Nanosecond, Some("UTC"))` — use `ailake_core::now_ns()` to populate.
     pub const CREATED_AT: &str = "created_at";
 }
 
@@ -63,10 +65,10 @@ pub mod episodic_columns {
 /// -- From episodic_columns::* (Phase 9 extensions)
 /// agent_id:          Utf8       -- UUID string
 /// session_id:        Utf8       -- UUID string
-/// created_at:        Int64      -- Unix seconds
+/// created_at:        Timestamp(ns, UTC)  -- use ailake_core::now_ns()
 /// recency_weight:    Float32    -- exp(-λ * days_since_access), updated by MemoryDecayJob
 /// access_count:      UInt32     -- incremented on each recall() hit
-/// last_accessed_at:  Int64      -- Unix seconds, updated on recall
+/// last_accessed_at:  Timestamp(ns, UTC)  -- updated on recall, use ailake_core::now_ns()
 /// importance_score:  Float32    -- agent-assigned [0.0, 1.0]
 /// ```
 ///

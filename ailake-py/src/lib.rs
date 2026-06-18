@@ -1115,6 +1115,16 @@ fn delete_rows(table_path: &str, file_path: &str, row_ids: Vec<u32>) -> PyResult
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Current UTC time as Unix epoch nanoseconds.
+///
+/// Use to populate `created_at` and `last_accessed_at` columns in
+/// `LlmContextSchema` / `EpisodicMemorySchema` tables. The matching Arrow
+/// type is `pa.timestamp('ns', tz='UTC')`.
+#[pyfunction]
+fn now_ns() -> i64 {
+    ailake_core::now_ns()
+}
+
 #[pymodule]
 fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
@@ -1128,5 +1138,6 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(migrate_embeddings, m)?)?;
     m.add_function(wrap_pyfunction!(decay_memories, m)?)?;
     m.add_function(wrap_pyfunction!(delete_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(now_ns, m)?)?;
     Ok(())
 }

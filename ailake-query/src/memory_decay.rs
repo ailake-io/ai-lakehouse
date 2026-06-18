@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Periodic recency-decay job for `EpisodicMemorySchema` tables.
 //!
-//! Reads the `last_accessed_at` string column from each data file, recomputes
+//! Reads the `last_accessed_at` column from each data file (Timestamp(ns, UTC) or legacy Utf8),
+//! recomputes
 //! `recency_weight = exp(-lambda * days_since_access)`, rewrites the column,
 //! and commits a new Iceberg snapshot replacing the old files.
 //!
@@ -18,7 +19,9 @@ use ailake_core::{AilakeError, AilakeResult, VectorStoragePolicy};
 use ailake_file::{AilakeFileReader, AilakeFileWriter};
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
-use arrow_array::{Array, Float32Array, RecordBatch};
+use arrow_array::{
+    Array, Float32Array, RecordBatch, TimestampMicrosecondArray, TimestampNanosecondArray,
+};
 use arrow_schema::{DataType, Field};
 
 const LAST_ACCESSED_COL: &str = "last_accessed_at";
@@ -153,29 +156,56 @@ impl MemoryDecayJob {
     }
 }
 
+/// Extract days-since-access for each row, supporting Timestamp(ns/us) and legacy Utf8.
+fn days_old_vec(col: &Arc<dyn Array>, today_day: i64) -> AilakeResult<Vec<f32>> {
+    if let Some(ts) = col.as_any().downcast_ref::<TimestampNanosecondArray>() {
+        return Ok((0..ts.len())
+            .map(|i| {
+                if !ts.is_valid(i) {
+                    return 0.0f32;
+                }
+                let day = ts.value(i) / (86_400 * 1_000_000_000i64);
+                (today_day - day).max(0) as f32
+            })
+            .collect());
+    }
+    if let Some(ts) = col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+        return Ok((0..ts.len())
+            .map(|i| {
+                if !ts.is_valid(i) {
+                    return 0.0f32;
+                }
+                let day = ts.value(i) / (86_400 * 1_000_000i64);
+                (today_day - day).max(0) as f32
+            })
+            .collect());
+    }
+    if let Some(sa) = col.as_any().downcast_ref::<arrow_array::StringArray>() {
+        return Ok((0..sa.len())
+            .map(|i| {
+                if !sa.is_valid(i) {
+                    return 0.0f32;
+                }
+                let access_day = parse_iso_date_days(sa.value(i)).unwrap_or(today_day);
+                (today_day - access_day).max(0) as f32
+            })
+            .collect());
+    }
+    Err(AilakeError::Catalog(
+        "last_accessed_at must be Timestamp(Nanosecond/Microsecond) or Utf8".into(),
+    ))
+}
+
 /// Rewrite the `recency_weight` column in `batch` based on `last_accessed_at`.
 fn apply_decay(batch: &RecordBatch, today_day: i64, lambda: f32) -> AilakeResult<RecordBatch> {
     let col = batch
         .column_by_name(LAST_ACCESSED_COL)
         .ok_or_else(|| AilakeError::Catalog("last_accessed_at column not found".into()))?;
 
-    let sa = col
-        .as_any()
-        .downcast_ref::<arrow_array::StringArray>()
-        .ok_or_else(|| {
-            AilakeError::Catalog("last_accessed_at must be Utf8 string column".into())
-        })?;
-
-    let new_weights: Vec<f32> = (0..sa.len())
-        .map(|i| {
-            if !sa.is_valid(i) {
-                return 1.0f32;
-            }
-            let val = sa.value(i);
-            let access_day = parse_iso_date_days(val).unwrap_or(today_day);
-            let days_old = (today_day - access_day).max(0) as f32;
-            (-lambda * days_old).exp()
-        })
+    let days_old = days_old_vec(col, today_day)?;
+    let new_weights: Vec<f32> = days_old
+        .into_iter()
+        .map(|d| (-lambda * d).exp())
         .collect();
 
     let new_weight_array = Arc::new(Float32Array::from(new_weights));
@@ -293,5 +323,52 @@ mod tests {
         let expected = (-0.1f32 * 10.0).exp();
         assert!((w - expected).abs() < 0.001, "expected {expected}, got {w}");
         let _ = y; // suppress unused warning
+    }
+
+    #[test]
+    fn apply_decay_handles_timestamp_nanosecond() {
+        use arrow_schema::{Field, Schema, TimeUnit};
+
+        // 2024-01-05 00:00:00 UTC in nanoseconds = day 19727
+        // 2024-01-05 = 19727 days × 86400s × 1e9 ns
+        let day_19727_ns: i64 = 19727i64 * 86_400 * 1_000_000_000;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                LAST_ACCESSED_COL,
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                true,
+            ),
+            Field::new(RECENCY_WEIGHT_COL, DataType::Float32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampNanosecondArray::from(vec![day_19727_ns]).with_timezone("UTC")),
+                Arc::new(Float32Array::from(vec![1.0f32])),
+            ],
+        )
+        .unwrap();
+
+        // today = 2024-01-15 = day 19737 → 10 days old → exp(-0.1 * 10) ≈ 0.368
+        let today_day = 19737i64;
+        let result = apply_decay(&batch, today_day, 0.1).unwrap();
+        let weights = result
+            .column_by_name(RECENCY_WEIGHT_COL)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        let w = weights.value(0);
+        let expected = (-0.1f32 * 10.0).exp();
+        assert!((w - expected).abs() < 0.001, "expected {expected}, got {w}");
+    }
+
+    #[test]
+    fn now_ns_is_recent() {
+        // now_ns() must be > 2025-01-01 00:00:00 UTC in nanoseconds
+        let floor_2025_ns: i64 = 55 * 365 * 86_400 * 1_000_000_000i64; // ~2025
+        let t = ailake_core::now_ns();
+        assert!(t > floor_2025_ns, "now_ns() returned suspiciously small value: {t}");
     }
 }
