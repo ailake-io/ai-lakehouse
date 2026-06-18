@@ -85,6 +85,62 @@ impl AilakeFileWriter {
         self
     }
 
+    /// Write `batch` + `embeddings` using a **pre-built** `HnswIndex`.
+    ///
+    /// Skips the O(N log N) HNSW construction — the caller is responsible for
+    /// building and populating the index. The index must contain exactly
+    /// `embeddings.len()` nodes with RowIds `0..N` matching `embeddings[0..N]`
+    /// in order.
+    ///
+    /// Used by incremental compaction to reuse the dominant file's existing
+    /// index and only insert vectors from smaller files.
+    pub fn write_with_prebuilt_hnsw(
+        &self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+        hnsw: &ailake_index::HnswIndex,
+    ) -> AilakeResult<Bytes> {
+        use ailake_core::AilakeError;
+
+        let parquet_writer = ParquetVectorWriter::new(self.policy.clone());
+
+        // Pass 1: write Parquet without KV to measure the row-group section size.
+        let (parquet_v1, record_count) = parquet_writer.write_batch(batch, embeddings)?;
+        let footer_start = parquet_footer_start(&parquet_v1)?;
+
+        let index_bytes = HnswSerializer::to_bytes(hnsw)?;
+        let ailk_section = build_ailk_section_from_index_bytes(
+            &self.policy,
+            embeddings,
+            record_count,
+            footer_start as u64,
+            &index_bytes,
+            0u16, // flags=0: HNSW (not IVF-PQ)
+        )?;
+
+        let kv_val = footer_start.to_string();
+        let kv_refs: &[(&str, &str)] = &[("ailake.footer_offset", kv_val.as_str())];
+
+        // Pass 2: write Parquet with AILK offset KV embedded.
+        let (parquet_v2, _) =
+            parquet_writer.write_batch_with_kv(batch, embeddings, kv_refs)?;
+        let footer_start_v2 = parquet_footer_start(&parquet_v2)
+            .map_err(|e| AilakeError::Parquet(format!("footer_start unstable in write_with_prebuilt_hnsw: {e}")))?;
+        debug_assert_eq!(
+            footer_start, footer_start_v2,
+            "footer_start must be stable across KV injection"
+        );
+
+        let footer_len_v2 = parquet_v2.len() - footer_start_v2;
+        let mut out =
+            BytesMut::with_capacity(footer_start + ailk_section.len() + footer_len_v2);
+        out.put_slice(&parquet_v1[..footer_start]);
+        drop(parquet_v1);
+        out.put(ailk_section);
+        out.put_slice(&parquet_v2[footer_start_v2..]);
+        Ok(out.freeze())
+    }
+
     /// Write RecordBatch + embeddings as plain Parquet, with no AILK section.
     ///
     /// Used by `TableWriter::write_batch_deferred()` to persist data immediately
@@ -281,6 +337,67 @@ impl AilakeFileWriter {
 
         Ok(out.freeze())
     }
+}
+
+/// Build a complete AILK section using **pre-serialized** index bytes.
+/// Same layout as `build_ailk_section` but skips the index build step.
+fn build_ailk_section_from_index_bytes(
+    policy: &VectorStoragePolicy,
+    embeddings: &[Vec<f32>],
+    record_count: u64,
+    ailk_abs_offset: u64,
+    index_bytes: &[u8],
+    flags: u16,
+) -> AilakeResult<Bytes> {
+    let norm_storage: Vec<Vec<f32>>;
+    let (emb_for_centroid, centroid_metric) =
+        if policy.pre_normalize && policy.metric == ailake_core::VectorMetric::Cosine {
+            norm_storage = embeddings
+                .iter()
+                .map(|v| ailake_vec::normalize_l2(v))
+                .collect();
+            (
+                norm_storage.as_slice(),
+                ailake_core::VectorMetric::NormalizedCosine,
+            )
+        } else {
+            (embeddings, policy.metric)
+        };
+
+    let centroid = compute_centroid_and_radius(emb_for_centroid, centroid_metric);
+    let centroid_bytes = encode_centroid(&centroid);
+
+    let centroid_offset = HEADER_SIZE as u64;
+    let centroid_len = centroid_bytes.len() as u64;
+    let index_offset_in_ailk = centroid_offset + centroid_len;
+    let index_len = index_bytes.len() as u64;
+    let ailk_total_len = HEADER_SIZE as u64 + centroid_len + index_len + TRAILER_SIZE as u64;
+
+    let header = AilakeHeader {
+        format_version: AILAKE_FORMAT_VERSION,
+        flags,
+        dim: policy.dim,
+        precision: Precision::from(policy.precision),
+        distance_metric: DistanceMetric::from(policy.metric),
+        record_count,
+        centroid_offset,
+        centroid_len,
+        hnsw_offset: index_offset_in_ailk,
+        hnsw_len: index_len,
+    };
+    let trailer = AilakeTrailer {
+        footer_offset: ailk_abs_offset,
+        footer_len: ailk_total_len,
+        format_version: AILAKE_FORMAT_VERSION,
+        flags,
+    };
+
+    let mut buf = BytesMut::with_capacity(ailk_total_len as usize);
+    buf.put_slice(&header.to_bytes());
+    buf.put_slice(&centroid_bytes);
+    buf.put_slice(index_bytes);
+    buf.put_slice(&trailer.to_bytes());
+    Ok(buf.freeze())
 }
 
 /// Build a complete AILK section (header + centroid + index + trailer) for one vector column.

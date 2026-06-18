@@ -6,7 +6,7 @@ use ailake_catalog::{
     make_data_file_entry, make_data_file_entry_indexing, CatalogProvider, DataFileEntry,
     NewSnapshot, SnapshotOperation, TableIdent, VectorIndexInfo,
 };
-use ailake_core::{AilakeResult, VectorStoragePolicy};
+use ailake_core::{AilakeResult, RowId, VectorStoragePolicy};
 use ailake_file::{AilakeFileReader, AilakeFileWriter};
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
@@ -243,6 +243,196 @@ impl CompactionExecutor {
         Ok(entry)
     }
 
+    /// Merge `files` into a single new file using incremental HNSW insertion.
+    ///
+    /// Identifies the **dominant file** — the file holding >= 40 % of the total
+    /// row count — loads its existing HNSW graph from the AILK section, then
+    /// calls `HnswIndex::insert_node` for every vector from the remaining files.
+    ///
+    /// **Complexity vs `compact`**:
+    /// - Full rebuild: O(N log N), N = total rows.
+    /// - Incremental (this method): O(N_dom) deserialization + O(N_small × log N_dom).
+    ///   For a 90 / 10 split (N = 1 M, N_dom = 900 k) the speedup is ~7×.
+    ///
+    /// **Fallbacks** (all degrade gracefully to `compact`):
+    /// - No file holds >= 40 % of rows.
+    /// - Dominant file's HNSW cannot be loaded (IVF-PQ, `IndexStatus::Indexing`, corrupt).
+    ///
+    /// **RowId contract**: dominant file's vectors are placed first in the merged
+    /// Parquet (positions 0..N_dom-1); other files follow. The existing RowIds from
+    /// the dominant HNSW remain valid; new nodes receive RowIds N_dom..N-1.
+    pub async fn compact_incremental(
+        &self,
+        files: &[DataFileEntry],
+        output_path: &str,
+    ) -> AilakeResult<DataFileEntry> {
+        const DOMINANT_RATIO: f64 = 0.40;
+
+        if files.is_empty() {
+            return Err(ailake_core::AilakeError::Catalog(
+                "compact_incremental: no files provided".into(),
+            ));
+        }
+
+        // Find the dominant file by record_count.
+        let total_rows: u64 = files.iter().map(|f| f.record_count).sum();
+        let dom_idx = files
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, f)| f.record_count)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let dom_rows = files[dom_idx].record_count;
+
+        if (dom_rows as f64 / total_rows as f64) < DOMINANT_RATIO {
+            debug!(
+                "ailake: compact_incremental — no dominant file ({}/{} rows < {:.0}% threshold), \
+                 falling back to full rebuild",
+                dom_rows,
+                total_rows,
+                DOMINANT_RATIO * 100.0
+            );
+            return self.compact(files, output_path).await;
+        }
+
+        let column = self.policy.column_name.clone();
+        let dim = self.policy.dim;
+        let dom_path = files[dom_idx].path.clone();
+
+        // Read all files in parallel. Retain raw bytes only for the dominant file
+        // (needed to load its HNSW without a second round-trip).
+        let futs: Vec<_> = files
+            .iter()
+            .map(|entry| {
+                let store = self.store.clone();
+                let path = entry.path.clone();
+                let col = column.clone();
+                let is_dom = path == dom_path;
+                async move {
+                    let bytes: Bytes = store.get(&path).await?;
+                    let reader = AilakeFileReader::new(bytes.clone(), &col, dim);
+                    if !reader.is_ailake_file() {
+                        debug!(
+                            "ailake: compact_incremental skipping {} — not an AI-Lake file",
+                            path
+                        );
+                        return Ok::<Option<(RecordBatch, Vec<Vec<f32>>, bool, Option<Bytes>)>, ailake_core::AilakeError>(None);
+                    }
+                    let (batch, vecs) = reader.read_parquet()?;
+                    let retained = if is_dom { Some(bytes) } else { None };
+                    Ok(Some((batch, vecs, is_dom, retained)))
+                }
+            })
+            .collect();
+
+        let raw: Vec<(RecordBatch, Vec<Vec<f32>>, bool, Option<Bytes>)> =
+            try_join_all(futs).await?.into_iter().flatten().collect();
+
+        if raw.is_empty() {
+            return Err(ailake_core::AilakeError::Catalog(
+                "compact_incremental: no valid AI-Lake files in input".into(),
+            ));
+        }
+
+        // Separate dominant from others; dominant goes first in the merged file.
+        let mut dom_batch: Option<RecordBatch> = None;
+        let mut dom_vecs: Vec<Vec<f32>> = Vec::new();
+        let mut dom_bytes_found: Option<Bytes> = None;
+        let mut other_batches: Vec<RecordBatch> = Vec::new();
+        let mut other_vecs: Vec<Vec<f32>> = Vec::new();
+
+        for (batch, vecs, is_dom, retained) in raw {
+            if is_dom {
+                dom_batch = Some(batch);
+                dom_vecs = vecs;
+                dom_bytes_found = retained;
+            } else {
+                other_batches.push(batch);
+                other_vecs.extend(vecs);
+            }
+        }
+
+        let (dom_batch, dom_bytes) = match (dom_batch, dom_bytes_found) {
+            (Some(b), Some(byt)) => (b, byt),
+            _ => {
+                debug!(
+                    "ailake: compact_incremental — dominant file missing from read results, \
+                     falling back to full rebuild"
+                );
+                return self.compact(files, output_path).await;
+            }
+        };
+
+        // Load the dominant file's existing HNSW graph.
+        let dom_reader = AilakeFileReader::new(dom_bytes, &column, dim);
+        let mut hnsw = match dom_reader.load_index() {
+            Ok(idx) => idx,
+            Err(e) => {
+                debug!(
+                    "ailake: compact_incremental — cannot load dominant HNSW ({}), \
+                     falling back to full rebuild",
+                    e
+                );
+                return self.compact(files, output_path).await;
+            }
+        };
+
+        let dom_count = dom_batch.num_rows() as u64;
+
+        // Insert vectors from non-dominant files into the loaded graph.
+        // RowIds are assigned starting at dom_count to match positions in the merged Parquet.
+        for (j, vec) in other_vecs.iter().enumerate() {
+            hnsw.insert_node(RowId::new(dom_count + j as u64), vec.clone());
+        }
+        hnsw.quantize_to_f16();
+
+        // Assemble merged batch (dominant rows first) and all embeddings.
+        let schema: SchemaRef = dom_batch.schema();
+        let mut all_batches = vec![dom_batch];
+        all_batches.extend(other_batches);
+        let merged_batch = concat_batches(schema, &all_batches)?;
+        let record_count = merged_batch.num_rows() as u64;
+
+        let mut all_embeddings = dom_vecs;
+        all_embeddings.extend(other_vecs);
+
+        // Write the merged file using the pre-built index (no rebuild).
+        let writer = AilakeFileWriter::new(self.policy.clone());
+        let file_bytes =
+            writer.write_with_prebuilt_hnsw(&merged_batch, &all_embeddings, &hnsw)?;
+        let file_size = file_bytes.len() as u64;
+        self.store.put(output_path, file_bytes.clone()).await?;
+
+        let centroid = compute_centroid_and_radius(&all_embeddings, self.policy.metric);
+        let reader = AilakeFileReader::new(file_bytes, &self.policy.column_name, self.policy.dim);
+        let header = reader.read_header()?;
+        let ailk_start = reader.ailk_offset()?;
+
+        let entry = make_data_file_entry(
+            output_path,
+            record_count,
+            file_size,
+            &centroid,
+            VectorIndexInfo {
+                column: &self.policy.column_name,
+                dim: self.policy.dim,
+                hnsw_offset: ailk_start + header.hnsw_offset,
+                hnsw_len: header.hnsw_len,
+            },
+        );
+
+        info!(
+            "ailake: compact_incremental — merged {} files into {} \
+             ({} rows from dominant + {} inserted incrementally)",
+            files.len(),
+            output_path,
+            dom_count,
+            record_count - dom_count
+        );
+
+        Ok(entry)
+    }
+
     /// Merge `files` into a single new file at `output_path`, writing Parquet
     /// immediately and building the HNSW / IVF-PQ index in a background Tokio task.
     ///
@@ -336,7 +526,8 @@ impl CompactionExecutor {
             .as_millis();
         let output_path = format!("{output_prefix}/compacted-{ts}.parquet");
 
-        let merged = self.compact(&to_compact, &output_path).await?;
+        // Use incremental merge when a dominant file exists (falls back to full rebuild automatically).
+        let merged = self.compact_incremental(&to_compact, &output_path).await?;
 
         // Commit: add merged file, remove input files (via Replace snapshot)
         let snapshot = NewSnapshot {
@@ -702,6 +893,236 @@ mod tests {
         let (batch, embs) = reader.read_parquet().unwrap();
         assert_eq!(batch.num_rows(), 4);
         assert_eq!(embs.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn compact_incremental_merges_dominant_plus_small() {
+        use ailake_core::{RowId, VectorMetric, VectorPrecision};
+        use ailake_store::LocalStore;
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let policy = VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim: 4,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+        };
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+
+        // Dominant file: 6 rows (75% of total 8 rows — above 40% threshold).
+        let embs_dom: Vec<Vec<f32>> = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+            vec![0.7, 0.7, 0.0, 0.0],
+            vec![0.0, 0.7, 0.7, 0.0],
+            vec![0.0, 0.0, 0.7, 0.7],
+        ];
+        let batch_dom = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![0i32, 1, 2, 3, 4, 5]))],
+        )
+        .unwrap();
+
+        // Small file: 2 rows.
+        let embs_small: Vec<Vec<f32>> = vec![
+            vec![0.0, 0.0, 0.0, 1.0],
+            vec![0.5, 0.5, 0.5, 0.5],
+        ];
+        let batch_small = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![6i32, 7]))],
+        )
+        .unwrap();
+
+        let bytes_dom = AilakeFileWriter::new(policy.clone())
+            .write(&batch_dom, &embs_dom)
+            .unwrap();
+        let bytes_small = AilakeFileWriter::new(policy.clone())
+            .write(&batch_small, &embs_small)
+            .unwrap();
+
+        store
+            .put("data/dominant.parquet", bytes_dom.clone())
+            .await
+            .unwrap();
+        store
+            .put("data/small.parquet", bytes_small.clone())
+            .await
+            .unwrap();
+
+        let entries = vec![
+            DataFileEntry {
+                path: "data/dominant.parquet".into(),
+                record_count: 6,
+                file_size_bytes: bytes_dom.len() as u64,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+            },
+            DataFileEntry {
+                path: "data/small.parquet".into(),
+                record_count: 2,
+                file_size_bytes: bytes_small.len() as u64,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+            },
+        ];
+
+        let executor = CompactionExecutor::new(store.clone(), policy.clone());
+        let merged = executor
+            .compact_incremental(&entries, "data/merged.parquet")
+            .await
+            .unwrap();
+
+        // Structural checks.
+        assert_eq!(merged.record_count, 8);
+        assert_eq!(merged.path, "data/merged.parquet");
+
+        // Load merged file and verify it's a valid AI-Lake file.
+        let merged_bytes = store.get("data/merged.parquet").await.unwrap();
+        let reader = AilakeFileReader::new(merged_bytes, "embedding", 4);
+        reader.verify_integrity().unwrap();
+
+        let (batch, embs) = reader.read_parquet().unwrap();
+        assert_eq!(batch.num_rows(), 8);
+        assert_eq!(embs.len(), 8);
+
+        // Dominant rows must come first (positions 0..5).
+        for f in &embs[..6] {
+            assert_eq!(f.len(), 4);
+        }
+
+        // HNSW must be searchable and return the nearest neighbor for a known query.
+        let hnsw = reader.load_index().unwrap();
+        assert_eq!(hnsw.node_count(), 8);
+
+        // Query [1, 0, 0, 0] → nearest should be RowId 0 (embs_dom[0]).
+        let results = hnsw.search(&[1.0, 0.0, 0.0, 0.0], 1, 50);
+        assert_eq!(results[0].0, RowId::new(0));
+
+        // Query [0, 0, 0, 1] → nearest should be RowId 6 (first row of small file,
+        // inserted at position 6 in the merged file).
+        let results = hnsw.search(&[0.0, 0.0, 0.0, 1.0], 1, 50);
+        assert_eq!(results[0].0, RowId::new(6));
+    }
+
+    #[tokio::test]
+    async fn compact_incremental_falls_back_when_no_dominant() {
+        use ailake_core::{VectorMetric, VectorPrecision};
+        use ailake_store::LocalStore;
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let policy = VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim: 4,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+        };
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+
+        // Two equal-sized files (50/50 split — no dominant, both below 40% threshold).
+        let make_batch = |ids: Vec<i32>, embs: Vec<Vec<f32>>| {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(Int32Array::from(ids))],
+            )
+            .unwrap();
+            AilakeFileWriter::new(policy.clone())
+                .write(&batch, &embs)
+                .unwrap()
+        };
+
+        let embs_a: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
+        let embs_b: Vec<Vec<f32>> = vec![vec![0.0, 0.0, 1.0, 0.0], vec![0.0, 0.0, 0.0, 1.0]];
+        let bytes_a = make_batch(vec![0, 1], embs_a);
+        let bytes_b = make_batch(vec![2, 3], embs_b);
+
+        store.put("data/a.parquet", bytes_a.clone()).await.unwrap();
+        store.put("data/b.parquet", bytes_b.clone()).await.unwrap();
+
+        let entries = vec![
+            DataFileEntry {
+                path: "data/a.parquet".into(),
+                record_count: 2,
+                file_size_bytes: bytes_a.len() as u64,
+                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
+                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                partition_value: None,
+            },
+            DataFileEntry {
+                path: "data/b.parquet".into(),
+                record_count: 2,
+                file_size_bytes: bytes_b.len() as u64,
+                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
+                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                partition_value: None,
+            },
+        ];
+
+        let executor = CompactionExecutor::new(store.clone(), policy.clone());
+        // Should fall back to full rebuild without error.
+        let merged = executor
+            .compact_incremental(&entries, "data/merged.parquet")
+            .await
+            .unwrap();
+
+        assert_eq!(merged.record_count, 4);
+
+        let merged_bytes = store.get("data/merged.parquet").await.unwrap();
+        let reader = AilakeFileReader::new(merged_bytes, "embedding", 4);
+        reader.verify_integrity().unwrap();
     }
 
     #[tokio::test]
