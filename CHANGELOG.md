@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.20] — 2026-06-18
+
 ### Added
 
 - **Flink `ailake_search_text_json` binding** — `AilakeNativeLib.kt` now declares `ailake_search_text_json` JNA function. `AilakeNativeLoader.kt` adds `searchText(warehouse, namespace, table, queryText, topK, textColumn, partitionFilter)` Kotlin wrapper. Mirrors the C-ABI function added to `ailake-jni`. AilakeVectorTableSource unaffected (vector-only Flink source remains unchanged).

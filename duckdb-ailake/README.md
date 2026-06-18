@@ -16,7 +16,10 @@ SELECT * FROM ailake_search(
     -- named (optional):
     vec_col          VARCHAR,    -- default 'embedding'
     ef_search        INTEGER,    -- HNSW ef parameter, default 50
-    partition_filter VARCHAR     -- restrict to files with matching partition_value (Phase 9)
+    partition_filter VARCHAR,    -- restrict to files with matching partition_value (Phase 9)
+    hybrid_text      VARCHAR,    -- BM25 query text for hybrid scoring; NULL = pure vector search
+    text_column      VARCHAR,    -- Parquet column for BM25 scoring, default 'chunk_text'
+    bm25_weight      FLOAT       -- BM25 weight in RRF fusion [0, 1], default 0.5
 ) → TABLE(row_id BIGINT, distance FLOAT, file_path VARCHAR)
 ```
 
@@ -106,6 +109,43 @@ SELECT * FROM ailake_search_multimodal(
 ```
 
 Returns 0 rows (no error) if `libailake_jni.so` is not loaded or does not export `ailake_search_multimodal_json`.
+
+---
+
+### `ailake_search_text` — pure BM25 full-text search (Phase 9)
+
+```sql
+SELECT * FROM ailake_search_text(
+    table_path   VARCHAR,    -- path/URI to AI-Lake table root
+    query_text   VARCHAR,    -- BM25 query string
+    top_k        INTEGER,    -- number of results
+    -- named (optional):
+    text_column      VARCHAR,    -- Parquet column to score, default 'chunk_text'
+    partition_filter VARCHAR     -- restrict to files with matching partition_value
+) → TABLE(row_id BIGINT, distance FLOAT, file_path VARCHAR)
+```
+
+`distance` is the negated BM25 score — lower is more relevant, consistent with vector search convention.
+
+**Examples:**
+
+```sql
+-- Pure BM25 search
+SELECT row_id, distance, file_path
+FROM ailake_search_text('file:///data/docs', 'rust programming async', 10)
+ORDER BY distance;
+
+-- Custom text column + agent partition
+SELECT * FROM ailake_search_text(
+    'file:///data/agents',
+    'deployment failure',
+    10,
+    text_column='chunk_text',
+    partition_filter='agent-42'
+) ORDER BY distance;
+```
+
+Returns 0 rows (graceful degradation) when `libailake_jni.so` is not loaded. Backed by `ailake_search_text_json` C-ABI.
 
 ---
 

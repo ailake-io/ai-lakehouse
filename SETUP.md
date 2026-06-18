@@ -1037,6 +1037,88 @@ C++ SDK: 14 unit tests in `ailake-cpp/tests/test_binary.cpp` cover `f32_to_bits`
 
 ---
 
+## 8L. BM25 hybrid search
+
+AI-Lake ships a pure-Rust BM25 scorer that runs alongside HNSW — no Elasticsearch, Tantivy, or external FTS infrastructure required. IDF statistics are accumulated at write time and persisted to `metadata/ailake_bm25_stats.bin` alongside the Iceberg catalog.
+
+### Enable BM25 at write time
+
+```python
+import ailake, numpy as np
+
+writer = ailake.TableWriter("./my_table", dim=1536, bm25_text_column="chunk_text")
+writer.write_batch(texts, embeddings)
+writer.commit()
+# Creates: metadata/ailake_bm25_stats.bin (IDF stats, bincode+zstd)
+```
+
+```bash
+# CLI — creates table with BM25 stats on every write
+ailake create ./my_table --dim 1536 --bm25-text-column chunk_text
+ailake insert ./my_table --texts docs.txt --embeddings vecs.npy
+```
+
+### Pure-lexical BM25 search (`search_text`)
+
+```python
+# Python
+results = ailake.search_text("./my_table", "rust programming async", top_k=10)
+# Returns: [{"row_id": int, "distance": float, "file": str}]
+# distance = negated BM25 score (lower = more relevant)
+```
+
+```bash
+# CLI
+ailake search-text ./my_table "rust programming async" --top-k 10
+```
+
+`search_text()` does a full O(N) scan — no HNSW required. Use for keyword-first workloads where recall > latency, or when vectors are not yet indexed (`IndexStatus::Indexing`).
+
+### Hybrid vector+BM25 search (RRF fusion)
+
+```python
+# Python — hybrid search: HNSW candidates fused with BM25 via Reciprocal Rank Fusion
+results = ailake.search(
+    "./my_table",
+    query_embedding,
+    top_k=10,
+    hybrid_text="rust programming async",   # triggers BM25 hybrid
+    text_column="chunk_text",               # default "chunk_text"
+    bm25_weight=0.5,                        # relative BM25 weight in RRF
+)
+```
+
+Hybrid pipeline: HNSW retrieves `10×top_k` candidates → BM25 scores each → RRF fusion (`w_vec/(60+rank_vec) + w_bm25/(60+rank_bm25)`) → top-k returned.
+
+### Fusion methods
+
+| `HybridFusion` | Formula | Use case |
+|---|---|---|
+| `Rrf` (default) | `Σ w/(60+rank)` | Balanced recall — preferred for most RAG workloads |
+| `Linear` | min-max normalized weighted sum | Numeric score comparison needed |
+
+### BM25 scoring parameters (Rust)
+
+```rust
+use ailake_query::bm25::{BM25Scorer, HybridConfig, HybridFusion};
+
+let config = SearchConfig::default()
+    .with_hybrid(
+        HybridConfig::new("rust programming")
+            .with_text_column("chunk_text")
+            .with_bm25_weight(0.5)
+            .with_fusion(HybridFusion::Rrf),
+    );
+```
+
+### Known limitations
+
+- No inverted index — `search_text()` is O(N). At >10M rows, use DuckDB `LIKE` / Trino FTS over the Iceberg-compatible Parquet layer instead.
+- BM25 stats do not update retroactively — rows written before `bm25_text_column` was set are not scored.
+- `search_text()` via DuckDB (`ailake_search_text()`) and Flink (`searchText()`) delegate to the same `ailake_search_text_json` C-ABI.
+
+---
+
 ## 8K. Embedding model tracking and migration
 
 AI-Lake records the embedding model used to produce vectors. This enables safe schema evolution — catching accidental dim mismatches, labelling each ingest shard, and driving automated re-embedding workflows.

@@ -96,7 +96,10 @@ The library exports C-ABI symbols consumed by JNA. All three plugins use the JSO
 ```c
 // request_json: {"warehouse":"...","namespace":"default","table":"...","vec_col":"embedding",
 //                "dim":1536,"query":[...],"top_k":10,
-//                "partition_filter":"agent-42"}  ← optional (Phase 9)
+//                "partition_filter":"agent-42",  ← optional (Phase 9)
+//                "hybrid_text":"rust programming", ← optional (Phase 9 BM25)
+//                "text_column":"chunk_text",        ← optional, default "chunk_text"
+//                "bm25_weight":0.5}                 ← optional, default 0.5
 // Returns: {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
 // Caller must free with ailake_free_string.
 char* ailake_search_json(const char* request_json);
@@ -111,21 +114,33 @@ char* ailake_search_json(const char* request_json);
 // On dim mismatch: {"ok":false,"error":"query dim=512 does not match table dim=1536 (...)"}
 char* ailake_write_batch_json(const char* request_json);
 
+// Pure BM25 full-text search — no HNSW required.
+// request_json: {"warehouse":"...","namespace":"default","table":"...",
+//                "query_text":"rust programming","top_k":10,
+//                "text_column":"chunk_text",         ← optional, default "chunk_text"
+//                "partition_filter":"agent-42"}       ← optional (Phase 9)
+// Returns: {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
+// distance = negated BM25 score (lower = more relevant).
+char* ailake_search_text_json(const char* request_json);
+
 void ailake_free_string(char* ptr);
 
 // Static version string — do NOT free.
 const char* ailake_version();
 ```
 
-### Phase 9 — partition fields
+### Phase 9 — partition and BM25 hybrid fields
 
 All JSON-envelope fields added in Phase 9 are `#[serde(default)]` — absent fields deserialize to empty string / `None`, preserving backward compatibility with callers that do not set them.
 
 | Field | Function | Type | Description |
 |---|---|---|---|
-| `partition_filter` | `ailake_search_json`, `ailake_search_multimodal_json` | string | Restrict search to files with this `partition_value`. Pruning before centroid check and HNSW load. |
+| `partition_filter` | `ailake_search_json`, `ailake_search_multimodal_json`, `ailake_search_text_json` | string | Restrict search to files with this `partition_value`. Pruning before centroid check and HNSW load. |
 | `partition_by` | `ailake_write_batch_json` | string | Iceberg identity partition column name. Written to `metadata.json` partition spec on first commit. |
 | `partition_value` | `ailake_write_batch_json` | string | Value for this write. Tagged in each file's `key_metadata` JSON in the Avro manifest. |
+| `hybrid_text` | `ailake_search_json` | string | BM25 query text. When set, retrieves 10×top_k HNSW candidates, scores by BM25, fuses via RRF. |
+| `text_column` | `ailake_search_json`, `ailake_search_text_json` | string | Parquet column for BM25 scoring. Default: `"chunk_text"`. |
+| `bm25_weight` | `ailake_search_json` | float | BM25 relative weight in RRF fusion. Default: `0.5`. |
 
 ---
 
@@ -538,11 +553,30 @@ val rows: List<MultimodalSearchRow> = AilakeNative.searchMultimodal(tableUri, qu
 import io.ailake.flink.internal.AilakeNativeLoader
 
 val loader = AilakeNativeLoader()
+
+// Cross-modal RRF search
 val queries = listOf(
     Triple(0.6f, "embedding",         queryVec1),
     Triple(0.4f, "context_embedding", queryVec2),
 )
 val rows = loader.searchMultimodal(tableUri, queries, topK = 20)
+
+// Vector search with optional BM25 hybrid scoring (Phase 9)
+val hybridRows = loader.search(
+    tableUri, queryVec, topK = 10,
+    hybridText  = "rust programming",   // optional — null = pure vector
+    textColumn  = "chunk_text",         // optional, default "chunk_text"
+    bm25Weight  = 0.5f,                 // optional, default 0.5
+)
+
+// Pure BM25 full-text search (Phase 9)
+val textRows = loader.searchText(
+    tableUri,
+    queryText       = "rust programming async",
+    topK            = 10,
+    textColumn      = "chunk_text",
+    partitionFilter = "agent-42",       // optional
+)
 ```
 
 ### Architecture diagram (multimodal path)

@@ -325,7 +325,7 @@ debug       = true
 | **Phase 6** | ✅ Complete | Public distribution — crates.io pipeline, PyPI manylinux wheels, Airflow provider on PyPI, pre-built JVM JARs + native lib on GitHub Releases, dynamic Python versioning |
 | **Phase 7** | 🚧 In progress | DuckDB extension (`duckdb-ailake/`), Python `fetch_data=True`, `write_batch_auto_deferred` + async (~200k vec/s), `pq_only`/`ivf_residual` in Python SDK, Airbyte CDK v3 destination connector, expanded JupyterLab demo (5 fixture tables, `07_multimodal.ipynb`). Remaining: DuckLake catalog backend; dbt integration guide |
 | **Phase 8** | ✅ Complete | Multimodal — `VectorModality` enum, `ailake.modality-<col>` Iceberg property, N generalized vector columns with independent HNSW, `write_batch_multi`, CLI `--vector-cols`, cross-modal RRF (`search_multimodal`), `MultimodalContextSchema`, Python `VectorColSpec`. Propagated to all plugins: `ailake_search_multimodal_json` C-ABI, `searchMultimodal()` Spark/Trino/Flink, `ailake_search_multimodal()` DuckDB, `SearchMultimodal()` Go SDK, `search_multimodal()` C++ SDK |
-| **Phase 9** | 📋 Planned | Agents / Episodic Memory — `ToolCallSchema`, `EpisodicMemorySchema` with recency decay, injectable hybrid scoring, `agent_id` Iceberg hidden partitioning, `WorkingMemoryBuffer`, `MemoryDecayJob`, `ailake.Agent` Python helper |
+| **Phase 9** | ✅ Complete | BM25 Hybrid Search + Agent Memory — `BM25Scorer`, `IdfStats` at write time, `SearchConfig::hybrid` (RRF + linear fusion), `search_text()` pure-lexical scan, `ailake_search_text_json` C-ABI, `ailake_search_text()` DuckDB, Flink `searchText()` + hybrid params; `ToolCallSchema`, `EpisodicMemorySchema` with recency decay, injectable `ScoreFn`, `agent_id` Iceberg identity partitioning, `WorkingMemoryBuffer`, `MemoryDecayJob`, Python `ailake.Agent` helper |
 
 ### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
@@ -461,3 +461,24 @@ Delivered in Phase 8:
 - **Plugin propagation** — `ailake_search_multimodal_json` C-ABI in `ailake-jni`; `searchMultimodal()` in Spark/Trino/Flink; `ailake_search_multimodal()` DuckDB table function; `SearchMultimodal()` Go SDK + `ExtraVectorIndex` catalog parsing; `search_multimodal()` C++17 SDK + `DataFileEntry::extra_vector_indexes`.
 - **`extra_vector_indexes`** in Avro `key_metadata` JSON — secondary column HNSW offsets propagated to all catalog readers.
 - **CI** — `ci-duckdb.yml` multimodal test step; Go unit tests in `multimodal_test.go`; `check_jni_cabi.py` `ailake_search_multimodal_json` coverage; Python `check_ailake_py.py` section 19.
+
+### Phase 9 — BM25 Hybrid Search + Agent Memory ✅
+
+Delivered in Phase 9:
+
+- **BM25 hybrid search** — `SearchConfig::hybrid: Option<HybridConfig>` adds first-class lexical scoring to the vector search pipeline. `BM25Scorer` pure Rust (no Tantivy dep), BM25+ formula (k1=1.2, b=0.75), 50k-term vocabulary cap. `IdfStats` accumulated at write time via `TableWriter::with_bm25("chunk_text")`, persisted to `metadata/ailake_bm25_stats.bin` (bincode+zstd). Pipeline: HNSW retrieves `10×top_k` candidates → BM25 scores each → fuses via RRF or linear combination. Compaction rebuilds IDF stats.
+- **`search_text()`** — pure BM25 brute-force scan (no HNSW required): scans all Parquet files, scores rows by BM25, returns top-k. O(N) per call.
+- **`ailake_search_text_json` C-ABI** — new `#[no_mangle]` export in `ailake-jni`. JSON protocol: `{"warehouse","namespace","table","query_text","top_k","text_column","partition_filter"}`. Returns `{"ok":true,"results":[{"row_id","distance","file_path"}]}`.
+- **`ailake_search_json` hybrid params** — `ailake_search_json` protocol extended with `hybrid_text`, `text_column`, `bm25_weight` optional fields (backward-compatible, `#[serde(default)]`).
+- **DuckDB `ailake_search_text()`** — new table function in `duckdb-ailake`: pure BM25 search from SQL. Named params: `hybrid_text`, `text_column`, `bm25_weight` added to `ailake_search()`.
+- **Flink `searchText()` + hybrid params** — `AilakeNativeLoader.searchText()` Kotlin wrapper; `search()` gains `hybridText`, `textColumn`, `bm25Weight` optional params.
+- **`ToolCallSchema`** — searchable tool call history with `agent_id`, `session_id`, `step_index`, `tool_name`, `tool_input_json`, `tool_output_json`, `outcome`, `latency_ms`.
+- **`EpisodicMemorySchema`** — recency decay fields: `recency_weight`, `access_count`, `last_accessed_at`, `importance_score`.
+- **Injectable `ScoreFn`** — `SearchConfig::score_fn: Option<ScoreFn>` for custom hybrid ranking (distance × recency × importance) injected without rewriting the index.
+- **`partition_by` / `partition_filter`** — Iceberg identity partitioning per `agent_id`; manifest-level pruning before centroid check and HNSW load.
+- **`WorkingMemoryBuffer`** — bounded in-memory FIFO (`ailake-query/src/mem_table.rs`); flat cosine scan; `drain_to_table()` persists to AI-Lake. Python: `ailake.WorkingMemoryBuffer(max_rows=1000)`.
+- **`MemoryDecayJob`** — async recomputation of `recency_weight = exp(-λ × days_since_access)` (`ailake-query/src/memory_decay.rs`); rewrites data files, commits new snapshot. Python: `ailake.decay_memories(path, decay_lambda=0.1)`.
+- **`extra_columns`** — all write methods accept `extra_columns: dict[str, list]` for writing `EpisodicMemorySchema`, `ToolCallSchema`, and custom agent columns without manual Arrow schema construction.
+- **Python `ailake.Agent`** — `Agent(table_path, embed_fn, agent_id)` with `remember()`, `recall()`, `log_tool_call()`, `assemble_context()`. High-level abstraction for LangChain/CrewAI/AutoGen.
+- **Demo** — `08_agents.ipynb` (26 cells), `09_hybrid_search.ipynb` (7 sections), `ailake_bm25` fixture in `init_demo.py`.
+- **Tests** — 6 BM25 integration tests in `tests/tests/hybrid_search.rs`; 4 `WorkingMemoryBuffer` unit tests; 4 `MemoryDecayJob` unit tests.

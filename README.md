@@ -62,6 +62,8 @@ Then open **http://localhost:8888** and run the notebooks:
 | `04_trino.ipynb` | Trino SQL, AI-Lake table properties, `$files` / `$manifests` system tables |
 | `05_bigquery.ipynb` | BigQuery emulator inserts, F16 BYTES decode, production GCS + BigQuery Omni pattern |
 | `07_multimodal.ipynb` | `VectorColSpec`, `write_batch_multi`, modality tags, cross-modal RRF fusion, weight ablation, `MultimodalContextSchema` column constants |
+| `08_agents.ipynb` | `ailake.Agent`, episodic memory, `ToolCallSchema`, `EpisodicMemorySchema`, `WorkingMemoryBuffer`, `decay_memories`, per-agent partition isolation |
+| `09_hybrid_search.ipynb` | BM25 write (`bm25_text_column`), `search_text` pure lexical, hybrid RRF (vector + BM25), weight ablation, `WorkingMemoryBuffer`, `decay_memories` |
 
 Notebooks 04 and 05 require the `engines` profile (adds Trino + BigQuery emulator):
 
@@ -97,9 +99,9 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 **Rust** (add to `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.19"
-ailake-query = "0.0.19"   # search(), TableWriter, ContextAssembler, search_multimodal
-ailake-store = "0.0.19"   # S3 / GCS / Azure / local backends
+ailake-core  = "0.0.20"
+ailake-query = "0.0.20"   # search(), TableWriter, ContextAssembler, search_multimodal
+ailake-store = "0.0.20"   # S3 / GCS / Azure / local backends
 ```
 
 **Python**:
@@ -134,7 +136,7 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.19
+VERSION=0.0.20
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
@@ -332,7 +334,9 @@ tests/
             ├── 04_trino.ipynb        # Trino SQL + $properties / $files / $manifests (--profile engines)
             ├── 05_bigquery.ipynb     # BigQuery emulator + F16 decode + GCS+BQ Omni pattern (--profile engines)
             ├── 06_airbyte_destination.ipynb  # Airbyte CDK destination, CmdEmbedder, StreamWriter
-            └── 07_multimodal.ipynb   # VectorColSpec, write_batch_multi, modality tags, cross-modal RRF fusion
+            ├── 07_multimodal.ipynb   # VectorColSpec, write_batch_multi, modality tags, cross-modal RRF fusion
+            ├── 08_agents.ipynb       # ailake.Agent, episodic memory, ToolCallSchema, WorkingMemoryBuffer, decay_memories
+            └── 09_hybrid_search.ipynb # BM25 write, search_text, hybrid RRF (vector+BM25), WorkingMemoryBuffer
 ```
 
 ## Performance

@@ -62,6 +62,8 @@ Depois abra **http://localhost:8888** e execute os notebooks:
 | `04_trino.ipynb` | SQL Trino, propriedades de tabela AI-Lake, tabelas do sistema `$files` / `$manifests` |
 | `05_bigquery.ipynb` | Inserções no emulador BigQuery, decodificação BYTES F16, padrão GCS + BigQuery Omni em produção |
 | `07_multimodal.ipynb` | `VectorColSpec`, `write_batch_multi`, tags de modalidade, fusão RRF cross-modal, ablação de pesos, constantes `MultimodalContextSchema` |
+| `08_agents.ipynb` | `ailake.Agent`, memória episódica, `ToolCallSchema`, `EpisodicMemorySchema`, `WorkingMemoryBuffer`, `decay_memories`, isolamento por agente via partição |
+| `09_hybrid_search.ipynb` | Escrita BM25 (`bm25_text_column`), `search_text` lexical puro, RRF híbrido (vetor + BM25), ablação de pesos, `WorkingMemoryBuffer`, `decay_memories` |
 
 Notebooks 04 e 05 requerem o perfil `engines` (adiciona Trino + emulador BigQuery):
 
@@ -97,9 +99,9 @@ Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
 **Rust** (adicione ao `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.19"
-ailake-query = "0.0.19"   # search(), TableWriter, ContextAssembler, search_multimodal
-ailake-store = "0.0.19"   # backends S3 / GCS / Azure / local
+ailake-core  = "0.0.20"
+ailake-query = "0.0.20"   # search(), TableWriter, ContextAssembler, search_multimodal
+ailake-store = "0.0.20"   # backends S3 / GCS / Azure / local
 ```
 
 **Python**:
@@ -134,7 +136,7 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — baixe os JARs pré-compilados em [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.19
+VERSION=0.0.20
 
 # Plugin Spark
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
@@ -199,7 +201,11 @@ tests/
             ├── 02_duckdb.ipynb
             ├── 03_spark.ipynb
             ├── 04_trino.ipynb
-            └── 05_bigquery.ipynb
+            ├── 05_bigquery.ipynb
+            ├── 06_airbyte_destination.ipynb
+            ├── 07_multimodal.ipynb
+            ├── 08_agents.ipynb
+            └── 09_hybrid_search.ipynb
 ```
 
 ## Performance

@@ -34,6 +34,9 @@ Performs a nearest-neighbor vector search on a local AI-Lake table.
 
 Optional fields:
 - `partition_filter` (string, default absent) — restrict search to manifest entries where `partition_value` matches this string. Pruning happens before geometric centroid check and HNSW load (Phase 9).
+- `hybrid_text` (string, default absent) — query text for BM25 hybrid scoring. When set, pipeline retrieves `10×top_k` HNSW candidates, scores each by BM25, and fuses via RRF.
+- `text_column` (string, default `"chunk_text"`) — Parquet column to score for BM25. Only used when `hybrid_text` is set.
+- `bm25_weight` (float, default `0.5`) — relative BM25 weight in RRF fusion. Only used when `hybrid_text` is set.
 
 **Response JSON:**
 
@@ -131,6 +134,38 @@ Cross-modal vector search with Reciprocal Rank Fusion. Accepts N column queries 
 ```
 
 `rrf_score` is positive (higher = more relevant). On error: `{"ok": false, "error": "..."}`.
+
+---
+
+### `ailake_search_text_json`
+
+```
+fn ailake_search_text_json(request_json: *const c_char) -> *mut c_char
+```
+
+Pure BM25 full-text search — no HNSW required. Scans all Parquet files and returns top-k by BM25 score.
+
+**Request JSON:**
+
+```json
+{
+  "warehouse":        "/path/to/warehouse",
+  "namespace":        "default",
+  "table":            "my_table",
+  "query_text":       "rust programming async",
+  "top_k":            10,
+  "text_column":      "chunk_text",
+  "partition_filter": "agent-42"
+}
+```
+
+Optional fields:
+- `text_column` (string, default `"chunk_text"`) — Parquet column to score.
+- `partition_filter` (string, default absent) — restrict to files tagged with this `partition_value`.
+
+**Response JSON:** `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}` where `distance` = negated BM25 score (lower = more relevant, consistent with vector search convention).
+
+On error: `{"ok": false, "error": "..."}`.
 
 ---
 
