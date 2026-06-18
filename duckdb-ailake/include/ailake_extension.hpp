@@ -76,12 +76,14 @@ struct ScanResult {
 // Thread-safe after Load() completes.
 class AilakeLib {
 public:
-    using search_fn_t      = char *(*)(const char *);
-    using multimodal_fn_t  = char *(*)(const char *);
-    using scan_fn_t        = char *(*)(const char *);
-    using write_fn_t       = char *(*)(const char *);
-    using search_text_fn_t = char *(*)(const char *);
-    using free_fn_t        = void (*)(char *);
+    using search_fn_t        = char *(*)(const char *);
+    using multimodal_fn_t    = char *(*)(const char *);
+    using scan_fn_t          = char *(*)(const char *);
+    using write_fn_t         = char *(*)(const char *);
+    using search_text_fn_t   = char *(*)(const char *);
+    using delete_where_fn_t  = char *(*)(const char *);
+    using evolve_schema_fn_t = char *(*)(const char *);
+    using free_fn_t          = void (*)(char *);
 
     static AilakeLib &get();
 
@@ -89,10 +91,12 @@ public:
     // Safe to call multiple times — no-ops after first successful load.
     bool load(const std::string &lib_path = "");
 
-    bool is_ready()             const { return search_fn_      != nullptr; }
-    bool is_multimodal_ready()  const { return multimodal_fn_  != nullptr; }
-    bool is_scan_ready()        const { return scan_fn_        != nullptr; }
-    bool is_search_text_ready() const { return search_text_fn_ != nullptr; }
+    bool is_ready()              const { return search_fn_        != nullptr; }
+    bool is_multimodal_ready()   const { return multimodal_fn_    != nullptr; }
+    bool is_scan_ready()         const { return scan_fn_          != nullptr; }
+    bool is_search_text_ready()  const { return search_text_fn_   != nullptr; }
+    bool is_delete_ready()       const { return delete_where_fn_  != nullptr; }
+    bool is_evolve_ready()       const { return evolve_schema_fn_ != nullptr; }
 
     // Execute ailake_search_json. Returns empty on any error.
     // hybrid_text: when non-empty, enables hybrid BM25+vector RRF fusion.
@@ -142,6 +146,8 @@ public:
     ) const;
 
     // Execute ailake_write_batch_json. Returns snapshot_id or -1 on error.
+    // partition_fields_json: JSON array like [{"column":"x","transform":"identity","column_type":"string"}]
+    // format_version: 2 (default) or 3
     int64_t write_batch(
         const std::string              &warehouse,
         const std::string              &ns,
@@ -152,20 +158,42 @@ public:
         const std::string              &precision,
         const std::vector<int64_t>     &ids,
         const std::vector<std::vector<float>> &embeddings,
-        const std::string              &partition_by    = "",
-        const std::string              &partition_value = ""
+        const std::string              &partition_by          = "",
+        const std::string              &partition_value       = "",
+        const std::string              &partition_fields_json = "",
+        int                             format_version        = 2
+    ) const;
+
+    // Execute ailake_delete_where_json. Returns true on success.
+    bool delete_where(
+        const std::string              &warehouse,
+        const std::string              &table_name,
+        const std::string              &column,
+        const std::vector<std::string> &values
+    ) const;
+
+    // Execute ailake_evolve_schema_json. Returns new schema_id or -1 on error.
+    // add_columns_json: JSON array of {name, type, initial_default?}
+    // rename_columns_json: JSON array of {from, to}
+    int32_t evolve_schema(
+        const std::string &warehouse,
+        const std::string &table_name,
+        const std::string &add_columns_json,
+        const std::string &rename_columns_json
     ) const;
 
 private:
     AilakeLib() = default;
 
-    void           *handle_          = nullptr;
-    search_fn_t     search_fn_       = nullptr;
-    multimodal_fn_t multimodal_fn_   = nullptr;
-    scan_fn_t       scan_fn_         = nullptr;
-    write_fn_t      write_fn_        = nullptr;
-    search_text_fn_t search_text_fn_ = nullptr;
-    free_fn_t       free_fn_         = nullptr;
+    void              *handle_           = nullptr;
+    search_fn_t        search_fn_        = nullptr;
+    multimodal_fn_t    multimodal_fn_    = nullptr;
+    scan_fn_t          scan_fn_          = nullptr;
+    write_fn_t         write_fn_         = nullptr;
+    search_text_fn_t   search_text_fn_   = nullptr;
+    delete_where_fn_t  delete_where_fn_  = nullptr;
+    evolve_schema_fn_t evolve_schema_fn_ = nullptr;
+    free_fn_t          free_fn_          = nullptr;
 };
 
 // Escape a string value for embedding in a JSON literal.
