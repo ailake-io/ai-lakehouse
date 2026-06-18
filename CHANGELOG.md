@@ -11,6 +11,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Flink `ailake_search_text_json` binding** — `AilakeNativeLib.kt` now declares `ailake_search_text_json` JNA function. `AilakeNativeLoader.kt` adds `searchText(warehouse, namespace, table, queryText, topK, textColumn, partitionFilter)` Kotlin wrapper. Mirrors the C-ABI function added to `ailake-jni`. AilakeVectorTableSource unaffected (vector-only Flink source remains unchanged).
+
+- **Flink `search()` hybrid params** — `AilakeNativeLoader.search()` gains `hybridText: String?`, `textColumn: String`, `bm25Weight: Float` optional params. When `hybridText != null`, includes `hybrid_text`/`text_column`/`bm25_weight` in the `ailake_search_json` request payload. Backward-compatible — all existing callers pass defaults.
+
 - **DuckDB `ailake_search_text()` table function** — new SQL function in `duckdb-ailake/src/ailake_search_text.cpp`. Pure BM25 full-text search from DuckDB: `SELECT * FROM ailake_search_text('path', 'rust programming', 10, text_column:='chunk_text') ORDER BY distance`. Backed by new `ailake_search_text_json` C-ABI function in `ailake-jni`. Returns `(row_id BIGINT, distance FLOAT, file_path VARCHAR)` where `distance` = negated BM25 score. Graceful degradation (0 rows) when native lib not loaded.
 
 - **DuckDB `ailake_search()` hybrid BM25+vector** — `ailake_search()` now accepts three new named params: `hybrid_text VARCHAR`, `text_column VARCHAR` (default `'chunk_text'`), `bm25_weight FLOAT` (default `0.5`). Backed by new fields in `ailake_search_json` C-ABI protocol (backward-compatible; missing = `null` = pure vector). Example: `SELECT * FROM ailake_search('path', query, 10, hybrid_text:='rust programming', bm25_weight:=0.4)`.

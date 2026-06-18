@@ -30,6 +30,9 @@ interface AilakeNativeLib : Library {
      *   top_k             (Int)     default 10
      *   ef_search         (Int)     default 50
      *   partition_filter  (String?) optional — restrict search to files where partition value matches
+     *   hybrid_text       (String?) optional — enables BM25+vector hybrid when non-empty
+     *   text_column       (String?) optional — Parquet column for BM25, default "chunk_text"
+     *   bm25_weight       (Float?)  optional — BM25 weight in RRF fusion, default 0.5
      *
      * Response JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
      */
@@ -80,6 +83,23 @@ interface AilakeNativeLib : Library {
         queryLen: Int,
         topK: Int,
     ): Pointer
+
+    /**
+     * Pure BM25 full-text search (no embedding required).
+     *
+     * Request JSON fields:
+     *   warehouse         (String)  warehouse root path
+     *   namespace         (String)  Iceberg namespace, default "default"
+     *   table             (String)  table name
+     *   query_text        (String)  text query to score against
+     *   top_k             (Int)     default 10
+     *   text_column       (String?) Parquet column for BM25, default "chunk_text"
+     *   partition_filter  (String?) optional — restrict to files matching partition value
+     *
+     * Response JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
+     * where distance = negated BM25 score (lower = more relevant).
+     */
+    fun ailake_search_text_json(requestJson: String): Pointer
 
     /** Free a string pointer returned by any ailake_* function. */
     fun ailake_free_string(ptr: Pointer)

@@ -75,6 +75,9 @@ object AilakeNativeLoader {
         topK: Int = 10,
         efSearch: Int = 50,
         partitionFilter: String? = null,
+        hybridText: String? = null,
+        textColumn: String = "chunk_text",
+        bm25Weight: Float = 0.5f,
     ): List<SearchResultItem> {
         val payload = mutableMapOf<String, Any>(
             "warehouse" to warehouse,
@@ -87,6 +90,11 @@ object AilakeNativeLoader {
             "ef_search" to efSearch,
         )
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        if (hybridText != null) {
+            payload["hybrid_text"]  = hybridText
+            payload["text_column"]  = textColumn
+            payload["bm25_weight"]  = bm25Weight
+        }
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_json(req)
         return try {
@@ -97,6 +105,42 @@ object AilakeNativeLoader {
                 throw RuntimeException("ailake_search_json error: ${resp.error}")
             }
             log.debug("[ailake] search OK table={}.{} top_k={} results={}", namespace, table, topK, resp.results.size)
+            resp.results
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    // ── BM25 text search ──────────────────────────────────────────────────────
+
+    fun searchText(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        queryText: String,
+        topK: Int = 10,
+        textColumn: String = "chunk_text",
+        partitionFilter: String? = null,
+    ): List<SearchResultItem> {
+        val payload = mutableMapOf<String, Any>(
+            "warehouse"   to warehouse,
+            "namespace"   to namespace,
+            "table"       to table,
+            "query_text"  to queryText,
+            "top_k"       to topK,
+            "text_column" to textColumn,
+        )
+        if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        val req = mapper.writeValueAsString(payload)
+        val ptr = lib.ailake_search_text_json(req)
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<SearchResponse>(json)
+            if (!resp.ok) {
+                log.error("[ailake] ailake_search_text_json returned error for table={}.{}: {}", namespace, table, resp.error)
+                throw RuntimeException("ailake_search_text_json error: ${resp.error}")
+            }
+            log.debug("[ailake] searchText OK table={}.{} top_k={} results={}", namespace, table, topK, resp.results.size)
             resp.results
         } finally {
             lib.ailake_free_string(ptr)
