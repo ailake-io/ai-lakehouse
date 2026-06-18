@@ -99,10 +99,18 @@ fn do_search(
     top_k: u32,
     ef_search: u32,
     partition_filter: Option<String>,
+    hybrid_text: Option<String>,
+    text_column: &str,
+    bm25_weight: f32,
 ) -> ailake_core::AilakeResult<Vec<SearchResult>> {
     let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&warehouse));
     let catalog = Arc::new(HadoopCatalog::new(store.clone(), &warehouse));
     let table = TableIdent::new(namespace, table_name);
+    let hybrid = hybrid_text.map(|qt| {
+        ailake_query::HybridConfig::new(qt)
+            .with_text_column(text_column)
+            .with_bm25_weight(bm25_weight)
+    });
     let config = SearchConfig {
         top_k: top_k as usize,
         ef_search: ef_search as usize,
@@ -110,7 +118,7 @@ fn do_search(
         rerank_factor: None,
         score_fn: None,
         partition_filter,
-        hybrid: None,
+        hybrid,
     };
     rt().block_on(rs_search(
         &table, &query, config, vec_col, dim, catalog, store,
@@ -202,7 +210,7 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     let query = std::slice::from_raw_parts(query_ptr, query_len as usize).to_vec();
     let dim = query.len() as u32;
     let results: Vec<RowResultJson> =
-        match do_search(uri, "default", "table", "embedding", dim, query, top_k, 50, None) {
+        match do_search(uri, "default", "table", "embedding", dim, query, top_k, 50, None, None, "chunk_text", 0.5) {
             Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
             Err(e) => return cstr_err_json(e),
         };
@@ -240,6 +248,12 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         ef_search: u32,
         #[serde(default)]
         partition_filter: Option<String>,
+        #[serde(default)]
+        hybrid_text: Option<String>,
+        #[serde(default = "default_text_col")]
+        text_column: String,
+        #[serde(default = "default_bm25_weight")]
+        bm25_weight: f32,
     }
     fn default_ns() -> String {
         "default".into()
@@ -252,6 +266,12 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
     }
     fn default_ef() -> u32 {
         50
+    }
+    fn default_text_col() -> String {
+        "chunk_text".into()
+    }
+    fn default_bm25_weight() -> f32 {
+        0.5
     }
 
     if request_json.is_null() {
@@ -277,6 +297,8 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         req.warehouse, req.namespace, req.table, req.dim, req.top_k
     );
 
+    let bm25_weight = req.bm25_weight;
+    let text_column = req.text_column.clone();
     let results = match do_search(
         req.warehouse,
         &req.namespace,
@@ -287,6 +309,9 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         req.top_k,
         req.ef_search,
         req.partition_filter,
+        req.hybrid_text,
+        &text_column,
+        bm25_weight,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -487,6 +512,106 @@ pub unsafe extern "C" fn ailake_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         drop(CString::from_raw(ptr));
     }
+}
+
+// ── ailake_search_text_json — pure BM25 text search ──────────────────────────
+
+/// Pure BM25 full-text search — no vector query required.
+///
+/// `request_json` must be UTF-8 JSON:
+/// ```json
+/// {
+///   "warehouse": "/path/to/warehouse",
+///   "namespace": "default",
+///   "table": "my_table",
+///   "query_text": "rust programming language",
+///   "top_k": 10,
+///   "text_column": "chunk_text",
+///   "partition_filter": null
+/// }
+/// ```
+///
+/// Returns JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
+/// where `distance` is the negated BM25 score (lower = more relevant).
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) -> *mut c_char {
+    use ailake_query::search_text as rs_search_text;
+
+    #[derive(serde::Deserialize)]
+    struct Req {
+        warehouse: String,
+        #[serde(default = "default_ns_st")]
+        namespace: String,
+        table: String,
+        query_text: String,
+        #[serde(default = "default_topk_st")]
+        top_k: u32,
+        #[serde(default = "default_text_col_st")]
+        text_column: String,
+        #[serde(default)]
+        partition_filter: Option<String>,
+    }
+    fn default_ns_st() -> String { "default".into() }
+    fn default_topk_st() -> u32 { 10 }
+    fn default_text_col_st() -> String { "chunk_text".into() }
+
+    if request_json.is_null() {
+        return cstr_err_json("null request_json");
+    }
+    let json_str = match CStr::from_ptr(request_json).to_str() {
+        Ok(s) => s,
+        Err(e) => return cstr_err_json(e),
+    };
+    let req: Req = match serde_json::from_str(json_str) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("ailake_search_text_json: JSON parse error: {}", e);
+            return cstr_err_json(e);
+        }
+    };
+
+    debug!(
+        "ailake_search_text_json: warehouse={} table={}.{} query={:?} top_k={}",
+        req.warehouse, req.namespace, req.table,
+        &req.query_text[..req.query_text.len().min(60)],
+        req.top_k
+    );
+
+    let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+    let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+    let table = TableIdent::new(&req.namespace, &req.table);
+    let pf = req.partition_filter.as_deref();
+    let results = match rt().block_on(rs_search_text(
+        &table,
+        &req.query_text,
+        &[req.text_column.as_str()],
+        req.top_k as usize,
+        catalog,
+        store,
+        pf,
+    )) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("ailake_search_text_json: search failed: {}", e);
+            return cstr_err_json(e);
+        }
+    };
+
+    #[derive(serde::Serialize)]
+    struct Resp {
+        ok: bool,
+        results: Vec<RowResultJson>,
+    }
+    let body = Resp {
+        ok: true,
+        results: results.into_iter().map(RowResultJson::from).collect(),
+    };
+    let json = serde_json::to_string(&body)
+        .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialize\"}".into());
+    CString::new(json).unwrap_or_default().into_raw()
 }
 
 // ── ailake_search_multimodal_json — cross-modal RRF ──────────────────────────

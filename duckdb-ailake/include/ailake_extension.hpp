@@ -76,11 +76,12 @@ struct ScanResult {
 // Thread-safe after Load() completes.
 class AilakeLib {
 public:
-    using search_fn_t     = char *(*)(const char *);
-    using multimodal_fn_t = char *(*)(const char *);
-    using scan_fn_t       = char *(*)(const char *);
-    using write_fn_t      = char *(*)(const char *);
-    using free_fn_t       = void (*)(char *);
+    using search_fn_t      = char *(*)(const char *);
+    using multimodal_fn_t  = char *(*)(const char *);
+    using scan_fn_t        = char *(*)(const char *);
+    using write_fn_t       = char *(*)(const char *);
+    using search_text_fn_t = char *(*)(const char *);
+    using free_fn_t        = void (*)(char *);
 
     static AilakeLib &get();
 
@@ -88,12 +89,15 @@ public:
     // Safe to call multiple times — no-ops after first successful load.
     bool load(const std::string &lib_path = "");
 
-    bool is_ready()            const { return search_fn_     != nullptr; }
-    bool is_multimodal_ready() const { return multimodal_fn_ != nullptr; }
-    bool is_scan_ready()       const { return scan_fn_       != nullptr; }
+    bool is_ready()             const { return search_fn_      != nullptr; }
+    bool is_multimodal_ready()  const { return multimodal_fn_  != nullptr; }
+    bool is_scan_ready()        const { return scan_fn_        != nullptr; }
+    bool is_search_text_ready() const { return search_text_fn_ != nullptr; }
 
     // Execute ailake_search_json. Returns empty on any error.
-    // partition_filter: if non-empty, restrict to files with matching partition_value.
+    // hybrid_text: when non-empty, enables hybrid BM25+vector RRF fusion.
+    // text_column: Parquet column for BM25 scoring (default "chunk_text").
+    // bm25_weight: BM25 weight in RRF (0.0 = pure vector, 1.0 = pure BM25).
     std::vector<SearchRow> search(
         const std::string        &warehouse,
         const std::string        &table_name,
@@ -101,7 +105,21 @@ public:
         const std::vector<float> &query,
         int                       top_k,
         int                       ef_search        = 50,
-        const std::string        &partition_filter = ""
+        const std::string        &partition_filter = "",
+        const std::string        &hybrid_text      = "",
+        const std::string        &text_column      = "chunk_text",
+        float                     bm25_weight      = 0.5f
+    ) const;
+
+    // Execute ailake_search_text_json. Pure BM25 search, no vector required.
+    // Returns empty on any error or if ailake_search_text_json not available.
+    std::vector<SearchRow> search_text(
+        const std::string &warehouse,
+        const std::string &table_name,
+        const std::string &query_text,
+        int                top_k,
+        const std::string &text_column      = "chunk_text",
+        const std::string &partition_filter = ""
     ) const;
 
     // Execute ailake_scan_json. Returns pre-parsed columnar data.
@@ -124,8 +142,6 @@ public:
     ) const;
 
     // Execute ailake_write_batch_json. Returns snapshot_id or -1 on error.
-    // partition_by: identity partition column stored in metadata.json (e.g. "agent_id").
-    // partition_value: per-write value tagged in key_metadata per file (e.g. agent UUID).
     int64_t write_batch(
         const std::string              &warehouse,
         const std::string              &ns,
@@ -143,12 +159,13 @@ public:
 private:
     AilakeLib() = default;
 
-    void          *handle_        = nullptr;
-    search_fn_t    search_fn_     = nullptr;
-    multimodal_fn_t multimodal_fn_= nullptr;
-    scan_fn_t      scan_fn_       = nullptr;
-    write_fn_t     write_fn_      = nullptr;
-    free_fn_t      free_fn_       = nullptr;
+    void           *handle_          = nullptr;
+    search_fn_t     search_fn_       = nullptr;
+    multimodal_fn_t multimodal_fn_   = nullptr;
+    scan_fn_t       scan_fn_         = nullptr;
+    write_fn_t      write_fn_        = nullptr;
+    search_text_fn_t search_text_fn_ = nullptr;
+    free_fn_t       free_fn_         = nullptr;
 };
 
 // Escape a string value for embedding in a JSON literal.

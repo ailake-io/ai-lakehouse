@@ -43,23 +43,25 @@ bool AilakeLib::load(const std::string &lib_path) {
     void *sym_handle = h;
 #endif
 
-    auto s  = reinterpret_cast<search_fn_t>    (AILAKE_DLSYM(sym_handle, "ailake_search_json"));
-    auto mm = reinterpret_cast<multimodal_fn_t>(AILAKE_DLSYM(sym_handle, "ailake_search_multimodal_json"));
-    auto sc = reinterpret_cast<scan_fn_t>      (AILAKE_DLSYM(sym_handle, "ailake_scan_json"));
-    auto w  = reinterpret_cast<write_fn_t>     (AILAKE_DLSYM(sym_handle, "ailake_write_batch_json"));
-    auto f  = reinterpret_cast<free_fn_t>      (AILAKE_DLSYM(sym_handle, "ailake_free_string"));
+    auto s  = reinterpret_cast<search_fn_t>     (AILAKE_DLSYM(sym_handle, "ailake_search_json"));
+    auto mm = reinterpret_cast<multimodal_fn_t> (AILAKE_DLSYM(sym_handle, "ailake_search_multimodal_json"));
+    auto sc = reinterpret_cast<scan_fn_t>       (AILAKE_DLSYM(sym_handle, "ailake_scan_json"));
+    auto w  = reinterpret_cast<write_fn_t>      (AILAKE_DLSYM(sym_handle, "ailake_write_batch_json"));
+    auto st = reinterpret_cast<search_text_fn_t>(AILAKE_DLSYM(sym_handle, "ailake_search_text_json"));
+    auto f  = reinterpret_cast<free_fn_t>       (AILAKE_DLSYM(sym_handle, "ailake_free_string"));
 
     if (!s || !w || !f) {
         if (h) AILAKE_DLCLOSE(h);
         return false;
     }
 
-    handle_        = h;
-    search_fn_     = s;
-    multimodal_fn_ = mm; // may be nullptr for older builds — is_multimodal_ready() guards
-    scan_fn_       = sc; // may be nullptr for older builds — is_scan_ready() guards
-    write_fn_      = w;
-    free_fn_       = f;
+    handle_          = h;
+    search_fn_       = s;
+    multimodal_fn_   = mm; // may be nullptr for older builds — is_multimodal_ready() guards
+    scan_fn_         = sc; // may be nullptr for older builds — is_scan_ready() guards
+    write_fn_        = w;
+    search_text_fn_  = st; // may be nullptr for older builds — is_search_text_ready() guards
+    free_fn_         = f;
     return true;
 }
 
@@ -129,7 +131,10 @@ std::vector<SearchRow> AilakeLib::search(
     const std::vector<float> &query,
     int                       top_k,
     int                       ef_search,
-    const std::string        &partition_filter
+    const std::string        &partition_filter,
+    const std::string        &hybrid_text,
+    const std::string        &text_column,
+    float                     bm25_weight
 ) const {
     if (!search_fn_ || !free_fn_ || query.empty()) return {};
 
@@ -152,6 +157,11 @@ std::vector<SearchRow> AilakeLib::search(
         ",\"ef_search\":"  + std::to_string(ef_search);
     if (!partition_filter.empty())
         req += ",\"partition_filter\":" + json_escape(partition_filter);
+    if (!hybrid_text.empty()) {
+        req += ",\"hybrid_text\":"  + json_escape(hybrid_text);
+        req += ",\"text_column\":"  + json_escape(text_column);
+        req += ",\"bm25_weight\":"  + std::to_string(bm25_weight);
+    }
     req += "}";
 
     char *raw = search_fn_(req.c_str());
@@ -164,6 +174,50 @@ std::vector<SearchRow> AilakeLib::search(
         auto j = nlohmann::json::parse(resp);
         if (!j.value("ok", false)) return {};
 
+        std::vector<SearchRow> rows;
+        for (auto &r : j["results"]) {
+            rows.push_back({
+                r["row_id"].get<int64_t>(),
+                r["distance"].get<float>(),
+                r["file_path"].get<std::string>()
+            });
+        }
+        return rows;
+    } catch (...) {
+        return {};
+    }
+}
+
+std::vector<SearchRow> AilakeLib::search_text(
+    const std::string &warehouse,
+    const std::string &table_name,
+    const std::string &query_text,
+    int                top_k,
+    const std::string &text_column,
+    const std::string &partition_filter
+) const {
+    if (!search_text_fn_ || !free_fn_ || query_text.empty()) return {};
+
+    std::string req =
+        "{\"warehouse\":"   + json_escape(warehouse)   +
+        ",\"namespace\":\"default\""                   +
+        ",\"table\":"       + json_escape(table_name)  +
+        ",\"query_text\":"  + json_escape(query_text)  +
+        ",\"top_k\":"       + std::to_string(top_k)    +
+        ",\"text_column\":" + json_escape(text_column);
+    if (!partition_filter.empty())
+        req += ",\"partition_filter\":" + json_escape(partition_filter);
+    req += "}";
+
+    char *raw = search_text_fn_(req.c_str());
+    if (!raw) return {};
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    try {
+        auto j = nlohmann::json::parse(resp);
+        if (!j.value("ok", false)) return {};
         std::vector<SearchRow> rows;
         for (auto &r : j["results"]) {
             rows.push_back({
@@ -401,6 +455,7 @@ ScanResult AilakeLib::scan(
 
 // Forward declarations
 void RegisterAilakeScan(duckdb::DatabaseInstance &db);
+void RegisterAilakeSearchText(duckdb::DatabaseInstance &db);
 
 extern "C" {
 
@@ -413,6 +468,7 @@ DUCKDB_EXTENSION_API void ailake_init(DatabaseInstance &db) {
     RegisterAilakeSearchMultimodal(db);
     RegisterAilakeWrite(db);
     RegisterAilakeScan(db);
+    RegisterAilakeSearchText(db);
 }
 
 DUCKDB_EXTENSION_API const char *ailake_version() {

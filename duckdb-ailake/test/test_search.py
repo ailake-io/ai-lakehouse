@@ -191,6 +191,65 @@ def test_search_partition_filter_named_param():
     require(rows[0] >= 0, "partition_filter named param caused an unexpected error")
     print(f"PASS: partition_filter named param accepted (returned {rows[0]} rows)")
 
+def test_search_hybrid_named_params():
+    """hybrid_text, text_column, bm25_weight named params are accepted without error."""
+    conn = setup_connection()
+    query = load_fixture_query()
+    q_sql = ", ".join(str(f) for f in query)
+
+    rows = conn.execute(f"""
+        SELECT count(*) FROM ailake_search(
+            '{table_path()}',
+            [{q_sql}]::FLOAT[],
+            10,
+            hybrid_text='vector search approximate nearest neighbor',
+            text_column='chunk_text',
+            bm25_weight=0.4
+        )
+    """).fetchone()
+    require(rows[0] >= 0, "hybrid named params caused an unexpected error")
+    print(f"PASS: hybrid named params accepted (returned {rows[0]} rows)")
+
+def test_search_text_schema():
+    """ailake_search_text returns correct schema: row_id, distance, file_path."""
+    conn = setup_connection()
+
+    schema = conn.execute(f"""
+        DESCRIBE SELECT * FROM ailake_search_text(
+            '{table_path()}',
+            'vector search',
+            5
+        )
+    """).fetchall()
+
+    col_names = [r[0] for r in schema]
+    require("row_id"    in col_names, f"ailake_search_text missing row_id, got {col_names}")
+    require("distance"  in col_names, f"ailake_search_text missing distance, got {col_names}")
+    require("file_path" in col_names, f"ailake_search_text missing file_path, got {col_names}")
+    print(f"PASS: ailake_search_text schema correct {col_names}")
+
+def test_search_text_no_lib_returns_empty():
+    """When native lib not loaded, ailake_search_text returns 0 rows gracefully."""
+    conn = duckdb.connect(config={
+        "allow_unsigned_extensions": True,
+        "allow_extensions_metadata_mismatch": True,
+    })
+    try:
+        conn.execute(f"LOAD '{EXT_PATH}'")
+    except Exception:
+        print("SKIP: extension not built yet")
+        return
+
+    rows = conn.execute(f"""
+        SELECT count(*) FROM ailake_search_text(
+            '/nonexistent/path',
+            'rust programming',
+            10
+        )
+    """).fetchone()
+    require(rows[0] == 0, f"expected 0 rows without native lib, got {rows[0]}")
+    print("PASS: ailake_search_text graceful degradation without native lib")
+
 if __name__ == "__main__":
     if not pathlib.Path(EXT_PATH).exists():
         print(f"SKIP: extension not found at {EXT_PATH} — build first with cmake")
@@ -203,5 +262,8 @@ if __name__ == "__main__":
     test_search_no_lib_returns_empty()
     test_search_vec_col_named_param()
     test_search_partition_filter_named_param()
+    test_search_hybrid_named_params()
+    test_search_text_schema()
+    test_search_text_no_lib_returns_empty()
 
     print("\nAll search tests passed.")

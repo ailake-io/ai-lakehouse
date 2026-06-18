@@ -11,6 +11,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **DuckDB `ailake_search_text()` table function** — new SQL function in `duckdb-ailake/src/ailake_search_text.cpp`. Pure BM25 full-text search from DuckDB: `SELECT * FROM ailake_search_text('path', 'rust programming', 10, text_column:='chunk_text') ORDER BY distance`. Backed by new `ailake_search_text_json` C-ABI function in `ailake-jni`. Returns `(row_id BIGINT, distance FLOAT, file_path VARCHAR)` where `distance` = negated BM25 score. Graceful degradation (0 rows) when native lib not loaded.
+
+- **DuckDB `ailake_search()` hybrid BM25+vector** — `ailake_search()` now accepts three new named params: `hybrid_text VARCHAR`, `text_column VARCHAR` (default `'chunk_text'`), `bm25_weight FLOAT` (default `0.5`). Backed by new fields in `ailake_search_json` C-ABI protocol (backward-compatible; missing = `null` = pure vector). Example: `SELECT * FROM ailake_search('path', query, 10, hybrid_text:='rust programming', bm25_weight:=0.4)`.
+
+- **`ailake_search_json` protocol extended** — `ailake-jni/src/lib.rs`: `do_search()` accepts `hybrid_text`, `text_column`, `bm25_weight`; `ailake_search_json` Req struct adds these three optional fields with serde defaults (backward-compatible). All existing callers (Spark/Trino/Flink/Go) pass `null` and get pure vector search unchanged.
+
+- **`ailake_search_text_json` C-ABI function** — new `#[no_mangle]` export in `ailake-jni/src/lib.rs`. JSON protocol: `{"warehouse","namespace","table","query_text","top_k","text_column","partition_filter"}`. Returns `{"ok":true,"results":[{"row_id","distance","file_path"}]}`.
+
 - **Python type stubs updated** (`ailake-py/python/ailake/_ailake.pyi`) — all new Phase 5/8/9 APIs now reflected in stubs: `bm25_text_column` param in `TableWriter.__init__`; `extra_columns` param in `write_batch` / `write_batch_auto_deferred` / `write_batch_idempotent`; `hybrid_text` / `text_column` / `bm25_weight` params in `search()`; new `search_text()` function; new `WorkingMemoryBuffer` class; new `decay_memories()` function. `SearchQuery` and module-level `search()` in `__init__.py` now forward `hybrid_text` / `text_column` / `bm25_weight` to the Rust `_search_raw()` binding.
 
 - **`WorkingMemoryBuffer`** — bounded in-memory FIFO queue for agent short-term memory (`ailake-query/src/mem_table.rs`). Stores at most `max_rows` `(text, embedding, importance)` tuples; evicts oldest on overflow. `search(query, top_k)` brute-force cosine flat scan; `drain_to_table(&mut TableWriter)` persists all entries and clears the buffer. Python: `ailake.WorkingMemoryBuffer(max_rows=1000)`. Replaces MemTable for single-session agents; cascade pattern: buffer first, drain to AI-Lake when full.
