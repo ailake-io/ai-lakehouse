@@ -578,6 +578,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 rerank_factor: None,
                 score_fn: None,
                 partition_filter: None,
+                hybrid: None,
             };
 
             let results = ailake_query::search(
@@ -675,6 +676,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 min_files_to_compact: min_files,
                 target_file_size_bytes: target_size,
                 index_strategy: Default::default(),
+                max_files_per_pass: 20,
             };
             let planner = CompactionPlanner::new(config);
             let to_compact = planner.plan(&files);

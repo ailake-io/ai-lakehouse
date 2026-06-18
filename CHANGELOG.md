@@ -11,6 +11,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Hybrid BM25+vector search** — `SearchConfig::hybrid: Option<HybridConfig>` adds first-class BM25 lexical scoring to the vector search pipeline, eliminating the need for external FTS infrastructure for RAG/hybrid workloads:
+  - `BM25Scorer` in pure Rust (no Tantivy dep) — BM25+ formula (k1=1.2, b=0.75), always-positive IDF, 50k-term vocabulary cap with automatic pruning.
+  - `IdfStats` accumulated at write time from `TableWriter::with_bm25("chunk_text")` — serialized as zstd-compressed bincode, persisted to `metadata/ailake_bm25_stats.bin` alongside the Iceberg catalog. Updated on every `write_batch` / `write_batch_deferred` call. Compaction rebuilds stats accurately.
+  - Hybrid pipeline: HNSW retrieves `candidate_pool` (default `10 × top_k`) candidates → BM25 scores each candidate using global IDF → fuses via **RRF** (default: `w_vec/(60+rank_vec) + w_bm25/(60+rank_bm25)`) or **linear combination** (min-max normalized). `HybridFusion::Rrf` and `HybridFusion::Linear` available.
+  - `search_text()` — pure BM25 brute-force scan (no HNSW required): scans all Parquet files, scores rows by BM25, returns top-k. O(N) per call; documented trade-off vs. inverted index at scale.
+  - Python: `ailake.TableWriter(bm25_text_column="chunk_text")` + `ailake.search(path, query, top_k, hybrid_text="my query", text_column="chunk_text", bm25_weight=0.5)` + `ailake.search_text(path, "my query", top_k)`.
+  - Rust: `SearchConfig::default().with_hybrid(HybridConfig::new("my query").with_text_column("chunk_text"))`.
+  - All other bindings (JNI, CLI, serve) pass `hybrid: None` (backward-compatible).
+
 - **`NormalizedCosine` + F16 in-memory HNSW** — `quantize_to_f16()` no longer skips `NormalizedCosine`. F16 is now used during HNSW graph traversal (half memory bandwidth, ~2× cache efficiency) for all metrics. After traversal, `HnswIndex::search()` re-scores the final `top_k` candidates with exact F32 from `flat_vecs` to correct F16 rounding errors (~0.001 error vs ~0.0002 true `1-dot` distance for very similar unit vectors). Re-score cost is O(top_k × dim) — negligible vs. O(ef × dim) traversal. Users can now pair `NormalizedCosine` + `pre_normalize=true` with `precision=F16` Parquet storage and F16 in-memory quantization simultaneously without precision trade-offs.
 
 ### Fixed

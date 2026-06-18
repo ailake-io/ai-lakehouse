@@ -64,7 +64,7 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, bm25_text_column=None))]
     fn new(
         py: Python<'_>,
         path: &str,
@@ -81,6 +81,7 @@ impl TableWriter {
         embed_fn: Option<Py<PyAny>>,
         partition_by: Option<String>,
         partition_value: Option<String>,
+        bm25_text_column: Option<String>,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
@@ -107,9 +108,12 @@ impl TableWriter {
         let table = TableIdent::new("default", "table");
 
         let stored_embed_fn = embed_fn.map(|f| f.clone_ref(py));
-        let writer = rt
+        let mut writer = rt
             .block_on(RsTableWriter::create_or_open(catalog, store, policy, table))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(col) = bm25_text_column {
+            writer = writer.with_bm25(col);
+        }
 
         Ok(Self {
             inner: Some(writer),
@@ -369,23 +373,32 @@ impl TableWriter {
 
 /// Search a table for the top-k nearest vectors to `query`.
 ///
+/// When `hybrid_text` is provided, hybrid BM25+vector search is performed:
+/// HNSW retrieves a larger candidate pool, then BM25 scores are computed
+/// against `hybrid_text` and fused via RRF. Requires BM25 stats to be
+/// accumulated at write time via `TableWriter(bm25_text_column=...)`.
+///
 /// Returns a list of dicts: [{"row_id": int, "distance": float, "file": str}, ...]
 #[pyfunction]
-#[pyo3(signature = (path, query, top_k=10, partition_filter=None))]
+#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5))]
 fn search(
     py: Python<'_>,
     path: &str,
     query: Vec<f32>,
     top_k: usize,
     partition_filter: Option<String>,
+    hybrid_text: Option<String>,
+    text_column: &str,
+    bm25_weight: f32,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
-        "ailake-py: search path={} dim={} top_k={} partition={:?}",
+        "ailake-py: search path={} dim={} top_k={} partition={:?} hybrid={:?}",
         path,
         query.len(),
         top_k,
-        partition_filter
+        partition_filter,
+        hybrid_text.as_deref().map(|t| &t[..t.len().min(50)])
     );
     let (catalog, store) = local_catalog_store(path);
     let table = TableIdent::new("default", "table");
@@ -404,6 +417,12 @@ fn search(
         .cloned()
         .unwrap_or_else(|| "embedding".into());
 
+    let hybrid = hybrid_text.map(|qt| {
+        ailake_query::HybridConfig::new(qt)
+            .with_text_column(text_column)
+            .with_bm25_weight(bm25_weight)
+    });
+
     let config = SearchConfig {
         top_k,
         ef_search: 50,
@@ -411,6 +430,7 @@ fn search(
         rerank_factor: None,
         score_fn: None,
         partition_filter,
+        hybrid,
     };
 
     let results = rt
@@ -425,6 +445,52 @@ fn search(
         ))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
+    let list = PyList::empty(py);
+    for r in results {
+        let d = PyDict::new(py);
+        d.set_item("row_id", r.row_id.as_u64())?;
+        d.set_item("distance", r.distance)?;
+        d.set_item("file", r.file_path)?;
+        list.append(d)?;
+    }
+    Ok(list.into())
+}
+
+/// Pure BM25 full-text search (no vector query required).
+///
+/// Scans all Parquet files and ranks rows by BM25 score against `query_text`.
+/// IDF stats must be accumulated at write time via `TableWriter(bm25_text_column=...)`.
+/// O(N) complexity per call — best for small/medium tables or offline ranking.
+///
+/// Returns a list of dicts: [{"row_id": int, "distance": float, "file": str}, ...]
+/// where `distance` is the negated BM25 score (lower = more relevant, for consistency
+/// with the vector search convention).
+#[pyfunction]
+#[pyo3(signature = (path, query_text, top_k=10, text_column="chunk_text", partition_filter=None))]
+fn search_text(
+    py: Python<'_>,
+    path: &str,
+    query_text: &str,
+    top_k: usize,
+    text_column: &str,
+    partition_filter: Option<String>,
+) -> PyResult<Py<PyAny>> {
+    use ailake_query::search_text as rs_search_text;
+    let rt = rt()?;
+    let (catalog, store) = local_catalog_store(path);
+    let table = TableIdent::new("default", "table");
+    let pf = partition_filter.as_deref();
+    let results = rt
+        .block_on(rs_search_text(
+            &table,
+            query_text,
+            &[text_column],
+            top_k,
+            catalog,
+            store,
+            pf,
+        ))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let list = PyList::empty(py);
     for r in results {
         let d = PyDict::new(py);
@@ -485,6 +551,7 @@ fn search_with_data(
         rerank_factor: None,
         score_fn: None,
         partition_filter,
+        hybrid: None,
     };
 
     let results = rt
@@ -808,6 +875,7 @@ fn search_multimodal(
         rerank_factor: None,
         score_fn: None,
         partition_filter,
+        hybrid: None,
     };
 
     let results = rt
@@ -838,6 +906,7 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
     m.add_class::<VectorColSpec>()?;
     m.add_function(wrap_pyfunction!(search, m)?)?;
+    m.add_function(wrap_pyfunction!(search_text, m)?)?;
     m.add_function(wrap_pyfunction!(search_multimodal, m)?)?;
     m.add_function(wrap_pyfunction!(search_with_data, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_context, m)?)?;
