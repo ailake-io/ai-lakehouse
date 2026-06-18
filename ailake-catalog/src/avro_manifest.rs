@@ -138,6 +138,7 @@ pub fn write_manifest_file(
             batch_id: f.batch_id.clone(),
             embedding_model: f.embedding_model.clone(),
             partition_value: f.partition_value.clone(),
+            deletion_vector: f.deletion_vector.clone(),
         };
         match serde_json::to_vec(&ext) {
             Ok(bytes) => encode_union_bytes(1, &bytes, &mut rec), // key_metadata=bytes
@@ -300,6 +301,10 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                         .as_deref()
                         .and_then(|b| serde_json::from_slice(b).ok());
 
+                    // Parse V3 Deletion Vector from native Avro field (Spark/Trino/PyIceberg).
+                    // AI-Lake-written DVs come from key_metadata JSON (Phase C).
+                    let native_dv = parse_v3_deletion_vector(df_fields);
+
                     results.push(DataFileEntry {
                         path,
                         record_count,
@@ -321,6 +326,10 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                         batch_id: ext.as_ref().and_then(|e| e.batch_id.clone()),
                         embedding_model: ext.as_ref().and_then(|e| e.embedding_model.clone()),
                         partition_value: ext.as_ref().and_then(|e| e.partition_value.clone()),
+                        deletion_vector: ext
+                            .as_ref()
+                            .and_then(|e| e.deletion_vector.clone())
+                            .or(native_dv),
                     });
                 }
             }
@@ -354,6 +363,53 @@ struct AilakeEntryExt {
     pub embedding_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_value: Option<String>,
+    /// V3 Deletion Vector written by AI-Lake (Phase C). For DVs written by
+    /// external engines (Spark/Trino/PyIceberg), parse from native Avro field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion_vector: Option<crate::provider::DeletionVector>,
+}
+
+/// Extract a V3 Deletion Vector reference from the native Avro `data_file.deletion_vector`
+/// field written by Spark, Trino, or PyIceberg. Returns None for V2 manifests or when
+/// the field is absent / null.
+fn parse_v3_deletion_vector(
+    df_fields: &[(String, Value)],
+) -> Option<crate::provider::DeletionVector> {
+    let dv_val = df_fields
+        .iter()
+        .find(|(k, _)| k == "deletion_vector")?;
+
+    let dv_record = match &dv_val.1 {
+        Value::Union(_, inner) => {
+            if let Value::Record(fields) = inner.as_ref() {
+                fields
+            } else {
+                return None;
+            }
+        }
+        Value::Record(fields) => fields,
+        _ => return None,
+    };
+
+    let get_str = |name: &str| {
+        dv_record
+            .iter()
+            .find(|(k, _)| k == name)
+            .and_then(|(_, v)| if let Value::String(s) = v { Some(s.clone()) } else { None })
+    };
+    let get_long = |name: &str| {
+        dv_record
+            .iter()
+            .find(|(k, _)| k == name)
+            .and_then(|(_, v)| if let Value::Long(n) = v { Some(*n) } else { None })
+    };
+
+    let path = get_str("path")?;
+    let offset = get_long("offset")? as u64;
+    let length = get_long("length")? as u64;
+    let cardinality = get_long("cardinality").unwrap_or(-1);
+
+    Some(crate::provider::DeletionVector { path, offset, length, cardinality })
 }
 
 /// Read manifest file paths from an Iceberg manifest list (Avro).
@@ -410,6 +466,7 @@ mod tests {
             batch_id: None,
             embedding_model: None,
             partition_value: None,
+            deletion_vector: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -438,6 +495,7 @@ mod tests {
             batch_id: Some("dag_run_2026-05-28_taskA".to_string()),
             embedding_model: None,
             partition_value: None,
+            deletion_vector: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;

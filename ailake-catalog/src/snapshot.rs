@@ -61,6 +61,7 @@ mod tests {
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
             }],
         };
         let json = manifest.to_json().unwrap();

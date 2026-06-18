@@ -29,6 +29,7 @@ thiserror      = { workspace = true }
 futures        = { workspace = true }
 rayon          = { workspace = true }
 tracing        = { workspace = true }
+roaring        = { workspace = true }
 
 [dev-dependencies]
 tempfile    = { workspace = true }

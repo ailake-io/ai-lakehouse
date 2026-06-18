@@ -21,6 +21,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Iceberg V3 format-version support (Phase A)** — `TableProperties::format_version: u8` (default `2`) propagated through all catalog backends and `TableWriter::create_or_open`. `IcebergMetadata::new()` and `write_manifest_file()` emit `"format-version": 3` when `format_version=3`. CLI: `ailake create --format-version 3`. Python: `TableWriter(format_version=3)`. V3 tables are append/update compatible out of the box; equality deletes and partition statistics not implemented (Phase B+). V2 default preserves full backward compatibility.
 
+- **Iceberg V3 Deletion Vector read support (Phase B)** — `DataFileEntry::deletion_vector: Option<DeletionVector>` carries DV pointer (Puffin path + offset + length + cardinality). `ailake-catalog`: `parse_v3_deletion_vector()` extracts native V3 Avro `deletion_vector` field from manifests written by Spark/Trino/PyIceberg; AI-Lake-written DVs stored in `AilakeEntryExt` JSON (Phase C write support planned). `ailake-query/src/dv.rs`: `load_deletion_vector(store, dv)` fetches the Roaring Bitmap blob via range GET (`offset..offset+length`), no full Puffin footer parse needed. Scanner (`scanner.rs`) loads DV bitmap once per file and masks deleted `row_id`s in both flat-scan and HNSW result paths. DV fetch failure: warn + continue without mask (safe degradation). Zero impact on V2 tables — `deletion_vector` field defaults to `None`.
+
 ### Tests
 
 - `metadata::tests::format_version_v3_emitted` — `IcebergMetadata::new(..., 3)` serialises `"format-version": 3` and round-trips correctly.
@@ -30,6 +32,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `hnsw::tests::insert_node_into_single_node_graph` — insert into a 1-node graph (edge case: entry point with no neighbours yet).
 - `compaction::tests::compact_incremental_merges_dominant_plus_small` — 6-row dominant + 2-row small file; verifies merged row count, dominant rows first, HNSW searchable with correct RowIds after incremental insertion.
 - `compaction::tests::compact_incremental_falls_back_when_no_dominant` — 50/50 split triggers full-rebuild fallback; merged file still valid.
+- `dv::tests::load_dv_roundtrip` — writes bitmap bytes at a simulated Puffin offset; `load_deletion_vector` fetches via range GET and verifies all deleted row IDs.
+- `dv::tests::has_deletions_detects_overlap` — `has_deletions` returns true iff any row_id in the candidate set appears in the bitmap.
 
 ### Docs
 

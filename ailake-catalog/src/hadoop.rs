@@ -351,6 +351,7 @@ mod tests {
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,

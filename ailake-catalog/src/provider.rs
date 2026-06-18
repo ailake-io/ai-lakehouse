@@ -33,6 +33,23 @@ impl TableIdent {
 
 pub type SnapshotId = i64;
 
+/// Iceberg V3 Deletion Vector reference stored in a manifest entry.
+///
+/// Points to a Roaring Bitmap blob inside a Puffin `.dvd` file.
+/// `offset` + `length` address the blob bytes directly — no full Puffin
+/// footer parse required for Phase B read support.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletionVector {
+    /// Absolute path to the Puffin `.dvd` file in the object store.
+    pub path: String,
+    /// Byte offset of the Roaring Bitmap blob within the Puffin file.
+    pub offset: u64,
+    /// Byte length of the Roaring Bitmap blob.
+    pub length: u64,
+    /// Number of deleted rows (bitmap popcount; -1 when unknown).
+    pub cardinality: i64,
+}
+
 /// HNSW index info for one additional (non-primary) vector column.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtraVectorIndex {
@@ -78,6 +95,11 @@ pub struct DataFileEntry {
     /// doesn't match the requested partition filter, avoiding all HNSW I/O.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_value: Option<String>,
+    /// Iceberg V3 Deletion Vector: Roaring Bitmap of deleted row positions.
+    /// None for V2 tables or V3 tables with no deletes for this file.
+    /// When present, scanner masks these row IDs from HNSW results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion_vector: Option<DeletionVector>,
 }
 
 /// Iceberg-compatible table metadata read from the catalog.
@@ -213,6 +235,7 @@ pub fn make_multi_column_data_file_entry(
         batch_id: None,
         embedding_model: None,
         partition_value: None,
+        deletion_vector: None,
     }
 }
 
@@ -250,6 +273,7 @@ pub fn make_data_file_entry_indexing(
         batch_id: None,
         embedding_model: None,
         partition_value: None,
+        deletion_vector: None,
     }
 }
 

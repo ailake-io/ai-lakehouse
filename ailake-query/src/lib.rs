@@ -6,6 +6,7 @@
 
 pub mod bm25;
 pub mod compaction;
+pub mod dv;
 pub mod context_assembler;
 pub mod mem_table;
 pub mod memory_decay;

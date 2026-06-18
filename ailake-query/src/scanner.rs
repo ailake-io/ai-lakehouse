@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
 use ailake_core::{AilakeError, AilakeResult, EmbeddingModelInfo, RowId, VectorMetric};
@@ -299,6 +299,32 @@ pub async fn search(
         let file_bytes: Bytes = store.get(&file_entry.path).await?;
         let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
 
+        // V3 Deletion Vector: fetch bitmap once per file (range GET from Puffin .dvd).
+        // None for V2 tables or V3 files with no deletes. On fetch error: warn + continue
+        // without mask (surfacing deleted rows is safer than hard-failing the search).
+        let dv_bitmap: Option<roaring::RoaringBitmap> =
+            if let Some(ref dv) = file_entry.deletion_vector {
+                match crate::dv::load_deletion_vector(&store, dv).await {
+                    Ok(bm) => {
+                        debug!(
+                            "ailake: DV loaded ({} deletions) for {}",
+                            bm.len(),
+                            file_entry.path
+                        );
+                        Some(bm)
+                    }
+                    Err(e) => {
+                        warn!(
+                            "ailake: DV fetch failed for '{}': {e} — deleted rows may appear",
+                            file_entry.path
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
         // Parquet read required for: flat scan fallback, exact reranking, score_fn, hybrid.
         let need_parquet = file_entry.index_status == IndexStatus::Indexing
             || !reader.is_ailake_file()
@@ -313,6 +339,10 @@ pub async fn search(
             );
             let (batch, raw_vectors) = reader.read_parquet()?;
             for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
+                // Skip rows marked as deleted by a V3 Deletion Vector.
+                if dv_bitmap.as_ref().map_or(false, |bm| bm.contains(row_id.as_u64() as u32)) {
+                    continue;
+                }
                 if use_hybrid {
                     let text = extract_text_for_row(
                         &batch,
@@ -342,6 +372,10 @@ pub async fn search(
         };
 
         for (row_id, approx_dist) in local_results {
+            // Skip rows marked as deleted by a V3 Deletion Vector.
+            if dv_bitmap.as_ref().map_or(false, |bm| bm.contains(row_id.as_u64() as u32)) {
+                continue;
+            }
             let idx = row_id.as_u64() as usize;
 
             let distance = if config.rerank_factor.is_some() {
