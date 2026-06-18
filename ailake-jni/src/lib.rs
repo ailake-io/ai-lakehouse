@@ -356,10 +356,23 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
 /// Caller must free the returned pointer with `ailake_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) -> *mut c_char {
-    use ailake_core::{VectorPrecision, VectorStoragePolicy};
+    use ailake_core::{PartitionDef, VectorPrecision, VectorStoragePolicy};
     use ailake_query::TableWriter;
     use arrow_array::{Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
+
+    /// One field in a multi-column partition spec.
+    /// JSON: `{"column": "agent_id", "transform": "identity", "column_type": "string"}`
+    #[derive(serde::Deserialize)]
+    struct PartitionFieldReq {
+        column: String,
+        #[serde(default = "default_transform")]
+        transform: String,
+        #[serde(default = "default_col_type")]
+        column_type: String,
+    }
+    fn default_transform() -> String { "identity".into() }
+    fn default_col_type() -> String { "string".into() }
 
     #[derive(serde::Deserialize)]
     struct Req {
@@ -376,25 +389,29 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         precision: Option<String>,
         #[serde(default)]
         ivf_residual: bool,
-        /// Optional model identifier stored in ``ailake.embedding-model`` Iceberg property.
-        /// Format: ``"<name>"`` or ``"<name>@<version>"`` (same as ``EmbeddingModelInfo::to_property_value``).
+        /// Optional model identifier stored in `ailake.embedding-model` Iceberg property.
         #[serde(default)]
         embedding_model: Option<String>,
-        /// Iceberg identity partition column (e.g. "agent_id"). Stored in metadata.json.
+        /// Single-column identity partition (legacy). Superseded by `partition_fields`.
         #[serde(default)]
         partition_by: Option<String>,
-        /// Runtime partition value for this write (e.g. agent UUID). Stored per-file in key_metadata.
+        /// Runtime partition value. For multi-column specs, use \x1f-separated compound
+        /// string or rely on `partition_values` dict (Python SDK converts automatically).
         #[serde(default)]
         partition_value: Option<String>,
+        /// Multi-column partition spec (Phase K). When non-empty, takes precedence over
+        /// `partition_by`. Supports "identity" and "truncate[W]" transforms.
+        #[serde(default)]
+        partition_fields: Vec<PartitionFieldReq>,
+        /// Iceberg format version: 2 (default, V2) or 3 (V3 opt-in).
+        #[serde(default = "default_format_version")]
+        format_version: u8,
         ids: Vec<i64>,
         embeddings: Vec<Vec<f32>>,
     }
-    fn default_ns() -> String {
-        "default".into()
-    }
-    fn default_col() -> String {
-        "embedding".into()
-    }
+    fn default_ns() -> String { "default".into() }
+    fn default_col() -> String { "embedding".into() }
+    fn default_format_version() -> u8 { 2 }
 
     if request_json.is_null() {
         return cstr_err_json("null request_json");
@@ -442,6 +459,16 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         .embedding_model
         .as_deref()
         .map(EmbeddingModelInfo::from_property_value);
+    let partition_fields: Vec<PartitionDef> = req
+        .partition_fields
+        .into_iter()
+        .map(|pf| PartitionDef {
+            column: pf.column,
+            transform: pf.transform,
+            column_type: pf.column_type,
+        })
+        .collect();
+
     let policy = VectorStoragePolicy {
         column_name: req.vec_col.clone(),
         dim: req.dim,
@@ -458,9 +485,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         partition_by: req.partition_by,
         partition_value: req.partition_value,
         partition_column_type: None,
-        partition_fields: vec![],
-};
+        partition_fields,
+    };
 
+    let format_version = req.format_version;
     let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
     let store: std::sync::Arc<dyn ailake_store::Store> =
         std::sync::Arc::new(LocalStore::new(&req.warehouse));
@@ -474,7 +502,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         };
 
     let result = rt().block_on(async {
-        let mut writer = TableWriter::create_or_open(catalog, store, policy, table, 2).await?;
+        let mut writer = TableWriter::create_or_open(catalog, store, policy, table, format_version).await?;
         writer.write_batch(&batch, &req.embeddings).await?;
         writer.commit().await
     });
@@ -1117,6 +1145,212 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
     }
 }
 
+// ── ailake_delete_where_json — Phase H: logical row deletion ──────────────────
+
+/// Delete all rows where `column` equals any value in `values`.
+///
+/// Writes an Iceberg equality delete file + delete manifest. No data files are
+/// rewritten. Deleted rows are filtered out by the scanner on every subsequent
+/// read. Compatible with both V2 and V3 tables.
+///
+/// `request_json`:
+/// ```json
+/// {
+///   "warehouse": "/data/my_table",
+///   "namespace": "default",
+///   "table": "my_table",
+///   "column": "document_id",
+///   "values": ["doc-a", "doc-b", "doc-c"]
+/// }
+/// ```
+///
+/// Returns `{"ok":true}` on success, `{"error":"..."}` on failure.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -> *mut c_char {
+    use ailake_query::delete_where;
+
+    #[derive(serde::Deserialize)]
+    struct Req {
+        warehouse: String,
+        #[serde(default = "dw_default_ns")]
+        namespace: String,
+        table: String,
+        column: String,
+        values: Vec<String>,
+    }
+    fn dw_default_ns() -> String { "default".into() }
+
+    if request_json.is_null() {
+        return cstr_err_json("null request_json");
+    }
+    let json_str = match CStr::from_ptr(request_json).to_str() {
+        Ok(s) => s,
+        Err(e) => return cstr_err_json(e),
+    };
+    let req: Req = match serde_json::from_str(json_str) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("ailake_delete_where_json: JSON parse error: {}", e);
+            return cstr_err_json(e);
+        }
+    };
+
+    debug!(
+        "ailake_delete_where_json: warehouse={} table={}.{} column={} values={}",
+        req.warehouse, req.namespace, req.table, req.column, req.values.len()
+    );
+
+    let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+    let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+    let table = TableIdent::new(&req.namespace, &req.table);
+    let values_ref: Vec<&str> = req.values.iter().map(String::as_str).collect();
+
+    let result = rt().block_on(delete_where(catalog, store, &table, &req.column, &values_ref));
+
+    #[derive(serde::Serialize)]
+    struct Resp { ok: bool }
+    match result {
+        Ok(()) => {
+            info!(
+                "ailake_delete_where_json: deleted {} values from column '{}' in {}.{}",
+                req.values.len(), req.column, req.namespace, req.table
+            );
+            CString::new(serde_json::to_string(&Resp { ok: true }).unwrap_or_default())
+                .unwrap_or_default()
+                .into_raw()
+        }
+        Err(e) => {
+            warn!("ailake_delete_where_json: failed: {}", e);
+            cstr_err_json(e)
+        }
+    }
+}
+
+// ── ailake_evolve_schema_json — Phase G: metadata-only schema evolution ───────
+
+/// Add or rename columns without rewriting data files.
+///
+/// Old files automatically return `initial_default` (or null) for new columns.
+/// Field IDs remain stable across renames — engines that rely on field-id
+/// (Spark, Trino) continue to work after a rename.
+///
+/// `request_json`:
+/// ```json
+/// {
+///   "warehouse": "/data/my_table",
+///   "namespace": "default",
+///   "table": "my_table",
+///   "add_columns": [
+///     { "name": "score", "type": "float", "initial_default": 0.0 }
+///   ],
+///   "rename_columns": [
+///     { "from": "old_name", "to": "new_name" }
+///   ]
+/// }
+/// ```
+///
+/// Returns `{"ok":true}` on success, `{"error":"..."}` on failure.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) -> *mut c_char {
+    use ailake_catalog::{AddColumnRequest, RenameColumnRequest, SchemaEvolution};
+    use ailake_catalog::provider::CatalogProvider;
+
+    #[derive(serde::Deserialize)]
+    struct AddColReq {
+        name: String,
+        #[serde(rename = "type")]
+        iceberg_type: String,
+        #[serde(default)]
+        initial_default: Option<serde_json::Value>,
+        #[serde(default)]
+        write_default: Option<serde_json::Value>,
+        #[serde(default)]
+        doc: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RenameColReq {
+        from: String,
+        to: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Req {
+        warehouse: String,
+        #[serde(default = "es_default_ns")]
+        namespace: String,
+        table: String,
+        #[serde(default)]
+        add_columns: Vec<AddColReq>,
+        #[serde(default)]
+        rename_columns: Vec<RenameColReq>,
+    }
+    fn es_default_ns() -> String { "default".into() }
+
+    if request_json.is_null() {
+        return cstr_err_json("null request_json");
+    }
+    let json_str = match CStr::from_ptr(request_json).to_str() {
+        Ok(s) => s,
+        Err(e) => return cstr_err_json(e),
+    };
+    let req: Req = match serde_json::from_str(json_str) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("ailake_evolve_schema_json: JSON parse error: {}", e);
+            return cstr_err_json(e);
+        }
+    };
+
+    debug!(
+        "ailake_evolve_schema_json: warehouse={} table={}.{} add={} rename={}",
+        req.warehouse, req.namespace, req.table, req.add_columns.len(), req.rename_columns.len()
+    );
+
+    let mut evolution = SchemaEvolution::new();
+    for r in req.rename_columns {
+        evolution = evolution.rename_column(r.from, r.to);
+    }
+    for a in req.add_columns {
+        evolution = evolution.add_column(AddColumnRequest {
+            name: a.name,
+            iceberg_type: a.iceberg_type,
+            required: false,
+            initial_default: a.initial_default,
+            write_default: a.write_default,
+            doc: a.doc,
+        });
+    }
+
+    let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+    let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+    let table = TableIdent::new(&req.namespace, &req.table);
+
+    let result = rt().block_on(catalog.evolve_schema(&table, evolution));
+
+    #[derive(serde::Serialize)]
+    struct Resp { ok: bool, new_schema_id: i32 }
+    match result {
+        Ok(schema_id) => {
+            info!(
+                "ailake_evolve_schema_json: schema evolved for {}.{} new_schema_id={}",
+                req.namespace, req.table, schema_id
+            );
+            CString::new(serde_json::to_string(&Resp { ok: true, new_schema_id: schema_id }).unwrap_or_default())
+                .unwrap_or_default()
+                .into_raw()
+        }
+        Err(e) => {
+            warn!("ailake_evolve_schema_json: failed: {}", e);
+            cstr_err_json(e)
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1159,6 +1393,98 @@ mod tests {
         assert!(!ptr.is_null());
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         assert_eq!(json, "[]");
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    // ── L1: partition_fields + format_version in write_batch_json ────────────
+
+    #[test]
+    fn write_batch_json_null_guard() {
+        let ptr = unsafe { ailake_write_batch_json(std::ptr::null()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        assert!(json.contains("error") || json.contains("null"));
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    #[test]
+    fn write_batch_json_partition_fields_parses() {
+        // JSON with partition_fields + format_version=3 must parse without panic.
+        // We pass a non-existent warehouse so it fails at I/O, not at JSON parse.
+        let req = r#"{
+            "warehouse": "/nonexistent/path",
+            "namespace": "default",
+            "table": "test",
+            "dim": 4,
+            "format_version": 3,
+            "partition_fields": [
+                {"column": "agent_id", "transform": "identity", "column_type": "string"},
+                {"column": "ts", "transform": "truncate[4]", "column_type": "string"}
+            ],
+            "ids": [1],
+            "embeddings": [[0.1, 0.2, 0.3, 0.4]]
+        }"#;
+        let c = std::ffi::CString::new(req).unwrap();
+        let ptr = unsafe { ailake_write_batch_json(c.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        // Expect I/O error (not JSON parse error)
+        assert!(json.contains("error"), "expected error json, got: {}", json);
+        assert!(!json.contains("JSON parse"), "unexpected JSON parse error: {}", json);
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    // ── L2: ailake_delete_where_json ─────────────────────────────────────────
+
+    #[test]
+    fn delete_where_json_null_guard() {
+        let ptr = unsafe { ailake_delete_where_json(std::ptr::null()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        assert!(json.contains("error"));
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    #[test]
+    fn delete_where_json_bad_warehouse_returns_error() {
+        let req = r#"{
+            "warehouse": "/nonexistent/warehouse",
+            "table": "my_table",
+            "column": "document_id",
+            "values": ["doc-a", "doc-b"]
+        }"#;
+        let c = std::ffi::CString::new(req).unwrap();
+        let ptr = unsafe { ailake_delete_where_json(c.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        assert!(json.contains("error"), "expected error, got: {}", json);
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    // ── L3: ailake_evolve_schema_json ────────────────────────────────────────
+
+    #[test]
+    fn evolve_schema_json_null_guard() {
+        let ptr = unsafe { ailake_evolve_schema_json(std::ptr::null()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        assert!(json.contains("error"));
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    #[test]
+    fn evolve_schema_json_bad_warehouse_returns_error() {
+        let req = r#"{
+            "warehouse": "/nonexistent/warehouse",
+            "table": "my_table",
+            "add_columns": [{"name": "score", "type": "float"}],
+            "rename_columns": [{"from": "old", "to": "new"}]
+        }"#;
+        let c = std::ffi::CString::new(req).unwrap();
+        let ptr = unsafe { ailake_evolve_schema_json(c.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        assert!(json.contains("error"), "expected error, got: {}", json);
         unsafe { ailake_free_string(ptr) };
     }
 }
