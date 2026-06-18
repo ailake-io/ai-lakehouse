@@ -7,6 +7,7 @@
 pub mod bloom;
 pub mod bm25;
 pub mod compaction;
+pub mod schema_filler;
 pub mod delete;
 pub mod dv;
 pub mod context_assembler;
@@ -26,6 +27,7 @@ pub use memory_decay::MemoryDecayJob;
 pub use migration::{EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy, ProgressFn};
 pub use bloom::BloomFilter;
 pub use pruner::{BloomPruner, VectorPruner};
+pub use schema_filler::SchemaFiller;
 pub use scanner::{
     fetch_rows, search, search_multimodal, search_text, FusionMethod, ModalQuery, ScoreFn,
     SearchConfig, SearchResult, SearchSession,

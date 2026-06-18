@@ -230,6 +230,45 @@ impl IcebergMetadata {
                 .find(|s| s.snapshot_id == snap_id)
                 .map(|s| s.statistics_path.clone())
         });
+
+        // Phase G: parse schema fields from the current schema entry.
+        let schema_fields = self
+            .schemas
+            .iter()
+            .find(|s| s["schema-id"].as_i64() == Some(self.current_schema_id as i64))
+            .and_then(|s| s["fields"].as_array().cloned())
+            .map(|fields| {
+                fields
+                    .into_iter()
+                    .filter_map(|f| {
+                        let id = f["id"].as_i64()? as i32;
+                        let name = f["name"].as_str()?.to_string();
+                        let required = f["required"].as_bool().unwrap_or(false);
+                        let iceberg_type = match &f["type"] {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        let initial_default = f
+                            .get("initial-default")
+                            .filter(|v| !v.is_null())
+                            .cloned();
+                        let write_default = f
+                            .get("write-default")
+                            .filter(|v| !v.is_null())
+                            .cloned();
+                        Some(crate::provider::SchemaField {
+                            id,
+                            name,
+                            required,
+                            iceberg_type,
+                            initial_default,
+                            write_default,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
         TableMetadata {
             table_uuid: self.table_uuid.clone(),
             format_version: self.format_version,
@@ -237,6 +276,7 @@ impl IcebergMetadata {
             properties: self.properties.clone(),
             current_snapshot_id: self.current_snapshot_id,
             current_statistics_path,
+            schema_fields,
         }
     }
 }

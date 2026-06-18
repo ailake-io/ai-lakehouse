@@ -1125,6 +1125,91 @@ fn now_ns() -> i64 {
     ailake_core::now_ns()
 }
 
+/// Add a column to the table schema without rewriting data files (Phase G).
+///
+/// Old files missing the column will return `initial_default` (or null if omitted)
+/// at read time — no compaction needed.
+///
+/// Args:
+///     table_path: path to the table (local dir or s3://... URI)
+///     name: column name
+///     iceberg_type: Iceberg type string — "int", "long", "float", "double",
+///         "boolean", "string", "date", "timestamp", "timestamptz", "binary"
+///     required: if True, the field is marked non-nullable (use False for additions)
+///     initial_default: JSON-serialisable scalar returned for old files, e.g. 0, 0.0,
+///         "unknown", True, None → null
+///     write_default: default written to new files when no value is supplied
+///     doc: optional field documentation stored in the schema
+///
+/// Returns:
+///     new schema-id (int)
+#[pyfunction]
+#[pyo3(signature = (table_path, name, iceberg_type, required=false, initial_default=None, write_default=None, doc=None))]
+fn add_column(
+    table_path: &str,
+    name: &str,
+    iceberg_type: &str,
+    required: bool,
+    initial_default: Option<pyo3::Bound<'_, PyAny>>,
+    write_default: Option<pyo3::Bound<'_, PyAny>>,
+    doc: Option<&str>,
+) -> PyResult<i32> {
+    let rt = rt()?;
+    let (catalog, _store) = local_catalog_store(table_path);
+    let table = TableIdent::new("default", "table");
+
+    let py_to_json = |v: Option<pyo3::Bound<'_, PyAny>>| -> Option<serde_json::Value> {
+        v.and_then(|py| {
+            if let Ok(b) = py.extract::<bool>() {
+                return Some(serde_json::Value::Bool(b));
+            }
+            if let Ok(i) = py.extract::<i64>() {
+                return Some(serde_json::json!(i));
+            }
+            if let Ok(f) = py.extract::<f64>() {
+                return Some(serde_json::json!(f));
+            }
+            if let Ok(s) = py.extract::<String>() {
+                return Some(serde_json::Value::String(s));
+            }
+            None
+        })
+    };
+
+    use ailake_catalog::{AddColumnRequest, SchemaEvolution};
+    let req = AddColumnRequest {
+        name: name.to_string(),
+        iceberg_type: iceberg_type.to_string(),
+        required,
+        initial_default: py_to_json(initial_default),
+        write_default: py_to_json(write_default),
+        doc: doc.map(str::to_string),
+    };
+    let evolution = SchemaEvolution::new().add_column(req);
+    rt.block_on(catalog.evolve_schema(&table, evolution))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Rename a column in the table schema without rewriting data files (Phase G).
+///
+/// Field IDs are stable — Iceberg and the AI-Lake SDK identify columns by ID,
+/// not name. Old files are not affected (reads continue to work).
+///
+/// Returns:
+///     new schema-id (int)
+#[pyfunction]
+#[pyo3(signature = (table_path, old_name, new_name))]
+fn rename_column(table_path: &str, old_name: &str, new_name: &str) -> PyResult<i32> {
+    let rt = rt()?;
+    let (catalog, _store) = local_catalog_store(table_path);
+    let table = TableIdent::new("default", "table");
+
+    use ailake_catalog::SchemaEvolution;
+    let evolution = SchemaEvolution::new().rename_column(old_name, new_name);
+    rt.block_on(catalog.evolve_schema(&table, evolution))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
@@ -1139,5 +1224,7 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(decay_memories, m)?)?;
     m.add_function(wrap_pyfunction!(delete_rows, m)?)?;
     m.add_function(wrap_pyfunction!(now_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(add_column, m)?)?;
+    m.add_function(wrap_pyfunction!(rename_column, m)?)?;
     Ok(())
 }

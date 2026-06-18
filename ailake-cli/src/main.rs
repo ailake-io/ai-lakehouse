@@ -199,6 +199,27 @@ enum Commands {
         #[arg(long)]
         rows: String,
     },
+    /// Evolve the table schema without rewriting data files (Phase G).
+    ///
+    /// Adds or renames columns in `metadata.json`. Old files missing new columns
+    /// will return `initial-default` (or null) at read time — no compaction needed.
+    Evolve {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// Add a column: "name:iceberg_type" e.g. "score:float" or "label:string"
+        /// May be specified multiple times for multiple additions.
+        #[arg(long = "add", value_name = "NAME:TYPE")]
+        adds: Vec<String>,
+        /// Initial default for the most recently listed --add column.
+        /// JSON literal: 0, 0.0, "unknown", true, null.
+        /// Repeated values align positionally with --add occurrences.
+        #[arg(long = "initial-default", value_name = "JSON")]
+        initial_defaults: Vec<String>,
+        /// Rename a column: "old:new" e.g. "old_name:new_name"
+        /// May be specified multiple times.
+        #[arg(long = "rename", value_name = "OLD:NEW")]
+        renames: Vec<String>,
+    },
     /// Estimate storage usage before writing (no I/O — pure math)
     Estimate {
         /// Number of vectors (supports K/M/B suffixes: 1M, 500K, 1B)
@@ -985,6 +1006,59 @@ async fn run(cli: Cli) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
 
             println!("deleted {} rows from {table} file {file}", row_ids.len());
+            Ok(())
+        }
+
+        Commands::Evolve {
+            table,
+            adds,
+            initial_defaults,
+            renames,
+        } => {
+            use ailake_catalog::{AddColumnRequest, SchemaEvolution};
+            let ident = parse_table_ident(&table);
+            let mut evolution = SchemaEvolution::new();
+
+            for (i, add_spec) in adds.iter().enumerate() {
+                let (name, iceberg_type) = add_spec
+                    .split_once(':')
+                    .ok_or_else(|| format!("--add value '{add_spec}' must be NAME:TYPE"))?;
+                let initial_default: Option<serde_json::Value> =
+                    initial_defaults.get(i).and_then(|s| {
+                        serde_json::from_str(s)
+                            .map_err(|e| {
+                                eprintln!(
+                                    "warn: could not parse --initial-default '{}' as JSON: {e}; \
+                                     using null",
+                                    s
+                                );
+                                e
+                            })
+                            .ok()
+                    });
+                evolution = evolution.add_column(AddColumnRequest {
+                    name: name.to_string(),
+                    iceberg_type: iceberg_type.to_string(),
+                    required: false,
+                    initial_default: initial_default.clone(),
+                    write_default: initial_default,
+                    doc: None,
+                });
+            }
+
+            for rename_spec in &renames {
+                let (old_name, new_name) = rename_spec
+                    .split_once(':')
+                    .ok_or_else(|| format!("--rename value '{rename_spec}' must be OLD:NEW"))?;
+                evolution = evolution.rename_column(old_name, new_name);
+            }
+
+            let new_schema_id = catalog
+                .evolve_schema(&ident, evolution)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            println!("schema evolved — new schema-id: {new_schema_id}");
             Ok(())
         }
 

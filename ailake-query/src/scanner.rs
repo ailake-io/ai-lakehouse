@@ -14,6 +14,7 @@ use arrow_array::{Array, RecordBatch};
 use bytes::Bytes;
 
 use crate::pruner::{BloomPruner, VectorPruner};
+use crate::schema_filler::SchemaFiller;
 
 /// Injectable per-result scoring function for hybrid ranking.
 ///
@@ -350,7 +351,9 @@ pub async fn search(
                 "ailake: flat scan fallback for {} (index_status={:?})",
                 file_entry.path, file_entry.index_status
             );
-            let (batch, raw_vectors) = reader.read_parquet()?;
+            let (raw_batch, raw_vectors) = reader.read_parquet()?;
+            // Phase G: inject columns added via schema evolution with initial_default values.
+            let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
             for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
                 // Skip rows marked as deleted by a V3 Deletion Vector.
                 if dv_bitmap.as_ref().map_or(false, |bm| bm.contains(row_id.as_u64() as u32)) {
@@ -379,7 +382,10 @@ pub async fn search(
         let local_results = index.search(query, candidate_k, config.ef_search);
 
         let parquet_data = if need_parquet {
-            Some(reader.read_parquet()?)
+            let (raw_batch, raw_vecs) = reader.read_parquet()?;
+            // Phase G: fill missing columns for old files before score_fn / hybrid BM25.
+            let filled = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
+            Some((filled, raw_vecs))
         } else {
             None
         };
@@ -1074,7 +1080,9 @@ pub async fn search_text(
         let file_bytes = store.get(&file_entry.path).await?;
         // Use dim=0 — we only read the Parquet columns, not the HNSW.
         let reader = AilakeFileReader::new(file_bytes, "", 0);
-        let (batch, _) = reader.read_parquet()?;
+        let (raw_batch, _) = reader.read_parquet()?;
+        // Phase G: fill missing columns for old files before BM25 text extraction.
+        let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
 
         for row_idx in 0..batch.num_rows() {
             let doc_text: String = text_columns

@@ -14,6 +14,7 @@ pub mod hadoop;
 pub mod metadata;
 pub mod provider;
 pub mod puffin;
+pub mod schema_evolution;
 #[cfg(feature = "rest-catalog")]
 pub mod rest;
 pub mod snapshot;
@@ -34,9 +35,10 @@ pub use metadata::{BlobRef, IcebergStatisticsRef};
 pub use provider::{
     decode_centroid, encode_centroid_b64, make_data_file_entry, make_data_file_entry_indexing,
     make_multi_column_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,
-    ExtraVectorIndex, IcebergSchemaUpdate, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation,
-    TableIdent, TableMetadata, TableProperties, VectorIndexInfo,
+    ExtraVectorIndex, IcebergSchemaUpdate, IndexStatus, NewSnapshot, SchemaField, SnapshotId,
+    SnapshotOperation, TableIdent, TableMetadata, TableProperties, VectorIndexInfo,
 };
+pub use schema_evolution::{AddColumnRequest, RenameColumnRequest, SchemaEvolution};
 pub use puffin::{
     AilakePuffinReader, AilakePuffinWriter, BM25BloomEntry, VectorStatEntry,
     BLOB_TYPE_BM25_BLOOM, BLOB_TYPE_VECTOR_STATS,

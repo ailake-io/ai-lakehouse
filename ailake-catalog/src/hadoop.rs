@@ -350,6 +350,99 @@ impl CatalogProvider for HadoopCatalog {
         }
         Ok(())
     }
+
+    /// Apply schema evolution without rewriting data files (Phase G).
+    ///
+    /// Steps:
+    /// 1. Load current `metadata.json`.
+    /// 2. Clone the current schema; apply renames (field name only, id stable).
+    /// 3. Append added fields with fresh field-ids and `initial-default` / `write-default`.
+    /// 4. Push new schema entry with `schema-id = current + 1`.
+    /// 5. Write new `metadata.json` (no new snapshot — pure metadata change).
+    ///
+    /// Returns the new `schema-id`.
+    async fn evolve_schema(
+        &self,
+        table: &TableIdent,
+        evolution: crate::schema_evolution::SchemaEvolution,
+    ) -> AilakeResult<i32> {
+        use ailake_core::AilakeError;
+
+        let mut meta = self.load_raw_metadata(table).await?;
+        let current_id = meta.current_schema_id;
+
+        // Clone current schema's fields array.
+        let current_schema = meta
+            .schemas
+            .iter()
+            .find(|s| s["schema-id"].as_i64() == Some(current_id as i64))
+            .ok_or_else(|| AilakeError::Catalog("current schema not found in metadata".into()))?
+            .clone();
+
+        let mut fields: Vec<serde_json::Value> = current_schema["fields"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        // Apply renames first (preserves field-ids).
+        for rename in &evolution.renames {
+            for field in fields.iter_mut() {
+                if field["name"].as_str() == Some(rename.old_name.as_str()) {
+                    field["name"] = serde_json::Value::String(rename.new_name.clone());
+                }
+            }
+        }
+
+        // Apply column additions.
+        let mut last_col_id = meta.last_column_id;
+        for add in evolution.adds {
+            last_col_id += 1;
+            let mut field = serde_json::json!({
+                "id": last_col_id,
+                "name": add.name,
+                "required": add.required,
+                "type": add.iceberg_type,
+            });
+            // Prefer explicit initial_default; fall back to write_default.
+            let init_default = add
+                .initial_default
+                .or_else(|| add.write_default.clone());
+            if let Some(ref d) = init_default {
+                field["initial-default"] = d.clone();
+            }
+            if let Some(ref wd) = add.write_default {
+                field["write-default"] = wd.clone();
+            }
+            if let Some(doc) = add.doc {
+                field["doc"] = serde_json::Value::String(doc);
+            }
+            fields.push(field);
+        }
+
+        let new_schema_id = current_id + 1;
+        let new_schema = serde_json::json!({
+            "schema-id": new_schema_id,
+            "type": "struct",
+            "fields": fields,
+        });
+
+        meta.schemas.push(new_schema);
+        meta.current_schema_id = new_schema_id;
+        meta.last_column_id = last_col_id;
+        meta.last_updated_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        self.save_metadata(table, &meta).await?;
+        tracing::info!(
+            "ailake: schema evolved — table={}/{}, new schema-id={new_schema_id}, \
+             last-column-id={last_col_id}",
+            table.namespace,
+            table.name
+        );
+        Ok(new_schema_id)
+    }
 }
 
 /// Extract centroid + radius from each DataFileEntry for Phase F Puffin stats.

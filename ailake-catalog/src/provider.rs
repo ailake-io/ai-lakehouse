@@ -107,6 +107,26 @@ pub struct DataFileEntry {
     pub first_row_id: Option<i64>,
 }
 
+/// One field from the current Iceberg table schema (Phase G).
+///
+/// Parsed from `schemas[current-schema-id].fields` in `metadata.json`.
+/// Used by `SchemaFiller` to inject missing columns when reading old files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaField {
+    pub id: i32,
+    pub name: String,
+    pub required: bool,
+    /// Iceberg type string, e.g. `"int"`, `"string"`, `"timestamptz"`.
+    pub iceberg_type: String,
+    /// Value injected when reading old files that predate this field.
+    /// `None` → null is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_default: Option<serde_json::Value>,
+    /// Default value written to new files. Same as `initial_default` in most cases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_default: Option<serde_json::Value>,
+}
+
 /// Iceberg-compatible table metadata read from the catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableMetadata {
@@ -120,6 +140,11 @@ pub struct TableMetadata {
     /// `None` for V2 tables or V3 tables without any committed statistics yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_statistics_path: Option<String>,
+    /// Current schema fields parsed from `metadata.json` (Phase G).
+    /// Empty for tables created before Phase G or tables with no schema committed.
+    /// Used by `SchemaFiller` in the scanner to inject missing columns with defaults.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_fields: Vec<SchemaField>,
 }
 
 /// Iceberg schema update carried inside a snapshot commit.
@@ -193,6 +218,23 @@ pub trait CatalogProvider: Send + Sync {
     ) -> AilakeResult<Vec<DataFileEntry>>;
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()>;
+
+    /// Apply schema evolution (add columns / rename columns) without rewriting data files.
+    ///
+    /// Returns the new `schema-id` assigned in `metadata.json`.
+    /// Old files missing new columns will have their values filled at read time using
+    /// `AddColumnRequest::initial_default` (Phase G `SchemaFiller`).
+    ///
+    /// Default implementation returns an error — override in file-based backends.
+    async fn evolve_schema(
+        &self,
+        _table: &TableIdent,
+        _evolution: crate::schema_evolution::SchemaEvolution,
+    ) -> AilakeResult<i32> {
+        Err(ailake_core::AilakeError::Catalog(
+            "evolve_schema not supported by this catalog backend".into(),
+        ))
+    }
 }
 
 /// Vector index metadata for a single data file.
