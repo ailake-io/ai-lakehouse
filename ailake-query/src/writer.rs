@@ -20,6 +20,31 @@ use bytes::Bytes;
 use serde_json;
 use tracing::{error, info, warn};
 
+/// Apply partition transforms and return the final stored value.
+/// For multi-column specs, raw must be \x1f-separated; each part is transformed
+/// independently and the result is rejoined with \x1f.
+/// For single-column (partition_by path), raw is returned as-is (identity only).
+fn apply_partition_transforms(
+    policy: &VectorStoragePolicy,
+    raw: Option<&str>,
+) -> Option<String> {
+    let raw = raw?;
+    if policy.partition_fields.is_empty() {
+        return Some(raw.to_string());
+    }
+    let parts: Vec<&str> = raw.split('\x1f').collect();
+    let transformed: Vec<String> = policy
+        .partition_fields
+        .iter()
+        .enumerate()
+        .map(|(i, pf)| {
+            let v = parts.get(i).copied().unwrap_or("");
+            pf.apply(v)
+        })
+        .collect();
+    Some(transformed.join("\x1f"))
+}
+
 /// One vector column for a multi-column write batch.
 pub struct MultiVectorBatch<'a> {
     pub policy: VectorStoragePolicy,
@@ -137,7 +162,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = self.policy.partition_value.clone();
+        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
 
         // Spawn background HNSW build (fire-and-forget; errors are logged).
@@ -201,7 +226,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = self.policy.partition_value.clone();
+        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
 
         let store = self.store.clone();
@@ -344,7 +369,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = self.policy.partition_value.clone();
+        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
 
         // Update BM25 IDF stats + build Bloom filter (Phase F).
@@ -480,7 +505,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = self.policy.partition_value.clone();
+        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -588,7 +613,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = self.policy.partition_value.clone();
+        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -665,7 +690,7 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = self.policy.partition_value.clone();
+        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
 
         // Clone all column data for the background task.
@@ -1461,7 +1486,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
         partition_column_type: None,
-        }
+                partition_fields: vec![],
+}
     }
 
     fn update_for(schema: &Schema, pol: &VectorStoragePolicy) -> IcebergSchemaUpdate {

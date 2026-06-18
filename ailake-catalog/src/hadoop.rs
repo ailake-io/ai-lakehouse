@@ -100,7 +100,7 @@ impl CatalogProvider for HadoopCatalog {
             .partition_column_type
             .as_deref()
             .or(props.policy.partition_column_type.as_deref());
-        let mut meta = IcebergMetadata::new(&location, &props.policy, props.format_version, pct);
+        let mut meta = IcebergMetadata::new(&location, &props.policy, props.format_version, pct, &props.policy.partition_fields);
         for (k, v) in &props.extra {
             meta.properties.insert(k.clone(), v.clone());
         }
@@ -630,7 +630,8 @@ mod tests {
                 partition_by: None,
                 partition_value: None,
                 partition_column_type: None,
-            },
+                        partition_fields: vec![],
+},
             extra: std::collections::HashMap::new(),
             format_version: 2,
             partition_column_type: None,

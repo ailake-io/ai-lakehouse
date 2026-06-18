@@ -30,7 +30,8 @@ fn make_policy(dim: u32) -> VectorStoragePolicy {
         partition_by: None,
         partition_value: None,
     partition_column_type: None,
-    }
+        partition_fields: vec![],
+}
 }
 
 fn rand_unit_vec(dim: usize, seed: u64) -> Vec<f32> {

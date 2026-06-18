@@ -1355,7 +1355,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
         partition_column_type: None,
-        }
+                partition_fields: vec![],
+}
     }
 
     async fn write_demo_table(dir: &TempDir, dim: usize, rows: usize) {
@@ -1629,7 +1630,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
         partition_column_type: None,
-        };
+                partition_fields: vec![],
+};
 
         let mut writer = crate::TableWriter::create_or_open(
             catalog.clone(),

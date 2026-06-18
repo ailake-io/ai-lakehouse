@@ -32,7 +32,8 @@ fn policy(partition_by: Option<String>, partition_value: Option<String>) -> Vect
         partition_by,
         partition_value,
         partition_column_type: None,
-    }
+        partition_fields: vec![],
+}
 }
 
 async fn write_agent_shard(

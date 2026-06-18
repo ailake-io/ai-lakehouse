@@ -365,7 +365,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
         partition_column_type: None,
-        }
+                partition_fields: vec![],
+}
     }
 
     fn make_batch(ids: &[i32]) -> RecordBatch {
@@ -532,7 +533,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
         partition_column_type: None,
-        };
+                partition_fields: vec![],
+};
         catalog
             .create_table(
                 &table,

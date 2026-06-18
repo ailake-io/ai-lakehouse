@@ -402,7 +402,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 partition_by: None,
                 partition_value: None,
             partition_column_type: None,
-            };
+                        partition_fields: vec![],
+};
 
             catalog
                 .create_table(
@@ -412,7 +413,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                         extra: std::collections::HashMap::new(),
                         format_version,
                         partition_column_type: None,
-                    },
+                        },
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -467,7 +468,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                     partition_by: None,
                     partition_value: None,
                 partition_column_type: None,
-                };
+                                partition_fields: vec![],
+};
                 mv_owned.push((first_policy, first_embs));
 
                 for (col_name, dim, metric, modality) in &col_specs[1..] {
@@ -489,7 +491,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                         partition_by: None,
                         partition_value: None,
                     partition_column_type: None,
-                    };
+                                        partition_fields: vec![],
+};
                     mv_owned.push((policy, embs));
                 }
 
@@ -557,7 +560,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                         partition_by: None,
                         partition_value: None,
                     partition_column_type: None,
-                    },
+                                        partition_fields: vec![],
+},
                     Err(_) => VectorStoragePolicy {
                         column_name: embeddings.clone(),
                         dim,
@@ -574,7 +578,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                         partition_by: None,
                         partition_value: None,
                     partition_column_type: None,
-                    },
+                                        partition_fields: vec![],
+},
                 };
 
                 let mut writer =
@@ -727,7 +732,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 partition_by: None,
                 partition_value: None,
             partition_column_type: None,
-            };
+                        partition_fields: vec![],
+};
 
             let files = catalog
                 .list_files(&ident, None)
@@ -835,7 +841,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 partition_by: None,
                 partition_value: None,
             partition_column_type: None,
-            };
+                        partition_fields: vec![],
+};
             serve::run(
                 catalog as Arc<dyn CatalogProvider>,
                 store,

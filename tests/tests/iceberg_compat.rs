@@ -31,7 +31,8 @@ fn make_policy(dim: u32) -> VectorStoragePolicy {
         partition_by: None,
         partition_value: None,
     partition_column_type: None,
-    }
+        partition_fields: vec![],
+}
 }
 
 async fn write_table(dir: &TempDir, table_name: &str, rows: usize, dim: u32) {

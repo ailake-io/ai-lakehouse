@@ -96,6 +96,75 @@ pub struct VectorStoragePolicy {
     /// Defaults to "string" when `None`.  Only relevant when `partition_by` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_column_type: Option<String>,
+    /// Multi-column / non-identity partition spec (Phase K).
+    ///
+    /// When non-empty, takes precedence over `partition_by` + `partition_column_type`
+    /// for table creation.  Supports `identity` and `truncate[W]` transforms.
+    /// Values at write time are provided via `partition_value` encoded as
+    /// `\x1f`-separated compound string ("val1\x1fval2") matching field order.
+    ///
+    /// Example (two-column identity):
+    /// ```ignore
+    /// partition_fields: vec![
+    ///     PartitionDef::identity("agent_id", "string"),
+    ///     PartitionDef::identity("session_id", "string"),
+    /// ]
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partition_fields: Vec<PartitionDef>,
+}
+
+/// One field in a multi-column partition spec (Phase K).
+///
+/// Supported transforms: `"identity"` and `"truncate[W]"` (string prefix / int rounding).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PartitionDef {
+    /// Source column name in the table schema.
+    pub column: String,
+    /// Iceberg transform string: `"identity"` or `"truncate[W]"`.
+    pub transform: String,
+    /// Iceberg type of the source column: `"string"`, `"int"`, `"long"`, `"uuid"`.
+    pub column_type: String,
+}
+
+impl PartitionDef {
+    pub fn identity(column: impl Into<String>, column_type: impl Into<String>) -> Self {
+        Self { column: column.into(), transform: "identity".into(), column_type: column_type.into() }
+    }
+
+    pub fn truncate(column: impl Into<String>, width: usize, column_type: impl Into<String>) -> Self {
+        Self {
+            column: column.into(),
+            transform: format!("truncate[{width}]"),
+            column_type: column_type.into(),
+        }
+    }
+
+    /// Apply this transform to a raw column value.
+    /// - `identity` → returns value unchanged.
+    /// - `truncate[W]` → returns first W characters (strings) or value rounded down to
+    ///   the nearest multiple of W (integers, parsed and re-formatted as string).
+    pub fn apply(&self, raw: &str) -> String {
+        if let Some(w) = self.truncate_width() {
+            if matches!(self.column_type.as_str(), "int" | "long" | "integer") {
+                // Integer truncation: round down to multiple of W
+                if let Ok(n) = raw.parse::<i64>() {
+                    return (n - n.rem_euclid(w as i64)).to_string();
+                }
+            }
+            // String truncation: first W chars
+            raw.chars().take(w).collect()
+        } else {
+            raw.to_string()
+        }
+    }
+
+    fn truncate_width(&self) -> Option<usize> {
+        self.transform
+            .strip_prefix("truncate[")
+            .and_then(|s| s.strip_suffix(']'))
+            .and_then(|s| s.parse().ok())
+    }
 }
 
 impl VectorStoragePolicy {
@@ -116,6 +185,7 @@ impl VectorStoragePolicy {
             partition_by: None,
             partition_value: None,
             partition_column_type: None,
+            partition_fields: vec![],
         }
     }
 }

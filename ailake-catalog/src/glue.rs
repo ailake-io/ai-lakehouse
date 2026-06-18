@@ -159,7 +159,7 @@ impl CatalogProvider for GlueCatalog {
             .as_deref()
             .or(props.policy.partition_column_type.as_deref());
         let mut meta =
-            IcebergMetadata::new(&table_root, &props.policy, props.format_version, pct);
+            IcebergMetadata::new(&table_root, &props.policy, props.format_version, pct, &props.policy.partition_fields);
         for (k, v) in &props.extra {
             meta.properties.insert(k.clone(), v.clone());
         }

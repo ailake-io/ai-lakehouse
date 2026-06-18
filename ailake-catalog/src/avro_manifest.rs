@@ -197,13 +197,19 @@ pub fn write_manifest_file(
         encode_int(0, &mut rec); // content=DATA
         encode_string(&f.path, &mut rec); // file_path
         encode_string("PARQUET", &mut rec); // file_format
-        // partition r102: encode native partition value when spec is active;
+        // partition r102: encode native partition values when spec is active;
         // empty record (0 bytes) for unpartitioned tables.
-        match partition_spec.and_then(|s| s.fields.first()) {
-            Some(field) => {
-                encode_partition_value(field, f.partition_value.as_deref(), &mut rec);
+        // For multi-column specs, partition_value is \x1f-separated; each field
+        // gets its own union slot in the Avro record.
+        if let Some(spec) = partition_spec {
+            if !spec.fields.is_empty() {
+                let raw = f.partition_value.as_deref().unwrap_or("");
+                let parts: Vec<&str> = raw.split('\x1f').collect();
+                for (i, field) in spec.fields.iter().enumerate() {
+                    let val = parts.get(i).copied().filter(|s| !s.is_empty());
+                    encode_partition_value(field, val, &mut rec);
+                }
             }
-            None => {} // empty record = 0 bytes
         }
         encode_long(f.record_count as i64, &mut rec); // record_count
         encode_long(f.file_size_bytes as i64, &mut rec); // file_size_in_bytes
@@ -400,26 +406,39 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                     // Falls back to key_metadata JSON for old AI-Lake manifests.
                     let native_first_row_id = parse_v3_first_row_id(df_fields);
 
-                    // Phase I: read native partition value from data_file.partition record.
-                    // Newly-written manifests carry the value here; old manifests carry it
-                    // in key_metadata JSON.  Native takes priority.
+                    // Phase I/K: read native partition values from data_file.partition record.
+                    // Multi-column specs → join with \x1f separator; single-column → plain string.
+                    // Newly-written manifests carry values here; old manifests fall back to key_metadata JSON.
                     let native_partition_value = df_fields
                         .iter()
                         .find(|(k, _)| k == "partition")
                         .and_then(|(_, v)| {
                             if let Value::Record(parts) = v {
-                                parts.first().and_then(|(_, pv)| match pv {
-                                    Value::Union(idx, inner) if *idx > 0 => match inner.as_ref() {
+                                if parts.is_empty() {
+                                    return None;
+                                }
+                                let vals: Vec<String> = parts
+                                    .iter()
+                                    .filter_map(|(_, pv)| match pv {
+                                        Value::Union(idx, inner) if *idx > 0 => match inner.as_ref() {
+                                            Value::String(s) => Some(s.clone()),
+                                            Value::Int(n) => Some(n.to_string()),
+                                            Value::Long(n) => Some(n.to_string()),
+                                            _ => None,
+                                        },
                                         Value::String(s) => Some(s.clone()),
                                         Value::Int(n) => Some(n.to_string()),
                                         Value::Long(n) => Some(n.to_string()),
                                         _ => None,
-                                    },
-                                    Value::String(s) => Some(s.clone()),
-                                    Value::Int(n) => Some(n.to_string()),
-                                    Value::Long(n) => Some(n.to_string()),
-                                    _ => None,
-                                })
+                                    })
+                                    .collect();
+                                if vals.is_empty() {
+                                    None
+                                } else if vals.len() == 1 {
+                                    Some(vals.into_iter().next().unwrap())
+                                } else {
+                                    Some(vals.join("\x1f"))
+                                }
                             } else {
                                 None
                             }
@@ -1211,6 +1230,64 @@ mod tests {
         );
         let entries = read_manifest_file(&bytes).expect("int partition roundtrip failed");
         assert_eq!(entries[0].partition_value.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn multi_column_partition_roundtrip() {
+        // Phase K: two-column spec (agent_id identity string + ts truncate[4] string).
+        use crate::provider::{PartitionField, PartitionSpec};
+        let spec = PartitionSpec {
+            spec_id: 1,
+            fields: vec![
+                PartitionField {
+                    source_id: 1,
+                    field_id: 1000,
+                    name: "agent_id".to_string(),
+                    transform: "identity".to_string(),
+                    source_type: "string".to_string(),
+                },
+                PartitionField {
+                    source_id: 2,
+                    field_id: 1001,
+                    name: "ts".to_string(),
+                    transform: "truncate[4]".to_string(),
+                    source_type: "string".to_string(),
+                },
+            ],
+        };
+        let compound = "agt-007\x1f2025"; // agent_id=agt-007, ts (truncated to 4)="2025"
+        let file = DataFileEntry {
+            path: "data/part-multi.parquet".to_string(),
+            record_count: 30,
+            file_size_bytes: 1024,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: Some("embedding".to_string()),
+            vector_dim: Some(4),
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: Some(compound.to_string()),
+            deletion_vector: None,
+            first_row_id: None,
+        };
+        let schema_json = r#"{"schema-id":0,"type":"struct","fields":[{"id":1,"name":"agent_id","required":false,"type":"string"},{"id":2,"name":"ts","required":false,"type":"string"}]}"#;
+        let partition_spec_json = r#"[{"spec-id":0,"fields":[]},{"spec-id":1,"fields":[{"name":"agent_id","transform":"identity","source-id":1,"field-id":1000},{"name":"ts","transform":"truncate[4]","source-id":2,"field-id":1001}]}]"#;
+        let bytes = write_manifest_file(
+            &[file],
+            202,
+            1,
+            schema_json,
+            partition_spec_json,
+            2,
+            Some(&spec),
+        );
+        let entries = read_manifest_file(&bytes).expect("multi-column roundtrip failed");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].partition_value.as_deref(), Some(compound));
     }
 
     #[test]

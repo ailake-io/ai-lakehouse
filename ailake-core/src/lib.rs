@@ -15,7 +15,8 @@ pub use episodic::{
 };
 pub use schema::{
     llm_columns, multimodal_columns, now_ns, tool_call_columns, LlmContextSchema,
-    MultimodalContextSchema, PQConfig, ToolCallOutcome, ToolCallSchema, VectorStoragePolicy,
+    MultimodalContextSchema, PQConfig, PartitionDef, ToolCallOutcome, ToolCallSchema,
+    VectorStoragePolicy,
 };
 pub use types::{
     ByteLen, ByteOffset, Centroid, Dim, EmbeddingModelInfo, RowId, VectorMetric, VectorModality,

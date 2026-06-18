@@ -131,7 +131,7 @@ impl CatalogProvider for JdbcCatalog {
             .partition_column_type
             .as_deref()
             .or(props.policy.partition_column_type.as_deref());
-        let mut meta = IcebergMetadata::new(&location, &props.policy, props.format_version, pct);
+        let mut meta = IcebergMetadata::new(&location, &props.policy, props.format_version, pct, &props.policy.partition_fields);
         for (k, v) in &props.extra {
             meta.properties.insert(k.clone(), v.clone());
         }
@@ -345,7 +345,8 @@ mod tests {
             extra: HashMap::new(),
             format_version: 2,
             partition_column_type: None,
-        };
+                partition_fields: vec![],
+};
 
         // create
         catalog.create_table(&table, &props).await.unwrap();

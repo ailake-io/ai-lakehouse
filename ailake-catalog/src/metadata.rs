@@ -142,6 +142,7 @@ impl IcebergMetadata {
         policy: &VectorStoragePolicy,
         format_version: u8,
         partition_column_type: Option<&str>,
+        partition_fields: &[ailake_core::PartitionDef],
     ) -> Self {
         let mut properties = HashMap::new();
         properties.insert("ailake.format-version".to_string(), "1".to_string());
@@ -193,7 +194,49 @@ impl IcebergMetadata {
         // the partition column to the table schema so source-id resolves correctly for
         // Spark, Trino, and PyIceberg partition pruning.
         let (schemas, last_column_id, partition_specs, default_spec_id, last_partition_id) =
-            if let Some(col) = &policy.partition_by {
+            if !partition_fields.is_empty() {
+                // Phase K: multi-column / non-identity partition spec.
+                // Each PartitionDef becomes one schema field (source-id = index+1)
+                // and one spec field (field-id = 1000+index).
+                let schema_fields: Vec<serde_json::Value> = partition_fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, pf)| {
+                        serde_json::json!({
+                            "id": i + 1,
+                            "name": pf.column,
+                            "required": false,
+                            "type": pf.column_type
+                        })
+                    })
+                    .collect();
+                let spec_fields: Vec<serde_json::Value> = partition_fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, pf)| {
+                        serde_json::json!({
+                            "name": pf.column,
+                            "transform": pf.transform,
+                            "source-id": i + 1,
+                            "field-id": 1000 + i as i32
+                        })
+                    })
+                    .collect();
+                let schema = serde_json::json!({
+                    "schema-id": 0, "type": "struct", "fields": schema_fields
+                });
+                let spec = serde_json::json!({
+                    "spec-id": 1, "fields": spec_fields
+                });
+                let n = partition_fields.len() as i32;
+                (
+                    vec![schema],
+                    n,
+                    vec![serde_json::json!({"spec-id": 0, "fields": []}), spec],
+                    1,
+                    1000 + n - 1,
+                )
+            } else if let Some(col) = &policy.partition_by {
                 let col_type = partition_column_type.unwrap_or("string");
                 // source field in schema: id=1, the partition column
                 let schema = serde_json::json!({
@@ -400,12 +443,13 @@ mod tests {
             partition_by: None,
             partition_value: None,
             partition_column_type: None,
-        }
+                partition_fields: vec![],
+}
     }
 
     #[test]
     fn roundtrip_json() {
-        let meta = IcebergMetadata::new("s3://my-lake/my_table", &make_policy(), 2, None);
+        let meta = IcebergMetadata::new("s3://my-lake/my_table", &make_policy(), 2, None, &[]);
         let json = meta.to_json().unwrap();
         let meta2 = IcebergMetadata::from_json(&json).unwrap();
         assert_eq!(meta2.format_version, 2);
@@ -417,7 +461,7 @@ mod tests {
 
     #[test]
     fn properties_contain_ailake_keys() {
-        let meta = IcebergMetadata::new("file:///tmp/tbl", &make_policy(), 2, None);
+        let meta = IcebergMetadata::new("file:///tmp/tbl", &make_policy(), 2, None, &[]);
         assert!(meta.properties.contains_key("ailake.format-version"));
         assert!(meta.properties.contains_key("ailake.vector-dim"));
     }
@@ -428,7 +472,7 @@ mod tests {
         let mut policy = make_policy();
         policy.embedding_model =
             Some(EmbeddingModelInfo::new("text-embedding-3-small").with_version("2024-01"));
-        let meta = IcebergMetadata::new("file:///tmp/tbl", &policy, 2, None);
+        let meta = IcebergMetadata::new("file:///tmp/tbl", &policy, 2, None, &[]);
         assert_eq!(
             meta.properties
                 .get("ailake.embedding-model")
@@ -439,7 +483,7 @@ mod tests {
 
     #[test]
     fn format_version_v3_emitted() {
-        let meta = IcebergMetadata::new("s3://my-lake/v3_table", &make_policy(), 3, None);
+        let meta = IcebergMetadata::new("s3://my-lake/v3_table", &make_policy(), 3, None, &[]);
         let json = meta.to_json().unwrap();
         let meta2 = IcebergMetadata::from_json(&json).unwrap();
         assert_eq!(meta2.format_version, 3);
@@ -447,7 +491,7 @@ mod tests {
 
     #[test]
     fn format_version_defaults_to_v2() {
-        let meta = IcebergMetadata::new("s3://my-lake/v2_table", &make_policy(), 2, None);
+        let meta = IcebergMetadata::new("s3://my-lake/v2_table", &make_policy(), 2, None, &[]);
         assert_eq!(meta.format_version, 2);
     }
 
@@ -455,7 +499,7 @@ mod tests {
     fn partition_spec_written_to_metadata_json() {
         let mut policy = make_policy();
         policy.partition_by = Some("agent_id".to_string());
-        let meta = IcebergMetadata::new("s3://my-lake/agents", &policy, 2, Some("string"));
+        let meta = IcebergMetadata::new("s3://my-lake/agents", &policy, 2, Some("string"), &[]);
 
         // Schema must contain the partition column.
         let schema = &meta.schemas[0];
@@ -494,7 +538,7 @@ mod tests {
 
     #[test]
     fn unpartitioned_table_has_no_partition_spec() {
-        let meta = IcebergMetadata::new("s3://my-lake/simple", &make_policy(), 2, None);
+        let meta = IcebergMetadata::new("s3://my-lake/simple", &make_policy(), 2, None, &[]);
         let tm = meta.to_table_metadata();
         assert!(tm.partition_spec.is_none());
     }
@@ -503,7 +547,7 @@ mod tests {
     fn partition_spec_int_type() {
         let mut policy = make_policy();
         policy.partition_by = Some("shard_id".to_string());
-        let meta = IcebergMetadata::new("s3://my-lake/shards", &policy, 2, Some("int"));
+        let meta = IcebergMetadata::new("s3://my-lake/shards", &policy, 2, Some("int"), &[]);
         let schema = &meta.schemas[0];
         assert_eq!(schema["fields"][0]["type"].as_str(), Some("int"));
         let tm = meta.to_table_metadata();

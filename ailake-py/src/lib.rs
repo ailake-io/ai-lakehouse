@@ -125,7 +125,7 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, partition_column_type=None, bm25_text_column=None, format_version=2))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, partition_column_type=None, partition_fields=None, partition_values=None, bm25_text_column=None, format_version=2))]
     fn new(
         py: Python<'_>,
         path: &str,
@@ -143,6 +143,14 @@ impl TableWriter {
         partition_by: Option<String>,
         partition_value: Option<String>,
         partition_column_type: Option<String>,
+        // Multi-column partition spec (Phase K).
+        // List of (column, transform, column_type) tuples.
+        // Example: [("agent_id", "identity", "string"), ("ts", "truncate[4]", "string")]
+        partition_fields: Option<Vec<(String, String, String)>>,
+        // Dict of {column: raw_value} for multi-column partition value at write time.
+        // Converted to \x1f-separated compound string in partition_fields order.
+        // Ignored when partition_value is also set (partition_value takes priority).
+        partition_values: Option<std::collections::HashMap<String, String>>,
         bm25_text_column: Option<String>,
         format_version: u8,
     ) -> PyResult<Self> {
@@ -159,8 +167,37 @@ impl TableWriter {
         policy.keep_raw_for_reranking = !pq_only;
         policy.ivf_residual = ivf_residual;
         policy.partition_by = partition_by;
-        policy.partition_value = partition_value;
         policy.partition_column_type = partition_column_type;
+
+        // Phase K: multi-column partition spec.
+        if let Some(fields) = partition_fields {
+            policy.partition_fields = fields
+                .into_iter()
+                .map(|(col, tr, ct)| ailake_core::PartitionDef {
+                    column: col,
+                    transform: tr,
+                    column_type: ct,
+                })
+                .collect();
+        }
+
+        // Resolve partition_value: explicit string wins; else build from dict in field order.
+        policy.partition_value = if let Some(pv) = partition_value {
+            Some(pv)
+        } else if let Some(pv_map) = partition_values {
+            if policy.partition_fields.is_empty() {
+                None
+            } else {
+                let parts: Vec<String> = policy
+                    .partition_fields
+                    .iter()
+                    .map(|pf| pv_map.get(&pf.column).cloned().unwrap_or_default())
+                    .collect();
+                Some(parts.join("\x1f"))
+            }
+        } else {
+            None
+        };
         if let Some(model_name) = embedding_model {
             let mut model_info = EmbeddingModelInfo::new(model_name).with_dim(dim);
             if let Some(version) = embedding_model_version {

@@ -852,7 +852,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
         partition_column_type: None,
-        };
+                partition_fields: vec![],
+};
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let embs_a: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
@@ -960,7 +961,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
         partition_column_type: None,
-        };
+                partition_fields: vec![],
+};
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
 
@@ -1110,7 +1112,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
         partition_column_type: None,
-        };
+                partition_fields: vec![],
+};
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
 
@@ -1209,7 +1212,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
         partition_column_type: None,
-        };
+                partition_fields: vec![],
+};
 
         use ailake_catalog::TableProperties;
         catalog
