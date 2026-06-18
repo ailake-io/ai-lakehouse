@@ -11,8 +11,9 @@ use base64::Engine as _;
 use crate::avro_manifest::{
     read_equality_delete_manifest, read_manifest_file, read_manifest_list_typed,
     write_equality_delete_manifest, write_manifest_file, write_manifest_list_multi_typed,
+    write_partition_stats_parquet,
 };
-use crate::metadata::{IcebergMetadata, IcebergSnapshot};
+use crate::metadata::{IcebergMetadata, IcebergPartitionStatsRef, IcebergSnapshot};
 use crate::provider::{
     CatalogProvider, DataFileEntry, EqualityDeleteFile, NewSnapshot, SnapshotId, TableIdent,
     TableMetadata, TableProperties,
@@ -340,6 +341,56 @@ impl CatalogProvider for HadoopCatalog {
                     }
                     Err(e) => {
                         tracing::warn!("ailake: Phase F — Puffin stats encode error: {e}");
+                    }
+                }
+            }
+        }
+
+        // Phase J: write partition statistics Parquet file for partitioned tables.
+        // Covers ALL data files in this snapshot (reads every data manifest) so that
+        // Spark/Trino can do partition-level aggregations without scanning data files.
+        if let Some(spec) = &active_partition_spec {
+            if !spec.is_unpartitioned() {
+                let mut all_data_entries: Vec<DataFileEntry> = Vec::new();
+                for (mpath, _len, content) in &all_manifests {
+                    if *content != 0 {
+                        continue;
+                    }
+                    match self.store.get(mpath).await {
+                        Ok(mb) => match read_manifest_file(&mb) {
+                            Ok(entries) => all_data_entries.extend(entries),
+                            Err(e) => {
+                                tracing::warn!("ailake: Phase J — manifest read error {mpath}: {e}")
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!("ailake: Phase J — store get error {mpath}: {e}")
+                        }
+                    }
+                }
+
+                match write_partition_stats_parquet(spec, &all_data_entries) {
+                    Ok(stats_bytes) => {
+                        let stats_path =
+                            format!("{table_root}/metadata/partition-stats-{snap_id}.parquet");
+                        let stats_len = stats_bytes.len() as u64;
+                        match self.store.put(&stats_path, stats_bytes).await {
+                            Ok(()) => {
+                                meta.partition_statistics.push(IcebergPartitionStatsRef {
+                                    snapshot_id: snap_id,
+                                    statistics_path: stats_path,
+                                    file_size_in_bytes: stats_len,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "ailake: Phase J — failed to write partition stats: {e}"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("ailake: Phase J — partition stats encode error: {e}");
                     }
                 }
             }

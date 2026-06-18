@@ -30,6 +30,9 @@ base64       = "0.22"
 apache-avro  = { workspace = true }
 bincode      = { workspace = true }
 roaring      = { workspace = true }
+parquet      = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
 
 # catalog-glue optional deps
 aws-sdk-glue = { version = "1", optional = true }

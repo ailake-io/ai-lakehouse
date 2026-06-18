@@ -58,6 +58,11 @@ pub struct IcebergMetadata {
     /// Iceberg V3 statistics files (Puffin). Only written for format-version=3.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub statistics: Vec<IcebergStatisticsRef>,
+    /// Partition statistics files (Parquet). Written for partitioned tables on every commit.
+    /// Referenced under `"partition-statistics"` in metadata.json (Iceberg spec §3.6).
+    /// Enables Spark/Trino to do partition-level aggregations without scanning data files.
+    #[serde(rename = "partition-statistics", default, skip_serializing_if = "Vec::is_empty")]
+    pub partition_statistics: Vec<IcebergPartitionStatsRef>,
 }
 
 /// Iceberg V3 statistics file reference stored in `metadata.json`.
@@ -89,6 +94,22 @@ pub struct BlobRef {
     pub fields: Vec<i32>,
     pub offset: u64,
     pub length: u64,
+}
+
+/// Partition statistics file reference stored in `metadata.json` under `"partition-statistics"`.
+///
+/// Points to a Parquet file where each row represents one partition value and carries
+/// aggregate statistics (record_count, file_count, total_size_bytes).
+/// Written automatically by AI-Lake on every commit to a partitioned table.
+/// Spark, Trino, and PyIceberg use this to optimise partition-level aggregations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IcebergPartitionStatsRef {
+    #[serde(rename = "snapshot-id")]
+    pub snapshot_id: i64,
+    #[serde(rename = "statistics-path")]
+    pub statistics_path: String,
+    #[serde(rename = "file-size-in-bytes")]
+    pub file_size_in_bytes: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -244,6 +265,7 @@ impl IcebergMetadata {
             default_sort_order_id: 0,
             refs: HashMap::new(),
             statistics: vec![],
+            partition_statistics: vec![],
         }
     }
 

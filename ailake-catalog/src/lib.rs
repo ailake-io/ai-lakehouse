@@ -31,10 +31,10 @@ pub mod jdbc;
 #[cfg(feature = "rest-catalog")]
 pub use databricks::{databricks_aws, databricks_azure, databricks_gcp, DatabricksAuth};
 pub use hadoop::HadoopCatalog;
-pub use metadata::{BlobRef, IcebergStatisticsRef};
+pub use metadata::{BlobRef, IcebergPartitionStatsRef, IcebergStatisticsRef};
 pub use avro_manifest::{
     build_manifest_entry_schema, read_equality_delete_values, write_equality_delete_avro,
-    write_equality_delete_manifest, write_manifest_list_multi_typed,
+    write_equality_delete_manifest, write_manifest_list_multi_typed, write_partition_stats_parquet,
 };
 pub use provider::{
     decode_centroid, encode_centroid_b64, make_data_file_entry, make_data_file_entry_indexing,

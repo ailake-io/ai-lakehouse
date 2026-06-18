@@ -833,6 +833,128 @@ pub fn read_equality_delete_values(data: &[u8]) -> apache_avro::AvroResult<Vec<(
     Ok(results)
 }
 
+// ---------------------------------------------------------------------------
+// Partition statistics Parquet file (Phase J)
+// ---------------------------------------------------------------------------
+
+/// Write an Iceberg partition statistics Parquet file.
+///
+/// Each row represents one distinct partition value with aggregate stats over
+/// all data files carrying that value.  Schema:
+///
+/// ```text
+/// message partition_statistics {
+///   required group partition {
+///     optional <type> <field_name>   -- one field per partition column
+///   }
+///   required int64 record_count
+///   required int64 file_count
+///   required int64 total_size_bytes
+/// }
+/// ```
+///
+/// Spark and Trino read this file via the `partition-statistics` entry in
+/// `metadata.json` to optimise partition-level aggregations without scanning
+/// data files.
+pub fn write_partition_stats_parquet(
+    partition_spec: &PartitionSpec,
+    data_files: &[DataFileEntry],
+) -> ailake_core::AilakeResult<bytes::Bytes> {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arrow_array::{Int64Array, StringArray, StructArray};
+    use arrow_schema::{DataType, Field, Fields, Schema};
+    use parquet::arrow::ArrowWriter;
+    use parquet::basic::Compression;
+    use parquet::file::properties::WriterProperties;
+
+    let part_field = match partition_spec.fields.first() {
+        Some(f) => f,
+        None => {
+            return Err(ailake_core::AilakeError::Catalog(
+                "write_partition_stats_parquet called on empty spec".into(),
+            ))
+        }
+    };
+
+    // Aggregate: partition_value → (record_count, file_count, total_size_bytes).
+    let mut agg: HashMap<String, (i64, i64, i64)> = HashMap::new();
+    for f in data_files {
+        let key = f.partition_value.clone().unwrap_or_default();
+        let e = agg.entry(key).or_insert((0, 0, 0));
+        e.0 += f.record_count as i64;
+        e.1 += 1;
+        e.2 += f.file_size_bytes as i64;
+    }
+
+    let n = agg.len();
+    let mut part_vals: Vec<Option<&str>> = Vec::with_capacity(n);
+    let mut record_counts: Vec<i64> = Vec::with_capacity(n);
+    let mut file_counts: Vec<i64> = Vec::with_capacity(n);
+    let mut total_sizes: Vec<i64> = Vec::with_capacity(n);
+
+    // Sort by partition value for deterministic output (Spark expects sorted for pruning).
+    let mut sorted: Vec<(&String, &(i64, i64, i64))> = agg.iter().collect();
+    sorted.sort_by_key(|(k, _)| k.as_str());
+
+    for (key, (rc, fc, ts)) in &sorted {
+        // Empty string = null partition (files with no partition value).
+        part_vals.push(if key.is_empty() { None } else { Some(key.as_str()) });
+        record_counts.push(*rc);
+        file_counts.push(*fc);
+        total_sizes.push(*ts);
+    }
+
+    // Build the `partition` struct column.  AI-Lake only supports single-field
+    // identity partitioning in Phase I, so this is always one field.
+    let part_col_field = Field::new(&part_field.name, DataType::Utf8, true);
+    let part_struct_field = Field::new(
+        "partition",
+        DataType::Struct(Fields::from(vec![part_col_field.clone()])),
+        false,
+    );
+    let part_string_arr = Arc::new(StringArray::from(part_vals)) as Arc<dyn arrow_array::Array>;
+    let partition_arr = Arc::new(StructArray::new(
+        Fields::from(vec![part_col_field]),
+        vec![part_string_arr],
+        None,
+    )) as Arc<dyn arrow_array::Array>;
+
+    let schema = Arc::new(Schema::new(vec![
+        part_struct_field,
+        Field::new("record_count", DataType::Int64, false),
+        Field::new("file_count", DataType::Int64, false),
+        Field::new("total_size_bytes", DataType::Int64, false),
+    ]));
+
+    let batch = arrow_array::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            partition_arr,
+            Arc::new(Int64Array::from(record_counts)),
+            Arc::new(Int64Array::from(file_counts)),
+            Arc::new(Int64Array::from(total_sizes)),
+        ],
+    )
+    .map_err(|e| ailake_core::AilakeError::Catalog(e.to_string()))?;
+
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))
+        .map_err(|e| ailake_core::AilakeError::Catalog(e.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|e| ailake_core::AilakeError::Catalog(e.to_string()))?;
+    writer
+        .close()
+        .map_err(|e| ailake_core::AilakeError::Catalog(e.to_string()))?;
+
+    Ok(bytes::Bytes::from(buf))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1117,5 +1239,126 @@ mod tests {
         assert!(s.contains("tenant_id"));
         assert!(s.contains("1000")); // field-id
         assert!(s.contains(r#""null","string""#));
+    }
+
+    // ---------- Phase J: partition statistics Parquet ----------
+
+    fn make_file(partition_value: Option<&str>, record_count: u64, size: u64) -> DataFileEntry {
+        DataFileEntry {
+            path: "data/part.parquet".to_string(),
+            record_count,
+            file_size_bytes: size,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: None,
+            vector_dim: None,
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: partition_value.map(String::from),
+            deletion_vector: None,
+            first_row_id: None,
+        }
+    }
+
+    #[test]
+    fn write_partition_stats_parquet_basic() {
+        use crate::provider::{PartitionField, PartitionSpec};
+        let spec = PartitionSpec {
+            spec_id: 1,
+            fields: vec![PartitionField {
+                source_id: 1,
+                field_id: 1000,
+                name: "agent_id".to_string(),
+                transform: "identity".to_string(),
+                source_type: "string".to_string(),
+            }],
+        };
+        let files = vec![
+            make_file(Some("agent-A"), 100, 4096),
+            make_file(Some("agent-A"), 200, 8192),
+            make_file(Some("agent-B"), 50, 2048),
+        ];
+        let bytes = write_partition_stats_parquet(&spec, &files).expect("should not fail");
+        assert!(!bytes.is_empty(), "output must be non-empty");
+
+        // Read back with parquet crate and verify row count.
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        let reader = SerializedFileReader::new(bytes::Bytes::from(bytes.to_vec()))
+            .expect("valid parquet");
+        let row_count: usize = reader
+            .get_row_iter(None)
+            .expect("iter")
+            .count();
+        // 2 distinct partition values → 2 rows
+        assert_eq!(row_count, 2, "expected one row per partition value");
+    }
+
+    #[test]
+    fn write_partition_stats_parquet_empty_files() {
+        use crate::provider::{PartitionField, PartitionSpec};
+        let spec = PartitionSpec {
+            spec_id: 1,
+            fields: vec![PartitionField {
+                source_id: 1,
+                field_id: 1000,
+                name: "tenant_id".to_string(),
+                transform: "identity".to_string(),
+                source_type: "string".to_string(),
+            }],
+        };
+        // No data files → zero rows in stats file (still valid Parquet).
+        let bytes = write_partition_stats_parquet(&spec, &[]).expect("should not fail");
+        assert!(!bytes.is_empty());
+
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        let reader = SerializedFileReader::new(bytes::Bytes::from(bytes.to_vec()))
+            .expect("valid parquet");
+        let row_count = reader.get_row_iter(None).expect("iter").count();
+        assert_eq!(row_count, 0);
+    }
+
+    #[test]
+    fn write_partition_stats_parquet_aggregates_correctly() {
+        use crate::provider::{PartitionField, PartitionSpec};
+        let spec = PartitionSpec {
+            spec_id: 1,
+            fields: vec![PartitionField {
+                source_id: 1,
+                field_id: 1000,
+                name: "region".to_string(),
+                transform: "identity".to_string(),
+                source_type: "string".to_string(),
+            }],
+        };
+        let files = vec![
+            make_file(Some("us-east"), 1000, 10000),
+            make_file(Some("us-east"), 2000, 20000),
+            make_file(Some("eu-west"), 500, 5000),
+        ];
+        let bytes = write_partition_stats_parquet(&spec, &files).expect("aggregation ok");
+
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        use parquet::record::RowAccessor;
+        let reader = SerializedFileReader::new(bytes::Bytes::from(bytes.to_vec()))
+            .expect("valid parquet");
+
+        let mut rc_us = 0i64;
+        let mut rc_eu = 0i64;
+        for row in reader.get_row_iter(None).expect("iter") {
+            let row = row.expect("row");
+            // Column 1 = record_count (int64)
+            let rc = row.get_long(1).expect("record_count");
+            if rc == 3000 {
+                rc_us = rc; // us-east: 1000+2000
+            } else if rc == 500 {
+                rc_eu = rc; // eu-west
+            }
+        }
+        assert_eq!(rc_us, 3000, "us-east record_count should aggregate to 3000");
+        assert_eq!(rc_eu, 500, "eu-west record_count should be 500");
     }
 }
