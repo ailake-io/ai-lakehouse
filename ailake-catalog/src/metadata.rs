@@ -277,6 +277,7 @@ impl IcebergMetadata {
             current_snapshot_id: self.current_snapshot_id,
             current_statistics_path,
             schema_fields,
+            equality_delete_files: vec![], // populated lazily via list_equality_deletes
         }
     }
 }

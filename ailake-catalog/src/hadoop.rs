@@ -9,12 +9,13 @@ use async_trait::async_trait;
 use base64::Engine as _;
 
 use crate::avro_manifest::{
-    read_manifest_file, read_manifest_list, write_manifest_file, write_manifest_list_multi,
+    read_equality_delete_manifest, read_manifest_file, read_manifest_list_typed,
+    write_equality_delete_manifest, write_manifest_file, write_manifest_list_multi_typed,
 };
 use crate::metadata::{IcebergMetadata, IcebergSnapshot};
 use crate::provider::{
-    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, TableIdent, TableMetadata,
-    TableProperties,
+    CatalogProvider, DataFileEntry, EqualityDeleteFile, NewSnapshot, SnapshotId, TableIdent,
+    TableMetadata, TableProperties,
 };
 use ailake_store::Store;
 use bytes::Bytes;
@@ -171,28 +172,53 @@ impl CatalogProvider for HadoopCatalog {
         // Collect manifest paths from the previous snapshot (if any) for the manifest list.
         // Replace/Overwrite: new manifest IS the complete state — don't inherit old manifests.
         // Append/Delete: inherit previous manifests so old files remain visible.
-        let mut all_manifests: Vec<(String, i64)> = Vec::new();
+        // Manifests carry content: 0=data, 1=delete.
+        let mut all_manifests: Vec<(String, i64, i32)> = Vec::new();
         if matches!(
             snapshot.operation,
             crate::provider::SnapshotOperation::Append | crate::provider::SnapshotOperation::Delete
         ) {
             if let Some(prev_snap) = meta.snapshots.last() {
                 if let Ok(ml_bytes) = self.store.get(&prev_snap.manifest_list).await {
-                    if let Ok(prev_manifests) = read_manifest_list(&ml_bytes) {
-                        for prev_path in prev_manifests {
+                    if let Ok(prev_manifests) = read_manifest_list_typed(&ml_bytes) {
+                        for (prev_path, content) in prev_manifests {
                             let len = self.store.file_size(&prev_path).await.unwrap_or(0) as i64;
-                            all_manifests.push((prev_path, len));
+                            all_manifests.push((prev_path, len, content));
                         }
                     }
                 }
             }
         }
-        all_manifests.push((manifest_file_path.clone(), manifest_len as i64));
+        all_manifests.push((manifest_file_path.clone(), manifest_len as i64, 0));
+
+        // Phase H: write delete manifest for equality delete files (if any).
+        let abs_eq_deletes: Vec<EqualityDeleteFile> = snapshot
+            .equality_delete_files
+            .iter()
+            .map(|d| EqualityDeleteFile {
+                path: if d.path.starts_with('/') || d.path.contains("://") {
+                    d.path.clone()
+                } else {
+                    format!("{}/{}", table_root, d.path)
+                },
+                equality_ids: d.equality_ids.clone(),
+                record_count: d.record_count,
+                file_size_bytes: d.file_size_bytes,
+            })
+            .collect();
+        if !abs_eq_deletes.is_empty() {
+            let del_manifest_path =
+                format!("{}/metadata/{}-eq-del.avro", table_root, snap_id);
+            let del_manifest_bytes =
+                write_equality_delete_manifest(&abs_eq_deletes, snap_id, seq);
+            let del_manifest_len = del_manifest_bytes.len();
+            self.store.put(&del_manifest_path, del_manifest_bytes).await?;
+            all_manifests.push((del_manifest_path, del_manifest_len as i64, 1));
+        }
 
         // Write Avro manifest list for this snapshot
         let manifest_list_path = format!("{}/metadata/snap-{}-1.avro", table_root, snap_id);
-        // Build manifest list from all manifests
-        let ml_bytes = write_manifest_list_multi(&all_manifests, snap_id, seq, added_rows);
+        let ml_bytes = write_manifest_list_multi_typed(&all_manifests, snap_id, seq, added_rows);
         self.store.put(&manifest_list_path, ml_bytes).await?;
 
         let now_ms = std::time::SystemTime::now()
@@ -320,20 +346,56 @@ impl CatalogProvider for HadoopCatalog {
             .find(|s| s.snapshot_id == snap_id)
             .ok_or_else(|| AilakeError::Catalog(format!("snapshot {snap_id} not found")))?;
 
-        // Read Avro manifest list → manifest file paths
+        // Read Avro manifest list → manifest file paths (content=0 = data manifests only)
         let ml_bytes = self.store.get(&snap.manifest_list).await?;
-        let manifest_paths =
-            read_manifest_list(&ml_bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
+        let manifest_entries = read_manifest_list_typed(&ml_bytes)
+            .map_err(|e| AilakeError::Catalog(e.to_string()))?;
 
-        // Read each manifest file → data file entries (with AI-Lake metadata from key_metadata)
+        // Read each data manifest file → data file entries (with AI-Lake metadata from key_metadata)
         let mut entries: Vec<DataFileEntry> = Vec::new();
-        for mpath in manifest_paths {
+        for (mpath, content) in manifest_entries {
+            if content != 0 {
+                continue; // skip delete manifests (content=1)
+            }
             let mf_bytes = self.store.get(&mpath).await?;
             let file_entries =
                 read_manifest_file(&mf_bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
             entries.extend(file_entries);
         }
         Ok(entries)
+    }
+
+    async fn list_equality_deletes(
+        &self,
+        table: &TableIdent,
+        snapshot_id: Option<SnapshotId>,
+    ) -> AilakeResult<Vec<EqualityDeleteFile>> {
+        let meta = self.load_raw_metadata(table).await?;
+        let snap_id = match snapshot_id.or(meta.current_snapshot_id) {
+            Some(id) => id,
+            None => return Ok(vec![]),
+        };
+        let snap = meta
+            .snapshots
+            .iter()
+            .find(|s| s.snapshot_id == snap_id)
+            .ok_or_else(|| AilakeError::Catalog(format!("snapshot {snap_id} not found")))?;
+
+        let ml_bytes = self.store.get(&snap.manifest_list).await?;
+        let manifest_entries = read_manifest_list_typed(&ml_bytes)
+            .map_err(|e| AilakeError::Catalog(e.to_string()))?;
+
+        let mut deletes: Vec<EqualityDeleteFile> = Vec::new();
+        for (mpath, content) in manifest_entries {
+            if content != 1 {
+                continue; // only delete manifests
+            }
+            let mf_bytes = self.store.get(&mpath).await?;
+            let entries = read_equality_delete_manifest(&mf_bytes)
+                .map_err(|e| AilakeError::Catalog(e.to_string()))?;
+            deletes.extend(entries);
+        }
+        Ok(deletes)
     }
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()> {
@@ -545,6 +607,7 @@ mod tests {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
+                    equality_delete_files: vec![],
         };
         let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 
@@ -590,6 +653,7 @@ mod tests {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
+                    equality_delete_files: vec![],
         };
         catalog.commit_snapshot(&table, snap1).await.unwrap();
 
@@ -620,6 +684,7 @@ mod tests {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
+                    equality_delete_files: vec![],
         };
         catalog.commit_snapshot(&table, snap2).await.unwrap();
 
@@ -667,6 +732,7 @@ mod tests {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
+                    equality_delete_files: vec![],
         };
         catalog.commit_snapshot(&table, snap).await.unwrap();
 

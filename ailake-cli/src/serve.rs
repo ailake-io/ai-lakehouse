@@ -312,6 +312,7 @@ async fn handle_compact(
                 iceberg_schema: None,
                 extra_properties: std::collections::HashMap::new(),
                 bloom_filters: vec![],
+                equality_delete_files: vec![],
             },
         )
         .await

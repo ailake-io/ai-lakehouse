@@ -813,6 +813,7 @@ impl TableWriter {
             iceberg_schema,
             extra_properties,
             bloom_filters: std::mem::take(&mut self.pending_blooms),
+            equality_delete_files: vec![],
         };
         self.catalog.commit_snapshot(&self.table, snapshot).await
     }
@@ -1140,6 +1141,7 @@ pub(crate) async fn build_and_patch_index(
                     iceberg_schema: None,
                     extra_properties: std::collections::HashMap::new(),
                     bloom_filters: vec![],
+                    equality_delete_files: vec![],
                 },
             )
             .await?;
@@ -1265,6 +1267,7 @@ async fn build_ivf_pq_and_patch_index(
                     iceberg_schema: None,
                     extra_properties: std::collections::HashMap::new(),
                     bloom_filters: vec![],
+                    equality_delete_files: vec![],
                 },
             )
             .await?;
@@ -1409,6 +1412,7 @@ async fn build_and_patch_multi_index(
                     iceberg_schema: None,
                     extra_properties: std::collections::HashMap::new(),
                     bloom_filters: vec![],
+                    equality_delete_files: vec![],
                 },
             )
             .await?;

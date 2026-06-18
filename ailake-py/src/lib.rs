@@ -1210,6 +1210,35 @@ fn rename_column(table_path: &str, old_name: &str, new_name: &str) -> PyResult<i
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Logically delete all rows where `column` equals any value in `values` (Phase H).
+///
+/// Writes an Iceberg equality delete file, then commits a Delete snapshot that
+/// inherits existing data files. Scanners will mask matching rows at read time
+/// without rewriting data files.
+///
+/// Args:
+///     table_path: path to the table (local dir or s3://... URI)
+///     column: name of the equality column (e.g. "document_id", "agent_id")
+///     values: list of string values identifying rows to delete
+///
+/// Example::
+///
+///     ailake.delete_where(
+///         "s3://my-lake/docs",
+///         "document_id",
+///         ["doc-abc", "doc-def"],
+///     )
+#[pyfunction]
+#[pyo3(signature = (table_path, column, values))]
+fn delete_where(table_path: &str, column: &str, values: Vec<String>) -> PyResult<()> {
+    let rt = rt()?;
+    let (catalog, store) = local_catalog_store(table_path);
+    let table = TableIdent::new("default", "table");
+    let value_refs: Vec<&str> = values.iter().map(String::as_str).collect();
+    rt.block_on(ailake_query::delete_where(catalog, store, &table, column, &value_refs))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
@@ -1226,5 +1255,6 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(now_ns, m)?)?;
     m.add_function(wrap_pyfunction!(add_column, m)?)?;
     m.add_function(wrap_pyfunction!(rename_column, m)?)?;
+    m.add_function(wrap_pyfunction!(delete_where, m)?)?;
     Ok(())
 }

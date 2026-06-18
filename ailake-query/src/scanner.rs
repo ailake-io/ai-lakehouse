@@ -13,6 +13,7 @@ use ailake_vec::exact_distance;
 use arrow_array::{Array, RecordBatch};
 use bytes::Bytes;
 
+use crate::equality_delete::EqualityDeleteFilter;
 use crate::pruner::{BloomPruner, VectorPruner};
 use crate::schema_filler::SchemaFiller;
 
@@ -267,6 +268,22 @@ pub async fn search(
         surviving_files
     };
 
+    // Phase H: load equality delete filter for this snapshot.
+    // Reads delete manifests from the catalog and downloads each equality delete Avro file.
+    // Empty filter is a no-op. On error: warn and continue with empty filter (data visible).
+    let eq_del_filter = match catalog.list_equality_deletes(table, None).await {
+        Ok(edfs) if !edfs.is_empty() => {
+            match EqualityDeleteFilter::from_files(&store, &edfs).await {
+                Ok(f) => f,
+                Err(e) => {
+                    warn!("ailake: equality delete filter build failed: {e} — rows may appear");
+                    EqualityDeleteFilter::empty()
+                }
+            }
+        }
+        _ => EqualityDeleteFilter::empty(),
+    };
+
     // Compute candidate pool: hybrid needs a larger pool for BM25 re-ranking.
     let candidate_k = match (&config.hybrid, config.rerank_factor) {
         (Some(h), rf) => {
@@ -339,12 +356,14 @@ pub async fn search(
                 None
             };
 
-        // Parquet read required for: flat scan fallback, exact reranking, score_fn, hybrid.
+        // Parquet read required for: flat scan fallback, exact reranking, score_fn, hybrid,
+        // or when equality delete filter must check column values per-row.
         let need_parquet = file_entry.index_status == IndexStatus::Indexing
             || !reader.is_ailake_file()
             || config.rerank_factor.is_some()
             || config.score_fn.is_some()
-            || use_hybrid;
+            || use_hybrid
+            || !eq_del_filter.is_empty();
 
         if file_entry.index_status == IndexStatus::Indexing || !reader.is_ailake_file() {
             debug!(
@@ -357,6 +376,10 @@ pub async fn search(
             for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
                 // Skip rows marked as deleted by a V3 Deletion Vector.
                 if dv_bitmap.as_ref().map_or(false, |bm| bm.contains(row_id.as_u64() as u32)) {
+                    continue;
+                }
+                // Phase H: skip rows matched by an equality delete predicate.
+                if eq_del_filter.should_delete_row(&batch, row_id.as_u64() as usize) {
                     continue;
                 }
                 if use_hybrid {
@@ -396,6 +419,13 @@ pub async fn search(
                 continue;
             }
             let idx = row_id.as_u64() as usize;
+            // Phase H: skip rows matched by an equality delete predicate.
+            // parquet_data is always loaded when eq_del_filter is non-empty (see need_parquet).
+            if let Some((ref batch, _)) = parquet_data {
+                if eq_del_filter.should_delete_row(batch, idx) {
+                    continue;
+                }
+            }
 
             let distance = if config.rerank_factor.is_some() {
                 match parquet_data.as_ref().and_then(|(_, vecs)| vecs.get(idx)) {
@@ -1074,6 +1104,20 @@ pub async fn search_text(
     };
     let scorer = crate::bm25::BM25Scorer::new(&stats);
 
+    // Phase H: equality delete filter for search_text results.
+    let eq_del_filter = match catalog.list_equality_deletes(table, None).await {
+        Ok(edfs) if !edfs.is_empty() => {
+            match EqualityDeleteFilter::from_files(&store, &edfs).await {
+                Ok(f) => f,
+                Err(e) => {
+                    warn!("ailake: equality delete filter build failed in search_text: {e}");
+                    EqualityDeleteFilter::empty()
+                }
+            }
+        }
+        _ => EqualityDeleteFilter::empty(),
+    };
+
     let mut results: Vec<SearchResult> = Vec::new();
 
     for file_entry in &files {
@@ -1085,6 +1129,10 @@ pub async fn search_text(
         let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
 
         for row_idx in 0..batch.num_rows() {
+            // Phase H: skip rows matched by equality delete predicate.
+            if eq_del_filter.should_delete_row(&batch, row_idx) {
+                continue;
+            }
             let doc_text: String = text_columns
                 .iter()
                 .filter_map(|&col| {

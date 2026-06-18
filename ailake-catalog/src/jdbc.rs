@@ -374,6 +374,7 @@ mod tests {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
+                equality_delete_files: vec![],
         };
         let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 

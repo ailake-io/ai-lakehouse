@@ -445,6 +445,17 @@ fn parse_v3_first_row_id(df_fields: &[(String, Value)]) -> Option<i64> {
 
 /// Read manifest file paths from an Iceberg manifest list (Avro).
 pub fn read_manifest_list(data: &[u8]) -> apache_avro::AvroResult<Vec<String>> {
+    Ok(read_manifest_list_typed(data)?
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect())
+}
+
+/// Read manifest file paths and content types from an Iceberg manifest list (Avro).
+///
+/// Returns `Vec<(path, content)>` where `content` follows Iceberg spec:
+/// `0` = data manifest, `1` = delete manifest (contains position or equality deletes).
+pub fn read_manifest_list_typed(data: &[u8]) -> apache_avro::AvroResult<Vec<(String, i32)>> {
     let reader = apache_avro::Reader::new(data)?;
     let mut results = Vec::new();
     for value in reader {
@@ -454,14 +465,256 @@ pub fn read_manifest_list(data: &[u8]) -> apache_avro::AvroResult<Vec<String>> {
                 .iter()
                 .find(|(k, _)| k == "manifest_path")
                 .and_then(|(_, v)| {
-                    if let Value::String(s) = v {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
+                    if let Value::String(s) = v { Some(s.clone()) } else { None }
                 });
+            let content: i32 = fields
+                .iter()
+                .find(|(k, _)| k == "content")
+                .and_then(|(_, v)| if let Value::Int(n) = v { Some(*n) } else { None })
+                .unwrap_or(0);
             if let Some(p) = path {
-                results.push(p);
+                results.push((p, content));
+            }
+        }
+    }
+    Ok(results)
+}
+
+/// Write a manifest list that carries both data manifests (content=0) and delete manifests
+/// (content=1). `manifests` is `(path, length_bytes, content_type)`.
+pub fn write_manifest_list_multi_typed(
+    manifests: &[(String, i64, i32)],
+    snapshot_id: SnapshotId,
+    sequence_number: i64,
+    added_rows: i64,
+) -> Bytes {
+    use crate::avro_raw::{
+        encode_empty_array, encode_int, encode_long, encode_string, write_avro_container,
+    };
+
+    let n = manifests.len();
+    let mut records: Vec<Vec<u8>> = Vec::with_capacity(n);
+    for (i, (path, len, content)) in manifests.iter().enumerate() {
+        let rows = if i + 1 == n { added_rows } else { 0i64 };
+        let mut rec = Vec::new();
+        encode_string(path, &mut rec);
+        encode_long(*len, &mut rec);
+        encode_int(0, &mut rec); // partition_spec_id
+        encode_int(*content, &mut rec); // content: 0=data, 1=delete
+        encode_long(sequence_number, &mut rec);
+        encode_long(sequence_number, &mut rec); // min_sequence_number
+        encode_long(snapshot_id, &mut rec);
+        encode_int(1, &mut rec); // added_data_files_count
+        encode_int(0, &mut rec); // existing_data_files_count
+        encode_int(0, &mut rec); // deleted_data_files_count
+        encode_long(rows, &mut rec);
+        encode_long(0, &mut rec);
+        encode_long(0, &mut rec);
+        encode_empty_array(&mut rec); // partitions
+        records.push(rec);
+    }
+
+    Bytes::from(write_avro_container(
+        MANIFEST_LIST_SCHEMA_STR,
+        &[],
+        &records,
+    ))
+}
+
+/// Write an Iceberg equality delete manifest file (Avro) — `content=2` entries.
+///
+/// Each `EqualityDeleteFile` reference is written as a manifest entry whose
+/// `data_file.content = 2` and `equality_ids` carries the matching field IDs.
+pub fn write_equality_delete_manifest(
+    deletes: &[crate::provider::EqualityDeleteFile],
+    snapshot_id: SnapshotId,
+    sequence_number: i64,
+) -> Bytes {
+    use crate::avro_raw::{
+        encode_int, encode_long, encode_string, encode_union_long, encode_union_null,
+        write_avro_container,
+    };
+
+    let mut records: Vec<Vec<u8>> = Vec::with_capacity(deletes.len());
+    for d in deletes {
+        let mut rec = Vec::new();
+        encode_int(1, &mut rec); // status=ADDED
+        encode_union_long(1, snapshot_id, &mut rec); // snapshot_id
+        encode_union_long(1, sequence_number, &mut rec); // sequence_number
+        encode_union_long(1, sequence_number, &mut rec); // file_sequence_number
+        // data_file record
+        encode_int(2, &mut rec); // content=EQUALITY_DELETES
+        encode_string(&d.path, &mut rec); // file_path
+        encode_string("AVRO", &mut rec); // file_format
+        // partition r102: empty record → 0 bytes
+        encode_long(d.record_count as i64, &mut rec); // record_count
+        encode_long(d.file_size_bytes as i64, &mut rec); // file_size_in_bytes
+        encode_union_null(&mut rec); // column_sizes
+        encode_union_null(&mut rec); // value_counts
+        encode_union_null(&mut rec); // null_value_counts
+        encode_union_null(&mut rec); // nan_value_counts
+        encode_union_null(&mut rec); // lower_bounds
+        encode_union_null(&mut rec); // upper_bounds
+        encode_union_null(&mut rec); // key_metadata
+        encode_union_null(&mut rec); // split_offsets
+        // equality_ids: union index 1 (array) + zigzag-encoded array of ints
+        encode_long(1, &mut rec); // union: non-null array
+        encode_long(d.equality_ids.len() as i64, &mut rec); // block count
+        for &id in &d.equality_ids {
+            encode_int(id, &mut rec);
+        }
+        encode_long(0, &mut rec); // array end marker
+        encode_union_null(&mut rec); // sort_order_id
+        encode_union_null(&mut rec); // first_row_id
+        records.push(rec);
+    }
+
+    let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
+    let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
+    let extra_meta: &[(&str, &[u8])] = &[
+        ("schema", schema_json.as_bytes()),
+        ("partition-spec", partition_spec.as_bytes()),
+        ("partition-spec-id", b"0"),
+        ("format-version", b"2"),
+        ("content", b"deletes"),
+    ];
+    Bytes::from(write_avro_container(
+        MANIFEST_ENTRY_SCHEMA_STR,
+        extra_meta,
+        &records,
+    ))
+}
+
+/// Read equality delete file entries from an Iceberg delete manifest.
+///
+/// Extracts `path`, `equality_ids`, `record_count`, and `file_size_in_bytes`
+/// from manifest entries where `data_file.content = 2`.
+pub fn read_equality_delete_manifest(
+    data: &[u8],
+) -> apache_avro::AvroResult<Vec<crate::provider::EqualityDeleteFile>> {
+    let reader = apache_avro::Reader::new(data)?;
+    let mut results = Vec::new();
+    for value in reader {
+        let value = value?;
+        if let Value::Record(fields) = value {
+            let data_file = fields.iter().find(|(k, _)| k == "data_file").map(|(_, v)| v);
+            if let Some(Value::Record(df_fields)) = data_file {
+                let content: i32 = df_fields
+                    .iter()
+                    .find(|(k, _)| k == "content")
+                    .and_then(|(_, v)| if let Value::Int(n) = v { Some(*n) } else { None })
+                    .unwrap_or(0);
+                if content != 2 {
+                    continue;
+                }
+                let path = df_fields
+                    .iter()
+                    .find(|(k, _)| k == "file_path")
+                    .and_then(|(_, v)| if let Value::String(s) = v { Some(s.clone()) } else { None });
+                let record_count = df_fields
+                    .iter()
+                    .find(|(k, _)| k == "record_count")
+                    .and_then(|(_, v)| if let Value::Long(n) = v { Some(*n as u64) } else { None })
+                    .unwrap_or(0);
+                let file_size_bytes = df_fields
+                    .iter()
+                    .find(|(k, _)| k == "file_size_in_bytes")
+                    .and_then(|(_, v)| if let Value::Long(n) = v { Some(*n as u64) } else { None })
+                    .unwrap_or(0);
+                let equality_ids = df_fields
+                    .iter()
+                    .find(|(k, _)| k == "equality_ids")
+                    .and_then(|(_, v)| match v {
+                        Value::Union(_, inner) => {
+                            if let Value::Array(arr) = inner.as_ref() {
+                                Some(arr.iter().filter_map(|item| {
+                                    if let Value::Int(n) = item { Some(*n) } else { None }
+                                }).collect())
+                            } else {
+                                None
+                            }
+                        }
+                        Value::Array(arr) => {
+                            Some(arr.iter().filter_map(|item| {
+                                if let Value::Int(n) = item { Some(*n) } else { None }
+                            }).collect())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                if let Some(path) = path {
+                    results.push(crate::provider::EqualityDeleteFile {
+                        path,
+                        equality_ids,
+                        record_count,
+                        file_size_bytes,
+                    });
+                }
+            }
+        }
+    }
+    Ok(results)
+}
+
+/// Write an equality delete Avro file containing the predicate rows.
+///
+/// Each value in `values` becomes one Avro record row `{col_name: value}`.
+/// `iceberg_type` controls the Avro type: `"string"` / `"int"` / `"long"` /
+/// `"float"` / `"double"`. Unrecognised types default to `"string"`.
+/// The Avro schema embeds `field-id` so PyIceberg / Trino can resolve the column.
+pub fn write_equality_delete_avro(
+    col_name: &str,
+    field_id: i32,
+    iceberg_type: &str,
+    values: &[&str],
+) -> apache_avro::AvroResult<Bytes> {
+    let avro_type = match iceberg_type.trim() {
+        "int" | "integer" => "int",
+        "long" => "long",
+        "float" => "float",
+        "double" => "double",
+        _ => "string",
+    };
+    let schema_str = format!(
+        r#"{{"type":"record","name":"eq_delete_entry","fields":[{{"name":"{col_name}","type":"{avro_type}","field-id":{field_id}}}]}}"#
+    );
+    let schema = apache_avro::Schema::parse_str(&schema_str)?;
+    let mut writer = apache_avro::Writer::new(&schema, Vec::new());
+    for val in values {
+        use apache_avro::types::Value as AV;
+        let avro_val = match avro_type {
+            "int" => val.parse::<i32>().map(AV::Int).unwrap_or(AV::String(val.to_string())),
+            "long" => val.parse::<i64>().map(AV::Long).unwrap_or(AV::String(val.to_string())),
+            "float" => val.parse::<f32>().map(AV::Float).unwrap_or(AV::String(val.to_string())),
+            "double" => val.parse::<f64>().map(AV::Double).unwrap_or(AV::String(val.to_string())),
+            _ => AV::String(val.to_string()),
+        };
+        let record = AV::Record(vec![(col_name.to_string(), avro_val)]);
+        writer.append(record)?;
+    }
+    Ok(Bytes::from(writer.into_inner()?))
+}
+
+/// Read (column_name, value_as_string) pairs from an equality delete Avro file.
+///
+/// Used by `EqualityDeleteFilter` to build the in-memory predicate set.
+pub fn read_equality_delete_values(data: &[u8]) -> apache_avro::AvroResult<Vec<(String, String)>> {
+    let reader = apache_avro::Reader::new(data)?;
+    let mut results = Vec::new();
+    for value in reader {
+        let value = value?;
+        if let Value::Record(fields) = value {
+            for (col, val) in fields {
+                let s = match &val {
+                    Value::String(s) => s.clone(),
+                    Value::Int(n) => n.to_string(),
+                    Value::Long(n) => n.to_string(),
+                    Value::Float(f) => f.to_string(),
+                    Value::Double(d) => d.to_string(),
+                    Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
+                    _ => continue,
+                };
+                results.push((col, s));
             }
         }
     }
@@ -592,5 +845,40 @@ mod tests {
         let bytes = write_manifest_file(&[file], 88, 1, schema_json, partition_spec, 2);
         let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
         assert_eq!(entries[0].first_row_id, None);
+    }
+
+    #[test]
+    fn equality_delete_manifest_roundtrip() {
+        use crate::provider::EqualityDeleteFile;
+        let del = EqualityDeleteFile {
+            path: "metadata/eq-del-001.avro".to_string(),
+            equality_ids: vec![5, 9],
+            record_count: 3,
+            file_size_bytes: 512,
+        };
+        let bytes = write_equality_delete_manifest(&[del], 42, 1);
+        let entries =
+            read_equality_delete_manifest(&bytes).expect("read_equality_delete_manifest failed");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "metadata/eq-del-001.avro");
+        assert_eq!(entries[0].equality_ids, vec![5, 9]);
+        assert_eq!(entries[0].record_count, 3);
+        assert_eq!(entries[0].file_size_bytes, 512);
+    }
+
+    #[test]
+    fn read_manifest_list_typed_returns_content() {
+        let manifests = vec![
+            ("metadata/m0.avro".to_string(), 1024i64, 0i32),
+            ("metadata/m0-eq-del.avro".to_string(), 256i64, 1i32),
+        ];
+        let bytes = write_manifest_list_multi_typed(&manifests, 99, 1, 10);
+        let typed =
+            read_manifest_list_typed(&bytes).expect("read_manifest_list_typed failed");
+        assert_eq!(typed.len(), 2);
+        assert_eq!(typed[0].0, "metadata/m0.avro");
+        assert_eq!(typed[0].1, 0); // data
+        assert_eq!(typed[1].0, "metadata/m0-eq-del.avro");
+        assert_eq!(typed[1].1, 1); // delete
     }
 }

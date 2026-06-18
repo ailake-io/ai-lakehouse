@@ -538,6 +538,7 @@ impl CompactionExecutor {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
+                equality_delete_files: vec![],
         };
         catalog.commit_snapshot(table, snapshot).await?;
 
@@ -588,6 +589,7 @@ impl CompactionExecutor {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
+                equality_delete_files: vec![],
         };
         catalog.commit_snapshot(table, snapshot).await?;
 

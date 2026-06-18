@@ -199,6 +199,20 @@ enum Commands {
         #[arg(long)]
         rows: String,
     },
+    /// Logically delete rows matching an equality predicate (Phase H).
+    ///
+    /// Writes an Iceberg equality delete file and commits a Delete snapshot.
+    /// Matching rows are masked at scan time without rewriting data files.
+    DeleteWhere {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// Column to match against (e.g. document_id, agent_id)
+        #[arg(long)]
+        col: String,
+        /// Comma-separated values to delete (e.g. "doc-abc,doc-def")
+        #[arg(long)]
+        vals: String,
+    },
     /// Evolve the table schema without rewriting data files (Phase G).
     ///
     /// Adds or renames columns in `metadata.json`. Old files missing new columns
@@ -763,6 +777,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 iceberg_schema: None,
                 extra_properties: std::collections::HashMap::new(),
                 bloom_filters: vec![],
+                equality_delete_files: vec![],
             };
             catalog
                 .commit_snapshot(&ident, snap)
@@ -1006,6 +1021,23 @@ async fn run(cli: Cli) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
 
             println!("deleted {} rows from {table} file {file}", row_ids.len());
+            Ok(())
+        }
+
+        Commands::DeleteWhere { table, col, vals } => {
+            use ailake_query::delete_where as rs_delete_where;
+            let ident = parse_table_ident(&table);
+            let values: Vec<&str> = vals.split(',').map(str::trim).collect();
+            rs_delete_where(
+                catalog as Arc<dyn CatalogProvider>,
+                store,
+                &ident,
+                &col,
+                &values,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            println!("delete-where committed: {} predicates on column '{col}'", values.len());
             Ok(())
         }
 

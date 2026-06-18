@@ -145,6 +145,11 @@ pub struct TableMetadata {
     /// Used by `SchemaFiller` in the scanner to inject missing columns with defaults.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schema_fields: Vec<SchemaField>,
+    /// Equality delete files active in the current snapshot (Phase H).
+    /// Loaded from delete manifests (content=2 in the manifest list).
+    /// Populated by `CatalogProvider::list_equality_deletes` — empty until first call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equality_delete_files: Vec<EqualityDeleteFile>,
 }
 
 /// Iceberg schema update carried inside a snapshot commit.
@@ -159,6 +164,22 @@ pub struct IcebergSchemaUpdate {
     pub last_column_id: i32,
     /// Compact JSON string: `[{"field-id":1,"names":["id"]},...]`.
     pub name_mapping_json: String,
+}
+
+/// Reference to an Iceberg equality delete file (Phase H).
+///
+/// The delete file is an Avro file with `content=2` whose rows contain equality
+/// predicates — any data row matching one of those rows is logically deleted.
+/// `equality_ids` lists the field IDs used for the equality check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EqualityDeleteFile {
+    /// Absolute or warehouse-relative path of the Avro delete file.
+    pub path: String,
+    /// Field IDs whose values must all match to delete a data row.
+    pub equality_ids: Vec<i32>,
+    /// Number of predicates (rows) in the delete file.
+    pub record_count: u64,
+    pub file_size_bytes: u64,
 }
 
 /// Snapshot commit request.
@@ -177,6 +198,9 @@ pub struct NewSnapshot {
     /// Key = data file path (relative, matches `DataFileEntry::path`).
     /// Written to the Puffin stats file on V3 commits; ignored for V2 tables.
     pub bloom_filters: Vec<(String, Vec<u8>)>,
+    /// Equality delete files to add to this snapshot (Phase H).
+    /// Written as a separate delete manifest with content=2 in the manifest list.
+    pub equality_delete_files: Vec<EqualityDeleteFile>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +258,19 @@ pub trait CatalogProvider: Send + Sync {
         Err(ailake_core::AilakeError::Catalog(
             "evolve_schema not supported by this catalog backend".into(),
         ))
+    }
+
+    /// Return all equality delete files active in the current (or specified) snapshot.
+    ///
+    /// Reads delete manifests (manifest list entries with `content=1`) and parses their
+    /// `content=2` entries. Default returns empty vec for catalog backends that do not
+    /// support Iceberg equality deletes.
+    async fn list_equality_deletes(
+        &self,
+        _table: &TableIdent,
+        _snapshot_id: Option<SnapshotId>,
+    ) -> AilakeResult<Vec<EqualityDeleteFile>> {
+        Ok(vec![])
     }
 }
 

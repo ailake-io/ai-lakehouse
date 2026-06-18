@@ -18,7 +18,7 @@ use ailake_catalog::{
         new_snapshot_id, CatalogProvider, DeletionVector, NewSnapshot, SnapshotOperation,
         TableIdent,
     },
-    DataFileEntry,
+    DataFileEntry, EqualityDeleteFile,
 };
 use ailake_core::{AilakeError, AilakeResult};
 use ailake_store::Store;
@@ -186,6 +186,76 @@ pub async fn delete_rows(
         iceberg_schema: None,
         extra_properties: std::collections::HashMap::new(),
         bloom_filters: vec![],
+                equality_delete_files: vec![],
+    };
+    catalog.commit_snapshot(table, snapshot).await?;
+    Ok(())
+}
+
+// ── Equality Delete (Phase H) ──────────────────────────────────────────────────
+
+/// Logically delete all rows where `column_name` equals any value in `values`.
+///
+/// Writes an Iceberg equality delete Avro file containing one row per value,
+/// then commits a `Delete` snapshot that inherits existing data manifests and
+/// appends a new delete manifest (`content=1`) pointing to that file.
+///
+/// Scanners that load equality delete files (AI-Lake, Spark, Trino with plugin)
+/// will automatically mask matching rows at read time without rewriting data files.
+///
+/// # Arguments
+/// * `column_name` — column to match against (must exist in the table schema)
+/// * `values` — values that identify rows to delete
+pub async fn delete_where(
+    catalog: Arc<dyn CatalogProvider>,
+    store: Arc<dyn Store>,
+    table: &TableIdent,
+    column_name: &str,
+    values: &[&str],
+) -> AilakeResult<()> {
+    if values.is_empty() {
+        return Ok(());
+    }
+
+    let meta = catalog.load_table(table).await?;
+    let table_root = meta.location.trim_end_matches('/');
+
+    // Look up field-id and iceberg_type from schema_fields. Fall back to id=0 / "string"
+    // for tables without schema_fields (old format) — the column name in the Avro file
+    // is still sufficient for AI-Lake's own scanner.
+    let (field_id, iceberg_type) = meta
+        .schema_fields
+        .iter()
+        .find(|sf| sf.name == column_name)
+        .map(|sf| (sf.id, sf.iceberg_type.clone()))
+        .unwrap_or((0, "string".to_string()));
+
+    // Write equality delete Avro file.
+    let snap_id = new_snapshot_id();
+    let eq_del_avro =
+        ailake_catalog::write_equality_delete_avro(column_name, field_id, &iceberg_type, values)
+            .map_err(|e| AilakeError::Catalog(e.to_string()))?;
+    let file_size = eq_del_avro.len() as u64;
+    let eq_del_path = format!("{table_root}/metadata/eq-del-{snap_id}.avro");
+    store.put(&eq_del_path, eq_del_avro).await?;
+
+    let eq_del_file = ailake_catalog::EqualityDeleteFile {
+        path: eq_del_path,
+        equality_ids: vec![field_id],
+        record_count: values.len() as u64,
+        file_size_bytes: file_size,
+    };
+
+    // Commit Delete snapshot — inherits previous data manifests, appends delete manifest.
+    let snapshot = NewSnapshot {
+        snapshot_id: snap_id,
+        parent_snapshot_id: meta.current_snapshot_id,
+        files: vec![],
+        operation: SnapshotOperation::Delete,
+        iceberg_schema: None,
+        extra_properties: std::collections::HashMap::new(),
+        bloom_filters: vec![],
+        equality_delete_files: vec![eq_del_file],
     };
     catalog.commit_snapshot(table, snapshot).await?;
     Ok(())
@@ -264,6 +334,7 @@ mod tests {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
+                equality_delete_files: vec![],
         };
         catalog.commit_snapshot(&table, snap).await.unwrap();
         (catalog, table)

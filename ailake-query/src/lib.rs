@@ -7,9 +7,10 @@
 pub mod bloom;
 pub mod bm25;
 pub mod compaction;
-pub mod schema_filler;
 pub mod delete;
 pub mod dv;
+pub mod equality_delete;
+pub mod schema_filler;
 pub mod context_assembler;
 pub mod mem_table;
 pub mod memory_decay;
@@ -32,5 +33,6 @@ pub use scanner::{
     fetch_rows, search, search_multimodal, search_text, FusionMethod, ModalQuery, ScoreFn,
     SearchConfig, SearchResult, SearchSession,
 };
-pub use delete::{delete_rows, PuffinWriter};
+pub use delete::{delete_rows, delete_where, PuffinWriter};
+pub use equality_delete::EqualityDeleteFilter;
 pub use writer::{MultiVectorBatch, TableWriter};
