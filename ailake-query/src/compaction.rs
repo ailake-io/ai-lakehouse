@@ -1169,6 +1169,7 @@ mod tests {
                 &TableProperties {
                     policy: policy.clone(),
                     extra: std::collections::HashMap::new(),
+                    format_version: 2,
                 },
             )
             .await

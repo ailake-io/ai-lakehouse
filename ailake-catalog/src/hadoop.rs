@@ -92,7 +92,7 @@ impl HadoopCatalog {
 impl CatalogProvider for HadoopCatalog {
     async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
         let location = self.table_root(name);
-        let mut meta = IcebergMetadata::new(&location, &props.policy);
+        let mut meta = IcebergMetadata::new(&location, &props.policy, props.format_version);
         for (k, v) in &props.extra {
             meta.properties.insert(k.clone(), v.clone());
         }
@@ -151,6 +151,7 @@ impl CatalogProvider for HadoopCatalog {
             seq,
             table_schema_json,
             partition_spec_json,
+            meta.format_version as u8,
         );
         let manifest_len = manifest_bytes.len();
         self.store.put(&manifest_file_path, manifest_bytes).await?;
@@ -306,6 +307,7 @@ mod tests {
                 partition_value: None,
             },
             extra: std::collections::HashMap::new(),
+            format_version: 2,
         }
     }
 
@@ -318,7 +320,7 @@ mod tests {
 
         catalog.create_table(&table, &make_props()).await.unwrap();
         let meta = catalog.load_table(&table).await.unwrap();
-        assert_eq!(meta.format_version, 2);
+        assert_eq!(meta.format_version, 2); // make_props uses format_version=2
         assert!(meta.properties.contains_key("ailake.vector-column"));
     }
 

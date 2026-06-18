@@ -81,6 +81,11 @@ enum Commands {
         /// Stored as ailake.modality-<column> in Iceberg properties.
         #[arg(long, value_enum)]
         modality: Option<ModalityArg>,
+        /// Iceberg format version: 2 (default, V2) or 3 (opt-in V3).
+        /// V3 enables format-version=3 in metadata.json and manifests.
+        /// Append/update workloads fully supported; equality deletes not implemented.
+        #[arg(long, default_value = "2")]
+        format_version: u8,
     },
     /// Insert a Parquet file (with an embedding column) into a table
     Insert {
@@ -330,6 +335,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             pq_only,
             ivf_residual,
             modality,
+            format_version,
         } => {
             let ident = parse_table_ident(&table);
             let policy = VectorStoragePolicy {
@@ -355,6 +361,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     &TableProperties {
                         policy,
                         extra: std::collections::HashMap::new(),
+                        format_version,
                     },
                 )
                 .await
@@ -437,7 +444,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 // Use first policy as the table-level policy for create_or_open.
                 let table_policy = mv_owned[0].0.clone();
                 let mut writer =
-                    TableWriter::create_or_open(catalog, Arc::clone(&store), table_policy, ident)
+                    TableWriter::create_or_open(catalog, Arc::clone(&store), table_policy, ident, 2)
                         .await
                         .map_err(|e| e.to_string())?;
 
@@ -517,7 +524,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 };
 
                 let mut writer =
-                    TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident)
+                    TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident, 2)
                         .await
                         .map_err(|e| e.to_string())?;
 

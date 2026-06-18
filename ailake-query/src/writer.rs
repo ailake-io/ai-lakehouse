@@ -786,6 +786,7 @@ impl TableWriter {
         store: Arc<dyn Store>,
         policy: VectorStoragePolicy,
         table: TableIdent,
+        format_version: u8,
     ) -> AilakeResult<Self> {
         // Track existing file count so new writers start their part counter past
         // any already-committed files, preventing name collisions on sequential writes.
@@ -824,6 +825,7 @@ impl TableWriter {
                         &TableProperties {
                             policy: policy.clone(),
                             extra: std::collections::HashMap::new(),
+                            format_version,
                         },
                     )
                     .await?;
@@ -1592,7 +1594,7 @@ mod tests {
         let pol = policy("embedding", 4);
         let ident = TableIdent::new("default", "t");
 
-        let mut writer = TableWriter::create_or_open(catalog, store, pol, ident)
+        let mut writer = TableWriter::create_or_open(catalog, store, pol, ident, 2)
             .await
             .unwrap();
 
@@ -1631,7 +1633,7 @@ mod tests {
         let primary_pol = policy("embedding", 4);
         let ident = TableIdent::new("default", "t");
 
-        let mut writer = TableWriter::create_or_open(catalog, store, primary_pol, ident)
+        let mut writer = TableWriter::create_or_open(catalog, store, primary_pol, ident, 2)
             .await
             .unwrap();
 

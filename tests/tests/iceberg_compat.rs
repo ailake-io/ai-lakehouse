@@ -46,6 +46,7 @@ async fn write_table(dir: &TempDir, table_name: &str, rows: usize, dim: u32) {
         Arc::clone(&store) as Arc<dyn Store>,
         make_policy(dim),
         table,
+        2,
     )
     .await
     .unwrap();

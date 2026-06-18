@@ -151,6 +151,7 @@ async fn main() {
         Arc::clone(&store),
         policy.clone(),
         table.clone(),
+        2,
     )
     .await
     .unwrap();

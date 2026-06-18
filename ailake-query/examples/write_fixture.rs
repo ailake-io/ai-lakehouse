@@ -104,6 +104,7 @@ async fn main() {
         Arc::clone(&store),
         policy,
         table.clone(),
+        2,
     )
     .await
     .expect("create writer");

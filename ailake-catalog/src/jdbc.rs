@@ -127,7 +127,7 @@ impl JdbcCatalog {
 impl CatalogProvider for JdbcCatalog {
     async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
         let location = self.table_root(name);
-        let mut meta = IcebergMetadata::new(&location, &props.policy);
+        let mut meta = IcebergMetadata::new(&location, &props.policy, props.format_version);
         for (k, v) in &props.extra {
             meta.properties.insert(k.clone(), v.clone());
         }
@@ -335,14 +335,17 @@ mod tests {
                 ivf_residual: false,
                 embedding_model: None,
                 modality: None,
+                partition_by: None,
+                partition_value: None,
             },
             extra: HashMap::new(),
+            format_version: 2,
         };
 
         // create
         catalog.create_table(&table, &props).await.unwrap();
         let meta = catalog.load_table(&table).await.unwrap();
-        assert_eq!(meta.format_version, 2);
+        assert_eq!(meta.format_version, 2); // props uses format_version=2
         assert!(meta.properties.contains_key("ailake.vector-column"));
 
         // commit snapshot

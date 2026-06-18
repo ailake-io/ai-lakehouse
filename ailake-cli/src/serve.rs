@@ -218,6 +218,7 @@ async fn handle_write(
         Arc::clone(&state.store),
         state.policy.clone(),
         state.table.clone(),
+        2,
     )
     .await
     .map_err(ApiError::from)?;

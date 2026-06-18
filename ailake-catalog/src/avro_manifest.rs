@@ -99,6 +99,7 @@ pub fn write_manifest_file(
     sequence_number: i64,
     table_schema_json: &str,
     partition_spec_json: &str,
+    format_version: u8,
 ) -> Bytes {
     use crate::avro_raw::{
         encode_empty_array, encode_int, encode_long, encode_string, encode_union_bytes,
@@ -150,11 +151,12 @@ pub fn write_manifest_file(
         records.push(rec);
     }
 
+    let fv_str: &[u8] = if format_version >= 3 { b"3" } else { b"2" };
     let extra_meta: &[(&str, &[u8])] = &[
         ("schema", table_schema_json.as_bytes()),
         ("partition-spec", partition_spec_json.as_bytes()),
         ("partition-spec-id", b"0"),
-        ("format-version", b"2"),
+        ("format-version", fv_str),
         ("content", b"data"),
     ];
     Bytes::from(write_avro_container(
@@ -411,7 +413,7 @@ mod tests {
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
-        let bytes = write_manifest_file(&[file], 99, 1, schema_json, partition_spec);
+        let bytes = write_manifest_file(&[file], 99, 1, schema_json, partition_spec, 2);
         let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "data/part-0.parquet");
@@ -439,7 +441,7 @@ mod tests {
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
-        let bytes = write_manifest_file(&[file], 42, 1, schema_json, partition_spec);
+        let bytes = write_manifest_file(&[file], 42, 1, schema_json, partition_spec, 2);
         let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
         assert_eq!(
             entries[0].batch_id.as_deref(),

@@ -125,7 +125,7 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, bm25_text_column=None))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, bm25_text_column=None, format_version=2))]
     fn new(
         py: Python<'_>,
         path: &str,
@@ -143,6 +143,7 @@ impl TableWriter {
         partition_by: Option<String>,
         partition_value: Option<String>,
         bm25_text_column: Option<String>,
+        format_version: u8,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
@@ -170,7 +171,7 @@ impl TableWriter {
 
         let stored_embed_fn = embed_fn.map(|f| f.clone_ref(py));
         let mut writer = rt
-            .block_on(RsTableWriter::create_or_open(catalog, store, policy, table))
+            .block_on(RsTableWriter::create_or_open(catalog, store, policy, table, format_version))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         if let Some(col) = bm25_text_column {
             writer = writer.with_bm25(col);

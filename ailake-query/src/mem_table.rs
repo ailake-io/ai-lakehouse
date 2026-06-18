@@ -396,6 +396,7 @@ mod tests {
                 &ailake_catalog::TableProperties {
                     policy: make_policy(),
                     extra: Default::default(),
+                    format_version: 2,
                 },
             )
             .await
@@ -535,6 +536,7 @@ mod tests {
                 &ailake_catalog::TableProperties {
                     policy: policy.clone(),
                     extra: Default::default(),
+                    format_version: 2,
                 },
             )
             .await

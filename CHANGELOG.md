@@ -19,8 +19,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Speedup**: for a 90 % / 10 % dominant split at N = 1 M vectors (dim = 1536), incremental compaction reduces HNSW build cost from O(N log N) to O(N_dom) deserialization + O(N_small × log N_dom) — approximately **7× faster** than full rebuild.
 
+- **Iceberg V3 format-version support (Phase A)** — `TableProperties::format_version: u8` (default `2`) propagated through all catalog backends and `TableWriter::create_or_open`. `IcebergMetadata::new()` and `write_manifest_file()` emit `"format-version": 3` when `format_version=3`. CLI: `ailake create --format-version 3`. Python: `TableWriter(format_version=3)`. V3 tables are append/update compatible out of the box; equality deletes and partition statistics not implemented (Phase B+). V2 default preserves full backward compatibility.
+
 ### Tests
 
+- `metadata::tests::format_version_v3_emitted` — `IcebergMetadata::new(..., 3)` serialises `"format-version": 3` and round-trips correctly.
+- `metadata::tests::format_version_defaults_to_v2` — V2 is the default when `format_version=2`.
 - `hnsw::tests::insert_node_extends_existing_graph` — inserts a 4th node and verifies nearest-neighbour correctness.
 - `hnsw::tests::insert_node_normalized_cosine` — insert with unnormalised input; node is pre-normalised internally.
 - `hnsw::tests::insert_node_into_single_node_graph` — insert into a 1-node graph (edge case: entry point with no neighbours yet).

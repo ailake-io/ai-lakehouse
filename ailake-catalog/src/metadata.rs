@@ -71,7 +71,11 @@ pub struct IcebergSnapshot {
 
 impl IcebergMetadata {
     /// Create a new metadata.json for a fresh AI-Lake table.
-    pub fn new(location: &str, policy: &VectorStoragePolicy) -> Self {
+    ///
+    /// `format_version`: 2 = Iceberg V2 (default); 3 = Iceberg V3 opt-in.
+    /// V3 tables are append/update compatible; equality deletes and partition
+    /// statistics require future phases (see docs/specs/ICEBERG_V3.md).
+    pub fn new(location: &str, policy: &VectorStoragePolicy, format_version: u8) -> Self {
         let mut properties = HashMap::new();
         properties.insert("ailake.format-version".to_string(), "1".to_string());
         properties.insert(
@@ -136,9 +140,17 @@ impl IcebergMetadata {
                 (vec![serde_json::json!({"spec-id": 0, "fields": []})], 0, 999)
             };
 
+        let format_version = format_version.max(2) as i32;
+        if format_version >= 3 {
+            eprintln!(
+                "[ailake] WARN: creating Iceberg V3 table at {location} — \
+                 append/update workloads fully supported; \
+                 equality deletes and partition statistics not implemented"
+            );
+        }
         let now_ms = now_ms();
         IcebergMetadata {
-            format_version: 2,
+            format_version,
             table_uuid: Uuid::new_v4().to_string(),
             location: location.to_string(),
             last_sequence_number: 0,
@@ -212,7 +224,7 @@ mod tests {
 
     #[test]
     fn roundtrip_json() {
-        let meta = IcebergMetadata::new("s3://my-lake/my_table", &make_policy());
+        let meta = IcebergMetadata::new("s3://my-lake/my_table", &make_policy(), 2);
         let json = meta.to_json().unwrap();
         let meta2 = IcebergMetadata::from_json(&json).unwrap();
         assert_eq!(meta2.format_version, 2);
@@ -224,7 +236,7 @@ mod tests {
 
     #[test]
     fn properties_contain_ailake_keys() {
-        let meta = IcebergMetadata::new("file:///tmp/tbl", &make_policy());
+        let meta = IcebergMetadata::new("file:///tmp/tbl", &make_policy(), 2);
         assert!(meta.properties.contains_key("ailake.format-version"));
         assert!(meta.properties.contains_key("ailake.vector-dim"));
     }
@@ -235,12 +247,26 @@ mod tests {
         let mut policy = make_policy();
         policy.embedding_model =
             Some(EmbeddingModelInfo::new("text-embedding-3-small").with_version("2024-01"));
-        let meta = IcebergMetadata::new("file:///tmp/tbl", &policy);
+        let meta = IcebergMetadata::new("file:///tmp/tbl", &policy, 2);
         assert_eq!(
             meta.properties
                 .get("ailake.embedding-model")
                 .map(|s| s.as_str()),
             Some("text-embedding-3-small@2024-01")
         );
+    }
+
+    #[test]
+    fn format_version_v3_emitted() {
+        let meta = IcebergMetadata::new("s3://my-lake/v3_table", &make_policy(), 3);
+        let json = meta.to_json().unwrap();
+        let meta2 = IcebergMetadata::from_json(&json).unwrap();
+        assert_eq!(meta2.format_version, 3);
+    }
+
+    #[test]
+    fn format_version_defaults_to_v2() {
+        let meta = IcebergMetadata::new("s3://my-lake/v2_table", &make_policy(), 2);
+        assert_eq!(meta.format_version, 2);
     }
 }

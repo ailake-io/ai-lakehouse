@@ -132,6 +132,10 @@ pub enum SnapshotOperation {
 pub struct TableProperties {
     pub policy: VectorStoragePolicy,
     pub extra: HashMap<String, String>,
+    /// Iceberg format version to write. 2 = default (V2). 3 = opt-in V3.
+    /// V3: append/update workloads fully supported. Equality deletes and
+    /// partition statistics not implemented (see docs/specs/ICEBERG_V3.md).
+    pub format_version: u8,
 }
 
 /// Unified catalog interface. All backends implement this trait.

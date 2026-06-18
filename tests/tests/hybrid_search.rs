@@ -85,6 +85,7 @@ async fn setup_bm25_table(
         Arc::clone(&store) as Arc<dyn ailake_store::Store>,
         make_policy(dim),
         table.clone(),
+        2,
     )
     .await
     .unwrap();
@@ -278,6 +279,7 @@ async fn write_batch_auto_deferred_creates_file() {
         Arc::clone(&store) as Arc<dyn ailake_store::Store>,
         make_policy(dim),
         table.clone(),
+        2,
     )
     .await
     .unwrap();

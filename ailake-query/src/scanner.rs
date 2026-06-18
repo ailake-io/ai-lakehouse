@@ -1236,7 +1236,7 @@ mod tests {
             .collect();
 
         let mut writer =
-            crate::TableWriter::create_or_open(catalog, store, make_policy(dim as u32), table)
+            crate::TableWriter::create_or_open(catalog, store, make_policy(dim as u32), table, 2)
                 .await
                 .unwrap();
         writer.write_batch(&batch, &embeddings).await.unwrap();
@@ -1494,6 +1494,7 @@ mod tests {
             store.clone(),
             text_policy,
             table.clone(),
+            2,
         )
         .await
         .unwrap();

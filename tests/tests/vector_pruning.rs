@@ -68,6 +68,7 @@ async fn pruning_eliminates_distant_file() {
         store.clone(),
         policy.clone(),
         table.clone(),
+        2,
     )
     .await
     .unwrap();

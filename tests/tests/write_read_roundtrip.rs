@@ -44,6 +44,7 @@ async fn write_10k_rows_search_top10() {
         Arc::clone(&store) as Arc<dyn ailake_store::Store>,
         policy.clone(),
         table.clone(),
+        2,
     )
     .await
     .unwrap();
