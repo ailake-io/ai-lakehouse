@@ -93,6 +93,9 @@ class SearchQuery:
         fetch_data: bool = False,
         partition_filter: "str | None" = None,
         score_fn: "Callable[[float, Any], float] | None" = None,
+        hybrid_text: "str | None" = None,
+        text_column: str = "chunk_text",
+        bm25_weight: float = 0.5,
     ) -> None:
         self._path = path
         self._query = query
@@ -100,6 +103,9 @@ class SearchQuery:
         self._fetch_data = fetch_data
         self._partition_filter = partition_filter
         self._score_fn = score_fn
+        self._hybrid_text = hybrid_text
+        self._text_column = text_column
+        self._bm25_weight = bm25_weight
         self._results: list[dict] | None = None      # lazy — pointer-only
         self._arrow_batch = None                      # lazy — full RecordBatch
 
@@ -117,7 +123,8 @@ class SearchQuery:
     def _execute(self) -> list[dict]:
         if self._results is None:
             self._results = _search_raw(
-                self._path, self._query, self._top_k, self._partition_filter
+                self._path, self._query, self._top_k, self._partition_filter,
+                self._hybrid_text, self._text_column, self._bm25_weight,
             )
         return self._results
 
@@ -965,6 +972,9 @@ def search(
     fetch_data: bool = False,
     partition_filter: "str | None" = None,
     score_fn: "Callable[[float, Any], float] | None" = None,
+    hybrid_text: "str | None" = None,
+    text_column: str = "chunk_text",
+    bm25_weight: float = 0.5,
 ) -> SearchQuery:
     """Module-level search returning a chainable :class:`SearchQuery`.
 
@@ -980,12 +990,25 @@ def search(
         score_fn: Optional Python callable ``(distance: float, row: pyarrow.RecordBatch) -> float``
                   applied post-search to re-rank results. Requires ``fetch_data=True``.
                   Note: not applied during GPU deferred-build window (SearchSession flat-scan).
+        hybrid_text: Optional text query for BM25 hybrid search. When set, HNSW retrieves
+                     a larger candidate pool, BM25 scores each candidate, and results are
+                     fused via RRF. Requires ``TableWriter(bm25_text_column=...)`` at write time.
+        text_column: Parquet column containing document text for BM25 scoring
+                     (default ``"chunk_text"``).
+        bm25_weight: Weight for BM25 signal in RRF fusion — ``0.0`` = pure vector,
+                     ``1.0`` = pure BM25 (default ``0.5``).
 
     Example::
 
         # Pointer-only (default — backward-compatible)
         results = ailake.search("s3://my-lake/docs/", query_vec, top_k=20)
         df = results.to_pandas()  # columns: row_id, distance, file
+
+        # Hybrid BM25+vector search
+        results = ailake.search(
+            "s3://my-lake/docs/", query_vec, top_k=20,
+            hybrid_text="rust async programming", bm25_weight=0.4,
+        )
 
         # Full row data with partition isolation
         results = ailake.search(
@@ -994,14 +1017,14 @@ def search(
         )
         df = results.to_pandas()  # columns: id, text, embedding, ..., _distance
 
-        # Hybrid scoring (recency × distance)
-        def hybrid(dist, row):
+        # Custom scoring (recency × distance)
+        def hybrid_score(dist, row):
             recency = row.column("recency_weight")[0].as_py()
             return dist / (recency + 1e-6)
 
         results = ailake.search(
             "s3://my-lake/docs/", query_vec, top_k=20,
-            fetch_data=True, score_fn=hybrid,
+            fetch_data=True, score_fn=hybrid_score,
         )
     """
     _q: list[float] = (
@@ -1014,4 +1037,7 @@ def search(
         fetch_data=fetch_data,
         partition_filter=partition_filter,
         score_fn=score_fn,
+        hybrid_text=hybrid_text,
+        text_column=text_column,
+        bm25_weight=bm25_weight,
     )

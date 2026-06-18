@@ -11,6 +11,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Python type stubs updated** (`ailake-py/python/ailake/_ailake.pyi`) — all new Phase 5/8/9 APIs now reflected in stubs: `bm25_text_column` param in `TableWriter.__init__`; `extra_columns` param in `write_batch` / `write_batch_auto_deferred` / `write_batch_idempotent`; `hybrid_text` / `text_column` / `bm25_weight` params in `search()`; new `search_text()` function; new `WorkingMemoryBuffer` class; new `decay_memories()` function. `SearchQuery` and module-level `search()` in `__init__.py` now forward `hybrid_text` / `text_column` / `bm25_weight` to the Rust `_search_raw()` binding.
+
 - **`WorkingMemoryBuffer`** — bounded in-memory FIFO queue for agent short-term memory (`ailake-query/src/mem_table.rs`). Stores at most `max_rows` `(text, embedding, importance)` tuples; evicts oldest on overflow. `search(query, top_k)` brute-force cosine flat scan; `drain_to_table(&mut TableWriter)` persists all entries and clears the buffer. Python: `ailake.WorkingMemoryBuffer(max_rows=1000)`. Replaces MemTable for single-session agents; cascade pattern: buffer first, drain to AI-Lake when full.
 
 - **`MemoryDecayJob`** — async recomputation of `recency_weight = exp(-λ × days_since_access)` for episodic memory tables (`ailake-query/src/memory_decay.rs`). Reads `last_accessed_at` column (ISO 8601 string), rewrites each data file with updated `recency_weight`, commits a new `Overwrite` snapshot. Python: `ailake.decay_memories(path, decay_lambda=0.1)` returns number of updated files. No new crate deps (JDN date arithmetic inline, no chrono).
