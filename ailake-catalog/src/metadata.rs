@@ -55,6 +55,40 @@ pub struct IcebergMetadata {
     pub default_sort_order_id: i32,
     #[serde(rename = "refs", default)]
     pub refs: HashMap<String, Value>,
+    /// Iceberg V3 statistics files (Puffin). Only written for format-version=3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statistics: Vec<IcebergStatisticsRef>,
+}
+
+/// Iceberg V3 statistics file reference stored in `metadata.json`.
+/// Points to a Puffin file containing table/snapshot statistics blobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IcebergStatisticsRef {
+    #[serde(rename = "snapshot-id")]
+    pub snapshot_id: i64,
+    #[serde(rename = "statistics-path")]
+    pub statistics_path: String,
+    #[serde(rename = "file-size-in-bytes")]
+    pub file_size_in_bytes: u64,
+    #[serde(rename = "file-footer-size-in-bytes")]
+    pub file_footer_size_in_bytes: u64,
+    /// Blob descriptors within the Puffin file. May be empty — readers can
+    /// always parse the Puffin footer directly for full blob metadata.
+    #[serde(rename = "blob-file-references", default, skip_serializing_if = "Vec::is_empty")]
+    pub blob_file_references: Vec<BlobRef>,
+}
+
+/// Describes one blob within an Iceberg Puffin statistics file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobRef {
+    #[serde(rename = "type")]
+    pub blob_type: String,
+    #[serde(rename = "snapshot-id")]
+    pub snapshot_id: i64,
+    #[serde(default)]
+    pub fields: Vec<i32>,
+    pub offset: u64,
+    pub length: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -175,6 +209,7 @@ impl IcebergMetadata {
             sort_orders: vec![serde_json::json!({"order-id": 0, "fields": []})],
             default_sort_order_id: 0,
             refs: HashMap::new(),
+            statistics: vec![],
         }
     }
 
@@ -187,12 +222,21 @@ impl IcebergMetadata {
     }
 
     pub fn to_table_metadata(&self) -> TableMetadata {
+        // Find the Puffin stats file for the current snapshot (most recent wins).
+        let current_statistics_path = self.current_snapshot_id.and_then(|snap_id| {
+            self.statistics
+                .iter()
+                .rev()
+                .find(|s| s.snapshot_id == snap_id)
+                .map(|s| s.statistics_path.clone())
+        });
         TableMetadata {
             table_uuid: self.table_uuid.clone(),
             format_version: self.format_version,
             location: self.location.clone(),
             properties: self.properties.clone(),
             current_snapshot_id: self.current_snapshot_id,
+            current_statistics_path,
         }
     }
 }

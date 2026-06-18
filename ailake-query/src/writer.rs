@@ -49,6 +49,9 @@ pub struct TableWriter {
     /// write_batch call and persisted to `metadata/ailake_bm25_stats.bin`.
     /// Enables hybrid vector+BM25 search via `SearchConfig::hybrid`.
     bm25_text_column: Option<String>,
+    /// Per-file Bloom filters built during write_batch when bm25_text_column is set.
+    /// Flushed to NewSnapshot::bloom_filters on commit (Phase F Puffin stats).
+    pending_blooms: Vec<(String, Vec<u8>)>,
 }
 
 impl TableWriter {
@@ -71,6 +74,7 @@ impl TableWriter {
             cached_ivf_codebook: None,
             deferred_ivf_codebook: Arc::new(tokio::sync::OnceCell::new()),
             bm25_text_column: None,
+            pending_blooms: Vec::new(),
         }
     }
 
@@ -152,9 +156,10 @@ impl TableWriter {
             }
         });
 
-        // Update BM25 IDF stats (immediately, text is available regardless of deferred HNSW).
+        // Update BM25 IDF stats + build Bloom filter (Phase F) for the new file.
         if self.bm25_text_column.is_some() {
             self.update_bm25_stats_from_batch(batch).await?;
+            self.build_bloom_for_file(batch, &file_path);
         }
 
         Ok(())
@@ -342,9 +347,10 @@ impl TableWriter {
         entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
 
-        // Update BM25 IDF stats if bm25_text_column is configured.
+        // Update BM25 IDF stats + build Bloom filter (Phase F).
         if self.bm25_text_column.is_some() {
             self.update_bm25_stats_from_batch(batch).await?;
+            self.build_bloom_for_file(batch, &file_path);
         }
         Ok(())
     }
@@ -692,6 +698,36 @@ impl TableWriter {
     /// No-op when `pending_files` is empty (e.g., all `write_batch_idempotent`
     /// calls were skipped because their `batch_id` was already committed).
     /// Returns the current snapshot id in that case (or 0 if no snapshot exists yet).
+    /// Build a Bloom filter from the BM25 text column and store it for the given file.
+    /// Called alongside `update_bm25_stats_from_batch` for every write_batch. The filter
+    /// is flushed to the Puffin stats file at commit time (Phase F).
+    fn build_bloom_for_file(&mut self, batch: &RecordBatch, file_path: &str) {
+        use arrow_array::cast::AsArray;
+        let col_name = match &self.bm25_text_column {
+            Some(c) => c.clone(),
+            None => return,
+        };
+        let col = match batch.column_by_name(&col_name) {
+            Some(c) => c,
+            None => return,
+        };
+        let str_arr = match col.as_string_opt::<i32>() {
+            Some(a) => a,
+            None => return,
+        };
+        // Size the filter for ~10× unique terms per row at 1% FPR.
+        let cap = (batch.num_rows() * 10).max(128);
+        let mut bloom = crate::bloom::BloomFilter::with_capacity(cap, 0.01);
+        for i in 0..str_arr.len() {
+            if str_arr.is_valid(i) {
+                for term in crate::bm25::tokenize(str_arr.value(i)) {
+                    bloom.insert(&term);
+                }
+            }
+        }
+        self.pending_blooms.push((file_path.to_string(), bloom.to_bytes()));
+    }
+
     /// Update BM25 IDF stats from a batch's text column and persist to storage.
     ///
     /// Read-modify-write: loads existing stats (if any), merges new DF counts,
@@ -776,6 +812,7 @@ impl TableWriter {
             operation: SnapshotOperation::Append,
             iceberg_schema,
             extra_properties,
+            bloom_filters: std::mem::take(&mut self.pending_blooms),
         };
         self.catalog.commit_snapshot(&self.table, snapshot).await
     }
@@ -1102,6 +1139,7 @@ pub(crate) async fn build_and_patch_index(
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
                     extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
                 },
             )
             .await?;
@@ -1226,6 +1264,7 @@ async fn build_ivf_pq_and_patch_index(
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
                     extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
                 },
             )
             .await?;
@@ -1369,6 +1408,7 @@ async fn build_and_patch_multi_index(
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
                     extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
                 },
             )
             .await?;

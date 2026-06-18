@@ -4,6 +4,7 @@
 //! Integration layer. Depends on all data-plane crates.
 //! Public surface: TableWriter, search(), ContextAssembler, CompactionPlanner, CompactionExecutor.
 
+pub mod bloom;
 pub mod bm25;
 pub mod compaction;
 pub mod delete;
@@ -23,7 +24,8 @@ pub use context_assembler::{AssembledContext, Chunk, ContextAssembler, ContextAs
 pub use mem_table::{MemTableConfig, MemTableWriter, WorkingMemoryBuffer, WorkingMemoryEntry};
 pub use memory_decay::MemoryDecayJob;
 pub use migration::{EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy, ProgressFn};
-pub use pruner::VectorPruner;
+pub use bloom::BloomFilter;
+pub use pruner::{BloomPruner, VectorPruner};
 pub use scanner::{
     fetch_rows, search, search_multimodal, search_text, FusionMethod, ModalQuery, ScoreFn,
     SearchConfig, SearchResult, SearchSession,

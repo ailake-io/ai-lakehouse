@@ -137,6 +137,7 @@ impl MigrationJob {
                         operation: SnapshotOperation::Replace,
                         iceberg_schema: None,
                         extra_properties: std::collections::HashMap::new(),
+                        bloom_filters: vec![],
                     },
                 )
                 .await?;
@@ -217,6 +218,7 @@ impl MigrationJob {
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
                     extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
                 },
             )
             .await?;

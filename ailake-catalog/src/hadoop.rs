@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use ailake_core::{AilakeError, AilakeResult};
 use async_trait::async_trait;
+use base64::Engine as _;
 
 use crate::avro_manifest::{
     read_manifest_file, read_manifest_list, write_manifest_file, write_manifest_list_multi,
@@ -238,6 +239,66 @@ impl CatalogProvider for HadoopCatalog {
             meta.properties.insert(k, v);
         }
 
+        // Phase F: write Puffin stats file for V3 tables (vector stats + BM25 bloom).
+        if meta.format_version >= 3 {
+            let vector_stats = collect_vector_stats(&abs_files);
+            let bm25_blooms: Vec<crate::puffin::BM25BloomEntry> = snapshot
+                .bloom_filters
+                .iter()
+                .map(|(path, bytes)| crate::puffin::BM25BloomEntry {
+                    path: path.clone(),
+                    bloom_bytes: bytes.clone(),
+                })
+                .collect();
+
+            if !vector_stats.is_empty() {
+                match crate::puffin::AilakePuffinWriter::write_stats(
+                    &vector_stats,
+                    &bm25_blooms,
+                    snap_id,
+                ) {
+                    Ok(result) => {
+                        let puffin_path =
+                            format!("{table_root}/metadata/stats-{snap_id}.puffin");
+                        let puffin_len = result.bytes.len() as u64;
+                        if let Err(e) = self.store.put(&puffin_path, result.bytes).await {
+                            tracing::warn!(
+                                "ailake: Phase F — failed to write Puffin stats: {e}"
+                            );
+                        } else {
+                            use crate::metadata::{BlobRef, IcebergStatisticsRef};
+                            let mut blob_refs = vec![BlobRef {
+                                blob_type: crate::puffin::BLOB_TYPE_VECTOR_STATS.to_string(),
+                                snapshot_id: snap_id,
+                                fields: vec![],
+                                offset: result.vector_stats_blob.0,
+                                length: result.vector_stats_blob.1,
+                            }];
+                            if let Some((off, len)) = result.bm25_bloom_blob {
+                                blob_refs.push(BlobRef {
+                                    blob_type: crate::puffin::BLOB_TYPE_BM25_BLOOM.to_string(),
+                                    snapshot_id: snap_id,
+                                    fields: vec![],
+                                    offset: off,
+                                    length: len,
+                                });
+                            }
+                            meta.statistics.push(IcebergStatisticsRef {
+                                snapshot_id: snap_id,
+                                statistics_path: puffin_path,
+                                file_size_in_bytes: puffin_len,
+                                file_footer_size_in_bytes: result.footer_size as u64,
+                                blob_file_references: blob_refs,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("ailake: Phase F — Puffin stats encode error: {e}");
+                    }
+                }
+            }
+        }
+
         self.save_metadata(table, &meta).await?;
         Ok(snap_id)
     }
@@ -289,6 +350,28 @@ impl CatalogProvider for HadoopCatalog {
         }
         Ok(())
     }
+}
+
+/// Extract centroid + radius from each DataFileEntry for Phase F Puffin stats.
+/// Files without centroid metadata (e.g. Indexing status) are skipped.
+fn collect_vector_stats(files: &[DataFileEntry]) -> Vec<crate::puffin::VectorStatEntry> {
+    files
+        .iter()
+        .filter_map(|f| {
+            let b64 = f.centroid_b64.as_ref()?;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+            let centroid: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            let radius = f.radius?;
+            Some(crate::puffin::VectorStatEntry {
+                path: f.path.clone(),
+                centroid,
+                radius,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -368,6 +451,7 @@ mod tests {
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
         };
         let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 
@@ -412,6 +496,7 @@ mod tests {
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
         };
         catalog.commit_snapshot(&table, snap1).await.unwrap();
 
@@ -441,6 +526,7 @@ mod tests {
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
         };
         catalog.commit_snapshot(&table, snap2).await.unwrap();
 
@@ -487,6 +573,7 @@ mod tests {
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
         };
         catalog.commit_snapshot(&table, snap).await.unwrap();
 

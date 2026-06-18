@@ -13,7 +13,7 @@ use ailake_vec::exact_distance;
 use arrow_array::{Array, RecordBatch};
 use bytes::Bytes;
 
-use crate::pruner::VectorPruner;
+use crate::pruner::{BloomPruner, VectorPruner};
 
 /// Injectable per-result scoring function for hybrid ranking.
 ///
@@ -252,6 +252,19 @@ pub async fn search(
         total_files,
         config.pruning_threshold
     );
+
+    // Phase F — Bloom pruning: for hybrid queries, load per-file Bloom filters from
+    // the Puffin stats file and skip files where no query term can be present.
+    let surviving_files = if let Some(ref h) = config.hybrid {
+        let bloom_map = load_bloom_map(&table_meta, store.as_ref()).await;
+        if !bloom_map.is_empty() {
+            BloomPruner::prune(surviving_files, &h.query_text, &bloom_map)
+        } else {
+            surviving_files
+        }
+    } else {
+        surviving_files
+    };
 
     // Compute candidate pool: hybrid needs a larger pool for BM25 re-ranking.
     let candidate_k = match (&config.hybrid, config.rerank_factor) {
@@ -1218,6 +1231,43 @@ pub async fn fetch_rows(
     columns.push(Arc::new(Float32Array::from(distances)));
 
     RecordBatch::try_new(new_schema, columns).map_err(|e| AilakeError::Arrow(e.to_string()))
+}
+
+/// Load per-file BM25 Bloom filters from the Puffin stats file for the current snapshot.
+///
+/// Returns a map of `file_path → BloomFilter`. Empty map = no stats file available
+/// (V2 table, first write, or fetch failure). The scanner applies Bloom pruning only
+/// when the map is non-empty.
+async fn load_bloom_map(
+    table_meta: &ailake_catalog::TableMetadata,
+    store: &dyn Store,
+) -> std::collections::HashMap<String, crate::bloom::BloomFilter> {
+    let stats_path = match &table_meta.current_statistics_path {
+        Some(p) => p.clone(),
+        None => return std::collections::HashMap::new(),
+    };
+    let bytes = match store.get(&stats_path).await {
+        Ok(b) => b,
+        Err(e) => {
+            debug!("ailake: Phase F — could not load Puffin stats ({stats_path}): {e}");
+            return std::collections::HashMap::new();
+        }
+    };
+    let reader = ailake_catalog::AilakePuffinReader::new(&bytes);
+    let bloom_entries = match reader.read_bm25_blooms() {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("ailake: Phase F — Puffin bloom parse error: {e}");
+            return std::collections::HashMap::new();
+        }
+    };
+    bloom_entries
+        .into_iter()
+        .filter_map(|entry| {
+            let bf = crate::bloom::BloomFilter::from_bytes(&entry.bloom_bytes)?;
+            Some((entry.path, bf))
+        })
+        .collect()
 }
 
 #[cfg(test)]

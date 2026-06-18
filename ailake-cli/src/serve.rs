@@ -311,6 +311,7 @@ async fn handle_compact(
                 operation: SnapshotOperation::Replace,
                 iceberg_schema: None,
                 extra_properties: std::collections::HashMap::new(),
+                bloom_filters: vec![],
             },
         )
         .await

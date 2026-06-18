@@ -149,6 +149,7 @@ impl MemoryDecayJob {
             operation: SnapshotOperation::Overwrite,
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
         };
         self.catalog.commit_snapshot(table, snap).await?;
         info!("ailake: MemoryDecayJob — updated recency_weight in {} files (lambda={})", updated, self.decay_lambda);

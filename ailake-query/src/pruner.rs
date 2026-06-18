@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+use std::collections::HashMap;
+
 use ailake_catalog::{decode_centroid, DataFileEntry};
 use ailake_core::VectorMetric;
 use ailake_vec::{cosine_distance, dot_product, euclidean_distance};
@@ -54,6 +56,55 @@ fn compute_distance(a: &[f32], b: &[f32], metric: VectorMetric) -> f32 {
         VectorMetric::Cosine | VectorMetric::NormalizedCosine => cosine_distance(a, b),
         VectorMetric::Euclidean => euclidean_distance(a, b),
         VectorMetric::DotProduct => -dot_product(a, b),
+    }
+}
+
+/// File-level BM25 Bloom filter pruner (Phase F).
+///
+/// Given a map of `file_path → BloomFilter` loaded from the Puffin stats file,
+/// removes files where no query term can possibly appear. Zero false negatives:
+/// if a term is in the file, the Bloom filter will return `true`. Files without
+/// a Bloom filter entry are kept (conservative fallback for V2 tables or files
+/// written before Phase F).
+pub struct BloomPruner;
+
+impl BloomPruner {
+    /// Skip files whose Bloom filter guarantees no query term is present.
+    ///
+    /// Returns the subset of `files` that *may* contain at least one query term.
+    /// Files absent from `bloom_map` are always kept.
+    pub fn prune(
+        files: Vec<DataFileEntry>,
+        query_text: &str,
+        bloom_map: &HashMap<String, crate::bloom::BloomFilter>,
+    ) -> Vec<DataFileEntry> {
+        let query_terms: Vec<String> = crate::bm25::tokenize(query_text);
+        if query_terms.is_empty() || bloom_map.is_empty() {
+            return files;
+        }
+        let before = files.len();
+        let surviving: Vec<DataFileEntry> = files
+            .into_iter()
+            .filter(|entry| match bloom_map.get(&entry.path) {
+                Some(bloom) => {
+                    let keep = query_terms.iter().any(|t| bloom.may_contain(t));
+                    debug!(
+                        "ailake: bloom pruner {} — {} query terms, keep={}",
+                        entry.path,
+                        query_terms.len(),
+                        keep
+                    );
+                    keep
+                }
+                None => true,
+            })
+            .collect();
+        debug!(
+            "ailake: bloom pruning — {}/{} files survive",
+            surviving.len(),
+            before
+        );
+        surviving
     }
 }
 

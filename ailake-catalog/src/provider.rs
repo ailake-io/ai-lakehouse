@@ -116,6 +116,10 @@ pub struct TableMetadata {
     /// Ailake-specific properties: ailake.vector-column, ailake.dim, etc.
     pub properties: HashMap<String, String>,
     pub current_snapshot_id: Option<SnapshotId>,
+    /// Absolute path to the Puffin stats file for the current snapshot (Phase F).
+    /// `None` for V2 tables or V3 tables without any committed statistics yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_statistics_path: Option<String>,
 }
 
 /// Iceberg schema update carried inside a snapshot commit.
@@ -144,6 +148,10 @@ pub struct NewSnapshot {
     /// Additional table-level properties to merge on commit (e.g. secondary column dims).
     /// Keys use `ailake.dim-<col>` / `ailake.metric-<col>` convention.
     pub extra_properties: HashMap<String, String>,
+    /// Per-file BM25 Bloom filter bytes for term-level file pruning (Phase F).
+    /// Key = data file path (relative, matches `DataFileEntry::path`).
+    /// Written to the Puffin stats file on V3 commits; ignored for V2 tables.
+    pub bloom_filters: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone)]
