@@ -110,6 +110,7 @@ fn do_search(
         rerank_factor: None,
         score_fn: None,
         partition_filter,
+        hybrid: None,
     };
     rt().block_on(rs_search(
         &table, &query, config, vec_col, dim, catalog, store,

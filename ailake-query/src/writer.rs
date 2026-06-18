@@ -9,6 +9,7 @@ use ailake_catalog::{
     TableIdent, TableProperties, VectorIndexInfo,
 };
 use ailake_core::{AilakeError, AilakeResult, EmbeddingModelInfo, VectorStoragePolicy};
+use arrow_array::Array;
 use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBatch};
 use ailake_index::{IvfPqCodebook, IvfPqConfig};
 use ailake_store::Store;
@@ -44,6 +45,10 @@ pub struct TableWriter {
     /// Shared codebook cell for deferred IVF-PQ builds. Cloneable Arc so each
     /// background task can access it; OnceCell guarantees training runs exactly once.
     deferred_ivf_codebook: Arc<tokio::sync::OnceCell<IvfPqCodebook>>,
+    /// When set, BM25 IDF stats are accumulated from this Parquet column on each
+    /// write_batch call and persisted to `metadata/ailake_bm25_stats.bin`.
+    /// Enables hybrid vector+BM25 search via `SearchConfig::hybrid`.
+    bm25_text_column: Option<String>,
 }
 
 impl TableWriter {
@@ -65,7 +70,20 @@ impl TableWriter {
             extra_vec_policies: Vec::new(),
             cached_ivf_codebook: None,
             deferred_ivf_codebook: Arc::new(tokio::sync::OnceCell::new()),
+            bm25_text_column: None,
         }
+    }
+
+    /// Enable BM25 hybrid search by accumulating IDF stats from `column` on each write.
+    ///
+    /// After calling this, every `write_batch*` call will tokenize the specified column,
+    /// update the corpus IDF stats, and persist them to `metadata/ailake_bm25_stats.bin`.
+    /// This file is then loaded automatically by `SearchConfig::hybrid` at query time.
+    ///
+    /// Typical usage: `TableWriter::new(...).with_bm25("chunk_text")`.
+    pub fn with_bm25(mut self, text_column: impl Into<String>) -> Self {
+        self.bm25_text_column = Some(text_column.into());
+        self
     }
 
     pub fn with_parent_snapshot(mut self, id: SnapshotId) -> Self {
@@ -133,6 +151,11 @@ impl TableWriter {
                 );
             }
         });
+
+        // Update BM25 IDF stats (immediately, text is available regardless of deferred HNSW).
+        if self.bm25_text_column.is_some() {
+            self.update_bm25_stats_from_batch(batch).await?;
+        }
 
         Ok(())
     }
@@ -318,6 +341,11 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value = self.policy.partition_value.clone();
         self.pending_files.push(entry);
+
+        // Update BM25 IDF stats if bm25_text_column is configured.
+        if self.bm25_text_column.is_some() {
+            self.update_bm25_stats_from_batch(batch).await?;
+        }
         Ok(())
     }
 
@@ -664,6 +692,52 @@ impl TableWriter {
     /// No-op when `pending_files` is empty (e.g., all `write_batch_idempotent`
     /// calls were skipped because their `batch_id` was already committed).
     /// Returns the current snapshot id in that case (or 0 if no snapshot exists yet).
+    /// Update BM25 IDF stats from a batch's text column and persist to storage.
+    ///
+    /// Read-modify-write: loads existing stats (if any), merges new DF counts,
+    /// writes back. Concurrent writers may lose some DF deltas; acceptable for
+    /// approximate BM25 (same as Iceberg without OCC). Compaction rebuilds accurately.
+    async fn update_bm25_stats_from_batch(&self, batch: &RecordBatch) -> AilakeResult<()> {
+        use arrow_array::cast::AsArray;
+
+        let col_name = match &self.bm25_text_column {
+            Some(c) => c.as_str(),
+            None => return Ok(()),
+        };
+        let col = match batch.column_by_name(col_name) {
+            Some(c) => c,
+            None => {
+                tracing::warn!("ailake: BM25 text column '{}' not found in batch — skipping IDF update", col_name);
+                return Ok(());
+            }
+        };
+        let str_arr = match col.as_string_opt::<i32>() {
+            Some(a) => a,
+            None => {
+                tracing::warn!("ailake: BM25 text column '{}' is not a Utf8 column — skipping", col_name);
+                return Ok(());
+            }
+        };
+
+        let texts: Vec<&str> = (0..str_arr.len())
+            .filter(|&i| str_arr.is_valid(i))
+            .map(|i| str_arr.value(i))
+            .collect();
+
+        // Load existing stats
+        let stats_path = crate::bm25::BM25_STATS_FILE;
+        let mut stats: crate::bm25::IdfStats = match self.store.get(stats_path).await {
+            Ok(bytes) => crate::bm25::IdfStats::from_bytes(&bytes).unwrap_or_default(),
+            Err(_) => crate::bm25::IdfStats::default(),
+        };
+
+        stats.merge_batch(&texts);
+
+        let bytes = stats.to_bytes()?;
+        self.store.put(stats_path, bytes::Bytes::from(bytes)).await?;
+        Ok(())
+    }
+
     pub async fn commit(mut self) -> AilakeResult<SnapshotId> {
         if self.pending_files.is_empty() {
             let current = self

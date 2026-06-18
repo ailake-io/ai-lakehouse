@@ -10,7 +10,7 @@ use ailake_file::AilakeFileReader;
 use ailake_index::AnyIndex;
 use ailake_store::Store;
 use ailake_vec::exact_distance;
-use arrow_array::RecordBatch;
+use arrow_array::{Array, RecordBatch};
 use bytes::Bytes;
 
 use crate::pruner::VectorPruner;
@@ -82,6 +82,17 @@ pub struct SearchConfig {
     /// Corrects the approximation error introduced by PQ-compressed HNSW distances.
     /// `None` (default) disables reranking.
     pub rerank_factor: Option<usize>,
+    /// Hybrid BM25+vector search configuration.
+    ///
+    /// When set, the pipeline loads global IDF stats from the table's BM25 stats file,
+    /// fetches a larger candidate pool from HNSW (`candidate_pool` or `10 * top_k`),
+    /// scores each candidate with BM25 against `query_text`, then fuses vector distance
+    /// and BM25 score via RRF (default) or linear combination.
+    ///
+    /// The BM25 stats file (`metadata/ailake_bm25_stats.bin`) is populated automatically
+    /// by `TableWriter` when `bm25_text_column` is configured. If absent, pure vector
+    /// distances are used (BM25 scores default to 0).
+    pub hybrid: Option<crate::bm25::HybridConfig>,
     /// Optional scoring function for hybrid ranking.
     ///
     /// When set, the search pipeline reads the Parquet row for each HNSW
@@ -110,6 +121,7 @@ impl Default for SearchConfig {
             rerank_factor: None,
             score_fn: None,
             partition_filter: None,
+            hybrid: None,
         }
     }
 }
@@ -127,6 +139,11 @@ impl SearchConfig {
 
     pub fn with_score_fn(mut self, f: impl Fn(f32, &RecordBatch) -> f32 + Send + Sync + 'static) -> Self {
         self.score_fn = Some(ScoreFn::new(f));
+        self
+    }
+
+    pub fn with_hybrid(mut self, cfg: crate::bm25::HybridConfig) -> Self {
+        self.hybrid = Some(cfg);
         self
     }
 }
@@ -236,38 +253,81 @@ pub async fn search(
         config.pruning_threshold
     );
 
-    let candidate_k = match config.rerank_factor {
-        Some(factor) => config.top_k * factor,
-        None => config.top_k,
+    // Compute candidate pool: hybrid needs a larger pool for BM25 re-ranking.
+    let candidate_k = match (&config.hybrid, config.rerank_factor) {
+        (Some(h), rf) => {
+            let pool = h.candidate_pool.unwrap_or(config.top_k * 10);
+            pool.max(rf.map_or(config.top_k, |f| f * config.top_k))
+        }
+        (None, Some(factor)) => config.top_k * factor,
+        (None, None) => config.top_k,
     };
 
+    let use_hybrid = config.hybrid.is_some();
+
+    // Load BM25 stats from the table's stats file when hybrid search is active.
+    let bm25_stats: Option<crate::bm25::IdfStats> = if let Some(ref h) = config.hybrid {
+        if h.text_columns.is_empty() {
+            None
+        } else {
+            let stats_path = table_meta
+                .properties
+                .get(crate::bm25::BM25_STATS_PATH_PROP)
+                .map(String::as_str)
+                .unwrap_or(crate::bm25::BM25_STATS_FILE);
+            match store.get(stats_path).await {
+                Ok(bytes) => crate::bm25::IdfStats::from_bytes(&bytes).ok(),
+                Err(_) => {
+                    debug!(
+                        "ailake: BM25 stats not found at '{}' — falling back to empty corpus IDF",
+                        stats_path
+                    );
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    // raw_candidates: (row_id, vec_dist, file_path, bm25_text) for hybrid re-ranking.
+    // Only populated when use_hybrid = true; otherwise all_results is populated directly.
+    let mut raw_candidates: Vec<(RowId, f32, String, String)> = Vec::new();
     let mut all_results: Vec<SearchResult> = Vec::new();
 
     for file_entry in &surviving_files {
         let file_bytes: Bytes = store.get(&file_entry.path).await?;
         let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
 
-        // Determine whether we need to read Parquet row data for this file.
-        // Required for: (a) flat scan fallback, (b) exact reranking, (c) score_fn.
+        // Parquet read required for: flat scan fallback, exact reranking, score_fn, hybrid.
         let need_parquet = file_entry.index_status == IndexStatus::Indexing
             || !reader.is_ailake_file()
             || config.rerank_factor.is_some()
-            || config.score_fn.is_some();
+            || config.score_fn.is_some()
+            || use_hybrid;
 
         if file_entry.index_status == IndexStatus::Indexing || !reader.is_ailake_file() {
-            // HNSW not yet built — flat scan over raw vectors.
             debug!(
                 "ailake: flat scan fallback for {} (index_status={:?})",
                 file_entry.path, file_entry.index_status
             );
             let (batch, raw_vectors) = reader.read_parquet()?;
             for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
-                let final_score = apply_score_fn(&config.score_fn, distance, row_id, &batch);
-                all_results.push(SearchResult {
-                    row_id,
-                    distance: final_score,
-                    file_path: file_entry.path.clone(),
-                });
+                if use_hybrid {
+                    let text = extract_text_for_row(
+                        &batch,
+                        row_id.as_u64() as usize,
+                        config.hybrid.as_ref().unwrap(),
+                    );
+                    raw_candidates.push((row_id, distance, file_entry.path.clone(), text));
+                } else {
+                    let final_score = apply_score_fn(&config.score_fn, distance, row_id, &batch);
+                    all_results.push(SearchResult {
+                        row_id,
+                        distance: final_score,
+                        file_path: file_entry.path.clone(),
+                    });
+                }
             }
             continue;
         }
@@ -275,7 +335,6 @@ pub async fn search(
         let index = reader.load_any_index_for_column(vector_column)?;
         let local_results = index.search(query, candidate_k, config.ef_search);
 
-        // Conditionally read Parquet once for reranking and/or score_fn.
         let parquet_data = if need_parquet {
             Some(reader.read_parquet()?)
         } else {
@@ -285,7 +344,6 @@ pub async fn search(
         for (row_id, approx_dist) in local_results {
             let idx = row_id.as_u64() as usize;
 
-            // Step 1: optionally replace approximated distance with exact distance.
             let distance = if config.rerank_factor.is_some() {
                 match parquet_data.as_ref().and_then(|(_, vecs)| vecs.get(idx)) {
                     Some(v) => exact_distance(metric, query, v),
@@ -303,26 +361,110 @@ pub async fn search(
                 approx_dist
             };
 
-            // Step 2: optionally apply injectable scoring function.
-            let final_score = if let Some((ref batch, _)) = parquet_data {
-                apply_score_fn(&config.score_fn, distance, row_id, batch)
+            if use_hybrid {
+                let text = parquet_data.as_ref().map_or(String::new(), |(batch, _)| {
+                    extract_text_for_row(batch, idx, config.hybrid.as_ref().unwrap())
+                });
+                raw_candidates.push((row_id, distance, file_entry.path.clone(), text));
             } else {
-                distance
-            };
-
-            all_results.push(SearchResult {
-                row_id,
-                distance: final_score,
-                file_path: file_entry.path.clone(),
-            });
+                let final_score = if let Some((ref batch, _)) = parquet_data {
+                    apply_score_fn(&config.score_fn, distance, row_id, batch)
+                } else {
+                    distance
+                };
+                all_results.push(SearchResult {
+                    row_id,
+                    distance: final_score,
+                    file_path: file_entry.path.clone(),
+                });
+            }
         }
     }
 
-    // Global merge: sort all candidates by final score, keep top-k.
-    // Use total_cmp so NaN values from user-supplied score_fn don't panic.
-    all_results.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+    // Hybrid BM25 fusion: applied after all HNSW candidates are collected.
+    if let Some(ref h) = config.hybrid {
+        let empty_stats = crate::bm25::IdfStats::default();
+        let stats = bm25_stats.as_ref().unwrap_or(&empty_stats);
+        let scorer = crate::bm25::BM25Scorer::new(stats);
+
+        // Compute BM25 score for each candidate.
+        let bm25_scores: Vec<f32> = raw_candidates
+            .iter()
+            .map(|(_, _, _, text)| scorer.score(&h.query_text, text))
+            .collect();
+
+        // Rank by vector distance (already sorted within each file, but merge globally).
+        raw_candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let vec_ranks: Vec<usize> = (0..raw_candidates.len()).collect();
+
+        // Rank by BM25 score descending (higher BM25 = better).
+        let mut bm25_indexed: Vec<(usize, f32)> = bm25_scores.iter().copied().enumerate().collect();
+        bm25_indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut bm25_rank_of = vec![0usize; raw_candidates.len()];
+        for (rank, (orig_idx, _)) in bm25_indexed.iter().enumerate() {
+            bm25_rank_of[*orig_idx] = rank;
+        }
+
+        use crate::bm25::{HybridFusion, linear_score, rrf_score};
+
+        let fused: Vec<f32> = match h.fusion {
+            HybridFusion::Rrf => vec_ranks
+                .iter()
+                .enumerate()
+                .map(|(i, &vr)| rrf_score(vr, bm25_rank_of[i], h.bm25_weight))
+                .collect(),
+            HybridFusion::Linear => {
+                let min_d = raw_candidates.iter().map(|r| r.1).fold(f32::INFINITY, f32::min);
+                let max_d = raw_candidates.iter().map(|r| r.1).fold(f32::NEG_INFINITY, f32::max);
+                let min_b = bm25_scores.iter().copied().fold(f32::INFINITY, f32::min);
+                let max_b = bm25_scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                raw_candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        linear_score(r.1, min_d, max_d, bm25_scores[i], min_b, max_b, h.bm25_weight)
+                    })
+                    .collect()
+            }
+        };
+
+        for (i, (row_id, _, file_path, _)) in raw_candidates.into_iter().enumerate() {
+            all_results.push(SearchResult { row_id, distance: fused[i], file_path });
+        }
+
+        // For RRF: lower (more negative) = better; for Linear: lower = better. Same convention.
+        all_results.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+    } else {
+        all_results.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+    }
+
     all_results.truncate(config.top_k);
     Ok(all_results)
+}
+
+/// Extract concatenated text from specified columns for a single row.
+fn extract_text_for_row(
+    batch: &RecordBatch,
+    row_idx: usize,
+    hybrid: &crate::bm25::HybridConfig,
+) -> String {
+    use arrow_array::cast::AsArray;
+    hybrid
+        .text_columns
+        .iter()
+        .filter_map(|col| {
+            batch.column_by_name(col).and_then(|arr| {
+                arr.as_string_opt::<i32>().and_then(|sa| {
+                    if row_idx < sa.len() && sa.is_valid(row_idx) {
+                        Some(sa.value(row_idx).to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// One query arm in a cross-modal search.
@@ -412,6 +554,7 @@ pub async fn search_multimodal(
             rerank_factor: config.rerank_factor,
             score_fn: None,
             partition_filter: config.partition_filter.clone(),
+            hybrid: None,
         };
         let results = search(
             table,
@@ -817,6 +960,113 @@ impl SearchSession {
     }
 }
 
+/// Pure BM25 full-text search across all Parquet files in the table.
+///
+/// Scans every surviving file (O(N) complexity), scores each row with BM25 against
+/// `query_text`, and returns the global top-k by score. IDF stats are loaded from
+/// `metadata/ailake_bm25_stats.bin` (written by `TableWriter` when `bm25_text_column`
+/// is configured). If the stats file is absent, IDF defaults to an empty corpus
+/// (all terms treated as maximally rare — directionally correct but less precise).
+///
+/// For pure-lexical search at scale (millions of rows, hundreds of files), consider
+/// using SQL `LIKE` / `ILIKE` via DuckDB/Trino over the Iceberg-compatible table.
+/// This function is best suited for small-medium tables or as a lexical complement
+/// to `search()` for tables where the document count per file is manageable.
+pub async fn search_text(
+    table: &TableIdent,
+    query_text: &str,
+    text_columns: &[&str],
+    top_k: usize,
+    catalog: Arc<dyn CatalogProvider>,
+    store: Arc<dyn Store>,
+    partition_filter: Option<&str>,
+) -> AilakeResult<Vec<SearchResult>> {
+    use arrow_array::cast::AsArray;
+
+    if text_columns.is_empty() {
+        return Err(AilakeError::InvalidArgument(
+            "search_text requires at least one text column".into(),
+        ));
+    }
+
+    let all_files = catalog.list_files(table, None).await?;
+    let table_meta = catalog.load_table(table).await?;
+
+    // Partition pruning
+    let files: Vec<_> = if let Some(pv) = partition_filter {
+        all_files
+            .into_iter()
+            .filter(|f| f.partition_value.as_deref() == Some(pv))
+            .collect()
+    } else {
+        all_files
+    };
+
+    // Load BM25 stats
+    let stats_path = table_meta
+        .properties
+        .get(crate::bm25::BM25_STATS_PATH_PROP)
+        .map(String::as_str)
+        .unwrap_or(crate::bm25::BM25_STATS_FILE);
+    let stats = match store.get(stats_path).await {
+        Ok(bytes) => crate::bm25::IdfStats::from_bytes(&bytes)
+            .unwrap_or_default(),
+        Err(_) => {
+            debug!(
+                "ailake: BM25 stats not found at '{}' — using empty corpus IDF",
+                stats_path
+            );
+            crate::bm25::IdfStats::default()
+        }
+    };
+    let scorer = crate::bm25::BM25Scorer::new(&stats);
+
+    let mut results: Vec<SearchResult> = Vec::new();
+
+    for file_entry in &files {
+        let file_bytes = store.get(&file_entry.path).await?;
+        // Use dim=0 — we only read the Parquet columns, not the HNSW.
+        let reader = AilakeFileReader::new(file_bytes, "", 0);
+        let (batch, _) = reader.read_parquet()?;
+
+        for row_idx in 0..batch.num_rows() {
+            let doc_text: String = text_columns
+                .iter()
+                .filter_map(|&col| {
+                    batch.column_by_name(col).and_then(|arr| {
+                        arr.as_string_opt::<i32>().and_then(|sa| {
+                            if sa.is_valid(row_idx) {
+                                Some(sa.value(row_idx).to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if doc_text.is_empty() {
+                continue;
+            }
+
+            let bm25 = scorer.score(query_text, &doc_text);
+            if bm25 > 0.0 {
+                // Negate so that sort-ascending = best-first (lower distance = higher BM25).
+                results.push(SearchResult {
+                    row_id: RowId::new(row_idx as u64),
+                    distance: -bm25,
+                    file_path: file_entry.path.clone(),
+                });
+            }
+        }
+    }
+
+    results.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+    results.truncate(top_k);
+    Ok(results)
+}
+
 /// Fetch full row data for a slice of search results.
 ///
 /// Groups results by Parquet file, reads each file once, extracts the matching rows
@@ -1012,6 +1262,7 @@ mod tests {
             rerank_factor: Some(2),
             score_fn: None,
             partition_filter: None,
+            hybrid: None,
         };
 
         let results = search(
@@ -1049,6 +1300,7 @@ mod tests {
             rerank_factor: Some(4),
             score_fn: None,
             partition_filter: None,
+            hybrid: None,
         };
 
         let results = search(
@@ -1095,6 +1347,7 @@ mod tests {
             rerank_factor: None,
             score_fn: None,
             partition_filter: None,
+            hybrid: None,
         };
         let cfg_rerank = SearchConfig {
             top_k: 2,
@@ -1103,6 +1356,7 @@ mod tests {
             rerank_factor: Some(2),
             score_fn: None,
             partition_filter: None,
+            hybrid: None,
         };
 
         let plain = search(
@@ -1170,6 +1424,7 @@ mod tests {
             rerank_factor: None,
             score_fn: None,
             partition_filter: None,
+            hybrid: None,
         };
 
         let results =
@@ -1281,6 +1536,7 @@ mod tests {
             rerank_factor: None,
             score_fn: None,
             partition_filter: None,
+            hybrid: None,
         };
 
         let results =

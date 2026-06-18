@@ -159,6 +159,7 @@ async fn handle_search(
         rerank_factor: None,
         score_fn: None,
         partition_filter: None,
+        hybrid: None,
     };
 
     let results = ailake_query::search(
@@ -263,6 +264,7 @@ async fn handle_compact(
         min_files_to_compact: req.min_files,
         target_file_size_bytes: req.target_size,
         index_strategy: Default::default(),
+        max_files_per_pass: 20,
     };
     let planner = CompactionPlanner::new(config);
     let to_compact = planner.plan(&files);
