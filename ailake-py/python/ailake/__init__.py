@@ -10,10 +10,13 @@ from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence, Union
 from ailake._ailake import (  # type: ignore[import]
     TableWriter as _TableWriter,
     VectorColSpec,
+    WorkingMemoryBuffer,
     assemble_context,
+    decay_memories,
     migrate_embeddings,
     search as _search_raw,
     search_multimodal,
+    search_text,
     search_with_data as _search_with_data,
 )
 
@@ -29,14 +32,17 @@ _Vector = Union[Sequence[float], "np.ndarray"]
 __all__ = [
     "open_table",
     "search",
+    "search_text",
     "search_multimodal",
     "Table",
     "SearchQuery",
     "TableWriter",
     "VectorColSpec",
+    "WorkingMemoryBuffer",
     "Agent",
     "assemble_context",
     "migrate_embeddings",
+    "decay_memories",
 ]
 
 # Backward-compat re-export: ailake.TableWriter still works.

@@ -28,6 +28,7 @@ MODEL_TRACKED_PATH  = str(pathlib.Path(TABLE_PATH).parent / "ailake_model_tracke
 MULTIMODAL_PATH     = str(pathlib.Path(TABLE_PATH).parent / "ailake_multimodal")
 AGENT_PATH          = os.environ.get("DEMO_AGENT_PATH",
                           str(pathlib.Path(TABLE_PATH).parent / "ailake_agent"))
+BM25_PATH           = str(pathlib.Path(TABLE_PATH).parent / "ailake_bm25")
 DIM                 = int(os.environ.get("DEMO_DIM", "32"))
 IMAGE_DIM           = 16   # synthetic "CLIP-like" image embeddings (half the text dim)
 N_DOCS              = 500
@@ -192,6 +193,21 @@ def _write_deferred(texts: list[str], embeddings: list[list[float]]) -> None:
     print(f"[Deferred] Committed snapshot_id={snap_id}  rows={N_DEFERRED}  (index builds in bg)")
 
 
+def _write_bm25(texts: list[str], embeddings: list[list[float]]) -> None:
+    """BM25-indexed table — demonstrates hybrid vector+lexical search.
+
+    Uses the first 200 rows. BM25 IDF stats are accumulated at write time
+    and stored as metadata/ailake_bm25_stats.bin inside the table root.
+    """
+    from ailake import TableWriter
+    os.makedirs(BM25_PATH, exist_ok=True)
+    # write_batch stores texts as "text" column — use that as BM25 source column.
+    w = TableWriter(BM25_PATH, dim=DIM, metric=METRIC, bm25_text_column="text")
+    w.write_batch(texts[:200], embeddings[:200])
+    snap_id = w.commit()
+    print(f"[BM25]     Committed snapshot_id={snap_id}  rows=200  bm25_col=text")
+
+
 def _save_query_payload(embeddings: list[list[float]], texts: list[str]) -> None:
     query_payload = {
         "query_vector":       embeddings[0],
@@ -206,6 +222,7 @@ def _save_query_payload(embeddings: list[list[float]], texts: list[str]) -> None
             "model_tracked": MODEL_TRACKED_PATH,
             "multimodal":    MULTIMODAL_PATH,
             "agent":         AGENT_PATH,
+            "bm25":          BM25_PATH,
         },
         "multimodal": {
             "text_dim":       DIM,
@@ -242,6 +259,7 @@ def main() -> None:
     _write_model_tracked(texts, embeddings)
     _write_multimodal(texts, embeddings)
     _write_agent_memory(texts, embeddings)
+    _write_bm25(texts, embeddings)
     _save_query_payload(embeddings, texts)
 
     _maybe_register_nessie(TABLE_PATH)

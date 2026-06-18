@@ -87,6 +87,7 @@ async fn pruning_eliminates_distant_file() {
             rerank_factor: None,
             score_fn: None,
             partition_filter: None,
+            hybrid: None,
         },
         "embedding",
         4,

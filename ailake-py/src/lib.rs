@@ -37,6 +37,67 @@ fn rt() -> PyResult<tokio::runtime::Runtime> {
     })
 }
 
+/// Build a RecordBatch from texts and optional extra columns.
+///
+/// Texts become the `"text"` column (Utf8). Extra columns are inferred from
+/// the Python value type of the first element:
+///   - `int` → Int64
+///   - `float` → Float32
+///   - `bool` → Boolean
+///   - `str`/other → Utf8
+fn build_batch_with_extra(
+    py: Python<'_>,
+    texts: Vec<String>,
+    extra_columns: Option<&Bound<'_, PyDict>>,
+) -> PyResult<RecordBatch> {
+    use arrow_array::{BooleanArray, Float32Array, Int64Array};
+    use arrow_schema::Field;
+
+    let mut fields = vec![Field::new("text", DataType::Utf8, false)];
+    let text_arr: Arc<dyn arrow_array::Array> = Arc::new(StringArray::from(texts));
+    let mut arrays: Vec<Arc<dyn arrow_array::Array>> = vec![text_arr];
+
+    if let Some(extra) = extra_columns {
+        for (k, v) in extra.iter() {
+            let col_name: String = k.extract()?;
+            let values: Vec<Py<PyAny>> = v.extract()?;
+
+            // Infer type from first element
+            let first = values.first().map(|x| x.bind(py));
+            if first.as_ref().map(|x| x.is_instance_of::<pyo3::types::PyBool>()).unwrap_or(false) {
+                let arr: Vec<Option<bool>> = values.iter()
+                    .map(|x| x.bind(py).extract::<bool>().ok())
+                    .collect();
+                fields.push(Field::new(&col_name, DataType::Boolean, true));
+                arrays.push(Arc::new(BooleanArray::from(arr)));
+            } else if first.as_ref().map(|x| x.is_instance_of::<pyo3::types::PyFloat>()).unwrap_or(false) {
+                let arr: Vec<Option<f32>> = values.iter()
+                    .map(|x| x.bind(py).extract::<f32>().ok())
+                    .collect();
+                fields.push(Field::new(&col_name, DataType::Float32, true));
+                arrays.push(Arc::new(Float32Array::from(arr)));
+            } else if first.as_ref().map(|x| x.is_instance_of::<pyo3::types::PyInt>()).unwrap_or(false) {
+                let arr: Vec<Option<i64>> = values.iter()
+                    .map(|x| x.bind(py).extract::<i64>().ok())
+                    .collect();
+                fields.push(Field::new(&col_name, DataType::Int64, true));
+                arrays.push(Arc::new(Int64Array::from(arr)));
+            } else {
+                // Default: string column
+                let arr: Vec<Option<String>> = values.iter()
+                    .map(|x| x.bind(py).extract::<String>().ok())
+                    .collect();
+                fields.push(Field::new(&col_name, DataType::Utf8, true));
+                arrays.push(Arc::new(StringArray::from(arr)));
+            }
+        }
+    }
+
+    let schema = Arc::new(Schema::new(fields));
+    RecordBatch::try_new(schema, arrays)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>) {
     let store: Arc<dyn Store> = Arc::new(LocalStore::new(path));
     // Use a file:// URI as warehouse so that Iceberg metadata.json and manifest
@@ -129,12 +190,13 @@ impl TableWriter {
     ///   embeddings: list[list[float]] or None — one embedding per row.
     ///               When None, embed_fn set at construction time is called automatically
     ///               (Pattern B). Raises ValueError when embeddings is None and no embed_fn.
-    #[pyo3(signature = (texts, embeddings=None))]
+    #[pyo3(signature = (texts, embeddings=None, extra_columns=None))]
     fn write_batch(
         &mut self,
         py: Python<'_>,
         texts: Vec<String>,
         embeddings: Option<Vec<Vec<f32>>>,
+        extra_columns: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let embs: Vec<Vec<f32>> = match embeddings {
             Some(e) => e,
@@ -155,10 +217,7 @@ impl TableWriter {
             }
         };
 
-        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
-        let text_arr = StringArray::from(texts);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let batch = build_batch_with_extra(py, texts, extra_columns)?;
 
         let writer = self
             .inner
@@ -182,15 +241,15 @@ impl TableWriter {
     /// Args:
     ///   texts: list[str] — text content for each row
     ///   embeddings: list[list[float]] — one embedding per row
+    #[pyo3(signature = (texts, embeddings, extra_columns=None))]
     fn write_batch_auto_deferred(
         &mut self,
+        py: Python<'_>,
         texts: Vec<String>,
         embeddings: Vec<Vec<f32>>,
+        extra_columns: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
-        let text_arr = StringArray::from(texts);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let batch = build_batch_with_extra(py, texts, extra_columns)?;
 
         let writer = self
             .inner
@@ -211,16 +270,16 @@ impl TableWriter {
     ///   texts: list[str] — text content for each row
     ///   embeddings: list[list[float]] — one embedding per row
     ///   batch_id: str — unique key for this batch (e.g. Airflow run_id + task_id)
+    #[pyo3(signature = (texts, embeddings, batch_id, extra_columns=None))]
     fn write_batch_idempotent(
         &mut self,
+        py: Python<'_>,
         texts: Vec<String>,
         embeddings: Vec<Vec<f32>>,
         batch_id: String,
+        extra_columns: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
-        let text_arr = StringArray::from(texts);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let batch = build_batch_with_extra(py, texts, extra_columns)?;
 
         let writer = self
             .inner
@@ -901,15 +960,139 @@ fn search_multimodal(
     Ok(list.into())
 }
 
+/// In-memory bounded ring buffer for agent short-term memory.
+///
+/// Stores the N most recent (text, embedding) pairs. On overflow the oldest entry
+/// is evicted. Supports brute-force cosine search and draining to an AI-Lake table.
+#[pyclass(name = "WorkingMemoryBuffer")]
+pub struct PyWorkingMemoryBuffer {
+    inner: ailake_query::WorkingMemoryBuffer,
+    runtime: tokio::runtime::Runtime,
+}
+
+#[pymethods]
+impl PyWorkingMemoryBuffer {
+    #[new]
+    #[pyo3(signature = (max_rows=1000))]
+    fn new(max_rows: usize) -> PyResult<Self> {
+        Ok(Self {
+            inner: ailake_query::WorkingMemoryBuffer::new(max_rows),
+            runtime: rt()?,
+        })
+    }
+
+    /// Add an entry. Evicts the oldest entry when at capacity.
+    #[pyo3(signature = (text, embedding, importance=1.0))]
+    fn push(&mut self, text: String, embedding: Vec<f32>, importance: f32) {
+        self.inner.push(text, embedding, importance);
+    }
+
+    /// Brute-force cosine search over the buffer.
+    ///
+    /// Returns list of dicts: [{"text": str, "distance": float, "importance": float}, ...]
+    /// sorted by ascending distance (most similar first).
+    fn search(&self, py: Python<'_>, query: Vec<f32>, top_k: usize) -> PyResult<Py<PyAny>> {
+        let results = self.inner.search(&query, top_k);
+        let list = PyList::empty(py);
+        for (dist, entry) in results {
+            let d = PyDict::new(py);
+            d.set_item("text", &entry.text)?;
+            d.set_item("distance", dist)?;
+            d.set_item("importance", entry.importance)?;
+            list.append(d)?;
+        }
+        Ok(list.into())
+    }
+
+    /// Write all buffered entries to an AI-Lake table and clear the buffer.
+    ///
+    /// Does NOT commit — call `writer.commit()` afterwards to persist the snapshot.
+    fn drain_to_table(&mut self, writer: &mut TableWriter) -> PyResult<()> {
+        let rs_writer = writer
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TableWriter already committed"))?;
+        self.runtime
+            .block_on(self.inner.drain_to_table(rs_writer))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    fn is_full(&self) -> bool {
+        self.inner.is_full()
+    }
+}
+
+/// Recompute `recency_weight` for all records in a table using exponential decay.
+///
+/// Reads the `last_accessed_at` column (ISO 8601 string) from each data file,
+/// applies `recency_weight = exp(-decay_lambda * days_since_access)`, rewrites
+/// the column, and commits a new Iceberg snapshot.
+///
+/// Args:
+///   path: str — table directory (same as TableWriter)
+///   decay_lambda: float — decay rate. Higher = faster decay. Default 0.1.
+///
+/// Returns the number of files updated.
+#[pyfunction]
+#[pyo3(signature = (path, decay_lambda=0.1))]
+fn decay_memories(path: &str, decay_lambda: f32) -> PyResult<usize> {
+    use ailake_core::VectorMetric;
+    use ailake_query::MemoryDecayJob;
+
+    let rt = rt()?;
+    let (catalog, store) = local_catalog_store(path);
+    let table = TableIdent::new("default", "table");
+
+    // Load stored policy from table metadata
+    let table_meta = rt
+        .block_on(catalog.load_table(&table))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let col = table_meta
+        .properties
+        .get("ailake.vector-column")
+        .cloned()
+        .unwrap_or_else(|| "embedding".to_string());
+    let dim: u32 = table_meta
+        .properties
+        .get("ailake.vector-dim")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1536);
+    let metric = table_meta
+        .properties
+        .get("ailake.vector-metric")
+        .and_then(|s| match s.as_str() {
+            "euclidean" | "l2" => Some(VectorMetric::Euclidean),
+            "dot" | "inner_product" | "dot_product" => Some(VectorMetric::DotProduct),
+            _ => Some(VectorMetric::Cosine),
+        })
+        .unwrap_or(VectorMetric::Cosine);
+
+    let policy = ailake_core::VectorStoragePolicy::default_f16(&col, dim, metric);
+    let job = MemoryDecayJob::new(catalog, store, policy, decay_lambda);
+
+    rt.block_on(job.run(&table))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
     m.add_class::<VectorColSpec>()?;
+    m.add_class::<PyWorkingMemoryBuffer>()?;
     m.add_function(wrap_pyfunction!(search, m)?)?;
     m.add_function(wrap_pyfunction!(search_text, m)?)?;
     m.add_function(wrap_pyfunction!(search_multimodal, m)?)?;
     m.add_function(wrap_pyfunction!(search_with_data, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_context, m)?)?;
     m.add_function(wrap_pyfunction!(migrate_embeddings, m)?)?;
+    m.add_function(wrap_pyfunction!(decay_memories, m)?)?;
     Ok(())
 }

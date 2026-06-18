@@ -185,6 +185,7 @@ async fn main() {
             rerank_factor: None,
             score_fn: None,
             partition_filter: None,
+            hybrid: None,
         },
         "embedding",
         dim,
