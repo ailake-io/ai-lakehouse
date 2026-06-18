@@ -29,7 +29,9 @@ fn make_policy(dim: u32) -> VectorStoragePolicy {
         modality: None,
         partition_by: None,
         partition_value: None,
-    }
+    partition_column_type: None,
+        partition_fields: vec![],
+}
 }
 
 fn rand_unit_vec(dim: usize, seed: u64) -> Vec<f32> {
@@ -85,6 +87,7 @@ async fn setup_bm25_table(
         Arc::clone(&store) as Arc<dyn ailake_store::Store>,
         make_policy(dim),
         table.clone(),
+        2,
     )
     .await
     .unwrap();
@@ -278,6 +281,7 @@ async fn write_batch_auto_deferred_creates_file() {
         Arc::clone(&store) as Arc<dyn ailake_store::Store>,
         make_policy(dim),
         table.clone(),
+        2,
     )
     .await
     .unwrap();

@@ -364,7 +364,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        }
+        partition_column_type: None,
+                partition_fields: vec![],
+}
     }
 
     fn make_batch(ids: &[i32]) -> RecordBatch {
@@ -396,6 +398,8 @@ mod tests {
                 &ailake_catalog::TableProperties {
                     policy: make_policy(),
                     extra: Default::default(),
+                    format_version: 2,
+                    partition_column_type: None,
                 },
             )
             .await
@@ -528,13 +532,17 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        };
+        partition_column_type: None,
+                partition_fields: vec![],
+};
         catalog
             .create_table(
                 &table,
                 &ailake_catalog::TableProperties {
                     policy: policy.clone(),
                     extra: Default::default(),
+                    format_version: 2,
+                    partition_column_type: None,
                 },
             )
             .await

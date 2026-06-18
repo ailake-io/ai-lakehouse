@@ -141,7 +141,9 @@ async fn main() {
         modality: None,
         partition_by: None,
         partition_value: None,
-    };
+    partition_column_type: None,
+        partition_fields: vec![],
+};
 
     // ---- write ----
     println!("\n=== Writing 2 batches (500 rows each) ===");
@@ -151,6 +153,7 @@ async fn main() {
         Arc::clone(&store),
         policy.clone(),
         table.clone(),
+        2,
     )
     .await
     .unwrap();

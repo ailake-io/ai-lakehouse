@@ -31,7 +31,9 @@ fn policy(partition_by: Option<String>, partition_value: Option<String>) -> Vect
         modality: None,
         partition_by,
         partition_value,
-    }
+        partition_column_type: None,
+        partition_fields: vec![],
+}
 }
 
 async fn write_agent_shard(
@@ -57,6 +59,7 @@ async fn write_agent_shard(
         Arc::clone(&store) as Arc<dyn ailake_store::Store>,
         policy(Some("agent_id".into()), Some(agent.into())),
         table.clone(),
+        2,
     )
     .await
     .unwrap();
@@ -284,6 +287,7 @@ async fn score_fn_is_invoked_during_search() {
         Arc::clone(&store) as Arc<dyn ailake_store::Store>,
         policy(None, None),
         table.clone(),
+        2,
     )
     .await
     .unwrap();
@@ -343,6 +347,7 @@ async fn score_fn_constant_zero_returns_rows() {
         Arc::clone(&store) as Arc<dyn ailake_store::Store>,
         policy(None, None),
         table.clone(),
+        2,
     )
     .await
     .unwrap();

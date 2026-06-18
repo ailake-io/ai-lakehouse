@@ -19,10 +19,23 @@ pub mod llm_columns {
     pub const CHUNK_SUMMARY: &str = "chunk_summary";
     pub const SOURCE_URI: &str = "source_uri";
     pub const PAGE_NUMBER: &str = "page_number";
+    /// Arrow type: `Timestamp(Nanosecond, Some("UTC"))` — use `ailake_core::now_ns()` to populate.
     pub const CREATED_AT: &str = "created_at";
     pub const DOCUMENT_DATE: &str = "document_date";
     pub const EMBEDDING: &str = "embedding";
     pub const CONTEXT_EMBEDDING: &str = "context_embedding";
+}
+
+/// Current UTC time as Unix epoch nanoseconds.
+///
+/// Use for `created_at` and `last_accessed_at` columns in `LlmContextSchema`
+/// and `EpisodicMemorySchema` tables. Arrow type for these columns must be
+/// `Timestamp(Nanosecond, Some("UTC"))` — Iceberg maps this to `timestamptz`.
+pub fn now_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
 }
 
 /// Vector storage configuration applied at table creation time.
@@ -78,6 +91,80 @@ pub struct VectorStoragePolicy {
     /// Typical usage: set to `agent_id` in Agent.__init__.
     #[serde(skip)]
     pub partition_value: Option<String>,
+    /// Iceberg type of the partition column ("string", "uuid", "int", "long").
+    /// Used when writing the Iceberg schema and partition spec at table creation.
+    /// Defaults to "string" when `None`.  Only relevant when `partition_by` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_column_type: Option<String>,
+    /// Multi-column / non-identity partition spec (Phase K).
+    ///
+    /// When non-empty, takes precedence over `partition_by` + `partition_column_type`
+    /// for table creation.  Supports `identity` and `truncate[W]` transforms.
+    /// Values at write time are provided via `partition_value` encoded as
+    /// `\x1f`-separated compound string ("val1\x1fval2") matching field order.
+    ///
+    /// Example (two-column identity):
+    /// ```ignore
+    /// partition_fields: vec![
+    ///     PartitionDef::identity("agent_id", "string"),
+    ///     PartitionDef::identity("session_id", "string"),
+    /// ]
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partition_fields: Vec<PartitionDef>,
+}
+
+/// One field in a multi-column partition spec (Phase K).
+///
+/// Supported transforms: `"identity"` and `"truncate[W]"` (string prefix / int rounding).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PartitionDef {
+    /// Source column name in the table schema.
+    pub column: String,
+    /// Iceberg transform string: `"identity"` or `"truncate[W]"`.
+    pub transform: String,
+    /// Iceberg type of the source column: `"string"`, `"int"`, `"long"`, `"uuid"`.
+    pub column_type: String,
+}
+
+impl PartitionDef {
+    pub fn identity(column: impl Into<String>, column_type: impl Into<String>) -> Self {
+        Self { column: column.into(), transform: "identity".into(), column_type: column_type.into() }
+    }
+
+    pub fn truncate(column: impl Into<String>, width: usize, column_type: impl Into<String>) -> Self {
+        Self {
+            column: column.into(),
+            transform: format!("truncate[{width}]"),
+            column_type: column_type.into(),
+        }
+    }
+
+    /// Apply this transform to a raw column value.
+    /// - `identity` → returns value unchanged.
+    /// - `truncate[W]` → returns first W characters (strings) or value rounded down to
+    ///   the nearest multiple of W (integers, parsed and re-formatted as string).
+    pub fn apply(&self, raw: &str) -> String {
+        if let Some(w) = self.truncate_width() {
+            if matches!(self.column_type.as_str(), "int" | "long" | "integer") {
+                // Integer truncation: round down to multiple of W
+                if let Ok(n) = raw.parse::<i64>() {
+                    return (n - n.rem_euclid(w as i64)).to_string();
+                }
+            }
+            // String truncation: first W chars
+            raw.chars().take(w).collect()
+        } else {
+            raw.to_string()
+        }
+    }
+
+    fn truncate_width(&self) -> Option<usize> {
+        self.transform
+            .strip_prefix("truncate[")
+            .and_then(|s| s.strip_suffix(']'))
+            .and_then(|s| s.parse().ok())
+    }
 }
 
 impl VectorStoragePolicy {
@@ -97,6 +184,8 @@ impl VectorStoragePolicy {
             modality: None,
             partition_by: None,
             partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
         }
     }
 }

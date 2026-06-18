@@ -20,6 +20,7 @@ ailake-store = { path = "../ailake-store", version = "0.0.20" }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 tokio        = { workspace = true }
+tracing      = { workspace = true }
 async-trait  = { workspace = true }
 thiserror    = { workspace = true }
 uuid         = { workspace = true }
@@ -27,6 +28,11 @@ bytes        = { workspace = true }
 reqwest      = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 base64       = "0.22"
 apache-avro  = { workspace = true }
+bincode      = { workspace = true }
+roaring      = { workspace = true }
+parquet      = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
 
 # catalog-glue optional deps
 aws-sdk-glue = { version = "1", optional = true }

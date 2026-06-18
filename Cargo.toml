@@ -46,6 +46,7 @@ hnsw_rs     = "0.3"
 bincode     = "1"
 memmap2     = "0.9"
 rayon       = "1"
+roaring     = "0.10"
 
 # Runtime dynamic library loading — GPU backend detection without build-time SDK
 libloading  = "0.8"

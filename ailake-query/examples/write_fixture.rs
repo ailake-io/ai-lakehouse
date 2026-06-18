@@ -97,13 +97,16 @@ async fn main() {
         modality: None,
         partition_by: None,
         partition_value: None,
-    };
+    partition_column_type: None,
+        partition_fields: vec![],
+};
 
     let mut writer = TableWriter::create_or_open(
         Arc::clone(&catalog) as Arc<dyn CatalogProvider>,
         Arc::clone(&store),
         policy,
         table.clone(),
+        2,
     )
     .await
     .expect("create writer");

@@ -457,7 +457,9 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         modality: None,
         partition_by: req.partition_by,
         partition_value: req.partition_value,
-    };
+        partition_column_type: None,
+        partition_fields: vec![],
+};
 
     let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
     let store: std::sync::Arc<dyn ailake_store::Store> =
@@ -472,7 +474,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         };
 
     let result = rt().block_on(async {
-        let mut writer = TableWriter::create_or_open(catalog, store, policy, table).await?;
+        let mut writer = TableWriter::create_or_open(catalog, store, policy, table, 2).await?;
         writer.write_batch(&batch, &req.embeddings).await?;
         writer.commit().await
     });
@@ -1084,6 +1086,9 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         req.top_k,
         req.ef_search,
         req.partition_filter,
+        None,
+        "",
+        0.0,
     ) {
         Ok(v) => v,
         Err(e) => {

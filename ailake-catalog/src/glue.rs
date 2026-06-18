@@ -154,7 +154,12 @@ impl GlueCatalog {
 impl CatalogProvider for GlueCatalog {
     async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
         let table_root = self.table_root(name);
-        let mut meta = IcebergMetadata::new(&table_root, &props.policy);
+        let pct = props
+            .partition_column_type
+            .as_deref()
+            .or(props.policy.partition_column_type.as_deref());
+        let mut meta =
+            IcebergMetadata::new(&table_root, &props.policy, props.format_version, pct, &props.policy.partition_fields);
         for (k, v) in &props.extra {
             meta.properties.insert(k.clone(), v.clone());
         }

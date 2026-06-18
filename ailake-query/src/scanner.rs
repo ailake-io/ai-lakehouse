@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
 use ailake_core::{AilakeError, AilakeResult, EmbeddingModelInfo, RowId, VectorMetric};
@@ -13,7 +13,9 @@ use ailake_vec::exact_distance;
 use arrow_array::{Array, RecordBatch};
 use bytes::Bytes;
 
-use crate::pruner::VectorPruner;
+use crate::equality_delete::EqualityDeleteFilter;
+use crate::pruner::{BloomPruner, VectorPruner};
+use crate::schema_filler::SchemaFiller;
 
 /// Injectable per-result scoring function for hybrid ranking.
 ///
@@ -253,6 +255,35 @@ pub async fn search(
         config.pruning_threshold
     );
 
+    // Phase F — Bloom pruning: for hybrid queries, load per-file Bloom filters from
+    // the Puffin stats file and skip files where no query term can be present.
+    let surviving_files = if let Some(ref h) = config.hybrid {
+        let bloom_map = load_bloom_map(&table_meta, store.as_ref()).await;
+        if !bloom_map.is_empty() {
+            BloomPruner::prune(surviving_files, &h.query_text, &bloom_map)
+        } else {
+            surviving_files
+        }
+    } else {
+        surviving_files
+    };
+
+    // Phase H: load equality delete filter for this snapshot.
+    // Reads delete manifests from the catalog and downloads each equality delete Avro file.
+    // Empty filter is a no-op. On error: warn and continue with empty filter (data visible).
+    let eq_del_filter = match catalog.list_equality_deletes(table, None).await {
+        Ok(edfs) if !edfs.is_empty() => {
+            match EqualityDeleteFilter::from_files(&store, &edfs).await {
+                Ok(f) => f,
+                Err(e) => {
+                    warn!("ailake: equality delete filter build failed: {e} — rows may appear");
+                    EqualityDeleteFilter::empty()
+                }
+            }
+        }
+        _ => EqualityDeleteFilter::empty(),
+    };
+
     // Compute candidate pool: hybrid needs a larger pool for BM25 re-ranking.
     let candidate_k = match (&config.hybrid, config.rerank_factor) {
         (Some(h), rf) => {
@@ -299,20 +330,58 @@ pub async fn search(
         let file_bytes: Bytes = store.get(&file_entry.path).await?;
         let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
 
-        // Parquet read required for: flat scan fallback, exact reranking, score_fn, hybrid.
+        // V3 Deletion Vector: fetch bitmap once per file (range GET from Puffin .dvd).
+        // None for V2 tables or V3 files with no deletes. On fetch error: warn + continue
+        // without mask (surfacing deleted rows is safer than hard-failing the search).
+        let dv_bitmap: Option<roaring::RoaringBitmap> =
+            if let Some(ref dv) = file_entry.deletion_vector {
+                match crate::dv::load_deletion_vector(&store, dv).await {
+                    Ok(bm) => {
+                        debug!(
+                            "ailake: DV loaded ({} deletions) for {}",
+                            bm.len(),
+                            file_entry.path
+                        );
+                        Some(bm)
+                    }
+                    Err(e) => {
+                        warn!(
+                            "ailake: DV fetch failed for '{}': {e} — deleted rows may appear",
+                            file_entry.path
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        // Parquet read required for: flat scan fallback, exact reranking, score_fn, hybrid,
+        // or when equality delete filter must check column values per-row.
         let need_parquet = file_entry.index_status == IndexStatus::Indexing
             || !reader.is_ailake_file()
             || config.rerank_factor.is_some()
             || config.score_fn.is_some()
-            || use_hybrid;
+            || use_hybrid
+            || !eq_del_filter.is_empty();
 
         if file_entry.index_status == IndexStatus::Indexing || !reader.is_ailake_file() {
             debug!(
                 "ailake: flat scan fallback for {} (index_status={:?})",
                 file_entry.path, file_entry.index_status
             );
-            let (batch, raw_vectors) = reader.read_parquet()?;
+            let (raw_batch, raw_vectors) = reader.read_parquet()?;
+            // Phase G: inject columns added via schema evolution with initial_default values.
+            let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
             for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
+                // Skip rows marked as deleted by a V3 Deletion Vector.
+                if dv_bitmap.as_ref().map_or(false, |bm| bm.contains(row_id.as_u64() as u32)) {
+                    continue;
+                }
+                // Phase H: skip rows matched by an equality delete predicate.
+                if eq_del_filter.should_delete_row(&batch, row_id.as_u64() as usize) {
+                    continue;
+                }
                 if use_hybrid {
                     let text = extract_text_for_row(
                         &batch,
@@ -336,13 +405,27 @@ pub async fn search(
         let local_results = index.search(query, candidate_k, config.ef_search);
 
         let parquet_data = if need_parquet {
-            Some(reader.read_parquet()?)
+            let (raw_batch, raw_vecs) = reader.read_parquet()?;
+            // Phase G: fill missing columns for old files before score_fn / hybrid BM25.
+            let filled = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
+            Some((filled, raw_vecs))
         } else {
             None
         };
 
         for (row_id, approx_dist) in local_results {
+            // Skip rows marked as deleted by a V3 Deletion Vector.
+            if dv_bitmap.as_ref().map_or(false, |bm| bm.contains(row_id.as_u64() as u32)) {
+                continue;
+            }
             let idx = row_id.as_u64() as usize;
+            // Phase H: skip rows matched by an equality delete predicate.
+            // parquet_data is always loaded when eq_del_filter is non-empty (see need_parquet).
+            if let Some((ref batch, _)) = parquet_data {
+                if eq_del_filter.should_delete_row(batch, idx) {
+                    continue;
+                }
+            }
 
             let distance = if config.rerank_factor.is_some() {
                 match parquet_data.as_ref().and_then(|(_, vecs)| vecs.get(idx)) {
@@ -1021,15 +1104,35 @@ pub async fn search_text(
     };
     let scorer = crate::bm25::BM25Scorer::new(&stats);
 
+    // Phase H: equality delete filter for search_text results.
+    let eq_del_filter = match catalog.list_equality_deletes(table, None).await {
+        Ok(edfs) if !edfs.is_empty() => {
+            match EqualityDeleteFilter::from_files(&store, &edfs).await {
+                Ok(f) => f,
+                Err(e) => {
+                    warn!("ailake: equality delete filter build failed in search_text: {e}");
+                    EqualityDeleteFilter::empty()
+                }
+            }
+        }
+        _ => EqualityDeleteFilter::empty(),
+    };
+
     let mut results: Vec<SearchResult> = Vec::new();
 
     for file_entry in &files {
         let file_bytes = store.get(&file_entry.path).await?;
         // Use dim=0 — we only read the Parquet columns, not the HNSW.
         let reader = AilakeFileReader::new(file_bytes, "", 0);
-        let (batch, _) = reader.read_parquet()?;
+        let (raw_batch, _) = reader.read_parquet()?;
+        // Phase G: fill missing columns for old files before BM25 text extraction.
+        let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
 
         for row_idx in 0..batch.num_rows() {
+            // Phase H: skip rows matched by equality delete predicate.
+            if eq_del_filter.should_delete_row(&batch, row_idx) {
+                continue;
+            }
             let doc_text: String = text_columns
                 .iter()
                 .filter_map(|&col| {
@@ -1186,6 +1289,43 @@ pub async fn fetch_rows(
     RecordBatch::try_new(new_schema, columns).map_err(|e| AilakeError::Arrow(e.to_string()))
 }
 
+/// Load per-file BM25 Bloom filters from the Puffin stats file for the current snapshot.
+///
+/// Returns a map of `file_path → BloomFilter`. Empty map = no stats file available
+/// (V2 table, first write, or fetch failure). The scanner applies Bloom pruning only
+/// when the map is non-empty.
+async fn load_bloom_map(
+    table_meta: &ailake_catalog::TableMetadata,
+    store: &dyn Store,
+) -> std::collections::HashMap<String, crate::bloom::BloomFilter> {
+    let stats_path = match &table_meta.current_statistics_path {
+        Some(p) => p.clone(),
+        None => return std::collections::HashMap::new(),
+    };
+    let bytes = match store.get(&stats_path).await {
+        Ok(b) => b,
+        Err(e) => {
+            debug!("ailake: Phase F — could not load Puffin stats ({stats_path}): {e}");
+            return std::collections::HashMap::new();
+        }
+    };
+    let reader = ailake_catalog::AilakePuffinReader::new(&bytes);
+    let bloom_entries = match reader.read_bm25_blooms() {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("ailake: Phase F — Puffin bloom parse error: {e}");
+            return std::collections::HashMap::new();
+        }
+    };
+    bloom_entries
+        .into_iter()
+        .filter_map(|entry| {
+            let bf = crate::bloom::BloomFilter::from_bytes(&entry.bloom_bytes)?;
+            Some((entry.path, bf))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1214,7 +1354,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        }
+        partition_column_type: None,
+                partition_fields: vec![],
+}
     }
 
     async fn write_demo_table(dir: &TempDir, dim: usize, rows: usize) {
@@ -1236,7 +1378,7 @@ mod tests {
             .collect();
 
         let mut writer =
-            crate::TableWriter::create_or_open(catalog, store, make_policy(dim as u32), table)
+            crate::TableWriter::create_or_open(catalog, store, make_policy(dim as u32), table, 2)
                 .await
                 .unwrap();
         writer.write_batch(&batch, &embeddings).await.unwrap();
@@ -1487,13 +1629,16 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        };
+        partition_column_type: None,
+                partition_fields: vec![],
+};
 
         let mut writer = crate::TableWriter::create_or_open(
             catalog.clone(),
             store.clone(),
             text_policy,
             table.clone(),
+            2,
         )
         .await
         .unwrap();

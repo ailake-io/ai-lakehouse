@@ -36,7 +36,9 @@ async fn write_10k_rows_search_top10() {
         modality: None,
         partition_by: None,
         partition_value: None,
-    };
+    partition_column_type: None,
+        partition_fields: vec![],
+};
 
     // Create table and write 10k rows split across 2 batches
     let mut writer = TableWriter::create_or_open(
@@ -44,6 +46,7 @@ async fn write_10k_rows_search_top10() {
         Arc::clone(&store) as Arc<dyn ailake_store::Store>,
         policy.clone(),
         table.clone(),
+        2,
     )
     .await
     .unwrap();

@@ -228,7 +228,11 @@ impl CompactionExecutor {
         let header = reader.read_header()?;
         let ailk_start = reader.ailk_offset()?;
 
-        let entry = make_data_file_entry(
+        // Preserve row-ID continuity: merged file inherits the minimum first_row_id of
+        // its sources so commit_snapshot doesn't allocate fresh IDs and grow next_row_id.
+        let source_first_row_id = files.iter().filter_map(|f| f.first_row_id).min();
+
+        let mut entry = make_data_file_entry(
             output_path,
             record_count,
             file_size,
@@ -240,6 +244,7 @@ impl CompactionExecutor {
                 hnsw_len: header.hnsw_len,
             },
         );
+        entry.first_row_id = source_first_row_id;
         Ok(entry)
     }
 
@@ -408,7 +413,12 @@ impl CompactionExecutor {
         let header = reader.read_header()?;
         let ailk_start = reader.ailk_offset()?;
 
-        let entry = make_data_file_entry(
+        // Dominant file goes first in the merged output, so the merged file's first
+        // logical row was the dominant file's first row.  Use its first_row_id so
+        // commit_snapshot doesn't grow next_row_id unnecessarily.
+        let source_first_row_id = files[dom_idx].first_row_id;
+
+        let mut entry = make_data_file_entry(
             output_path,
             record_count,
             file_size,
@@ -420,6 +430,7 @@ impl CompactionExecutor {
                 hnsw_len: header.hnsw_len,
             },
         );
+        entry.first_row_id = source_first_row_id;
 
         info!(
             "ailake: compact_incremental — merged {} files into {} \
@@ -478,7 +489,8 @@ impl CompactionExecutor {
 
         // Centroid available for geometric pruning during the build window.
         let centroid = compute_centroid_and_radius(&all_embeddings, self.policy.metric);
-        let entry = make_data_file_entry_indexing(
+        let source_first_row_id = files.iter().filter_map(|f| f.first_row_id).min();
+        let mut entry = make_data_file_entry_indexing(
             output_path,
             record_count,
             file_size,
@@ -486,6 +498,7 @@ impl CompactionExecutor {
             &self.policy.column_name,
             self.policy.dim,
         );
+        entry.first_row_id = source_first_row_id;
 
         // Spawn background index build; errors are logged, not propagated.
         let store = self.store.clone();
@@ -537,6 +550,8 @@ impl CompactionExecutor {
             operation: SnapshotOperation::Replace,
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+                equality_delete_files: vec![],
         };
         catalog.commit_snapshot(table, snapshot).await?;
 
@@ -586,6 +601,8 @@ impl CompactionExecutor {
             operation: SnapshotOperation::Replace,
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+                equality_delete_files: vec![],
         };
         catalog.commit_snapshot(table, snapshot).await?;
 
@@ -648,6 +665,8 @@ mod tests {
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             })
             .collect();
         assert!(planner.plan(&files).is_empty());
@@ -676,6 +695,8 @@ mod tests {
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "large.parquet".into(),
@@ -692,6 +713,8 @@ mod tests {
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "also-small.parquet".into(),
@@ -708,6 +731,8 @@ mod tests {
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
         ];
         let selected = planner.plan(&files);
@@ -740,6 +765,8 @@ mod tests {
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             })
             .collect();
         let selected = planner.plan(&files);
@@ -766,6 +793,8 @@ mod tests {
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "a.parquet".into(),
@@ -775,6 +804,8 @@ mod tests {
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "b.parquet".into(),
@@ -784,6 +815,8 @@ mod tests {
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
         ];
         let selected = planner.plan(&files);
@@ -818,7 +851,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        };
+        partition_column_type: None,
+                partition_fields: vec![],
+};
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let embs_a: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
@@ -859,6 +894,8 @@ mod tests {
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -875,6 +912,8 @@ mod tests {
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
         ];
 
@@ -921,7 +960,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        };
+        partition_column_type: None,
+                partition_fields: vec![],
+};
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
 
@@ -983,6 +1024,8 @@ mod tests {
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "data/small.parquet".into(),
@@ -999,6 +1042,8 @@ mod tests {
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
         ];
 
@@ -1066,7 +1111,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        };
+        partition_column_type: None,
+                partition_fields: vec![],
+};
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
 
@@ -1099,6 +1146,8 @@ mod tests {
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -1108,6 +1157,8 @@ mod tests {
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
         ];
 
@@ -1160,7 +1211,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        };
+        partition_column_type: None,
+                partition_fields: vec![],
+};
 
         use ailake_catalog::TableProperties;
         catalog
@@ -1169,6 +1222,8 @@ mod tests {
                 &TableProperties {
                     policy: policy.clone(),
                     extra: std::collections::HashMap::new(),
+                    format_version: 2,
+                    partition_column_type: None,
                 },
             )
             .await
@@ -1206,6 +1261,8 @@ mod tests {
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -1215,6 +1272,8 @@ mod tests {
                 vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
                 partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             },
         ];
 

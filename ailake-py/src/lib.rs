@@ -24,10 +24,10 @@ use ailake_catalog::{
 };
 use ailake_core::{EmbeddingModelInfo, VectorMetric, VectorModality, VectorStoragePolicy};
 use ailake_query::{
-    fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
-    Chunk, ContextAssembler, ContextAssemblerConfig, EmbedFn, FusionMethod, MigrationJob,
-    MigrationProgress, MigrationStrategy, ModalQuery, MultiVectorBatch, ProgressFn, SearchConfig,
-    TableWriter as RsTableWriter,
+    delete_rows as rs_delete_rows, fetch_rows as rs_fetch_rows, search as rs_search,
+    search_multimodal as rs_search_multimodal, Chunk, ContextAssembler, ContextAssemblerConfig,
+    EmbedFn, FusionMethod, MigrationJob, MigrationProgress, MigrationStrategy, ModalQuery,
+    MultiVectorBatch, ProgressFn, SearchConfig, TableWriter as RsTableWriter,
 };
 use ailake_store::{store::Store, LocalStore};
 
@@ -125,7 +125,7 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, bm25_text_column=None))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, partition_column_type=None, partition_fields=None, partition_values=None, bm25_text_column=None, format_version=2))]
     fn new(
         py: Python<'_>,
         path: &str,
@@ -142,7 +142,17 @@ impl TableWriter {
         embed_fn: Option<Py<PyAny>>,
         partition_by: Option<String>,
         partition_value: Option<String>,
+        partition_column_type: Option<String>,
+        // Multi-column partition spec (Phase K).
+        // List of (column, transform, column_type) tuples.
+        // Example: [("agent_id", "identity", "string"), ("ts", "truncate[4]", "string")]
+        partition_fields: Option<Vec<(String, String, String)>>,
+        // Dict of {column: raw_value} for multi-column partition value at write time.
+        // Converted to \x1f-separated compound string in partition_fields order.
+        // Ignored when partition_value is also set (partition_value takes priority).
+        partition_values: Option<std::collections::HashMap<String, String>>,
         bm25_text_column: Option<String>,
+        format_version: u8,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
@@ -157,7 +167,37 @@ impl TableWriter {
         policy.keep_raw_for_reranking = !pq_only;
         policy.ivf_residual = ivf_residual;
         policy.partition_by = partition_by;
-        policy.partition_value = partition_value;
+        policy.partition_column_type = partition_column_type;
+
+        // Phase K: multi-column partition spec.
+        if let Some(fields) = partition_fields {
+            policy.partition_fields = fields
+                .into_iter()
+                .map(|(col, tr, ct)| ailake_core::PartitionDef {
+                    column: col,
+                    transform: tr,
+                    column_type: ct,
+                })
+                .collect();
+        }
+
+        // Resolve partition_value: explicit string wins; else build from dict in field order.
+        policy.partition_value = if let Some(pv) = partition_value {
+            Some(pv)
+        } else if let Some(pv_map) = partition_values {
+            if policy.partition_fields.is_empty() {
+                None
+            } else {
+                let parts: Vec<String> = policy
+                    .partition_fields
+                    .iter()
+                    .map(|pf| pv_map.get(&pf.column).cloned().unwrap_or_default())
+                    .collect();
+                Some(parts.join("\x1f"))
+            }
+        } else {
+            None
+        };
         if let Some(model_name) = embedding_model {
             let mut model_info = EmbeddingModelInfo::new(model_name).with_dim(dim);
             if let Some(version) = embedding_model_version {
@@ -170,7 +210,7 @@ impl TableWriter {
 
         let stored_embed_fn = embed_fn.map(|f| f.clone_ref(py));
         let mut writer = rt
-            .block_on(RsTableWriter::create_or_open(catalog, store, policy, table))
+            .block_on(RsTableWriter::create_or_open(catalog, store, policy, table, format_version))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         if let Some(col) = bm25_text_column {
             writer = writer.with_bm25(col);
@@ -1082,6 +1122,162 @@ fn decay_memories(path: &str, decay_lambda: f32) -> PyResult<usize> {
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Mark rows as deleted in a V3 AI-Lake table using Iceberg Deletion Vectors.
+///
+/// Writes a Roaring Bitmap blob into a Puffin `.dvd` file and commits a new
+/// snapshot so the deleted rows are invisible to all subsequent searches.
+/// The data file itself is not modified; DVs are incremental and mergeable.
+///
+/// Args:
+///     table_path: path to the table directory (local or object-store URL).
+///     file_path: path of the Parquet data file (as shown by `ailake.info()`).
+///     row_ids: list of 0-based row positions to delete.
+///
+/// Raises:
+///     ValueError: if the table is format-version < 3, or file_path not found.
+///
+/// Example::
+///
+///     ailake.delete_rows(
+///         "s3://my-lake/docs",
+///         "data/part-00001.parquet",
+///         [5, 10, 42],
+///     )
+#[pyfunction]
+#[pyo3(signature = (table_path, file_path, row_ids))]
+fn delete_rows(table_path: &str, file_path: &str, row_ids: Vec<u32>) -> PyResult<()> {
+    let rt = rt()?;
+    let (catalog, store) = local_catalog_store(table_path);
+    let table = TableIdent::new("default", "table");
+
+    rt.block_on(rs_delete_rows(catalog, store, &table, file_path, &row_ids))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Current UTC time as Unix epoch nanoseconds.
+///
+/// Use to populate `created_at` and `last_accessed_at` columns in
+/// `LlmContextSchema` / `EpisodicMemorySchema` tables. The matching Arrow
+/// type is `pa.timestamp('ns', tz='UTC')`.
+#[pyfunction]
+fn now_ns() -> i64 {
+    ailake_core::now_ns()
+}
+
+/// Add a column to the table schema without rewriting data files (Phase G).
+///
+/// Old files missing the column will return `initial_default` (or null if omitted)
+/// at read time — no compaction needed.
+///
+/// Args:
+///     table_path: path to the table (local dir or s3://... URI)
+///     name: column name
+///     iceberg_type: Iceberg type string — "int", "long", "float", "double",
+///         "boolean", "string", "date", "timestamp", "timestamptz", "binary"
+///     required: if True, the field is marked non-nullable (use False for additions)
+///     initial_default: JSON-serialisable scalar returned for old files, e.g. 0, 0.0,
+///         "unknown", True, None → null
+///     write_default: default written to new files when no value is supplied
+///     doc: optional field documentation stored in the schema
+///
+/// Returns:
+///     new schema-id (int)
+#[pyfunction]
+#[pyo3(signature = (table_path, name, iceberg_type, required=false, initial_default=None, write_default=None, doc=None))]
+fn add_column(
+    table_path: &str,
+    name: &str,
+    iceberg_type: &str,
+    required: bool,
+    initial_default: Option<pyo3::Bound<'_, PyAny>>,
+    write_default: Option<pyo3::Bound<'_, PyAny>>,
+    doc: Option<&str>,
+) -> PyResult<i32> {
+    let rt = rt()?;
+    let (catalog, _store) = local_catalog_store(table_path);
+    let table = TableIdent::new("default", "table");
+
+    let py_to_json = |v: Option<pyo3::Bound<'_, PyAny>>| -> Option<serde_json::Value> {
+        v.and_then(|py| {
+            if let Ok(b) = py.extract::<bool>() {
+                return Some(serde_json::Value::Bool(b));
+            }
+            if let Ok(i) = py.extract::<i64>() {
+                return Some(serde_json::json!(i));
+            }
+            if let Ok(f) = py.extract::<f64>() {
+                return Some(serde_json::json!(f));
+            }
+            if let Ok(s) = py.extract::<String>() {
+                return Some(serde_json::Value::String(s));
+            }
+            None
+        })
+    };
+
+    use ailake_catalog::{AddColumnRequest, SchemaEvolution};
+    let req = AddColumnRequest {
+        name: name.to_string(),
+        iceberg_type: iceberg_type.to_string(),
+        required,
+        initial_default: py_to_json(initial_default),
+        write_default: py_to_json(write_default),
+        doc: doc.map(str::to_string),
+    };
+    let evolution = SchemaEvolution::new().add_column(req);
+    rt.block_on(catalog.evolve_schema(&table, evolution))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Rename a column in the table schema without rewriting data files (Phase G).
+///
+/// Field IDs are stable — Iceberg and the AI-Lake SDK identify columns by ID,
+/// not name. Old files are not affected (reads continue to work).
+///
+/// Returns:
+///     new schema-id (int)
+#[pyfunction]
+#[pyo3(signature = (table_path, old_name, new_name))]
+fn rename_column(table_path: &str, old_name: &str, new_name: &str) -> PyResult<i32> {
+    let rt = rt()?;
+    let (catalog, _store) = local_catalog_store(table_path);
+    let table = TableIdent::new("default", "table");
+
+    use ailake_catalog::SchemaEvolution;
+    let evolution = SchemaEvolution::new().rename_column(old_name, new_name);
+    rt.block_on(catalog.evolve_schema(&table, evolution))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Logically delete all rows where `column` equals any value in `values` (Phase H).
+///
+/// Writes an Iceberg equality delete file, then commits a Delete snapshot that
+/// inherits existing data files. Scanners will mask matching rows at read time
+/// without rewriting data files.
+///
+/// Args:
+///     table_path: path to the table (local dir or s3://... URI)
+///     column: name of the equality column (e.g. "document_id", "agent_id")
+///     values: list of string values identifying rows to delete
+///
+/// Example::
+///
+///     ailake.delete_where(
+///         "s3://my-lake/docs",
+///         "document_id",
+///         ["doc-abc", "doc-def"],
+///     )
+#[pyfunction]
+#[pyo3(signature = (table_path, column, values))]
+fn delete_where(table_path: &str, column: &str, values: Vec<String>) -> PyResult<()> {
+    let rt = rt()?;
+    let (catalog, store) = local_catalog_store(table_path);
+    let table = TableIdent::new("default", "table");
+    let value_refs: Vec<&str> = values.iter().map(String::as_str).collect();
+    rt.block_on(ailake_query::delete_where(catalog, store, &table, column, &value_refs))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
@@ -1094,5 +1290,10 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(assemble_context, m)?)?;
     m.add_function(wrap_pyfunction!(migrate_embeddings, m)?)?;
     m.add_function(wrap_pyfunction!(decay_memories, m)?)?;
+    m.add_function(wrap_pyfunction!(delete_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(now_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(add_column, m)?)?;
+    m.add_function(wrap_pyfunction!(rename_column, m)?)?;
+    m.add_function(wrap_pyfunction!(delete_where, m)?)?;
     Ok(())
 }

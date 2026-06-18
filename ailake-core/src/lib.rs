@@ -14,8 +14,9 @@ pub use episodic::{
     episodic_columns, hybrid_score, recency_weight, EpisodicMemorySchema, RecencyConfig,
 };
 pub use schema::{
-    llm_columns, multimodal_columns, tool_call_columns, LlmContextSchema, MultimodalContextSchema,
-    PQConfig, ToolCallOutcome, ToolCallSchema, VectorStoragePolicy,
+    llm_columns, multimodal_columns, now_ns, tool_call_columns, LlmContextSchema,
+    MultimodalContextSchema, PQConfig, PartitionDef, ToolCallOutcome, ToolCallSchema,
+    VectorStoragePolicy,
 };
 pub use types::{
     ByteLen, ByteOffset, Centroid, Dim, EmbeddingModelInfo, RowId, VectorMetric, VectorModality,

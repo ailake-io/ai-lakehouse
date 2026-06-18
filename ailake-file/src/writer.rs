@@ -547,7 +547,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        }
+            partition_column_type: None,
+                partition_fields: vec![],
+}
     }
 
     #[test]
@@ -676,7 +678,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        };
+            partition_column_type: None,
+                partition_fields: vec![],
+};
 
         let writer = AilakeFileWriter::new(policy1.clone());
         let file = writer

@@ -12,8 +12,9 @@ use ailake_core::{
     VectorStoragePolicy,
 };
 use ailake_query::{
-    CompactionConfig, CompactionExecutor, CompactionPlanner, EmbedFn, MigrationJob,
-    MigrationProgress, MigrationStrategy, MultiVectorBatch, ProgressFn, SearchConfig, TableWriter,
+    delete_rows as rs_delete_rows, CompactionConfig, CompactionExecutor, CompactionPlanner,
+    EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy, MultiVectorBatch, ProgressFn,
+    SearchConfig, TableWriter,
 };
 use ailake_store::store_from_url;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -81,6 +82,11 @@ enum Commands {
         /// Stored as ailake.modality-<column> in Iceberg properties.
         #[arg(long, value_enum)]
         modality: Option<ModalityArg>,
+        /// Iceberg format version: 2 (default, V2) or 3 (opt-in V3).
+        /// V3 enables format-version=3 in metadata.json and manifests.
+        /// Append/update workloads fully supported; equality deletes not implemented.
+        #[arg(long, default_value = "2")]
+        format_version: u8,
     },
     /// Insert a Parquet file (with an embedding column) into a table
     Insert {
@@ -180,6 +186,53 @@ enum Commands {
         /// Optional version tag appended to --model-name (stored as "<name>@<version>")
         #[arg(long)]
         model_version: Option<String>,
+    },
+    /// Mark rows as deleted in a V3 table using Iceberg Deletion Vectors
+    DeleteRows {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// Path of the Parquet data file containing the rows to delete
+        /// (as reported by `ailake info`, e.g. "data/part-00001.parquet")
+        #[arg(long)]
+        file: String,
+        /// Comma-separated 0-based row positions to delete (e.g. "0,5,42")
+        #[arg(long)]
+        rows: String,
+    },
+    /// Logically delete rows matching an equality predicate (Phase H).
+    ///
+    /// Writes an Iceberg equality delete file and commits a Delete snapshot.
+    /// Matching rows are masked at scan time without rewriting data files.
+    DeleteWhere {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// Column to match against (e.g. document_id, agent_id)
+        #[arg(long)]
+        col: String,
+        /// Comma-separated values to delete (e.g. "doc-abc,doc-def")
+        #[arg(long)]
+        vals: String,
+    },
+    /// Evolve the table schema without rewriting data files (Phase G).
+    ///
+    /// Adds or renames columns in `metadata.json`. Old files missing new columns
+    /// will return `initial-default` (or null) at read time — no compaction needed.
+    Evolve {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// Add a column: "name:iceberg_type" e.g. "score:float" or "label:string"
+        /// May be specified multiple times for multiple additions.
+        #[arg(long = "add", value_name = "NAME:TYPE")]
+        adds: Vec<String>,
+        /// Initial default for the most recently listed --add column.
+        /// JSON literal: 0, 0.0, "unknown", true, null.
+        /// Repeated values align positionally with --add occurrences.
+        #[arg(long = "initial-default", value_name = "JSON")]
+        initial_defaults: Vec<String>,
+        /// Rename a column: "old:new" e.g. "old_name:new_name"
+        /// May be specified multiple times.
+        #[arg(long = "rename", value_name = "OLD:NEW")]
+        renames: Vec<String>,
     },
     /// Estimate storage usage before writing (no I/O — pure math)
     Estimate {
@@ -330,6 +383,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             pq_only,
             ivf_residual,
             modality,
+            format_version,
         } => {
             let ident = parse_table_ident(&table);
             let policy = VectorStoragePolicy {
@@ -347,7 +401,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                 modality: modality.map(VectorModality::from),
                 partition_by: None,
                 partition_value: None,
-            };
+            partition_column_type: None,
+                        partition_fields: vec![],
+};
 
             catalog
                 .create_table(
@@ -355,7 +411,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                     &TableProperties {
                         policy,
                         extra: std::collections::HashMap::new(),
-                    },
+                        format_version,
+                        partition_column_type: None,
+                        },
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -409,7 +467,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                     modality: first_modality,
                     partition_by: None,
                     partition_value: None,
-                };
+                partition_column_type: None,
+                                partition_fields: vec![],
+};
                 mv_owned.push((first_policy, first_embs));
 
                 for (col_name, dim, metric, modality) in &col_specs[1..] {
@@ -430,14 +490,16 @@ async fn run(cli: Cli) -> Result<(), String> {
                         modality: *modality,
                         partition_by: None,
                         partition_value: None,
-                    };
+                    partition_column_type: None,
+                                        partition_fields: vec![],
+};
                     mv_owned.push((policy, embs));
                 }
 
                 // Use first policy as the table-level policy for create_or_open.
                 let table_policy = mv_owned[0].0.clone();
                 let mut writer =
-                    TableWriter::create_or_open(catalog, Arc::clone(&store), table_policy, ident)
+                    TableWriter::create_or_open(catalog, Arc::clone(&store), table_policy, ident, 2)
                         .await
                         .map_err(|e| e.to_string())?;
 
@@ -497,7 +559,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                         modality: None,
                         partition_by: None,
                         partition_value: None,
-                    },
+                    partition_column_type: None,
+                                        partition_fields: vec![],
+},
                     Err(_) => VectorStoragePolicy {
                         column_name: embeddings.clone(),
                         dim,
@@ -513,11 +577,13 @@ async fn run(cli: Cli) -> Result<(), String> {
                         modality: None,
                         partition_by: None,
                         partition_value: None,
-                    },
+                    partition_column_type: None,
+                                        partition_fields: vec![],
+},
                 };
 
                 let mut writer =
-                    TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident)
+                    TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident, 2)
                         .await
                         .map_err(|e| e.to_string())?;
 
@@ -665,7 +731,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                 modality: None,
                 partition_by: None,
                 partition_value: None,
-            };
+            partition_column_type: None,
+                        partition_fields: vec![],
+};
 
             let files = catalog
                 .list_files(&ident, None)
@@ -721,6 +789,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 operation: ailake_catalog::provider::SnapshotOperation::Replace,
                 iceberg_schema: None,
                 extra_properties: std::collections::HashMap::new(),
+                bloom_filters: vec![],
+                equality_delete_files: vec![],
             };
             catalog
                 .commit_snapshot(&ident, snap)
@@ -770,7 +840,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                 modality: None,
                 partition_by: None,
                 partition_value: None,
-            };
+            partition_column_type: None,
+                        partition_fields: vec![],
+};
             serve::run(
                 catalog as Arc<dyn CatalogProvider>,
                 store,
@@ -939,6 +1011,101 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
 
             println!("migration complete");
+            Ok(())
+        }
+
+        Commands::DeleteRows { table, file, rows } => {
+            let ident = parse_table_ident(&table);
+            let row_ids: Vec<u32> = rows
+                .split(',')
+                .map(|s| {
+                    s.trim()
+                        .parse::<u32>()
+                        .map_err(|e| format!("invalid row id '{}': {e}", s.trim()))
+                })
+                .collect::<Result<_, _>>()?;
+
+            rs_delete_rows(
+                catalog as Arc<dyn CatalogProvider>,
+                store,
+                &ident,
+                &file,
+                &row_ids,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+            println!("deleted {} rows from {table} file {file}", row_ids.len());
+            Ok(())
+        }
+
+        Commands::DeleteWhere { table, col, vals } => {
+            use ailake_query::delete_where as rs_delete_where;
+            let ident = parse_table_ident(&table);
+            let values: Vec<&str> = vals.split(',').map(str::trim).collect();
+            rs_delete_where(
+                catalog as Arc<dyn CatalogProvider>,
+                store,
+                &ident,
+                &col,
+                &values,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            println!("delete-where committed: {} predicates on column '{col}'", values.len());
+            Ok(())
+        }
+
+        Commands::Evolve {
+            table,
+            adds,
+            initial_defaults,
+            renames,
+        } => {
+            use ailake_catalog::{AddColumnRequest, SchemaEvolution};
+            let ident = parse_table_ident(&table);
+            let mut evolution = SchemaEvolution::new();
+
+            for (i, add_spec) in adds.iter().enumerate() {
+                let (name, iceberg_type) = add_spec
+                    .split_once(':')
+                    .ok_or_else(|| format!("--add value '{add_spec}' must be NAME:TYPE"))?;
+                let initial_default: Option<serde_json::Value> =
+                    initial_defaults.get(i).and_then(|s| {
+                        serde_json::from_str(s)
+                            .map_err(|e| {
+                                eprintln!(
+                                    "warn: could not parse --initial-default '{}' as JSON: {e}; \
+                                     using null",
+                                    s
+                                );
+                                e
+                            })
+                            .ok()
+                    });
+                evolution = evolution.add_column(AddColumnRequest {
+                    name: name.to_string(),
+                    iceberg_type: iceberg_type.to_string(),
+                    required: false,
+                    initial_default: initial_default.clone(),
+                    write_default: initial_default,
+                    doc: None,
+                });
+            }
+
+            for rename_spec in &renames {
+                let (old_name, new_name) = rename_spec
+                    .split_once(':')
+                    .ok_or_else(|| format!("--rename value '{rename_spec}' must be OLD:NEW"))?;
+                evolution = evolution.rename_column(old_name, new_name);
+            }
+
+            let new_schema_id = catalog
+                .evolve_schema(&ident, evolution)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            println!("schema evolved — new schema-id: {new_schema_id}");
             Ok(())
         }
 

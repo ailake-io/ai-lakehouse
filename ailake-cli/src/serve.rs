@@ -218,6 +218,7 @@ async fn handle_write(
         Arc::clone(&state.store),
         state.policy.clone(),
         state.table.clone(),
+        2,
     )
     .await
     .map_err(ApiError::from)?;
@@ -310,6 +311,8 @@ async fn handle_compact(
                 operation: SnapshotOperation::Replace,
                 iceberg_schema: None,
                 extra_properties: std::collections::HashMap::new(),
+                bloom_filters: vec![],
+                equality_delete_files: vec![],
             },
         )
         .await
