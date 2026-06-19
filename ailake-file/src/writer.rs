@@ -573,7 +573,6 @@ mod tests {
     #[test]
     fn write_single_pass_reader_bootstrap_from_trailer() {
         use crate::reader::AilakeFileReader;
-        use bytes::Bytes;
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let batch =
@@ -586,7 +585,7 @@ mod tests {
 
         // Single-pass files have NO ailake.footer_offset in Parquet KV.
         // AilakeFileReader must bootstrap from AilakeTrailer instead.
-        let reader = AilakeFileReader::new(Bytes::from(file_bytes), "embedding", 4);
+        let reader = AilakeFileReader::new(file_bytes, "embedding", 4);
         assert!(
             reader.is_ailake_file(),
             "single-pass file must be recognised as AI-Lake file via trailer bootstrap"
@@ -601,7 +600,6 @@ mod tests {
         // Both write paths must produce an index that returns the same nearest neighbour
         // for a fixed query — verifying that single-pass doesn't corrupt the HNSW.
         use crate::reader::AilakeFileReader;
-        use bytes::Bytes;
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let batch = RecordBatch::try_new(
@@ -624,8 +622,8 @@ mod tests {
 
         let query = vec![1.0f32, 0.0, 0.0, 0.0];
 
-        let reader_tp = AilakeFileReader::new(Bytes::from(bytes_two_pass), "embedding", 4);
-        let reader_sp = AilakeFileReader::new(Bytes::from(bytes_single_pass), "embedding", 4);
+        let reader_tp = AilakeFileReader::new(bytes_two_pass, "embedding", 4);
+        let reader_sp = AilakeFileReader::new(bytes_single_pass, "embedding", 4);
 
         let idx_tp = reader_tp.load_index().unwrap();
         let idx_sp = reader_sp.load_index().unwrap();
