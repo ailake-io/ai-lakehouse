@@ -70,29 +70,86 @@ Writes a batch of records and their embeddings to an AI-Lake table.
 
 ```json
 {
-  "warehouse":       "/path/to/warehouse",
-  "namespace":       "default",
-  "table":           "my_table",
-  "vec_col":         "embedding",
-  "dim":             1536,
-  "metric":          "cosine",
-  "precision":       "f16",
-  "ids":             [1, 2, 3],
-  "embeddings":      [[0.1, 0.2, "..."], [0.3, 0.4, "..."], [0.5, 0.6, "..."]],
-  "ivf_residual":    false,
-  "embedding_model": "text-embedding-3-small@v1",
-  "partition_by":    "agent_id",
-  "partition_value": "agent-42"
+  "warehouse":        "/path/to/warehouse",
+  "namespace":        "default",
+  "table":            "my_table",
+  "vec_col":          "embedding",
+  "dim":              1536,
+  "metric":           "cosine",
+  "precision":        "f16",
+  "ids":              [1, 2, 3],
+  "embeddings":       [[0.1, 0.2, "..."], [0.3, 0.4, "..."], [0.5, 0.6, "..."]],
+  "ivf_residual":     false,
+  "embedding_model":  "text-embedding-3-small@v1",
+  "partition_by":     "agent_id",
+  "partition_value":  "agent-42",
+  "partition_fields": [{"column":"topic_id","transform":"identity","column_type":"int"}],
+  "format_version":   3
 }
 ```
 
 Optional fields:
 - `ivf_residual` (bool, default `false`) — enable residual PQ encoding (`vec - cluster_centroid`); improves recall@10 by ~2-4 pp at same storage.
-- `embedding_model` (string, default absent) — model identifier stored in Iceberg properties (`ailake.embedding-model`) and in the per-file Avro `key_metadata`. Format: `"<name>"` or `"<name>@<version>"`. Used for mismatch detection and migration tracking.
-- `partition_by` (string, default absent) — Iceberg identity partition column (e.g. `"agent_id"`). Stored in `metadata.json` as an Iceberg partition spec; subsequent readers can prune files by this column (Phase 9).
-- `partition_value` (string, default absent) — value for this write, tagged in per-file `key_metadata` JSON in the Avro manifest. Must be set whenever `partition_by` is set.
+- `embedding_model` (string, default absent) — model identifier stored in Iceberg properties (`ailake.embedding-model`). Format: `"<name>"` or `"<name>@<version>"`.
+- `partition_by` (string, default absent) — single-column Iceberg identity partition column (legacy; prefer `partition_fields` for new tables).
+- `partition_value` (string, default absent) — value for `partition_by`. Must be set when `partition_by` is set.
+- `partition_fields` (array, default `[]`) — multi-column Iceberg partition spec. Each object: `{column, transform, column_type}`. Supports all Iceberg transforms: `identity`, `year`, `month`, `day`, `hour`, `bucket[N]`, `truncate[N]`. Takes precedence over `partition_by` when non-empty.
+- `format_version` (int, default `2`) — Iceberg format version. Set to `3` to enable Iceberg v3.
 
 **Response JSON:** `{"ok": true, "snapshot_id": 7}` or `{"ok": false, "error": "..."}`.
+
+---
+
+### `ailake_delete_where_json`
+
+```
+fn ailake_delete_where_json(request_json: *const c_char) -> *mut c_char
+```
+
+Writes an Iceberg equality delete file and commits a Delete snapshot. No data files are rewritten.
+
+**Request JSON:**
+
+```json
+{
+  "warehouse": "/path/to/warehouse",
+  "namespace": "default",
+  "table":     "my_table",
+  "column":    "id",
+  "values":    ["doc-1", "doc-2"]
+}
+```
+
+- `values` empty array → no-op, returns `{"ok": true}` without writing any file.
+
+**Response JSON:** `{"ok": true}` or `{"ok": false, "error": "..."}`.
+
+---
+
+### `ailake_evolve_schema_json`
+
+```
+fn ailake_evolve_schema_json(request_json: *const c_char) -> *mut c_char
+```
+
+Applies metadata-only schema evolution. No data files are rewritten. Field IDs are stable.
+
+**Request JSON:**
+
+```json
+{
+  "warehouse":      "/path/to/warehouse",
+  "namespace":      "default",
+  "table":          "my_table",
+  "add_columns":    [{"name": "source_url", "type": "string", "initial_default": ""}],
+  "rename_columns": [{"from": "source_url", "to": "url"}]
+}
+```
+
+- Both arrays empty → no-op, returns current `schema_id`.
+- `initial_default` is optional; absent means `null`.
+
+**Response JSON:** `{"ok": true, "new_schema_id": 5}` or `{"ok": false, "error": "..."}`.
 
 ---
 

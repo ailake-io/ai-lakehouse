@@ -98,7 +98,8 @@ Starts at byte 0 of every AILK section. All integer fields little-endian.
 | `0`   | F32      | 4 |
 | `1`   | F16      | 2 (default) |
 | `2`   | I8       | 1 |
-| `3`   | Binary   | `ceil(dim/8)` per vector |
+
+Value `3` (Binary / Hamming) was removed in v0.0.14 — recall ≈ 0 on standard float embeddings without specific binary training alignment. Readers encountering `precision=3` in legacy files should treat it as unsupported.
 
 The `precision` field describes the encoding stored in the **Parquet column**.
 The centroid blob in the AILK section is always F32 (4 bytes per element)

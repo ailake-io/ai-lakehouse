@@ -303,6 +303,27 @@ recall/latency tradeoff but requires the most complex build setup.
 - `ailake-index/src/hardware.rs` — `HardwareBackend` enum (`CpuSimd`/`NvidiaCuda`/`AmdRocm`); `OnceLock<HardwareBackend>` caches detection result; AMD probed before NVIDIA to handle ROCm CUDA-compat layer; `HardwareProfile` struct includes `has_cuda`, `has_rocm`, `backend`, `cpu_logical_cores`, `has_avx2`, `has_avx512`
 - `detect_backend()`, `detect_cuda()`, `detect_rocm()` — public functions used by dispatch in `ivf_pq.rs`, `scanner.rs`
 
+**Hardware detection constants:**
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `MIN_VECTORS_FOR_IVF_PQ` | `5_000` | Minimum batch size to recommend IVF-PQ on CPU |
+| `MIN_CORES_FOR_IVF_PQ` | `8` | Minimum logical CPU cores to trigger CPU IVF-PQ path |
+| GPU priority | ROCm > CUDA > CPU | AMD probed first (ROCm CUDA-compat layer can mask NVIDIA) |
+
+**`HardwareProfile::recommend_ivf_pq(n_vectors: usize) → bool`** returns `true` when:
+- Any GPU detected (`has_cuda || has_rocm`), regardless of `n_vectors`, OR
+- `n_vectors >= MIN_VECTORS_FOR_IVF_PQ` AND `cpu_logical_cores > MIN_CORES_FOR_IVF_PQ`
+
+**Library names probed at runtime (dlopen/LoadLibrary):**
+
+| Backend | Linux | macOS | Windows |
+|---|---|---|---|
+| CUDA runtime | `libcudart.so`, `libcudart.so.12`, `libcudart.so.11` | `libcudart.dylib` | `cudart64_12.dll`, `cudart64_11.dll` |
+| cuBLAS | `libcublas.so`, `libcublas.so.12`, `libcublas.so.11` | `libcublas.dylib` | `cublas64_12.dll` |
+| ROCm (HIP) | `libamdhip64.so`, `libamdhip64.so.6` | — | — |
+| hipBLAS | `libhipblas.so`, `libhipblas.so.0` | — | — |
+
 **Implemented in Phase 4 — Adaptive index selection:**
 
 - `ailake-file::IndexType::Auto` — resolved at write time via `HardwareProfile::detect()`; IVF-PQ chosen when `has_cuda || has_rocm || cpu_logical_cores > 8 && n >= 5000`; HNSW otherwise

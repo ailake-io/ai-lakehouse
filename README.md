@@ -56,19 +56,21 @@ Then open **http://localhost:8888** and run the notebooks:
 
 | Notebook | What it shows |
 |---|---|
-| `01_ailake_demo.ipynb` | Write, search, IVF-PQ, residual PQ, deferred write, HNSW tuning, async API, storage estimator, Iceberg compat, RAG context assembly, MinIO upload, multi-column write, cross-modal RRF, `MultimodalContextSchema` |
+| `01_ailake_demo.ipynb` | Write, search, IVF-PQ, residual PQ, deferred write, HNSW tuning, async API, storage estimator, Iceberg compat, RAG context assembly, MinIO upload, multi-column write, cross-modal RRF, `MultimodalContextSchema`, `delete_where`, `add_column`/`rename_column`, `partition_fields` + Iceberg v3 |
 | `02_duckdb.ipynb` | DuckDB Parquet scan, filtered queries, per-file storage stats, F16 embedding decode |
-| `03_spark.ipynb` | PySpark local[*], Iceberg SQL, snapshot history, time-travel `VERSION AS OF` |
-| `04_trino.ipynb` | Trino SQL, AI-Lake table properties, `$files` / `$manifests` system tables |
+| `03_spark.ipynb` | PySpark local[*], Iceberg SQL, snapshot history, time-travel `VERSION AS OF`, partitioned v3 table read, delete_demo visibility, schema evolution read |
+| `04_trino.ipynb` | Trino SQL, AI-Lake table properties, `$files` / `$manifests` system tables, `partition_fields` DDL inspection, equality delete visibility |
 | `05_bigquery.ipynb` | BigQuery emulator inserts, F16 BYTES decode, production GCS + BigQuery Omni pattern |
 | `07_multimodal.ipynb` | `VectorColSpec`, `write_batch_multi`, modality tags, cross-modal RRF fusion, weight ablation, `MultimodalContextSchema` column constants |
 | `08_agents.ipynb` | `ailake.Agent`, episodic memory, `ToolCallSchema`, `EpisodicMemorySchema`, `WorkingMemoryBuffer`, `decay_memories`, per-agent partition isolation |
-| `09_hybrid_search.ipynb` | BM25 write (`bm25_text_column`), `search_text` pure lexical, hybrid RRF (vector + BM25), weight ablation, `WorkingMemoryBuffer`, `decay_memories` |
+| `09_hybrid_search.ipynb` | BM25 write (`bm25_text_column`), `search_text` pure lexical, hybrid RRF (vector + BM25), weight ablation |
+| `10_gpu_demo.ipynb` | `hardware_info()`, `write_batch_auto_deferred`, timing comparison HNSW vs deferred, search QPS, recall@10, CPU fallback |
 
-Notebooks 04 and 05 require the `engines` profile (adds Trino + BigQuery emulator):
+Notebooks 03 and 04 require the `engines` profile (adds Trino). Notebook 10 requires the `gpu` profile (NVIDIA Container Toolkit):
 
 ```bash
-docker compose -f tests/docker/compose-demo.yml --profile engines up -d
+docker compose -f tests/docker/compose-demo.yml --profile engines up -d   # Trino
+docker compose -f tests/docker/compose-demo.yml --profile gpu up -d        # GPU JupyterLab on :8889
 ```
 
 See [`tests/docker/`](./tests/docker/) for compose file details.
@@ -324,7 +326,7 @@ tests/
     └── demo/
         ├── Dockerfile           # Two-stage: Rust/maturin → JupyterLab
         ├── entrypoint.sh        # Init fixture then start Jupyter
-        ├── init_demo.py         # Generates 5 fixture tables (HNSW, PQ-only, Residual-PQ, Deferred, Multimodal)
+        ├── init_demo.py         # Generates 8 fixture tables (HNSW, PQ-only, Residual-PQ, Deferred, Multimodal, Partitioned-v3, Delete-demo, Schema-evo)
         ├── trino-catalog/
         │   └── ailake.properties # Trino Iceberg HadoopCatalog config
         └── notebooks/
@@ -407,7 +409,7 @@ cargo check --workspace
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector; **IVF-PQ shared codebook** (single k-means training across all shards — ADC distances comparable cross-shard); **`write_batch_ivf_pq_deferred`** (~250k vec/s write, async IVF-PQ build); **k-means++ O(n×k) fix** + rayon parallelism (17× speedup); **`HadoopCatalog` Replace fix** (`IndexStatus::Ready` convergence with concurrent background tasks) |
 | **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP REST server, Apache Airflow provider, idempotent writes, Compat Heavy CI (Spark+Iceberg, Trino+REST, BigQuery emulator), TruffleHog secret scanning, cloud deployment guides |
 | **Phase 6** | ✅ Complete | Public distribution pipeline — crates.io, PyPI (manylinux abi3 wheels), Airflow provider on PyPI, pre-built JVM JARs + `libailake_jni.so` on GitHub Releases, dynamic Python versioning |
-| **Phase 7** | 🚧 In progress | Done: DuckDB extension (`duckdb-ailake/`), Python full-read (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` exposed in Python SDK, expanded JupyterLab demo (5 fixture tables, 23 notebook sections + `07_multimodal.ipynb`). Remaining: DuckLake catalog backend; dbt integration guide |
+| **Phase 7** | 🚧 In progress | Done: DuckDB extension (`duckdb-ailake/`), Python full-read (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` exposed in Python SDK, dbt integration guide (`docs/guides/DBT_INTEGRATION.md`), `partition_fields` (multi-column Iceberg partition spec), `format_version=3` (Iceberg v3 tables), `delete_where` + `evolve_schema` across all SDKs (Python, Go, C++, Spark, Trino, Flink, DuckDB, Airflow, Airbyte), `hardware_info()` Python binding, GPU demo notebook (`10_gpu_demo.ipynb`), expanded JupyterLab demo (10 notebooks). Remaining: DuckLake catalog backend |
 | **Phase 8** | ✅ Complete | Multimodal — `VectorModality` enum, `ailake.modality-<col>` Iceberg property, N generalized vector columns with independent HNSW, `write_batch_multi`, CLI `--vector-cols`, `search_multimodal` (cross-modal RRF), `MultimodalContextSchema` + `multimodal_columns` constants, Python `VectorColSpec`, multimodal demo notebook + fixture. Propagated to all native plugins: `ailake_search_multimodal_json` C-ABI (JNI), `searchMultimodal()` in Spark/Trino/Flink, `ailake_search_multimodal()` DuckDB table function, `SearchMultimodal()` Go SDK + `ExtraVectorIndex` catalog parsing, `search_multimodal()` C++ SDK + `ExtraVectorIndex` in `DataFileEntry`. |
 | **Phase 9** | ✅ Complete | Agent memory — `ToolCallSchema` (searchable tool call history), `EpisodicMemorySchema` (recency decay, access count, importance score), injectable `ScoreFn` for hybrid scoring (distance × recency × importance), `partition_by`/`partition_value` Iceberg identity partitioning for per-agent file isolation, `partition_filter` manifest-level pruning before centroid check and HNSW load, Python `ailake.Agent` helper (LangChain/CrewAI/AutoGen). Propagated to all SDKs and connectors: Spark, Trino, Flink, Go, C++, DuckDB (`ailake_search` + `ailake_search_multimodal` + `ailake_write_batch`), Airbyte destination, Airflow provider. Fix: `TableWriter::create_or_open` part_counter initialized from existing file count (prevents file path collision on multi-writer tables). |
 

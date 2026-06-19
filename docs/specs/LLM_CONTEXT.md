@@ -434,6 +434,8 @@ results = ailake.search(
 
 `score_fn` receives the HNSW distance and the full `RecordBatch` row for the candidate. The return value replaces `distance` in the ranked result. Lower is still better (agents typically set score = distance / recency / importance so high-recency, high-importance results surface first).
 
+> **GPU flat-scan limitation**: `score_fn` is **not applied** during the deferred index build window (`write_batch_auto_deferred`) when the GPU flat-scan path is active — flat-scan has no access to Parquet row data. Once `IndexStatus` transitions to `Ready`, `score_fn` is applied normally via the HNSW/IVF-PQ path. For production agent workloads where hybrid scoring is critical, use synchronous `write_batch()` or poll `IndexStatus::Ready` before querying with `score_fn`.
+
 ### Partition isolation — per-agent file pruning
 
 Writing with `partition_by` + `partition_value` enables zero-cost per-agent isolation. The manifest-level `partition_filter` at search time prunes files before any HNSW I/O — no post-scan filtering:

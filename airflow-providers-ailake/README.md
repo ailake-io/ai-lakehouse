@@ -50,8 +50,41 @@ write_op = AilakeWriteOperator(
     table_path="s3://my-lake/agents/",
     texts_key="texts",            # XCom key for texts
     embeddings_key="embeddings",  # XCom key for embeddings
-    partition_by="agent_id",      # Phase 9 — Iceberg identity partition column
-    partition_value="agent-42",   # Phase 9 — value for this write
+    partition_by="agent_id",      # single-column identity partition
+    partition_value="agent-42",   # value tagged on this write
+    # multi-column partition spec (takes precedence over partition_by when set):
+    partition_fields=[{"column": "topic_id", "transform": "identity", "column_type": "int"}],
+    format_version=3,             # Iceberg v3 (default: 2)
+)
+```
+
+`AilakeDeleteWhereOperator` — writes an Iceberg equality delete file and commits a Delete snapshot. No data files are rewritten.
+
+```python
+from airflow_providers_ailake.operators.ailake import AilakeDeleteWhereOperator
+
+delete_op = AilakeDeleteWhereOperator(
+    task_id="expire_old_records",
+    conn_id="ailake_default",
+    table_path="s3://my-lake/docs/",
+    column="id",
+    values=["doc-obsolete-1", "doc-obsolete-2"],
+    # values_xcom_task_id="upstream_task",   # pull values list from XCom instead
+    # values_xcom_key="ids_to_delete",
+)
+```
+
+`AilakeEvolveSchemaOperator` — applies metadata-only schema evolution (add columns, rename columns). Pushes `schema_id` to XCom.
+
+```python
+from airflow_providers_ailake.operators.ailake import AilakeEvolveSchemaOperator
+
+evolve_op = AilakeEvolveSchemaOperator(
+    task_id="add_source_url_column",
+    conn_id="ailake_default",
+    table_path="s3://my-lake/docs/",
+    add_columns=[{"name": "source_url", "col_type": "string"}],
+    rename_columns=[],  # e.g. [{"from": "source_url", "to": "url"}]
 )
 ```
 

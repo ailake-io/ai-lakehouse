@@ -134,8 +134,10 @@ Opens or creates an AI-Lake table at `path`.
 | `embedding_model` | `None` | Embedding model name stored in Iceberg properties (`ailake.embedding-model`). Used for mismatch detection and migration tracking. |
 | `embedding_model_version` | `None` | Optional model version. Stored as `"<name>@<version>"` in Iceberg properties. |
 | `embed_fn` | `None` | Auto-embed callable `list[str] → list[list[float]]`. When set, `insert(texts)` and `write_batch(texts)` can be called without passing `embeddings` — the callable is invoked automatically. |
-| `partition_by` | `None` | Iceberg identity partition column (e.g. `"agent_id"`). When set, each writer must also pass `partition_value`. Stored in `metadata.json` as an Iceberg partition spec. |
-| `partition_value` | `None` | Per-write partition value (e.g. an agent UUID). Tagged in each `DataFileEntry` via `key_metadata` — used for manifest-level pruning at search time. |
+| `partition_by` | `None` | Single-column Iceberg identity partition (e.g. `"agent_id"`). Stored in `metadata.json`. Prefer `partition_fields` for new tables. |
+| `partition_value` | `None` | Per-write value for `partition_by`. Tagged in `key_metadata`; used for manifest-level pruning at search time. |
+| `partition_fields` | `None` | Multi-column Iceberg partition spec. List of `(column, transform, column_type)` tuples. Supports all Iceberg transforms: `"identity"`, `"year"`, `"month"`, `"day"`, `"hour"`, `"bucket[N]"`, `"truncate[N]"`. Takes precedence over `partition_by`. Example: `[("topic_id","identity","int"),("date","month","date")]`. |
+| `format_version` | `2` | Iceberg format version. Set to `3` to write an Iceberg v3 table. |
 
 ### `Table`
 
@@ -354,7 +356,46 @@ writer.write_batch_auto_deferred(texts, embeddings)
 writer.commit()
 ```
 
-`TableWriter` parameters: same as `open_table()` (includes `pq_only`, `ivf_residual`, `pre_normalize`, `hnsw_m`, `hnsw_ef_construction`, `embedding_model`, `embedding_model_version`, `embed_fn`).
+`TableWriter` parameters: same as `open_table()` (includes `pq_only`, `ivf_residual`, `pre_normalize`, `hnsw_m`, `hnsw_ef_construction`, `embedding_model`, `embedding_model_version`, `embed_fn`, `partition_by`, `partition_value`, `partition_fields`, `format_version`).
+
+### `delete_where(path, column, values) → None`
+
+Commits an Iceberg equality delete. No data files are rewritten.
+
+```python
+ailake.delete_where("./my_table", "id", ["doc-obsolete-1", "doc-obsolete-2"])
+```
+
+### `add_column(path, name, col_type, *, required=False, initial_default=None) → int`
+
+Adds column to live table schema. Returns new `schema_id`. No data files rewritten.
+
+```python
+ailake.add_column("./my_table", "source_url", "string", required=False, initial_default="")
+```
+
+### `rename_column(path, old_name, new_name) → int`
+
+Renames column. Returns new `schema_id`.
+
+### `hardware_info() → dict[str, str]`
+
+Returns hardware profile of current machine.
+
+```python
+info = ailake.hardware_info()
+# {
+#   "backend":           "cpu-simd",   # or "nvidia-cuda" / "amd-rocm"
+#   "has_cuda":          "false",
+#   "has_rocm":          "false",
+#   "cpu_logical_cores": "16",
+#   "has_avx2":          "true",
+#   "has_avx512":        "false",
+#   "recommend_ivf_pq":  "true",       # true when has GPU OR (cores > 8 AND n >= 5000)
+# }
+```
+
+Call before `write_batch_auto_deferred` to understand what index type will be selected.
 
 ### `assemble_context(chunks, max_tokens=4096, dedup_threshold=0.05) → str`
 

@@ -9,6 +9,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Documentation audit — full sync with codebase state** — all project docs updated to match current feature set. Changes across 18 files:
+  - **SETUP.md**: removed §8I (RaBitQ flat index), §8J (Binary Hamming flat index); updated crate table to drop removed index types; added Python examples for `partition_fields`, `format_version=3`, `delete_where`/`add_column`/`rename_column`, `hardware_info()`.
+  - **CONTRIBUTING.md**: fixed C++ test table — replaced `test_binary.cpp` row with `test_write.cpp` (covers `delete_where`, `evolve_schema`, `shell_quote`, `resolve_bin`); fixed `foreach` line to match actual CMakeLists.
+  - **docs/specs/FILE_FORMAT.md**: removed `precision=3` Binary row from precision table; added deprecation note (removed in v0.0.14).
+  - **docs/specs/JVM_PLUGINS.md**: added uniffi removal note; rewrote C-ABI API section with all 6 exported functions including `ailake_delete_where_json` and `ailake_evolve_schema_json`; updated JSON field table with `partition_fields` and `format_version`; added full Flink connector section (build, SQL DDL, Kotlin API, options table); added `## Delete and schema evolution` section.
+  - **docs/specs/GPU_FFI_EVALUATION.md**: added hardware thresholds table (`MIN_VECTORS_FOR_IVF_PQ=5_000`, `MIN_CORES_FOR_IVF_PQ=8`, GPU priority order) and dlopen library names table.
+  - **docs/specs/INTEGRATIONS.md**: fixed cloud platform rows that still said "Phase 3" → "✅"; updated `ailake_write_batch` signature with `partition_fields` and `format_version`; expanded optional params description.
+  - **docs/specs/CLOUD_DEPLOY.md**: added §5 Flink deployment guide (KDA, EMR, SQL DDL, Kubernetes Flink operator); §5 Troubleshooting bumped to §6.
+  - **docs/specs/LLM_CONTEXT.md**: added GPU flat-scan limitation note for `score_fn` (not applied during deferred build window).
+  - **docs/WHY_AILAKE.md**: added "AI-Lake is also the right choice when" block covering BM25 hybrid search, `delete_where` atomicity, `partition_by` agent isolation; updated "not the right choice" block to accurately describe BM25 scope.
+  - **ailake-py/README.md**: added `partition_fields`, `format_version` params to `open_table()` table; added `TableWriter` params note; added `delete_where`, `add_column`, `rename_column`, `hardware_info()` sections.
+  - **ailake-jni/README.md**: updated `ailake_write_batch_json` request JSON with `partition_fields` and `format_version`; documented all optional fields; added full `ailake_delete_where_json` and `ailake_evolve_schema_json` sections.
+  - **ailake-go/README.md**: expanded `TableInfo` struct to show all fields including `FormatVersion`, `PartitionFields`, `SchemaFields`; added `PartitionDef` and `SchemaField` struct docs.
+  - **ailake-cpp/README.md**: added `## Write operations` section with `delete_where` and `evolve_schema` examples.
+  - **duckdb-ailake/README.md**: added `partition_fields` and `format_version` arities to `ailake_write_batch` with examples.
+  - **airflow-providers-ailake/README.md**: added `partition_fields` and `format_version` to `AilakeWriteOperator`; added `AilakeDeleteWhereOperator` and `AilakeEvolveSchemaOperator` sections.
+  - **airbyte-destination-ailake/README.md**: added `partition_fields` and `format_version` fields to config table.
+  - **README.md** + **README.pt-BR.md**: updated notebook list (10 notebooks, accurate descriptions); updated Phase 7 scope; updated fixture table count (5 → 8); added GPU profile note.
+
 ### Added
 
 - **Demo update — Phase L-R features, GPU demo notebook** — `tests/docker/demo/` fully updated with new features. `init_demo.py` adds three fixture tables: `ailake_partitioned_v3` (format_version=3, `partition_fields=[topic_id:identity:int]`), `ailake_delete_demo` (100 rows, 10 pre-deleted via `delete_where`), `ailake_schema_evo` (100 rows, `add_column source_url` applied); `_save_query_payload` records paths in `demo_query.json`. `compose-demo.yml` gains `--profile gpu` service `jupyter-gpu` with NVIDIA Container Toolkit device reservation (1 GPU). Notebook `01_ailake_demo.ipynb` gains §29 (`delete_where` before/after demo), §30 (schema evolution `add_column`/`rename_column`), §31 (Iceberg v3 partitioned table with `format_version=3`, bucket[4] demo inline). New notebook `10_gpu_demo.ipynb`: 7 sections covering `hardware_info()`, `write_batch_auto_deferred` auto-index-selection, write timing (immediate HNSW vs deferred auto), search throughput, recall comparison (auto-deferred vs HNSW), graceful CPU fallback path, large-scale deferred write (20k vectors).

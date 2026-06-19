@@ -156,11 +156,17 @@ The Iceberg manifest carries per-file `centroid` and `radius` in its `custom_pro
 - You run Spark, Trino, or Flink for transforms and want vector search in the same pipeline without a network hop to an external service.
 - You want sub-2ms p99 at production scale with no recall compromise.
 
+**AI-Lake is also the right choice when:**
+
+- You need hybrid BM25 + vector search without running an external FTS cluster. AI-Lake includes a pure-Rust BM25 scorer (`BM25Scorer`) with IDF stats accumulated at write time, fused with HNSW via Reciprocal Rank Fusion in a single search call. No Elasticsearch, no Tantivy dependency.
+- You need atomic deletes. `ailake.delete_where(path, "id", [ids])` commits an Iceberg equality delete in one snapshot — the rows vanish from both SQL queries and vector search simultaneously. No dual-system "delete in DB, delete in vector service" race condition.
+- You need per-agent/per-tenant isolation at massive scale. `partition_by="agent_id"` tags each file at write time; `partition_filter="agent-42"` at search time prunes to that agent's files at the manifest level — before any HNSW I/O. Isolation cost is O(manifest entries), not O(total vectors).
+
 **AI-Lake is not the right choice when:**
 
 - You are starting from scratch with no Iceberg infrastructure. LanceDB is simpler to get running in a day.
 - Your dataset is below ~1M vectors and your latency requirement is above 1 second. Iceberg + DuckDB `array_cosine_similarity` is sufficient.
-- You need full-text search as a first-class citizen alongside vector search. LanceDB bundles Tantivy; AI-Lake does not.
+- You need full-text search as a primary product feature (web-scale FTS, faceting, autocomplete). AI-Lake's BM25 path is a complement to vector search for RAG workloads — not a replacement for Elasticsearch or Solr at search-engine scale.
 - You need a managed cloud service with a control plane. AI-Lake is a format and SDK, not a SaaS product.
 
 ---

@@ -169,13 +169,22 @@ SELECT ailake_write_batch(
     precision       VARCHAR          -- f32 | f16 | i8
 ) → BIGINT
 
--- Named parameters (Phase 9 agent partitioning)
+-- Named parameters (single-column partition)
 SELECT ailake_write_batch(
     table_path,
     ids,
     embeddings,
     partition_by    VARCHAR,         -- partition column name (e.g. 'agent_id')
     partition_value VARCHAR          -- value for this write (e.g. agent UUID)
+) → BIGINT
+
+-- Named parameters (multi-column partition spec + format_version)
+SELECT ailake_write_batch(
+    table_path,
+    ids,
+    embeddings,
+    partition_fields VARCHAR,        -- JSON array: '[{"column":"topic_id","transform":"identity","column_type":"int"}]'
+    format_version   INTEGER         -- 2 (default) or 3 (Iceberg v3)
 ) → BIGINT
 ```
 
@@ -195,6 +204,15 @@ SELECT ailake_write_batch(
     [[0.1, 0.2], [0.3, 0.4]]::FLOAT[][],
     partition_by='agent_id',
     partition_value='agent-42'
+);
+
+-- Multi-column partition spec with Iceberg v3
+SELECT ailake_write_batch(
+    'file:///data/topics',
+    [0, 1]::BIGINT[],
+    [[0.1, 0.2], [0.3, 0.4]]::FLOAT[][],
+    partition_fields='[{"column":"topic_id","transform":"identity","column_type":"int"}]',
+    format_version=3
 );
 ```
 

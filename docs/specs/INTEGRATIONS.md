@@ -23,14 +23,14 @@ AI-Lake tables are read-compatible with any engine that supports Apache Iceberg 
 | **DuckDB 0.10+** | ✅ Iceberg extension | ✅ `duckdb-ailake/` extension | ✅ `ailake_search()` + `ailake_write_batch()` | — |
 | **PyIceberg 0.6+** | ✅ | ✅ | via SDK direct | — |
 | **AWS Athena** | ✅ Glue catalog | Limited | — | — |
-| **AWS EMR** | ✅ Spark/Trino on EMR | ✅ | Phase 3 | ✅ |
+| **AWS EMR** | ✅ Spark/Trino on EMR | ✅ | ✅ | ✅ |
 | **AWS Glue ETL** | ✅ | ✅ | via SDK direct | ✅ |
-| **Azure Synapse** | ✅ Spark pool | ✅ | Phase 3 | ✅ |
-| **Azure Databricks** | ✅ | ✅ | Phase 3 | ✅ |
-| **GCP Dataproc** | ✅ Spark/Trino | ✅ | Phase 3 | ✅ |
+| **Azure Synapse** | ✅ Spark pool | ✅ | ✅ | ✅ |
+| **Azure Databricks** | ✅ | ✅ | ✅ | ✅ |
+| **GCP Dataproc** | ✅ Spark/Trino | ✅ | ✅ | ✅ |
 | **GCP Dataflow** | ✅ Beam IcebergIO | ✅ Beam IcebergIO | via SDK direct | ✅ |
 | **Snowflake** | ✅ Iceberg tables | Limited | — | — |
-| **Databricks (general)** | ✅ | ✅ | Phase 3 | ✅ |
+| **Databricks (general)** | ✅ | ✅ | ✅ | ✅ |
 | **Python (`ailake-py`)** | ✅ PyArrow | ✅ `open_table` + `Table.insert` / `write_batch_auto_deferred` | ✅ `SearchQuery` fluent chain | ✅ `write_batch_auto_deferred`, `write_batch_idempotent`, async API |
 | **Go (`ailake-go`)** | ✅ AilakeReader | ✅ AilakeWriter | ✅ VectorSearch | — |
 | **C++17 (`ailake-cpp`)** | ✅ header-only | ✅ header-only | ✅ header-only | — |
@@ -491,9 +491,9 @@ Or set `ailake.native.lib` system property or `AILAKE_NATIVE_LIB` env var to poi
 |---|---|---|
 | `ailake_search` | `(table_path VARCHAR, query FLOAT[], top_k INTEGER [, vec_col VARCHAR, ef_search INTEGER, partition_filter VARCHAR]) → TABLE(row_id BIGINT, distance FLOAT, file_path VARCHAR)` | Vector nearest-neighbor search |
 | `ailake_search_multimodal` | `(table_path VARCHAR, queries LIST(STRUCT(...)), top_k INTEGER [, partition_filter VARCHAR]) → TABLE(row_id BIGINT, rrf_score FLOAT, file_path VARCHAR)` | Cross-modal RRF search |
-| `ailake_write_batch` | `(table_path VARCHAR, ids BIGINT[], embeddings FLOAT[][] [, vec_col, metric, precision, partition_by, partition_value]) → BIGINT` | Write a batch; returns snapshot ID or -1 on error |
+| `ailake_write_batch` | `(table_path VARCHAR, ids BIGINT[], embeddings FLOAT[][] [, vec_col, metric, precision, partition_by, partition_value, partition_fields, format_version]) → BIGINT` | Write a batch; returns snapshot ID or -1 on error |
 
-`partition_filter` (search) and `partition_by` / `partition_value` (write) are optional named parameters that enable per-agent/per-tenant manifest-level file pruning (Phase 9). All three functions degrade gracefully when `libailake_jni.so` is not loaded.
+`partition_filter` (search) and `partition_by`/`partition_value` (write, single-column identity) are optional named parameters for per-agent/per-tenant file pruning (Phase 9). `partition_fields` accepts a JSON array (`[{"column":"topic_id","transform":"identity","column_type":"int"}]`) for multi-column Iceberg partition specs with any transform (identity, bucket, truncate, year, month, day, hour) — Phase L/R. `format_version` (default 2) enables Iceberg v3 when set to `3`. All functions degrade gracefully when `libailake_jni.so` is not loaded.
 
 The extension uses the same JSON-envelope C-ABI protocol as the Spark and Trino plugins — no additional Rust code required.
 
