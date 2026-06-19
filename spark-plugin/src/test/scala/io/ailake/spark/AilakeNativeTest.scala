@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.spark
 
+import org.apache.spark.sql.connector.expressions.Transform
 import org.scalatest.funsuite.AnyFunSuite
 
 class AilakeNativeTest extends AnyFunSuite {
@@ -140,7 +141,7 @@ class AilakeNativeTest extends AnyFunSuite {
     props.put("partition-fields",
       """[{"column":"agent_id","transform":"identity","column_type":"string"}]""")
     props.put("format-version", "3")
-    val table = ds.getTable(StructType(Array.empty), Array.empty, props)
+    val table = ds.getTable(new StructType(), Array.empty[Transform], props)
     val handle = table.asInstanceOf[AilakeTable].handle
     assert(handle.partitionFields.size == 1)
     assert(handle.partitionFields.head.column == "agent_id")
@@ -154,7 +155,7 @@ class AilakeNativeTest extends AnyFunSuite {
     val ds = new AilakeDataSource()
     val props = new java.util.HashMap[String, String]()
     props.put("tableUri", "s3://b/docs/")
-    val table = ds.getTable(StructType(Array.empty), Array.empty, props)
+    val table = ds.getTable(new StructType(), Array.empty[Transform], props)
     val handle = table.asInstanceOf[AilakeTable].handle
     assert(handle.partitionFields.isEmpty)
     assert(handle.formatVersion == 2)

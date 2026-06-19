@@ -83,7 +83,7 @@ object implicits {
       precision:       String = "f16",
       namespace:       String = "default",
       tableName:       String = "",
-      partitionFields: Seq[PartitionFieldDef] = Seq.empty,
+      partitionFields: Seq[AilakeNative.PartitionFieldDef] = Seq.empty,
       formatVersion:   Int = 2,
     ): Unit = {
       val resolvedName = if (tableName.nonEmpty) tableName

@@ -27,11 +27,11 @@ class VectorScanConnectorFactory : ConnectorFactory {
             tableUri.trimEnd('/').substringAfterLast('/'))
         val embeddingModel = config["ailake.embedding-model"]?.takeIf { it.isNotEmpty() }
         val pfJson = config.getOrDefault("ailake.partition-fields", "[]")
-        val partitionFields: List<PartitionFieldDef> = if (pfJson == "[]" || pfJson.isBlank()) emptyList() else {
+        val partitionFields: List<AilakeNative.PartitionFieldDef> = if (pfJson == "[]" || pfJson.isBlank()) emptyList() else {
             val node = ObjectMapper().readTree(pfJson)
             (0 until node.size()).map { i ->
                 val n = node.get(i)
-                PartitionFieldDef(n.get("column").asText(), n.get("transform").asText(), n.get("column_type").asText())
+                AilakeNative.PartitionFieldDef(n.get("column").asText(), n.get("transform").asText(), n.get("column_type").asText())
             }
         }
         val formatVersion = config.getOrDefault("ailake.format-version", "2").toInt()

@@ -20,7 +20,7 @@ case class AilakeWriteHandle(
   idColIndex:      Int = 0,
   vecColIndex:     Int = 1,
   embeddingModel:  Option[String] = None,
-  partitionFields: Seq[PartitionFieldDef] = Seq.empty,
+  partitionFields: Seq[AilakeNative.PartitionFieldDef] = Seq.empty,
   formatVersion:   Int = 2,
 )
 

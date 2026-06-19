@@ -4,7 +4,7 @@ package io.ailake.flink
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.ailake.flink.internal.AilakeNativeLoader
-import io.ailake.flink.internal.PartitionFieldDef
+import io.ailake.flink.internal.AilakeNativeLoader.PartitionFieldDef
 import org.apache.flink.configuration.ConfigOption
 import org.apache.flink.configuration.ConfigOptions
 import org.apache.flink.table.connector.sink.DynamicTableSink

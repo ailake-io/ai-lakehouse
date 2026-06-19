@@ -29,7 +29,7 @@ class VectorScanMetadata(
     private val namespace: String,
     private val tableName: String,
     private val embeddingModel: String? = null,
-    private val partitionFields: List<PartitionFieldDef> = emptyList(),
+    private val partitionFields: List<AilakeNative.PartitionFieldDef> = emptyList(),
     private val formatVersion: Int = 2,
 ) : ConnectorMetadata {
 

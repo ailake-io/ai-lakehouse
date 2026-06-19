@@ -3,7 +3,7 @@
 package io.ailake.flink
 
 import io.ailake.flink.internal.AilakeNativeLoader
-import io.ailake.flink.internal.PartitionFieldDef
+import io.ailake.flink.internal.AilakeNativeLoader.PartitionFieldDef
 import org.apache.flink.streaming.api.datastream.DataStream
 import org.apache.flink.streaming.api.datastream.DataStreamSink
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction

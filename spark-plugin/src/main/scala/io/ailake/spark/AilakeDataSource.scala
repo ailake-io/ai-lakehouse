@@ -50,11 +50,11 @@ class AilakeDataSource extends TableProvider with DataSourceRegister {
       opts.getOrDefault("table-name",
         tableUri.stripSuffix("/").split("/").last))
     val pfJson       = opts.getOrDefault("partition-fields", opts.getOrDefault("partitionFields", "[]"))
-    val partitionFields: Seq[PartitionFieldDef] = if (pfJson == "[]" || pfJson.isEmpty) Seq.empty else {
+    val partitionFields: Seq[AilakeNative.PartitionFieldDef] = if (pfJson == "[]" || pfJson.isEmpty) Seq.empty else {
       val node = new ObjectMapper().readTree(pfJson)
       (0 until node.size()).map { i =>
         val n = node.get(i)
-        PartitionFieldDef(n.get("column").asText(), n.get("transform").asText(), n.get("column_type").asText())
+        AilakeNative.PartitionFieldDef(n.get("column").asText(), n.get("transform").asText(), n.get("column_type").asText())
       }.toSeq
     }
     val formatVersion = opts.getOrDefault("format-version", opts.getOrDefault("formatVersion", "2")).toInt
