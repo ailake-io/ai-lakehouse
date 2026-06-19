@@ -96,4 +96,36 @@ class AilakeNativeLoaderTest {
         assertTrue(r.ok)
         assertEquals(5, r.new_schema_id)
     }
+
+    // ── Phase R: AilakeVectorConnectorFactory option registration ─────────────
+
+    @Test
+    fun connectorFactoryRegistersPartitionFieldsOption() {
+        val factory = io.ailake.flink.AilakeVectorConnectorFactory()
+        val keys = factory.optionalOptions().map { it.key() }.toSet()
+        assertTrue("partition.fields" in keys,
+            "partition.fields must be in optionalOptions(); got: $keys")
+    }
+
+    @Test
+    fun connectorFactoryRegistersFormatVersionOption() {
+        val factory = io.ailake.flink.AilakeVectorConnectorFactory()
+        val keys = factory.optionalOptions().map { it.key() }.toSet()
+        assertTrue("format.version" in keys,
+            "format.version must be in optionalOptions(); got: $keys")
+    }
+
+    @Test
+    fun connectorFactoryPartitionFieldsDefaultIsEmptyJson() {
+        val factory = io.ailake.flink.AilakeVectorConnectorFactory()
+        val partitionFieldsOpt = factory.optionalOptions().first { it.key() == "partition.fields" }
+        assertEquals("[]", partitionFieldsOpt.defaultValue())
+    }
+
+    @Test
+    fun connectorFactoryFormatVersionDefaultIs2() {
+        val factory = io.ailake.flink.AilakeVectorConnectorFactory()
+        val formatVersionOpt = factory.optionalOptions().first { it.key() == "format.version" }
+        assertEquals(2, formatVersionOpt.defaultValue())
+    }
 }

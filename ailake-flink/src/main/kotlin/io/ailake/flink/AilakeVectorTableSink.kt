@@ -3,6 +3,7 @@
 package io.ailake.flink
 
 import io.ailake.flink.internal.AilakeNativeLoader
+import io.ailake.flink.internal.PartitionFieldDef
 import org.apache.flink.streaming.api.datastream.DataStream
 import org.apache.flink.streaming.api.datastream.DataStreamSink
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction
@@ -35,6 +36,8 @@ class AilakeVectorTableSink(
     private val precision: String,
     private val schema: ResolvedSchema,
     private val embeddingModel: String? = null,
+    private val partitionFields: List<PartitionFieldDef> = emptyList(),
+    private val formatVersion: Int = 2,
 ) : DynamicTableSink {
 
     companion object {
@@ -54,16 +57,18 @@ class AilakeVectorTableSink(
             ): DataStreamSink<*> {
                 return dataStream.addSink(
                     AilakeSinkFunction(
-                        warehouse      = warehouse,
-                        namespace      = namespace,
-                        tableName      = tableName,
-                        vecCol         = vecCol,
-                        dim            = dim,
-                        metric         = metric,
-                        precision      = precision,
-                        idIdx          = idIdx,
-                        vecIdx         = vecIdx,
-                        embeddingModel = embeddingModel,
+                        warehouse       = warehouse,
+                        namespace       = namespace,
+                        tableName       = tableName,
+                        vecCol          = vecCol,
+                        dim             = dim,
+                        metric          = metric,
+                        precision       = precision,
+                        idIdx           = idIdx,
+                        vecIdx          = vecIdx,
+                        embeddingModel  = embeddingModel,
+                        partitionFields = partitionFields,
+                        formatVersion   = formatVersion,
                     )
                 )
             }
@@ -71,7 +76,7 @@ class AilakeVectorTableSink(
     }
 
     override fun copy(): DynamicTableSink = AilakeVectorTableSink(
-        warehouse, namespace, tableName, vecCol, dim, metric, precision, schema, embeddingModel
+        warehouse, namespace, tableName, vecCol, dim, metric, precision, schema, embeddingModel, partitionFields, formatVersion
     )
 
     override fun asSummaryString(): String = "AI-Lake-Sink[$namespace.$tableName]"
@@ -88,6 +93,8 @@ class AilakeSinkFunction(
     private val idIdx: Int,
     private val vecIdx: Int,
     private val embeddingModel: String? = null,
+    private val partitionFields: List<PartitionFieldDef> = emptyList(),
+    private val formatVersion: Int = 2,
 ) : RichSinkFunction<RowData>() {
 
     private val idsBuffer = mutableListOf<Long>()
@@ -109,16 +116,18 @@ class AilakeSinkFunction(
 
     private fun flush() {
         AilakeNativeLoader.writeBatch(
-            warehouse      = warehouse,
-            namespace      = namespace,
-            table          = tableName,
-            vecCol         = vecCol,
-            dim            = dim,
-            metric         = metric,
-            precision      = precision,
-            ids            = idsBuffer.toLongArray(),
-            embeddings     = embeddingsBuffer.toTypedArray(),
-            embeddingModel = embeddingModel,
+            warehouse       = warehouse,
+            namespace       = namespace,
+            table           = tableName,
+            vecCol          = vecCol,
+            dim             = dim,
+            metric          = metric,
+            precision       = precision,
+            ids             = idsBuffer.toLongArray(),
+            embeddings      = embeddingsBuffer.toTypedArray(),
+            embeddingModel  = embeddingModel,
+            partitionFields = partitionFields,
+            formatVersion   = formatVersion,
         )
         idsBuffer.clear()
         embeddingsBuffer.clear()

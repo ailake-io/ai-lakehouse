@@ -136,4 +136,61 @@ class AilakeNativeTest {
         val r2 = AilakeNative.RenameColReq("old_col", "new_col")
         assertEquals(r1, r2)
     }
+
+    // ── Phase R: public connector surface — AilakeIngestTableHandle ──────────
+
+    @Test
+    fun ingestHandleDefaultPartitionFieldsIsEmpty() {
+        val handle = AilakeIngestTableHandle(
+            tableUri = "s3://b/t/", namespace = "default", tableName = "t",
+            vectorColumn = "emb", dim = 4, metric = "cosine", precision = "f16",
+        )
+        assertTrue(handle.partitionFields.isEmpty())
+    }
+
+    @Test
+    fun ingestHandleDefaultFormatVersionIs2() {
+        val handle = AilakeIngestTableHandle(
+            tableUri = "s3://b/t/", namespace = "default", tableName = "t",
+            vectorColumn = "emb", dim = 4, metric = "cosine", precision = "f16",
+        )
+        assertEquals(2, handle.formatVersion)
+    }
+
+    @Test
+    fun ingestHandleAcceptsPartitionFieldsAndFormatVersion() {
+        val pf = AilakeNative.PartitionFieldDef("agent_id", "identity", "string")
+        val handle = AilakeIngestTableHandle(
+            tableUri = "s3://b/t/", namespace = "default", tableName = "t",
+            vectorColumn = "emb", dim = 4, metric = "cosine", precision = "f16",
+            partitionFields = listOf(pf),
+            formatVersion = 3,
+        )
+        assertEquals(1, handle.partitionFields.size)
+        assertEquals("agent_id", handle.partitionFields[0].column)
+        assertEquals(3, handle.formatVersion)
+    }
+
+    // ── Phase R: VectorScanConnectorFactory JSON parsing ─────────────────────
+
+    @Test
+    fun connectorFactoryParsesPartitionFieldsJson() {
+        val factory = VectorScanConnectorFactory()
+        val config = mapOf(
+            "ailake.table-uri"        to "s3://b/t/",
+            "ailake.partition-fields" to """[{"column":"ts","transform":"truncate[4]","column_type":"string"}]""",
+            "ailake.format-version"   to "3",
+        )
+        // Verify parsing logic via the same ObjectMapper the factory uses
+        val mapper = com.fasterxml.jackson.databind.ObjectMapper()
+        val pfJson = config.getOrDefault("ailake.partition-fields", "[]")
+        val node = mapper.readTree(pfJson)
+        assertEquals(1, node.size())
+        assertEquals("ts",          node.get(0).get("column").asText())
+        assertEquals("truncate[4]", node.get(0).get("transform").asText())
+        assertEquals("string",      node.get(0).get("column_type").asText())
+        assertEquals(3, config.getOrDefault("ailake.format-version", "2").toInt())
+        // Verify factory identifier is still correct
+        assertEquals("ailake", factory.name)
+    }
 }

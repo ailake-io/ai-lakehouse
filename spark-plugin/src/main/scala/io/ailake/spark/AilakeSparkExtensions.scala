@@ -75,30 +75,37 @@ object implicits {
      * @param tableName    table name; defaults to last segment of tableUri
      */
     def ailakeWrite(
-      tableUri:     String,
-      df:           DataFrame,
-      vectorColumn: String = "embedding",
-      idColumn:     String = "id",
-      metric:       String = "cosine",
-      precision:    String = "f16",
-      namespace:    String = "default",
-      tableName:    String = "",
+      tableUri:        String,
+      df:              DataFrame,
+      vectorColumn:    String = "embedding",
+      idColumn:        String = "id",
+      metric:          String = "cosine",
+      precision:       String = "f16",
+      namespace:       String = "default",
+      tableName:       String = "",
+      partitionFields: Seq[PartitionFieldDef] = Seq.empty,
+      formatVersion:   Int = 2,
     ): Unit = {
       val resolvedName = if (tableName.nonEmpty) tableName
                          else tableUri.stripSuffix("/").split("/").last
-      val dimOpt = df.schema.find(_.name == vectorColumn).flatMap(_.dataType match {
-        case org.apache.spark.sql.types.ArrayType(_, _) => None  // inferred per-row by DataWriter
+      df.schema.find(_.name == vectorColumn).foreach(_.dataType match {
+        case _: org.apache.spark.sql.types.ArrayType => // ok
         case _ => throw new IllegalArgumentException(s"Column $vectorColumn must be ArrayType")
       })
+      val pfJson = partitionFields.map(pf =>
+        s"""{"column":"${pf.column}","transform":"${pf.transform}","column_type":"${pf.columnType}"}"""
+      ).mkString("[", ",", "]")
       df.write
         .format("io.ailake.spark.AilakeDataSource")
-        .option("tableUri",     tableUri)
-        .option("namespace",    namespace)
-        .option("tableName",    resolvedName)
-        .option("vectorColumn", vectorColumn)
-        .option("idColumn",     idColumn)
-        .option("metric",       metric)
-        .option("precision",    precision)
+        .option("tableUri",          tableUri)
+        .option("namespace",         namespace)
+        .option("tableName",         resolvedName)
+        .option("vectorColumn",      vectorColumn)
+        .option("idColumn",          idColumn)
+        .option("metric",            metric)
+        .option("precision",         precision)
+        .option("partition-fields",  pfJson)
+        .option("format-version",    formatVersion.toString)
         .save()
     }
   }

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.trino
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import io.trino.spi.connector.Connector
 import io.trino.spi.connector.ConnectorContext
 import io.trino.spi.connector.ConnectorFactory
@@ -25,6 +26,15 @@ class VectorScanConnectorFactory : ConnectorFactory {
         val tableName      = config.getOrDefault("ailake.table-name",
             tableUri.trimEnd('/').substringAfterLast('/'))
         val embeddingModel = config["ailake.embedding-model"]?.takeIf { it.isNotEmpty() }
-        return VectorScanConnector(tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel)
+        val pfJson = config.getOrDefault("ailake.partition-fields", "[]")
+        val partitionFields: List<PartitionFieldDef> = if (pfJson == "[]" || pfJson.isBlank()) emptyList() else {
+            val node = ObjectMapper().readTree(pfJson)
+            (0 until node.size()).map { i ->
+                val n = node.get(i)
+                PartitionFieldDef(n.get("column").asText(), n.get("transform").asText(), n.get("column_type").asText())
+            }
+        }
+        val formatVersion = config.getOrDefault("ailake.format-version", "2").toInt()
+        return VectorScanConnector(tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel, partitionFields, formatVersion)
     }
 }

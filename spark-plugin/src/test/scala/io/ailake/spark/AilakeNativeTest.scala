@@ -108,4 +108,55 @@ class AilakeNativeTest extends AnyFunSuite {
     val r2 = AilakeNative.RenameColReq("old_col", "new_col")
     assert(r1 == r2)
   }
+
+  // ── Phase R: public connector surface — AilakeWriteHandle ─────────────────
+
+  test("AilakeWriteHandle default partitionFields is empty") {
+    val h = AilakeWriteHandle("s3://b/t/", "default", "t", "emb", 4, "cosine", "f16")
+    assert(h.partitionFields.isEmpty)
+  }
+
+  test("AilakeWriteHandle default formatVersion is 2") {
+    val h = AilakeWriteHandle("s3://b/t/", "default", "t", "emb", 4, "cosine", "f16")
+    assert(h.formatVersion == 2)
+  }
+
+  test("AilakeWriteHandle accepts partitionFields and formatVersion") {
+    val pf = AilakeNative.PartitionFieldDef("agent_id", "identity", "string")
+    val h  = AilakeWriteHandle("s3://b/t/", "default", "t", "emb", 4, "cosine", "f16",
+      partitionFields = Seq(pf), formatVersion = 3)
+    assert(h.partitionFields.size == 1)
+    assert(h.partitionFields.head.column == "agent_id")
+    assert(h.formatVersion == 3)
+  }
+
+  // ── Phase R: AilakeDataSource JSON option parsing ─────────────────────────
+
+  test("AilakeDataSource parses partition-fields and format-version options") {
+    import org.apache.spark.sql.types.StructType
+    val ds = new AilakeDataSource()
+    val props = new java.util.HashMap[String, String]()
+    props.put("tableUri", "s3://b/docs/")
+    props.put("partition-fields",
+      """[{"column":"agent_id","transform":"identity","column_type":"string"}]""")
+    props.put("format-version", "3")
+    val table = ds.getTable(StructType(Array.empty), Array.empty, props)
+    val handle = table.asInstanceOf[AilakeTable].handle
+    assert(handle.partitionFields.size == 1)
+    assert(handle.partitionFields.head.column == "agent_id")
+    assert(handle.partitionFields.head.transform == "identity")
+    assert(handle.partitionFields.head.columnType == "string")
+    assert(handle.formatVersion == 3)
+  }
+
+  test("AilakeDataSource defaults to empty partitionFields and formatVersion=2") {
+    import org.apache.spark.sql.types.StructType
+    val ds = new AilakeDataSource()
+    val props = new java.util.HashMap[String, String]()
+    props.put("tableUri", "s3://b/docs/")
+    val table = ds.getTable(StructType(Array.empty), Array.empty, props)
+    val handle = table.asInstanceOf[AilakeTable].handle
+    assert(handle.partitionFields.isEmpty)
+    assert(handle.formatVersion == 2)
+  }
 }

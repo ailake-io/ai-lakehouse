@@ -10,16 +10,18 @@ import scala.collection.mutable.ArrayBuffer
 // ── Config holder ─────────────────────────────────────────────────────────────
 
 case class AilakeWriteHandle(
-  tableUri:       String,
-  namespace:      String,
-  tableName:      String,
-  vectorColumn:   String,
-  dim:            Int,
-  metric:         String,
-  precision:      String,
-  idColIndex:     Int = 0,            // index of id column in the page (default: channel 0)
-  vecColIndex:    Int = 1,            // index of embedding column in the page (default: channel 1)
-  embeddingModel: Option[String] = None, // "<name>" or "<name>@<version>" for model tracking
+  tableUri:        String,
+  namespace:       String,
+  tableName:       String,
+  vectorColumn:    String,
+  dim:             Int,
+  metric:          String,
+  precision:       String,
+  idColIndex:      Int = 0,
+  vecColIndex:     Int = 1,
+  embeddingModel:  Option[String] = None,
+  partitionFields: Seq[PartitionFieldDef] = Seq.empty,
+  formatVersion:   Int = 2,
 )
 
 // ── WriterCommitMessage ───────────────────────────────────────────────────────
@@ -48,16 +50,18 @@ class AilakeDataWriter(handle: AilakeWriteHandle, partitionId: Int, taskId: Long
   def commit(): WriterCommitMessage = {
     if (ids.isEmpty) return AilakeCommitMessage(None)
     val snapshotId = AilakeNative.writeBatch(
-      tableUri       = handle.tableUri,
-      namespace      = handle.namespace,
-      tableName      = handle.tableName,
-      vectorColumn   = handle.vectorColumn,
-      dim            = handle.dim,
-      metric         = handle.metric,
-      precision      = handle.precision,
-      ids            = ids.toSeq,
-      embeddings     = embeddings.toSeq,
-      embeddingModel = handle.embeddingModel,
+      tableUri        = handle.tableUri,
+      namespace       = handle.namespace,
+      tableName       = handle.tableName,
+      vectorColumn    = handle.vectorColumn,
+      dim             = handle.dim,
+      metric          = handle.metric,
+      precision       = handle.precision,
+      ids             = ids.toSeq,
+      embeddings      = embeddings.toSeq,
+      embeddingModel  = handle.embeddingModel,
+      partitionFields = handle.partitionFields,
+      formatVersion   = handle.formatVersion,
     )
     log.info(s"[ailake] partition=$partitionId wrote ${ids.size} rows → snapshot=$snapshotId")
     AilakeCommitMessage(snapshotId)
