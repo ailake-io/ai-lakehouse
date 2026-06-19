@@ -500,6 +500,7 @@ impl TableWriter {
 ///
 /// Returns a list of dicts: [{"row_id": int, "distance": float, "file": str}, ...]
 #[pyfunction]
+#[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5))]
 fn search(
     py: Python<'_>,
@@ -1129,10 +1130,10 @@ fn decay_memories(path: &str, decay_lambda: f32) -> PyResult<usize> {
     let metric = table_meta
         .properties
         .get("ailake.vector-metric")
-        .and_then(|s| match s.as_str() {
-            "euclidean" | "l2" => Some(VectorMetric::Euclidean),
-            "dot" | "inner_product" | "dot_product" => Some(VectorMetric::DotProduct),
-            _ => Some(VectorMetric::Cosine),
+        .map(|s| match s.as_str() {
+            "euclidean" | "l2" => VectorMetric::Euclidean,
+            "dot" | "inner_product" | "dot_product" => VectorMetric::DotProduct,
+            _ => VectorMetric::Cosine,
         })
         .unwrap_or(VectorMetric::Cosine);
 
