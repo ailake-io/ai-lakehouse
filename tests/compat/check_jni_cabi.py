@@ -202,7 +202,7 @@ with tempfile.TemporaryDirectory() as tmp:
         "namespace": "default",
         "table": "del_test",
         "column": "id",
-        "values": [0, 1, 2],
+        "values": ["0", "1", "2"],
     })
     assert resp.get("ok"), f"FAIL: delete_where failed: {resp}"
     print("PASS (delete_where): 3 rows marked deleted via equality delete")
