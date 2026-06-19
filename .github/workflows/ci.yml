@@ -149,24 +149,26 @@ jobs:
     runs-on: [self-hosted, Linux]
     steps:
       - uses: actions/checkout@v6
-      # - uses: actions/setup-python@v5  # not needed on self-hosted
-      - name: Install test dependencies
+      - name: Install dependencies and run tests
         run: |
-          pip install apache-airflow pytest
-      - name: Run Airflow provider unit tests
-        run: |
+          rm -rf /tmp/airflow-venv
+          python3 -m venv /tmp/airflow-venv
+          /tmp/airflow-venv/bin/pip install apache-airflow pytest ./airflow-providers-ailake
           cd airflow-providers-ailake
-          python -m pytest tests/ -v
+          /tmp/airflow-venv/bin/python -m pytest tests/ -v
 
   test-airbyte:
     name: test-airbyte
     runs-on: [self-hosted, Linux]
     steps:
       - uses: actions/checkout@v6
-      - name: Install test dependencies
-        run: pip install pytest numpy airbyte-cdk
-      - name: Run Airbyte destination unit tests
-        run: python -m pytest airbyte-destination-ailake/tests/ -v
+      - name: Install dependencies and run tests
+        run: |
+          rm -rf /tmp/airbyte-venv
+          python3 -m venv /tmp/airbyte-venv
+          /tmp/airbyte-venv/bin/pip install pytest numpy airbyte-cdk
+          /tmp/airbyte-venv/bin/pip install --no-deps ./airbyte-destination-ailake
+          /tmp/airbyte-venv/bin/python -m pytest airbyte-destination-ailake/tests/ -v
 
   compat-ailake-py:
     name: compat-ailake-py
