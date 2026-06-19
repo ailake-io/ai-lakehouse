@@ -334,11 +334,14 @@ def main() -> None:
     _save_query_payload(embeddings, texts)
 
     _maybe_register_nessie(TABLE_PATH)
+    _maybe_register_nessie(PARTITIONED_V3_PATH, nessie_name="partitioned_v3")
+    _maybe_register_nessie(DELETE_DEMO_PATH,    nessie_name="delete_demo")
+    _maybe_register_nessie(SCHEMA_EVO_PATH,     nessie_name="schema_evo")
     print("All fixtures ready.")
 
 
-def _maybe_register_nessie(table_path: str) -> None:
-    """Register the AI-Lake table in the Nessie catalog so Trino can discover it.
+def _maybe_register_nessie(table_path: str, *, nessie_name: str = "table") -> None:
+    """Register an AI-Lake table in the Nessie catalog so Trino can discover it.
 
     Uses the Nessie REST API v1 directly (stdlib urllib — no extra deps).
     No-op when NESSIE_URI is unset.
@@ -392,10 +395,10 @@ def _maybe_register_nessie(table_path: str) -> None:
         sort_order_id = meta_json.get("default-sort-order-id", 0)
 
         _nessie("POST", f"/trees/branch/main/commit?expectedHash={current_hash}", {
-            "commitMeta": {"message": "register ailake demo table"},
+            "commitMeta": {"message": f"register ailake demo table: {nessie_name}"},
             "operations": [{
                 "type": "PUT",
-                "key": {"elements": ["default", "table"]},
+                "key": {"elements": ["default", nessie_name]},
                 "content": {
                     "type":             "ICEBERG_TABLE",
                     "metadataLocation": meta_location,
@@ -406,7 +409,7 @@ def _maybe_register_nessie(table_path: str) -> None:
                 },
             }],
         })
-        print(f"Table registered in Nessie: {meta_location}")
+        print(f"Table '{nessie_name}' registered in Nessie: {meta_location}")
     except Exception as e:
         print(f"WARNING: Nessie registration failed: {e}", file=sys.stderr)
 
