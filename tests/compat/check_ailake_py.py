@@ -586,14 +586,15 @@ with tempfile.TemporaryDirectory() as tmp:
     writer.write_batch([f"doc_{i}" for i in range(N)], [make_embedding(i) for i in range(N)])
     writer.commit()
 
-    writer2 = ailake.TableWriter(path, vector_column="embedding", dim=DIM * 2, metric="cosine")
     try:
+        writer2 = ailake.TableWriter(path, vector_column="embedding", dim=DIM * 2, metric="cosine")
         writer2.write_batch(
             [f"bad_{i}" for i in range(N)],
             [[0.1] * (DIM * 2) for _ in range(N)],
         )
         writer2.commit()
-        print("WARN (ModelMismatch): no error raised for dim mismatch — check writer.rs:ModelMismatch")
+        print("FAIL (ModelMismatch): no error raised for dim mismatch — create_or_open must reject it")
+        sys.exit(1)
     except Exception as e:
         print(f"PASS (ModelMismatch): raised {type(e).__name__} on dim mismatch")
 
@@ -758,6 +759,46 @@ with tempfile.TemporaryDirectory() as tmp:
     )
     assert len(results_text_only) > 0, "FAIL: text-only search_multimodal returned empty"
     print(f"PASS (search_multimodal text-only): {len(results_text_only)} results")
+
+
+# ── 20. Phase L-R — partition_fields, format_version, add_column, rename_column, delete_where ──
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = str(pathlib.Path(tmp) / "phase_lr_test")
+
+    # TableWriter with partition_fields + format_version=3
+    writer = ailake.TableWriter(
+        path,
+        vector_column="embedding",
+        dim=DIM,
+        metric="cosine",
+        partition_fields=[("chunk_id", "identity", "int")],
+        format_version=3,
+    )
+    texts = [f"doc_{i}" for i in range(N)]
+    embeddings = [make_embedding(i) for i in range(N)]
+    writer.write_batch(texts, embeddings)
+    snap_id = writer.commit()
+    assert snap_id >= 0, f"FAIL: partition_fields/format_version=3 commit returned {snap_id}"
+    print(f"PASS (partition_fields + format_version=3): snapshot_id={snap_id}")
+
+    # add_column
+    schema_id = ailake.add_column(path, "source_url", "string")
+    assert schema_id >= 0, f"FAIL: add_column returned {schema_id}"
+    print(f"PASS (add_column): new_schema_id={schema_id}")
+
+    # rename_column
+    schema_id2 = ailake.rename_column(path, "source_url", "url")
+    assert schema_id2 >= 0, f"FAIL: rename_column returned {schema_id2}"
+    print(f"PASS (rename_column): new_schema_id={schema_id2}")
+
+    # delete_where — marks rows 0,1 deleted
+    ailake.delete_where(path, "id", ["0", "1"])
+    print("PASS (delete_where): 2 rows marked deleted via equality delete")
+
+    # delete_where — empty list is no-op
+    ailake.delete_where(path, "id", [])
+    print("PASS (delete_where noop): empty values list accepted")
 
 
 print()

@@ -40,6 +40,10 @@ type SearchOptions struct {
 	// Hardware overrides. When nil, DetectHardware() is called automatically.
 	// Set explicitly to force CPU-only or a specific GPU backend.
 	Hardware *HardwareProfile
+
+	// PartitionFilter restricts search to files tagged with this partition value
+	// (Phase 9). Empty string means no filtering (search all files).
+	PartitionFilter string
 }
 
 func (o *SearchOptions) efSearch() int {
@@ -112,9 +116,23 @@ func Search(
 		query = normalizeL2(query)
 	}
 
+	// Partition pruning (Phase 9): filter by partition_value before geometric pruning.
+	partitioned := entries
+	if opts.PartitionFilter != "" {
+		before := len(partitioned)
+		var pf []DataFileEntry
+		for _, e := range partitioned {
+			if e.PartitionValue == opts.PartitionFilter {
+				pf = append(pf, e)
+			}
+		}
+		partitioned = pf
+		slog.Debug("ailake: partition pruning", "filter", opts.PartitionFilter, "before", before, "after", len(partitioned))
+	}
+
 	// Geometric pruning
 	var survivors []DataFileEntry
-	for _, e := range entries {
+	for _, e := range partitioned {
 		if len(e.Centroid) == 0 {
 			survivors = append(survivors, e) // no centroid → can't prune
 			slog.Debug("ailake: pruner keep (no centroid)", "file", e.Path)

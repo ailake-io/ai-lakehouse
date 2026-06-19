@@ -136,8 +136,18 @@ type SearchOptions struct {
     TopK             int            // number of results (default: 10)
     EfSearch         int            // HNSW ef_search (default: TopK*5)
     PruningThreshold float32        // geometric pruning cutoff (default: 0.8)
+    PartitionFilter  string         // restrict to files with matching partition_value; "" = no filter (Phase 9)
     Hardware         *HardwareProfile // nil = auto-detect
 }
+```
+
+Set `PartitionFilter` to an agent UUID to restrict search to that agent's files — pruning happens at the manifest level before any HNSW I/O:
+
+```go
+results, err := ailake.Search(catalog, "default", "agents", query, ailake.SearchOptions{
+    TopK:            10,
+    PartitionFilter: "agent-uuid-here",
+})
 ```
 
 ### `FileSearchResult`
@@ -189,10 +199,33 @@ type ExtraVectorIndex struct {
 
 ```go
 type TableInfo struct {
-    VectorDim      string
-    VectorMetric   string
-    VectorPrecision string
-    EmbeddingModel string // global model from ailake.embedding-model property
+    Table           string
+    Location        string
+    VectorColumn    string
+    VectorDim       string
+    VectorMetric    string
+    EmbeddingModel  string         // from ailake.embedding-model property
+    Files           int
+    IndexedFiles    int
+    Rows            uint64
+    SizeBytes       uint64
+    SnapshotID      *int64
+    FormatVersion   int            // 2 (Iceberg v2) or 3 (Iceberg v3)
+    PartitionFields []PartitionDef // empty for unpartitioned tables
+    SchemaFields    []SchemaField  // current schema field list
+}
+
+type PartitionDef struct {
+    Column     string // partition source column
+    Transform  string // "identity", "year", "month", "day", "hour", "bucket[N]", "truncate[N]"
+    ColumnType string // Iceberg primitive type: "string", "int", "long", …
+}
+
+type SchemaField struct {
+    ID       int
+    Name     string
+    Type     string // Iceberg primitive type string
+    Required bool
 }
 ```
 

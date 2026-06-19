@@ -157,6 +157,9 @@ async fn handle_search(
         ef_search: req.top_k * 5,
         pruning_threshold: req.pruning_threshold,
         rerank_factor: None,
+        score_fn: None,
+        partition_filter: None,
+        hybrid: None,
     };
 
     let results = ailake_query::search(
@@ -215,6 +218,7 @@ async fn handle_write(
         Arc::clone(&state.store),
         state.policy.clone(),
         state.table.clone(),
+        2,
     )
     .await
     .map_err(ApiError::from)?;
@@ -261,6 +265,7 @@ async fn handle_compact(
         min_files_to_compact: req.min_files,
         target_file_size_bytes: req.target_size,
         index_strategy: Default::default(),
+        max_files_per_pass: 20,
     };
     let planner = CompactionPlanner::new(config);
     let to_compact = planner.plan(&files);
@@ -306,6 +311,8 @@ async fn handle_compact(
                 operation: SnapshotOperation::Replace,
                 iceberg_schema: None,
                 extra_properties: std::collections::HashMap::new(),
+                bloom_filters: vec![],
+                equality_delete_files: vec![],
             },
         )
         .await

@@ -11,14 +11,21 @@ Guide for running the file format locally: writing batches, vector search with g
 docker compose -f tests/docker/compose-demo.yml up -d
 ```
 
-Open **http://localhost:8888** — JupyterLab starts with 4 pre-built fixture tables (HNSW standard, PQ-only, Residual-PQ, Deferred write) and 500 synthetic documents indexed across all of them.
+Open **http://localhost:8888** — JupyterLab starts with pre-built fixture tables (HNSW standard, PQ-only, Residual-PQ, Deferred write, partitioned Iceberg v3, delete demo, schema evolution, multimodal, agent memory, BM25) and 500 synthetic documents indexed across them.
 
-The demo covers all SDK features across 5 notebooks (17 sections in `01_ailake_demo.ipynb` alone): vector search, IVF-PQ, residual PQ, deferred writes, HNSW tuning, async API, storage estimation, Iceberg compatibility, RAG context assembly, and object storage integration.
+The demo covers all SDK features across 10 notebooks: `01_ailake_demo.ipynb` (vector search through §31 partitioned v3), `07_multimodal.ipynb`, `08_agents.ipynb`, `09_hybrid_search.ipynb`, `10_gpu_demo.ipynb` (GPU acceleration + `hardware_info()`), and connector notebooks (`02`–`06`).
 
 For engine demos (Trino + BigQuery emulator):
 
 ```bash
 docker compose -f tests/docker/compose-demo.yml --profile engines up -d
+```
+
+For GPU demo (requires NVIDIA Container Toolkit + NVIDIA GPU):
+
+```bash
+docker compose -f tests/docker/compose-demo.yml --profile gpu up -d
+# Opens on http://localhost:8889
 ```
 
 See [`tests/docker/`](./tests/docker/) for full details.
@@ -90,9 +97,9 @@ Should finish with `112 passed` (2 ignored — doctests requiring live credentia
 
 | Crate | What it covers |
 |---|---|
-| `ailake-vec` | F32→F16 quantization, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centroids, `exact_distance`, SIMD (AVX2/NEON), RaBitQ encoding, binary sign quantization (MSB-first) |
-| `ailake-index` | HNSW build/search, IVF-PQ (train/search/serialize), RaBitQ (encode/search/serialize), Binary Hamming (encode/search/serialize), GPU k-means dispatch, bincode serialization, MmapLoader round-trip |
-| `ailake-file` | Unified file write/read, AILK layout (HNSW, IVF-PQ, RaBitQ, Binary Hamming), integrity |
+| `ailake-vec` | F32→F16 quantization, PQ (encode/decode/ADC), BlockCompressor (zstd/lz4), centroids, `exact_distance`, SIMD (AVX2/NEON) |
+| `ailake-index` | HNSW build/search, IVF-PQ (train/search/serialize), GPU k-means dispatch (CUDA/ROCm via libloading), bincode serialization, MmapLoader round-trip |
+| `ailake-file` | Unified file write/read, AILK layout (HNSW, IVF-PQ), integrity |
 | `ailake-query` | ContextAssembler, geometric pruning, post-PQ reranking, MemTableWriter, write_batch_ivf_pq; `arrow_schema_to_iceberg_update` (automatic schema propagation on commit) |
 | `ailake-parquet` | write_batch_multi_vec / read_all_multi_vec (multi-vector columns) |
 | `tests` (integration) | write→read→search end-to-end, positional invariant, PyArrow compatibility, pruning, context assembler |
@@ -441,6 +448,63 @@ print(ctx)
 
 > `ailake.TableWriter(path, ...)` is still supported for backward compatibility.
 
+### Partition fields and Iceberg v3
+
+```python
+# Iceberg format_version=3 table with partition by topic_id (identity transform)
+writer = ailake.TableWriter(
+    "/tmp/ailake-partitioned",
+    dim=64,
+    metric="cosine",
+    partition_fields=[("topic_id", "identity", "int")],
+    format_version=3,
+)
+writer.write_batch(texts, embeddings, extra_columns={"topic_id": [i % 5 for i in range(len(texts))]})
+writer.commit()
+
+# Multiple transforms supported: identity, year, month, day, hour, bucket[N], truncate[N]
+writer2 = ailake.TableWriter(
+    "/tmp/ailake-bucketed",
+    dim=64,
+    metric="cosine",
+    partition_fields=[("shard_id", "bucket[4]", "int")],
+    format_version=3,
+)
+```
+
+### Schema evolution
+
+```python
+# Add optional column — metadata-only, existing files untouched
+schema_id = ailake.add_column(
+    "/tmp/ailake-test", "source_url", "string",
+    required=False, initial_default="",
+)
+
+# Rename by field ID — data files untouched
+schema_id2 = ailake.rename_column("/tmp/ailake-test", "source_url", "url")
+```
+
+### Equality delete
+
+```python
+# Delete rows by column value — writes Iceberg equality delete file
+ailake.delete_where("/tmp/ailake-test", "id", ["0", "1", "2"])
+
+# Empty list is always a no-op (no file written)
+ailake.delete_where("/tmp/ailake-test", "id", [])
+```
+
+### Hardware detection
+
+```python
+# Inspect detected GPU/CPU backend
+info = ailake.hardware_info()
+# Returns dict: backend, has_cuda, has_rocm, cpu_logical_cores, has_avx2, has_avx512, recommend_ivf_pq
+print(info)
+# {'backend': 'nvidia-cuda', 'has_cuda': 'true', 'recommend_ivf_pq': 'true', ...}
+```
+
 ---
 
 ## 7. Verify PyArrow compatibility manually
@@ -782,6 +846,24 @@ CPU fallback        →  kmeans_centroids (parallel rayon)
 cargo build --release
 ```
 
+### 8F-7. Phase 9 agent features and GPU interaction
+
+**`partition_filter`** — applied at manifest level in `scanner.rs` before any file is opened.
+The GPU flat-scan path (`SearchSession.search_batch()`) also respects it; no GPU-specific changes.
+
+**`score_fn` limitation** — `score_fn: Option<ScoreFn>` is applied after HNSW candidate
+rows are read from Parquet (lines 265/308 in `scanner.rs`). The GPU flat-scan path used
+during the deferred index build window (`write_batch_auto_deferred`, `IndexStatus::Indexing`)
+has no Parquet row data available and therefore **ignores `score_fn`**. Results during this
+window are ordered by pure distance only.
+
+If hybrid scoring is required from the first query, use synchronous `write_batch()` instead
+of deferred variants, or poll `IndexStatus` until `Ready` before querying.
+
+Python-level `score_fn` (passed to `ailake.search()` / `SearchQuery`) runs as a Python
+post-processing step after `search_with_data()` returns IPC bytes and is not affected by
+this limitation.
+
 ---
 
 ## 8F-2. Storage estimator (`ailake estimate`)
@@ -892,130 +974,85 @@ Search phase  (top_k=10)
 
 ---
 
-## 8I. RaBitQ flat index (`--rabitq`)
+## 8L. BM25 hybrid search
 
-RaBitQ uses 1 bit/dim (packed sign bits) after a **modified Gram-Schmidt orthonormal random rotation** — 16× smaller than F16 with better recall than naive binary quantization via an unbiased XOR/popcount IP estimator. No graph construction: write is one-pass O(n), making it the fastest index to build. Search is sequential O(N) flat scan with O(N) partial select; outer shard parallelism handles concurrency.
+AI-Lake ships a pure-Rust BM25 scorer that runs alongside HNSW — no Elasticsearch, Tantivy, or external FTS infrastructure required. IDF statistics are accumulated at write time and persisted to `metadata/ailake_bm25_stats.bin` alongside the Iceberg catalog.
 
-### When to use RaBitQ
-
-| Criterion | RaBitQ | HNSW | IVF-PQ |
-|---|---|---|---|
-| Write throughput | **~163k vec/s** (SIFT-1M measured) | ~50k vec/s | ~200k vec/s |
-| Storage (dim=1536) | **200 bytes/vec** | ~10 MB/50k vecs | ~2 MB/50k vecs |
-| Recall@10 cosine (rerank≥3) | 0.85–0.95 | ≥0.95 | 0.90–0.95 |
-| Recall@10 Euclidean (rerank=3) | ~0.67 | ≥0.95 | 0.90–0.95 |
-| Search QPS (SIFT-1M, 10 shards) | ~101 | ~1400 | ~380 |
-| Graph build overhead | **None** | O(n log n) | O(n) k-means |
-| Best use case | High-insert, extreme compression, cosine | Online search | S3 cold storage |
-
-RaBitQ is designed for **cosine** workloads. Euclidean recall is lower because the IP estimator adds approximation noise when converting to L2. Use `rerank_factor ≥ 10` for complex datasets; `rerank_factor ≥ 3` is sufficient for most real-world embedding models.
-
-Use RaBitQ when storage is the primary constraint and you can afford a second pass for reranking.
-
-### CLI usage
-
-```bash
-# Create table with RaBitQ flat index
-ailake create s3://my-lake/docs/ --dim 1536 --metric cosine --rabitq
-
-# With custom seed (for reproducibility across shards)
-ailake create s3://my-lake/docs/ --dim 1536 --metric cosine \
-    --rabitq --rabitq-seed 42
-
-# Without raw F16 storage (extreme compression, no reranking)
-ailake create s3://my-lake/docs/ --dim 1536 --metric cosine \
-    --rabitq --rabitq-seed 42 --no-rabitq-keep-raw
-```
-
-### Python usage
+### Enable BM25 at write time
 
 ```python
-import ailake
+import ailake, numpy as np
 
-writer = ailake.TableWriter(
-    "s3://my-lake/docs/",
-    dim=1536,
-    metric="cosine",
-    rabitq=True,
-    rabitq_seed=42,       # same seed across all shards → comparable distances
-    rabitq_keep_raw=True, # keep F16 for reranking (recommended)
-)
+writer = ailake.TableWriter("./my_table", dim=1536, bm25_text_column="chunk_text")
 writer.write_batch(texts, embeddings)
 writer.commit()
+# Creates: metadata/ailake_bm25_stats.bin (IDF stats, bincode+zstd)
+```
 
-# Search with reranking: fetch top_30, rerank with raw F16, return top_10
+```bash
+# CLI — creates table with BM25 stats on every write
+ailake create ./my_table --dim 1536 --bm25-text-column chunk_text
+ailake insert ./my_table --texts docs.txt --embeddings vecs.npy
+```
+
+### Pure-lexical BM25 search (`search_text`)
+
+```python
+# Python
+results = ailake.search_text("./my_table", "rust programming async", top_k=10)
+# Returns: [{"row_id": int, "distance": float, "file": str}]
+# distance = negated BM25 score (lower = more relevant)
+```
+
+```bash
+# CLI
+ailake search-text ./my_table "rust programming async" --top-k 10
+```
+
+`search_text()` does a full O(N) scan — no HNSW required. Use for keyword-first workloads where recall > latency, or when vectors are not yet indexed (`IndexStatus::Indexing`).
+
+### Hybrid vector+BM25 search (RRF fusion)
+
+```python
+# Python — hybrid search: HNSW candidates fused with BM25 via Reciprocal Rank Fusion
 results = ailake.search(
-    path="s3://my-lake/docs/",
-    query=query_embedding,
+    "./my_table",
+    query_embedding,
     top_k=10,
-    rerank_factor=10,  # recommended: ≥ 3 for most datasets, ≥ 10 for complex/Euclidean
+    hybrid_text="rust programming async",   # triggers BM25 hybrid
+    text_column="chunk_text",               # default "chunk_text"
+    bm25_weight=0.5,                        # relative BM25 weight in RRF
 )
 ```
 
-### Storage comparison (dim=1536, 1M vectors)
+Hybrid pipeline: HNSW retrieves `10×top_k` candidates → BM25 scores each → RRF fusion (`w_vec/(60+rank_vec) + w_bm25/(60+rank_bm25)`) → top-k returned.
 
-| Index | Bytes/vector | Total (1M vecs) |
+### Fusion methods
+
+| `HybridFusion` | Formula | Use case |
 |---|---|---|
-| F32 raw | 6 144 | 6 GB |
-| F16 raw | 3 072 | 3 GB |
-| HNSW graph (F16) | ~3 200 | ~3.2 GB |
-| IVF-PQ (M=48) | ~50 | ~50 MB |
-| **RaBitQ (no raw)** | **192** | **192 MB** |
-| RaBitQ + raw F16 | 3 264 | ~3.3 GB (codes + F16) |
+| `Rrf` (default) | `Σ w/(60+rank)` | Balanced recall — preferred for most RAG workloads |
+| `Linear` | min-max normalized weighted sum | Numeric score comparison needed |
 
-**Note**: with `keep_raw=False`, only the binary codes and norms are stored — 192 bytes/vec for dim=1536, with no reranking possible. With `keep_raw=True` (default), raw F16 vectors are also stored for reranking — total is similar to HNSW but with faster writes.
+### BM25 scoring parameters (Rust)
 
----
+```rust
+use ailake_query::bm25::{BM25Scorer, HybridConfig, HybridFusion};
 
-## 8J. Binary Hamming flat index (`--binary`)
-
-Binary Hamming uses 1 bit/dim packed MSB-first — no rotation matrix, no k-means. Quantization rule: `bit_i = (x_i >= 0.0)`. Storage: 192 bytes/vector at dim=1536 (32× smaller than F32). Write throughput exceeds 200k vec/s. Search is sequential Hamming scan with SIMD dispatch (AVX2+SSSE3 → NEON → scalar u64 popcnt). Lower recall than RaBitQ (no orthonormal rotation to spread signs); best for cosine with reranking.
-
-### CLI usage
-
-```bash
-# Create table with Binary Hamming flat index
-ailake create s3://my-lake/docs/ --dim 1536 --metric cosine --binary
-
-# Without raw F16 storage (maximum compression, no reranking)
-ailake create s3://my-lake/docs/ --dim 1536 --metric cosine --binary --no-binary-keep-raw
+let config = SearchConfig::default()
+    .with_hybrid(
+        HybridConfig::new("rust programming")
+            .with_text_column("chunk_text")
+            .with_bm25_weight(0.5)
+            .with_fusion(HybridFusion::Rrf),
+    );
 ```
 
-### Python usage
+### Known limitations
 
-```python
-import ailake
-
-writer = ailake.TableWriter(
-    "s3://my-lake/docs/",
-    dim=1536,
-    metric="cosine",
-    binary=True,
-    binary_keep_raw=True,  # keep F16 for reranking (recommended)
-)
-writer.write_batch(texts, embeddings)
-writer.commit()
-
-results = ailake.search(
-    path="s3://my-lake/docs/",
-    query=query_embedding,
-    top_k=10,
-    rerank_factor=3,  # ≥ 3 for cosine; ≥ 10 for Euclidean/complex
-)
-```
-
-### Storage comparison (dim=1536, 1M vectors)
-
-| Index | Bytes/vector | Total (1M vecs) | Recall@10 cosine |
-|---|---|---|---|
-| HNSW (F16) | ~3 200 | ~3.2 GB | ≥ 0.95 |
-| IVF-PQ (M=48) | ~50 | ~50 MB | 0.90–0.95 |
-| RaBitQ (no raw) | 192 | 192 MB | 0.70–0.85 |
-| RaBitQ + raw F16 | 3 264 | ~3.3 GB | 0.85–0.95 |
-| **Binary (no raw)** | **192** | **192 MB** | 0.50–0.70 |
-| Binary + raw F16 | 3 264 | ~3.3 GB | 0.80–0.92 |
-
-C++ SDK: 14 unit tests in `ailake-cpp/tests/test_binary.cpp` cover `f32_to_bits`, `hamming_distance`, and `binary_search` (empty, zero top_k, top-k cap, F16 rerank).
+- No inverted index — `search_text()` is O(N). At >10M rows, use DuckDB `LIKE` / Trino FTS over the Iceberg-compatible Parquet layer instead.
+- BM25 stats do not update retroactively — rows written before `bm25_text_column` was set are not scored.
+- `search_text()` via DuckDB (`ailake_search_text()`) and Flink (`searchText()`) delegate to the same `ailake_search_text_json` C-ABI.
 
 ---
 

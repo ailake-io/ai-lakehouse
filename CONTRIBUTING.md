@@ -289,12 +289,12 @@ Unit tests live in `ailake-cpp/tests/`:
 
 | File | What it covers |
 |---|---|
-| `test_footer.cpp` | AILK header parsing, all flag bits (`is_hnsw`, `is_ivfpq`, `is_rabitq`, `is_binary`), bad magic/version rejection |
+| `test_footer.cpp` | AILK header parsing, flag bits (`is_hnsw`, `is_ivfpq`), bad magic/version rejection |
 | `test_hnsw.cpp` | Flat HNSW search (Euclidean, Cosine, top-k capped, empty index) |
 | `test_ivfpq.cpp` | IVF-PQ nearest-cell search, top-k limit, zero nprobe |
-| `test_binary.cpp` | `f32_to_bits` MSB-first packing, `hamming_distance` (single byte, multibyte, 32-byte SIMD), `binary_search` (top-1, top-k cap, F16 rerank, empty, zero top_k) |
+| `test_write.cpp` | `delete_where`, `evolve_schema`, `shell_quote` edge cases, `resolve_bin` env override; integration tests guarded by `AILAKE_BIN`/`AILAKE_FIXTURE` |
 
-All test binaries are compiled via `foreach(_test footer hnsw ivfpq binary)` in `CMakeLists.txt` and run via `ctest`. New index types require a corresponding `test_<name>.cpp`.
+All test binaries are compiled via `foreach(_test footer hnsw ivfpq write)` in `CMakeLists.txt` and run via `ctest`. New index types require a corresponding `test_<name>.cpp`.
 
 Key rules:
 - Header-only where possible — implementations in `include/ailake/*.hpp`

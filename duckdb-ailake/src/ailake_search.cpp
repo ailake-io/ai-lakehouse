@@ -9,20 +9,34 @@
 // top_k       INTEGER   — number of nearest neighbors to return
 //
 // Optional named parameters (pass as named args in DuckDB):
-// vec_col     VARCHAR   default 'embedding'
-// ef_search   INTEGER   default 50
+// vec_col          VARCHAR   default 'embedding'
+// ef_search        INTEGER   default 50
+// partition_filter VARCHAR   default '' (no partition filter)
+// hybrid_text      VARCHAR   default '' — enables hybrid BM25+vector when non-empty
+// text_column      VARCHAR   default 'chunk_text' — Parquet column for BM25 scoring
+// bm25_weight      FLOAT     default 0.5 — BM25 weight in RRF (0=pure vector, 1=pure BM25)
 //
-// Example:
+// Example (pure vector):
 //   SELECT * FROM ailake_search(
 //       'file:///data/my_table',
 //       [0.1, 0.2, 0.3]::FLOAT[],
 //       10
 //   ) ORDER BY distance;
+//
+// Example (hybrid BM25+vector):
+//   SELECT * FROM ailake_search(
+//       'file:///data/my_table',
+//       [0.1, 0.2, 0.3]::FLOAT[],
+//       10,
+//       hybrid_text := 'rust programming language',
+//       text_column := 'chunk_text',
+//       bm25_weight := 0.4
+//   ) ORDER BY distance;
 
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/value.hpp"
 
@@ -32,11 +46,15 @@ using namespace duckdb;
 
 struct AilakeSearchBindData : public TableFunctionData {
     std::string        warehouse;
-    std::string        table_name  = "table";
-    std::string        vec_col     = "embedding";
+    std::string        table_name      = "table";
+    std::string        vec_col         = "embedding";
     std::vector<float> query;
-    int                top_k       = 10;
-    int                ef_search   = 50;
+    int                top_k           = 10;
+    int                ef_search       = 50;
+    std::string        partition_filter;
+    std::string        hybrid_text;        // non-empty = hybrid BM25+vector mode
+    std::string        text_column     = "chunk_text";
+    float              bm25_weight     = 0.5f;
 };
 
 // ── Global state (search executed once in Init, results cached) ───────────────
@@ -89,6 +107,17 @@ static unique_ptr<FunctionData> AilakeSearchBind(
             data->ef_search = IntegerValue::Get(named.second);
         } else if (named.first == "table_name") {
             data->table_name = StringValue::Get(named.second);
+        } else if (named.first == "partition_filter") {
+            if (!named.second.IsNull())
+                data->partition_filter = StringValue::Get(named.second);
+        } else if (named.first == "hybrid_text") {
+            if (!named.second.IsNull())
+                data->hybrid_text = StringValue::Get(named.second);
+        } else if (named.first == "text_column") {
+            if (!named.second.IsNull())
+                data->text_column = StringValue::Get(named.second);
+        } else if (named.first == "bm25_weight") {
+            data->bm25_weight = FloatValue::Get(named.second);
         }
     }
 
@@ -120,7 +149,11 @@ static unique_ptr<GlobalTableFunctionState> AilakeSearchInit(
         bind.vec_col,
         bind.query,
         bind.top_k,
-        bind.ef_search
+        bind.ef_search,
+        bind.partition_filter,
+        bind.hybrid_text,
+        bind.text_column,
+        bind.bm25_weight
     );
 
     return std::move(state);
@@ -162,7 +195,7 @@ static void AilakeSearchScan(
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
-void RegisterAilakeSearch(duckdb::DatabaseInstance &db) {
+void RegisterAilakeSearch(duckdb::ExtensionLoader &loader) {
     TableFunction func(
         "ailake_search",
         {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::FLOAT), LogicalType::INTEGER},
@@ -171,9 +204,13 @@ void RegisterAilakeSearch(duckdb::DatabaseInstance &db) {
         AilakeSearchInit
     );
 
-    func.named_parameters["vec_col"]    = LogicalType::VARCHAR;
-    func.named_parameters["ef_search"]  = LogicalType::INTEGER;
-    func.named_parameters["table_name"] = LogicalType::VARCHAR;
+    func.named_parameters["vec_col"]          = LogicalType::VARCHAR;
+    func.named_parameters["ef_search"]        = LogicalType::INTEGER;
+    func.named_parameters["table_name"]       = LogicalType::VARCHAR;
+    func.named_parameters["partition_filter"] = LogicalType::VARCHAR;
+    func.named_parameters["hybrid_text"]      = LogicalType::VARCHAR;
+    func.named_parameters["text_column"]      = LogicalType::VARCHAR;
+    func.named_parameters["bm25_weight"]      = LogicalType::FLOAT;
 
-    ExtensionUtil::RegisterFunction(db, func);
+    loader.RegisterFunction( func);
 }

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 
 @dataclass
@@ -76,6 +76,20 @@ class AilakeDestinationConfig:
     pq_only: bool = False
     """Discard raw F16 vectors after index build — max compression, no reranking."""
 
+    # --- Agent partitioning (Phase 9) ---
+    partition_by: str = ""
+    """Iceberg identity partition column (e.g. ``agent_id``). Empty = no partitioning."""
+
+    # --- Multi-column partition specs + format version (Phase Q) ---
+    partition_fields: list[dict[str, Any]] = field(default_factory=list)
+    """Multi-column partition spec (Phase K).  Each entry must have ``column``,
+    ``transform`` (``"identity"`` or ``"truncate[W]"``), and ``column_type``.
+    When non-empty, takes precedence over ``partition_by`` at table creation."""
+
+    format_version: int = 2
+    """Iceberg format version.  ``2`` (default, full compatibility) or ``3``
+    (V3 tables: deletion vectors, row lineage, variant type)."""
+
     @classmethod
     def from_dict(cls, raw: dict) -> "AilakeDestinationConfig":
         embed_mode = raw.get("embed_mode", "cmd")
@@ -105,6 +119,9 @@ class AilakeDestinationConfig:
             batch_size=int(raw.get("batch_size", 512)),
             pre_normalize=bool(raw.get("pre_normalize", False)),
             pq_only=bool(raw.get("pq_only", False)),
+            partition_by=raw.get("partition_by", ""),
+            partition_fields=raw.get("partition_fields", []),
+            format_version=int(raw.get("format_version", 2)),
         )
 
     def validate(self) -> list[str]:
@@ -123,6 +140,14 @@ class AilakeDestinationConfig:
             errors.append(f"embedding_dim must be > 0, got {self.embedding_dim}")
         if self.batch_size <= 0:
             errors.append(f"batch_size must be > 0, got {self.batch_size}")
+        if self.format_version not in (2, 3):
+            errors.append(f"format_version must be 2 or 3, got {self.format_version}")
+        for i, pf in enumerate(self.partition_fields):
+            for key in ("column", "transform", "column_type"):
+                if not pf.get(key):
+                    errors.append(
+                        f"partition_fields[{i}] missing required key '{key}'"
+                    )
         return errors
 
     def table_path(self, stream_name: str) -> str:

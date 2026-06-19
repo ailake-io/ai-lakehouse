@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::info;
@@ -189,6 +190,153 @@ impl MemTableWriter {
     }
 }
 
+// ─── WorkingMemoryBuffer ──────────────────────────────────────────────────────
+
+/// Single entry in a `WorkingMemoryBuffer`.
+#[derive(Debug, Clone)]
+pub struct WorkingMemoryEntry {
+    /// Text content (chunk_text or tool call summary).
+    pub text: String,
+    /// Embedding vector for similarity search.
+    pub embedding: Vec<f32>,
+    /// Agent-assigned importance score (0.0–1.0). Influences hybrid scoring.
+    pub importance: f32,
+}
+
+/// Bounded in-memory buffer for agent short-term memory.
+///
+/// Stores the N most recent entries (text + embedding). When full, the oldest
+/// entry is evicted on each `push`. Supports brute-force flat scan (`search`)
+/// and draining all entries to an AI-Lake table (`drain_to_table`).
+///
+/// # Cascade pattern
+///
+/// Short-term agents use only `WorkingMemoryBuffer`. Long-term agents cascade:
+/// 1. `search` queries the buffer first (fast, recent).
+/// 2. When full, `drain_to_table` persists to AI-Lake; continue searching via
+///    `ailake::search` for historical context.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut wm = WorkingMemoryBuffer::new(100);
+/// wm.push("Meeting notes: …", embedding, 0.8);
+/// let top3 = wm.search(&query_vec, 3);
+/// if wm.is_full() {
+///     wm.drain_to_table(&mut writer).await?;
+///     writer.commit().await?;
+/// }
+/// ```
+pub struct WorkingMemoryBuffer {
+    max_rows: usize,
+    entries: VecDeque<WorkingMemoryEntry>,
+}
+
+impl WorkingMemoryBuffer {
+    /// Create buffer with at most `max_rows` entries. Evicts oldest on overflow.
+    pub fn new(max_rows: usize) -> Self {
+        Self {
+            max_rows: max_rows.max(1),
+            entries: VecDeque::with_capacity(max_rows.min(4096)),
+        }
+    }
+
+    /// Add entry. If at capacity, evicts the oldest entry (FIFO).
+    pub fn push(&mut self, text: impl Into<String>, embedding: Vec<f32>, importance: f32) {
+        if self.entries.len() >= self.max_rows {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(WorkingMemoryEntry {
+            text: text.into(),
+            embedding,
+            importance: importance.clamp(0.0, 1.0),
+        });
+    }
+
+    /// Brute-force cosine similarity scan. Returns `(distance, entry)` pairs
+    /// sorted ascending (smallest distance = most similar). Distances in `[0, 2]`.
+    pub fn search(&self, query: &[f32], top_k: usize) -> Vec<(f32, &WorkingMemoryEntry)> {
+        if self.entries.is_empty() || top_k == 0 {
+            return vec![];
+        }
+        let q_norm = l2_norm(query);
+        let mut scored: Vec<(f32, usize)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let v_norm = l2_norm(&e.embedding);
+                let dot: f32 = query.iter().zip(&e.embedding).map(|(a, b)| a * b).sum();
+                let cos_sim = if q_norm * v_norm < f32::EPSILON {
+                    0.0
+                } else {
+                    dot / (q_norm * v_norm)
+                };
+                // cosine distance: lower = more similar
+                (1.0 - cos_sim, i)
+            })
+            .collect();
+
+        scored.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+        scored
+            .into_iter()
+            .map(|(dist, idx)| (dist, &self.entries[idx]))
+            .collect()
+    }
+
+    /// Write all buffered entries to an AI-Lake table and clear the buffer.
+    ///
+    /// Creates a RecordBatch with a `chunk_text` column. Call `writer.commit()`
+    /// after to persist the snapshot.
+    pub async fn drain_to_table(&mut self, writer: &mut TableWriter) -> AilakeResult<()> {
+        use arrow_array::StringArray;
+        use arrow_schema::{DataType, Field, Schema};
+
+        if self.entries.is_empty() {
+            return Ok(());
+        }
+
+        let texts: Vec<&str> = self.entries.iter().map(|e| e.text.as_str()).collect();
+        let embeddings: Vec<Vec<f32>> = self.entries.iter().map(|e| e.embedding.clone()).collect();
+        let importance_vals: Vec<f32> = self.entries.iter().map(|e| e.importance).collect();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chunk_text", DataType::Utf8, false),
+            Field::new("importance_score", DataType::Float32, false),
+        ]));
+        let batch = arrow_array::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(texts)) as _,
+                Arc::new(arrow_array::Float32Array::from(importance_vals)) as _,
+            ],
+        )
+        .map_err(|e| ailake_core::AilakeError::Arrow(e.to_string()))?;
+
+        writer.write_batch(&batch, &embeddings).await?;
+        self.entries.clear();
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// True when the buffer has reached its configured capacity.
+    pub fn is_full(&self) -> bool {
+        self.entries.len() >= self.max_rows
+    }
+}
+
+fn l2_norm(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +362,10 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
         }
     }
 
@@ -246,6 +398,8 @@ mod tests {
                 &ailake_catalog::TableProperties {
                     policy: make_policy(),
                     extra: Default::default(),
+                    format_version: 2,
+                    partition_column_type: None,
                 },
             )
             .await
@@ -317,6 +471,97 @@ mod tests {
         let snap = mt.insert(&batch2, &embs).await.unwrap();
         assert!(snap.is_some(), "should auto-flush when row limit exceeded");
         assert_eq!(mt.buffered_rows(), 0);
+    }
+
+    #[test]
+    fn working_memory_evicts_oldest() {
+        let mut wm = WorkingMemoryBuffer::new(3);
+        wm.push("a", vec![1.0, 0.0], 1.0);
+        wm.push("b", vec![0.0, 1.0], 1.0);
+        wm.push("c", vec![1.0, 1.0], 1.0);
+        assert_eq!(wm.len(), 3);
+        assert!(wm.is_full());
+
+        wm.push("d", vec![0.5, 0.5], 1.0);
+        assert_eq!(wm.len(), 3);
+        // "a" should be evicted
+        assert!(!wm.entries.iter().any(|e| e.text == "a"));
+        assert!(wm.entries.iter().any(|e| e.text == "d"));
+    }
+
+    #[test]
+    fn working_memory_search_ranks_similar_first() {
+        let mut wm = WorkingMemoryBuffer::new(10);
+        wm.push("near", vec![1.0, 0.0, 0.0], 1.0);
+        wm.push("far", vec![0.0, 1.0, 0.0], 1.0);
+        wm.push("very far", vec![0.0, 0.0, 1.0], 1.0);
+
+        let query = vec![1.0, 0.0, 0.0];
+        let results = wm.search(&query, 3);
+        assert_eq!(results.len(), 3);
+        // "near" should have smallest cosine distance
+        assert_eq!(results[0].1.text, "near");
+        assert!(results[0].0 < results[1].0);
+    }
+
+    #[test]
+    fn working_memory_search_empty() {
+        let wm = WorkingMemoryBuffer::new(10);
+        assert!(wm.search(&[1.0, 0.0], 5).is_empty());
+    }
+
+    #[tokio::test]
+    async fn working_memory_drain_to_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog = Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "test_wm_drain");
+
+        let policy = VectorStoragePolicy {
+            column_name: "embedding".to_string(),
+            dim: 3,
+            metric: ailake_core::VectorMetric::Cosine,
+            precision: ailake_core::VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: false,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
+        catalog
+            .create_table(
+                &table,
+                &ailake_catalog::TableProperties {
+                    policy: policy.clone(),
+                    extra: Default::default(),
+                    format_version: 2,
+                    partition_column_type: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut wm = WorkingMemoryBuffer::new(5);
+        wm.push("memory one", vec![1.0, 0.0, 0.0], 0.9);
+        wm.push("memory two", vec![0.0, 1.0, 0.0], 0.5);
+
+        let mut writer = TableWriter::new(
+            Arc::clone(&catalog) as Arc<dyn ailake_catalog::CatalogProvider>,
+            Arc::clone(&store) as Arc<dyn ailake_store::Store>,
+            policy,
+            table,
+        );
+        wm.drain_to_table(&mut writer).await.unwrap();
+        assert!(wm.is_empty());
+        let snap = writer.commit().await.unwrap();
+        assert!(snap > 0);
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ── DuckDB version (must match the duckdb Python package used in tests) ────────
-set(DUCKDB_VERSION "v1.1.3" CACHE STRING "DuckDB version to build against")
+set(DUCKDB_VERSION "v1.5.3" CACHE STRING "DuckDB version to build against")
 
 # ── Fetch DuckDB source (headers only — do NOT add_subdirectory) ──────────────
 include(FetchContent)
@@ -35,8 +35,11 @@ add_library(duckdb_ailake MODULE
     src/ailake_extension.cpp
     src/ailake_search.cpp
     src/ailake_search_multimodal.cpp
+    src/ailake_search_text.cpp
     src/ailake_write.cpp
     src/ailake_scan_table.cpp
+    src/ailake_delete.cpp
+    src/ailake_evolve_schema.cpp
 )
 
 target_include_directories(duckdb_ailake PRIVATE
@@ -49,10 +52,10 @@ target_link_libraries(duckdb_ailake PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
-# DuckDB manylinux wheels are compiled with _GLIBCXX_USE_CXX11_ABI=0 (old ABI).
-# Our extension must match, otherwise std::string-bearing symbols get the
-# B5cxx11 ABI tag (e.g. ToString()B5cxx11) which the host .so doesn't export.
-target_compile_definitions(duckdb_ailake PRIVATE _GLIBCXX_USE_CXX11_ABI=0)
+# ABI note: match the ABI of the host duckdb Python package.
+# Anaconda/pip wheels on modern Linux use C++11 ABI (default, no flag needed).
+# Older manylinux wheels use _GLIBCXX_USE_CXX11_ABI=0 — add back if loading fails
+# with "undefined symbol: ...B5cxx11..." vs "...ToStringEv" (without B5cxx11).
 
 # Extensions must NOT link against duckdb — symbols resolved from the host process at dlopen time.
 if(APPLE)

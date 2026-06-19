@@ -3,6 +3,8 @@
 package io.ailake.spark
 
 import org.scalatest.funsuite.AnyFunSuite
+import org.junit.runner.RunWith
+import org.scalatestplus.junit.JUnitRunner
 
 /**
  * End-to-end integration test for the Spark JNA bridge.
@@ -14,6 +16,7 @@ import org.scalatest.funsuite.AnyFunSuite
  *
  * Skipped automatically when either env var is absent.
  */
+@RunWith(classOf[JUnitRunner])
 class AilakeNativeIntegrationTest extends AnyFunSuite {
 
   private val fixturePath = sys.env.get("AILAKE_SPARK_TRINO_FIXTURE")

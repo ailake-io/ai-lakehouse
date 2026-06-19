@@ -56,17 +56,21 @@ Depois abra **http://localhost:8888** e execute os notebooks:
 
 | Notebook | O que demonstra |
 |---|---|
-| `01_ailake_demo.ipynb` | Escrita, busca, IVF-PQ, PQ residual, escrita diferida, tuning HNSW, API async, estimador de storage, compat Iceberg, montagem de contexto RAG, upload MinIO, escrita multi-coluna, RRF cross-modal, `MultimodalContextSchema` |
+| `01_ailake_demo.ipynb` | Escrita, busca, IVF-PQ, PQ residual, escrita diferida, tuning HNSW, API async, estimador de storage, compat Iceberg, montagem de contexto RAG, upload MinIO, escrita multi-coluna, RRF cross-modal, `MultimodalContextSchema`, `delete_where`, `add_column`/`rename_column`, `partition_fields` + Iceberg v3 |
 | `02_duckdb.ipynb` | Scan Parquet DuckDB, queries filtradas, estatísticas de storage por arquivo, decodificação F16 |
-| `03_spark.ipynb` | PySpark local[*], SQL Iceberg, histórico de snapshots, time-travel `VERSION AS OF` |
-| `04_trino.ipynb` | SQL Trino, propriedades de tabela AI-Lake, tabelas do sistema `$files` / `$manifests` |
+| `03_spark.ipynb` | PySpark local[*], SQL Iceberg, histórico de snapshots, time-travel `VERSION AS OF`, leitura de tabela particionada v3, visibilidade de delete, leitura de schema evolutivo |
+| `04_trino.ipynb` | SQL Trino, propriedades de tabela AI-Lake, tabelas do sistema `$files` / `$manifests`, inspeção de DDL `partition_fields`, visibilidade de equality delete |
 | `05_bigquery.ipynb` | Inserções no emulador BigQuery, decodificação BYTES F16, padrão GCS + BigQuery Omni em produção |
 | `07_multimodal.ipynb` | `VectorColSpec`, `write_batch_multi`, tags de modalidade, fusão RRF cross-modal, ablação de pesos, constantes `MultimodalContextSchema` |
+| `08_agents.ipynb` | `ailake.Agent`, memória episódica, `ToolCallSchema`, `EpisodicMemorySchema`, `WorkingMemoryBuffer`, `decay_memories`, isolamento por agente via partição |
+| `09_hybrid_search.ipynb` | Escrita BM25 (`bm25_text_column`), `search_text` lexical puro, RRF híbrido (vetor + BM25), ablação de pesos |
+| `10_gpu_demo.ipynb` | `hardware_info()`, `write_batch_auto_deferred`, comparação de tempo HNSW vs diferido, QPS de busca, recall@10, fallback CPU |
 
-Notebooks 04 e 05 requerem o perfil `engines` (adiciona Trino + emulador BigQuery):
+Notebooks 03 e 04 requerem o perfil `engines` (adiciona Trino). Notebook 10 requer o perfil `gpu` (NVIDIA Container Toolkit):
 
 ```bash
-docker compose -f tests/docker/compose-demo.yml --profile engines up -d
+docker compose -f tests/docker/compose-demo.yml --profile engines up -d   # Trino
+docker compose -f tests/docker/compose-demo.yml --profile gpu up -d        # JupyterLab GPU na :8889
 ```
 
 Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
@@ -97,9 +101,9 @@ Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
 **Rust** (adicione ao `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.19"
-ailake-query = "0.0.19"   # search(), TableWriter, ContextAssembler, search_multimodal
-ailake-store = "0.0.19"   # backends S3 / GCS / Azure / local
+ailake-core  = "0.0.20"
+ailake-query = "0.0.20"   # search(), TableWriter, ContextAssembler, search_multimodal
+ailake-store = "0.0.20"   # backends S3 / GCS / Azure / local
 ```
 
 **Python**:
@@ -134,7 +138,7 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — baixe os JARs pré-compilados em [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.19
+VERSION=0.0.20
 
 # Plugin Spark
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
@@ -193,13 +197,17 @@ tests/
     ├── compose-engines.yml      # + Spark + Trino
     ├── compose-demo.yml         # Demo de onboarding; --profile engines adiciona Trino + BQ
     └── demo/
-        ├── init_demo.py         # Gera 5 tabelas fixture (HNSW, PQ-only, Residual-PQ, Deferred, Multimodal)
+        ├── init_demo.py         # Gera 8 tabelas fixture (HNSW, PQ-only, Residual-PQ, Deferred, Multimodal, Partitioned-v3, Delete-demo, Schema-evo, Deferred, Multimodal)
         └── notebooks/
             ├── 01_ailake_demo.ipynb
             ├── 02_duckdb.ipynb
             ├── 03_spark.ipynb
             ├── 04_trino.ipynb
-            └── 05_bigquery.ipynb
+            ├── 05_bigquery.ipynb
+            ├── 06_airbyte_destination.ipynb
+            ├── 07_multimodal.ipynb
+            ├── 08_agents.ipynb
+            └── 09_hybrid_search.ipynb
 ```
 
 ## Performance
@@ -270,7 +278,8 @@ cargo check --workspace
 | **Fase 4** | ✅ Completa | Reranking pós-PQ, spec pública do formato, busca GPU (NVIDIA cuBLAS + AMD hipBLAS, ambos runtime-only), otimizações HNSW, índice nativo IVF-PQ, k-means GPU, `MemTableWriter`, colunas multi-vetor, seleção adaptativa de índice, conector Kotlin `ailake-flink`; **codebook compartilhado IVF-PQ**; **`write_batch_ivf_pq_deferred`**; **fix k-means++ O(n×k)**; **fix `HadoopCatalog` Replace** |
 | **Fase 5** | ✅ Completa | SDKs multi-linguagem (`ailake-go`, `ailake-cpp`), servidor HTTP REST `ailake serve`, provider Apache Airflow, escritas idempotentes, CI Compat Heavy, scanning de segredos TruffleHog, guias de deploy em cloud |
 | **Fase 6** | ✅ Completa | Pipeline de distribuição pública — crates.io, PyPI (wheels manylinux abi3), provider Airflow no PyPI, JARs JVM pré-compilados + `libailake_jni.so` no GitHub Releases, versionamento Python dinâmico |
-| **Fase 7** | 🚧 Em andamento | Concluído: extensão DuckDB (`duckdb-ailake/`), leitura completa Python (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` expostos no SDK Python, demo JupyterLab expandida (5 tabelas fixture, 23 seções + `07_multimodal.ipynb`). Restante: backend de catálogo DuckLake; guia de integração dbt |
+| **Fase 7** | 🚧 Em andamento | Concluído: extensão DuckDB (`duckdb-ailake/`), leitura completa Python (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` expostos no SDK Python, guia dbt (`docs/guides/DBT_INTEGRATION.md`), `partition_fields` (spec de partição Iceberg multi-coluna), `format_version=3` (tabelas Iceberg v3), `delete_where` + `evolve_schema` em todos os SDKs (Python, Go, C++, Spark, Trino, Flink, DuckDB, Airflow, Airbyte), binding `hardware_info()` Python, notebook de demo GPU (`10_gpu_demo.ipynb`), demo JupyterLab expandida (10 notebooks). Restante: backend de catálogo DuckLake |
 | **Fase 8** | ✅ Completa | Multimodal — enum `VectorModality`, propriedade Iceberg `ailake.modality-<col>`, N colunas vetoriais generalizadas com HNSW independente, `write_batch_multi`, CLI `--vector-cols`, `search_multimodal` (RRF cross-modal), `MultimodalContextSchema` + módulo `multimodal_columns`, Python `VectorColSpec`, notebook e fixture multimodal |
+| **Fase 9** | ✅ Completa | Memória de agentes — `ToolCallSchema` (histórico de tool calls pesquisável), `EpisodicMemorySchema` (decaimento de recência, contagem de acesso, pontuação de importância), `ScoreFn` injetável para scoring híbrido (distância × recência × importância), `partition_by`/`partition_value` para isolamento por agente via particionamento Iceberg, `partition_filter` para pruning ao nível de manifesto antes de centroide e HNSW, helper Python `ailake.Agent` (LangChain/CrewAI/AutoGen). Propagado para todos os SDKs e conectores: Spark, Trino, Flink, Go, C++, DuckDB, Airbyte, Airflow. Fix: `TableWriter::create_or_open` inicializa `part_counter` a partir da contagem de arquivos existentes. |
 
 Veja [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) para o detalhamento completo das fases.

@@ -5,15 +5,22 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence, Union
 
 from ailake._ailake import (  # type: ignore[import]
     TableWriter as _TableWriter,
     VectorColSpec,
+    WorkingMemoryBuffer,
+    add_column,
     assemble_context,
+    decay_memories,
+    delete_where,
+    hardware_info,
     migrate_embeddings,
+    rename_column,
     search as _search_raw,
     search_multimodal,
+    search_text,
     search_with_data as _search_with_data,
 )
 
@@ -29,13 +36,21 @@ _Vector = Union[Sequence[float], "np.ndarray"]
 __all__ = [
     "open_table",
     "search",
+    "search_text",
     "search_multimodal",
     "Table",
     "SearchQuery",
     "TableWriter",
     "VectorColSpec",
+    "WorkingMemoryBuffer",
+    "Agent",
     "assemble_context",
     "migrate_embeddings",
+    "decay_memories",
+    "delete_where",
+    "add_column",
+    "rename_column",
+    "hardware_info",
 ]
 
 # Backward-compat re-export: ailake.TableWriter still works.
@@ -78,11 +93,27 @@ class SearchQuery:
     dicts.  ``.to_list()`` always returns ``[{row_id, distance, file}]`` regardless.
     """
 
-    def __init__(self, path: str, query: list[float], top_k: int, fetch_data: bool = False) -> None:
+    def __init__(
+        self,
+        path: str,
+        query: list[float],
+        top_k: int,
+        fetch_data: bool = False,
+        partition_filter: "str | None" = None,
+        score_fn: "Callable[[float, Any], float] | None" = None,
+        hybrid_text: "str | None" = None,
+        text_column: str = "chunk_text",
+        bm25_weight: float = 0.5,
+    ) -> None:
         self._path = path
         self._query = query
         self._top_k = top_k
         self._fetch_data = fetch_data
+        self._partition_filter = partition_filter
+        self._score_fn = score_fn
+        self._hybrid_text = hybrid_text
+        self._text_column = text_column
+        self._bm25_weight = bm25_weight
         self._results: list[dict] | None = None      # lazy — pointer-only
         self._arrow_batch = None                      # lazy — full RecordBatch
 
@@ -99,15 +130,23 @@ class SearchQuery:
 
     def _execute(self) -> list[dict]:
         if self._results is None:
-            self._results = _search_raw(self._path, self._query, self._top_k)
+            self._results = _search_raw(
+                self._path, self._query, self._top_k, self._partition_filter,
+                self._hybrid_text, self._text_column, self._bm25_weight,
+            )
         return self._results
 
     def _execute_arrow(self):
         if self._arrow_batch is None:
             import io
             import pyarrow as pa  # noqa: PLC0415
-            ipc_bytes: bytes = _search_with_data(self._path, self._query, self._top_k)
-            self._arrow_batch = pa.ipc.open_file(io.BytesIO(ipc_bytes)).read_all()
+            ipc_bytes: bytes = _search_with_data(
+                self._path, self._query, self._top_k, self._partition_filter
+            )
+            table = pa.ipc.open_file(io.BytesIO(ipc_bytes)).read_all()
+            if self._score_fn is not None:
+                table = _apply_score_fn(table, self._score_fn)
+            self._arrow_batch = table
         return self._arrow_batch
 
     def to_list(self) -> list[dict]:
@@ -467,6 +506,30 @@ class Table:
         )
 
 
+def _apply_score_fn(table, score_fn):
+    """Re-rank a pyarrow Table using a Python-level score_fn(distance, row) -> float.
+
+    score_fn receives (distance: float, row: dict) where row maps column names to
+    scalar Python values for that row. Returns float; lower = better (matches
+    distance semantics). Table is re-sorted by the new score; ``_score`` column appended.
+    """
+    import pyarrow as pa  # noqa: PLC0415
+    import pyarrow.compute as pc  # noqa: PLC0415
+
+    n = table.num_rows
+    col_names = table.schema.names
+    scores = []
+    dist_col = table.column("_distance")
+    for i in range(n):
+        dist = dist_col[i].as_py()
+        row = {name: table.column(name)[i].as_py() for name in col_names}
+        scores.append(score_fn(dist, row))
+    score_array = pa.array(scores, type=pa.float32())
+    table = table.append_column("_score", score_array)
+    order = pc.sort_indices(table, sort_keys=[("_score", "ascending")])
+    return table.take(order)
+
+
 # ── module-level helpers ──────────────────────────────────────────────────────
 
 def open_table(
@@ -517,7 +580,410 @@ def open_table(
     )
 
 
-def search(path: str, query: _Vector, top_k: int = 10, fetch_data: bool = False) -> SearchQuery:
+# ── Agent ─────────────────────────────────────────────────────────────────────
+
+# Metadata is embedded in chunk_text using this separator (ASCII unit separator,
+# extremely unlikely to appear in natural text).
+_AGENT_META_SEP = "\x1f"
+
+
+def _pack_agent_meta(text: str, meta: dict) -> str:
+    """Embed JSON metadata as a prefix in the stored text."""
+    import json
+    return _AGENT_META_SEP + json.dumps(meta, separators=(",", ":")) + _AGENT_META_SEP + text
+
+
+def _unpack_agent_meta(stored: str) -> tuple[str, dict]:
+    """Extract metadata prefix from stored text. Returns (original_text, meta_dict)."""
+    import json
+    if stored.startswith(_AGENT_META_SEP):
+        parts = stored.split(_AGENT_META_SEP, 2)
+        if len(parts) == 3:
+            try:
+                return parts[2], json.loads(parts[1])
+            except (json.JSONDecodeError, IndexError):
+                pass
+    return stored, {}
+
+
+class Agent:
+    """High-level agent memory helper — Phase 9.
+
+    Wraps :class:`TableWriter` + vector search + :func:`assemble_context` into
+    a single interface designed for agent frameworks (LangChain, CrewAI, AutoGen).
+
+    Episodic memories and tool-call records are stored as vector-indexed rows
+    in a shared AI-Lake table. Recall uses **hybrid scoring** — the HNSW distance
+    is modulated by exponential recency decay and an agent-assigned importance
+    score, so recent and important memories rank above older, less-important ones
+    even when semantically equidistant.
+
+    Args:
+        table_path: Local path or object-storage URI for the agent memory table.
+        embed_fn:   ``Callable[[list[str]], list[list[float]]]`` — text → embedding.
+                    Must return one embedding per input string.
+        agent_id:   Stable UUID string identifying this agent instance.
+                    Auto-generated if omitted (new UUID each session).
+        session_id: UUID for the current conversation/task session.
+                    Auto-generated if omitted.
+        metric:     Distance metric — ``"cosine"`` (default), ``"euclidean"``,
+                    ``"dot_product"``, ``"normalized_cosine"``.
+        lambda_:    Exponential decay rate for recency. Default ``0.099``
+                    (half-life ≈ 7 days). Use ``0.693`` for daily decay,
+                    ``0.023`` for monthly decay.
+
+    Example::
+
+        import ailake, openai
+
+        def embed(texts):
+            resp = openai.embeddings.create(model="text-embedding-3-small", input=texts)
+            return [d.embedding for d in resp.data]
+
+        agent = ailake.Agent("s3://my-lake/agent-memory/", embed_fn=embed,
+                             agent_id="agent-42")
+
+        # Store memories
+        agent.remember("User prefers concise responses", importance=0.9)
+        agent.remember("Last session topic: Rust async patterns", importance=0.6)
+        agent.log_tool_call("web_search", {"q": "Rust tokio docs"}, {"hits": 5})
+        agent.commit()
+
+        # Recall with hybrid scoring
+        memories = agent.recall(embed(["async programming"])[0], top_k=5)
+        for m in memories:
+            print(f"[score={m['score']:.3f}] {m['text']}")
+
+        # Assemble LLM context
+        context_xml = agent.assemble_context(embed(["concise answers"])[0])
+    """
+
+    def __init__(
+        self,
+        table_path: str,
+        embed_fn: Callable[[list[str]], list[list[float]]],
+        agent_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        metric: str = "cosine",
+        lambda_: float = 0.099,
+    ) -> None:
+        import uuid as _uuid
+        self._table_path = table_path
+        self._embed_fn = embed_fn
+        self._agent_id = agent_id or str(_uuid.uuid4())
+        self._session_id = session_id or str(_uuid.uuid4())
+        self._metric = metric
+        self._lambda = lambda_
+        # Writer is lazily initialised on first write (dim unknown until first embedding).
+        self._writer: Optional[_TableWriter] = None
+        # Pending (stored_text, embedding) pairs not yet written.
+        self._pending: list[tuple[str, list[float]]] = []
+
+    # ── internal ──────────────────────────────────────────────────────────────
+
+    def _ensure_writer(self, dim: int) -> _TableWriter:
+        if self._writer is None:
+            self._writer = _TableWriter(
+                self._table_path,
+                vector_column="embedding",
+                dim=dim,
+                metric=self._metric,
+                partition_by="agent_id",
+                partition_value=self._agent_id,
+            )
+        return self._writer
+
+    def _embed_one(self, text: str) -> list[float]:
+        results = self._embed_fn([text])
+        return results[0] if results else []
+
+    def _flush_pending(self) -> None:
+        if not self._pending:
+            return
+        texts = [t for t, _ in self._pending]
+        embs = [e for _, e in self._pending]
+        dim = len(embs[0])
+        writer = self._ensure_writer(dim)
+        writer.write_batch(texts, embs)
+        self._pending.clear()
+
+    # ── write ─────────────────────────────────────────────────────────────────
+
+    def remember(self, text: str, importance: float = 1.0) -> str:
+        """Embed *text* and buffer it as an episodic memory.
+
+        Args:
+            text:       Natural-language memory to store.
+            importance: Agent-assigned salience in ``[0.0, 1.0]`` (default 1.0).
+                        Higher values make this memory harder to displace in recall
+                        even as it ages.
+
+        Returns:
+            ``mem_id`` — a UUID string that uniquely identifies this memory.
+
+        Note:
+            Call :meth:`commit` to persist buffered memories to storage.
+        """
+        import time
+        import uuid as _uuid
+        mem_id = str(_uuid.uuid4())
+        now = int(time.time())
+        meta = {
+            "type": "memory",
+            "mem_id": mem_id,
+            "agent_id": self._agent_id,
+            "session_id": self._session_id,
+            "importance": importance,
+            "created_at": now,
+            "last_accessed_at": now,
+            "access_count": 0,
+        }
+        emb = self._embed_one(text)
+        self._pending.append((_pack_agent_meta(text, meta), emb))
+        return mem_id
+
+    def log_tool_call(
+        self,
+        name: str,
+        input: object,
+        output: object,
+        outcome: str = "success",
+        latency_ms: int = 0,
+        importance: float = 0.5,
+    ) -> str:
+        """Record a tool invocation in the agent memory table.
+
+        The embedding is computed from ``"{name}: {input_json}"`` so that
+        semantic search can find past calls by intent rather than just name.
+
+        Args:
+            name:        Tool name (e.g. ``"web_search"``, ``"code_exec"``).
+            input:       Tool input — any JSON-serialisable value or string.
+            output:      Tool output — any JSON-serialisable value or string.
+            outcome:     ``"success"`` | ``"failure"`` | ``"timeout"``.
+            latency_ms:  Wall-clock latency in milliseconds.
+            importance:  Salience of this tool call for future recall (default 0.5).
+
+        Returns:
+            ``call_id`` — a UUID string identifying this tool call record.
+        """
+        import json
+        import time
+        import uuid as _uuid
+        call_id = str(_uuid.uuid4())
+        now = int(time.time())
+        input_json = json.dumps(input) if not isinstance(input, str) else input
+        output_json = json.dumps(output) if not isinstance(output, str) else output
+        embed_text = f"{name}: {input_json}"
+        meta = {
+            "type": "tool_call",
+            "call_id": call_id,
+            "agent_id": self._agent_id,
+            "session_id": self._session_id,
+            "tool_name": name,
+            "tool_input_json": input_json,
+            "tool_output_json": output_json,
+            "outcome": outcome,
+            "latency_ms": latency_ms,
+            "importance": importance,
+            "created_at": now,
+            "last_accessed_at": now,
+            "access_count": 0,
+        }
+        emb = self._embed_one(embed_text)
+        self._pending.append((_pack_agent_meta(embed_text, meta), emb))
+        return call_id
+
+    def commit(self) -> int:
+        """Persist all buffered memories and tool calls as a new Iceberg snapshot.
+
+        Returns the new snapshot id, or 0 if nothing was pending.
+        """
+        if not self._pending and self._writer is None:
+            return 0
+        self._flush_pending()
+        return self._writer.commit() if self._writer else 0
+
+    # ── read ──────────────────────────────────────────────────────────────────
+
+    def recall(
+        self,
+        query: _Vector,
+        top_k: int = 10,
+        oversample: int = 3,
+    ) -> list[dict]:
+        """Retrieve the *top_k* most relevant memories with hybrid scoring.
+
+        HNSW distance is modulated by recency decay and importance:
+        ``score = distance / (recency_weight × importance)``
+        Lower score = better rank.
+
+        Args:
+            query:      Query embedding — ``list[float]`` or array with ``.tolist()``.
+            top_k:      Number of results to return (default 10).
+            oversample: Fetch ``top_k × oversample`` HNSW candidates before
+                        re-ranking (default 3, i.e. 3× oversampling).
+
+        Returns:
+            List of dicts sorted by hybrid score (best first), each containing:
+            ``text``, ``distance``, ``score``, ``recency``, ``importance``,
+            ``type`` (``"memory"`` | ``"tool_call"``), ``mem_id`` / ``call_id``,
+            ``agent_id``, ``session_id``, ``created_at``.
+        """
+        import io
+        import math
+        import time
+
+        import pyarrow as pa  # noqa: PLC0415
+
+        q: list[float] = query.tolist() if hasattr(query, "tolist") else list(query)
+        candidate_k = top_k * max(1, oversample)
+
+        raw_ipc: bytes = _search_with_data(self._table_path, q, candidate_k, self._agent_id)
+        batch = pa.ipc.open_file(io.BytesIO(raw_ipc)).read_all()
+
+        now = int(time.time())
+        col_names = batch.schema.names
+        has_chunk_text = "chunk_text" in col_names
+        has_distance = "distance" in col_names
+
+        scored: list[dict] = []
+        for i in range(batch.num_rows):
+            dist = float(batch.column("distance")[i].as_py()) if has_distance else 1.0
+            raw_text = str(batch.column("chunk_text")[i].as_py()) if has_chunk_text else ""
+            text, meta = _unpack_agent_meta(raw_text)
+
+            last_accessed = meta.get("last_accessed_at", now)
+            days_since = max(0.0, (now - last_accessed) / 86400.0)
+            recency = math.exp(-self._lambda * days_since)
+            importance = float(meta.get("importance", 1.0))
+            denom = max(recency * importance, 1e-7)
+            score = dist / denom
+
+            entry: dict = {
+                "text": text,
+                "distance": dist,
+                "score": score,
+                "recency": recency,
+                "importance": importance,
+                "type": meta.get("type", "memory"),
+                "agent_id": meta.get("agent_id"),
+                "session_id": meta.get("session_id"),
+                "created_at": meta.get("created_at"),
+            }
+            if meta.get("type") == "tool_call":
+                entry["call_id"] = meta.get("call_id")
+                entry["tool_name"] = meta.get("tool_name")
+                entry["tool_input_json"] = meta.get("tool_input_json")
+                entry["tool_output_json"] = meta.get("tool_output_json")
+                entry["outcome"] = meta.get("outcome")
+                entry["latency_ms"] = meta.get("latency_ms")
+            else:
+                entry["mem_id"] = meta.get("mem_id")
+
+            scored.append(entry)
+
+        scored.sort(key=lambda x: x["score"])
+        return scored[:top_k]
+
+    def assemble_context(self, query: _Vector, max_tokens: int = 4096) -> str:
+        """Retrieve memories and assemble structured XML context for an LLM.
+
+        Calls :meth:`recall` with ``top_k=20`` and formats the results using
+        the same :func:`assemble_context` pipeline as the rest of the SDK
+        (deduplication, token-budget enforcement, XML structure).
+
+        Args:
+            query:      Query embedding (same space as memories).
+            max_tokens: Token budget for the context block (default 4096).
+
+        Returns:
+            XML string suitable for inclusion in a Claude / GPT-4 prompt.
+        """
+        memories = self.recall(query, top_k=20)
+        chunks = [
+            {
+                "document_id": m.get("mem_id") or m.get("call_id") or f"mem-{i}",
+                "chunk_index": i,
+                "chunk_text": m["text"],
+                "distance": m["distance"],
+                "document_title": (
+                    f"Tool: {m.get('tool_name', 'unknown')} [{m.get('outcome', '')}]"
+                    if m.get("type") == "tool_call"
+                    else f"Memory (importance={m['importance']:.2f})"
+                ),
+                "source_uri": self._table_path,
+            }
+            for i, m in enumerate(memories)
+        ]
+        return assemble_context(chunks, max_tokens=max_tokens)
+
+    # ── async variants ─────────────────────────────────────────────────────────
+
+    async def remember_async(self, text: str, importance: float = 1.0) -> str:
+        """Async variant of :meth:`remember`."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.remember, text, importance)
+
+    async def recall_async(self, query: _Vector, top_k: int = 10) -> list[dict]:
+        """Async variant of :meth:`recall`."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.recall, query, top_k)
+
+    async def commit_async(self) -> int:
+        """Async variant of :meth:`commit`."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.commit)
+
+    # ── context manager ───────────────────────────────────────────────────────
+
+    def __enter__(self) -> "Agent":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.commit()
+
+    # ── display ───────────────────────────────────────────────────────────────
+
+    def __repr__(self) -> str:
+        pending = len(self._pending)
+        return (
+            f"Agent(table={self._table_path!r}, "
+            f"agent_id={self._agent_id!r}, "
+            f"session_id={self._session_id!r}, "
+            f"pending={pending})"
+        )
+
+    def _repr_html_(self) -> str:
+        rows = _kv_rows([
+            ("agent_id", self._agent_id),
+            ("session_id", self._session_id),
+            ("table", self._table_path),
+            ("metric", self._metric),
+            ("lambda (decay)", f"{self._lambda:.4f} (half-life ≈ {0.693/self._lambda:.1f} days)"),
+            ("pending writes", len(self._pending)),
+        ])
+        return (
+            f'<div style="{_CARD_STYLE}">'
+            f'<div style="color:#6c757d;font-size:11px;margin-bottom:6px">ailake.Agent — Phase 9</div>'
+            f'<table style="border-collapse:collapse;width:100%">{rows}</table>'
+            f"</div>"
+        )
+
+
+# ── module-level helpers ──────────────────────────────────────────────────────
+
+def search(
+    path: str,
+    query: _Vector,
+    top_k: int = 10,
+    fetch_data: bool = False,
+    partition_filter: "str | None" = None,
+    score_fn: "Callable[[float, Any], float] | None" = None,
+    hybrid_text: "str | None" = None,
+    text_column: str = "chunk_text",
+    bm25_weight: float = 0.5,
+) -> SearchQuery:
     """Module-level search returning a chainable :class:`SearchQuery`.
 
     Args:
@@ -527,6 +993,18 @@ def search(path: str, query: _Vector, top_k: int = 10, fetch_data: bool = False)
         fetch_data: When ``True``, ``.to_arrow()`` / ``.to_pandas()`` / ``.to_polars()``
                     return full row data (all Parquet columns + ``_distance``).
                     When ``False`` (default), only ``row_id``, ``distance``, ``file``.
+        partition_filter: Optional partition value to restrict search (e.g. agent_id).
+                          Pruned at manifest level — no files from other partitions opened.
+        score_fn: Optional Python callable ``(distance: float, row: pyarrow.RecordBatch) -> float``
+                  applied post-search to re-rank results. Requires ``fetch_data=True``.
+                  Note: not applied during GPU deferred-build window (SearchSession flat-scan).
+        hybrid_text: Optional text query for BM25 hybrid search. When set, HNSW retrieves
+                     a larger candidate pool, BM25 scores each candidate, and results are
+                     fused via RRF. Requires ``TableWriter(bm25_text_column=...)`` at write time.
+        text_column: Parquet column containing document text for BM25 scoring
+                     (default ``"chunk_text"``).
+        bm25_weight: Weight for BM25 signal in RRF fusion — ``0.0`` = pure vector,
+                     ``1.0`` = pure BM25 (default ``0.5``).
 
     Example::
 
@@ -534,13 +1012,40 @@ def search(path: str, query: _Vector, top_k: int = 10, fetch_data: bool = False)
         results = ailake.search("s3://my-lake/docs/", query_vec, top_k=20)
         df = results.to_pandas()  # columns: row_id, distance, file
 
-        # Full row data
-        results = ailake.search("s3://my-lake/docs/", query_vec, top_k=20, fetch_data=True)
+        # Hybrid BM25+vector search
+        results = ailake.search(
+            "s3://my-lake/docs/", query_vec, top_k=20,
+            hybrid_text="rust async programming", bm25_weight=0.4,
+        )
+
+        # Full row data with partition isolation
+        results = ailake.search(
+            "s3://my-lake/docs/", query_vec, top_k=20,
+            fetch_data=True, partition_filter="agent-A",
+        )
         df = results.to_pandas()  # columns: id, text, embedding, ..., _distance
+
+        # Custom scoring (recency × distance)
+        def hybrid_score(dist, row):
+            recency = row.column("recency_weight")[0].as_py()
+            return dist / (recency + 1e-6)
+
+        results = ailake.search(
+            "s3://my-lake/docs/", query_vec, top_k=20,
+            fetch_data=True, score_fn=hybrid_score,
+        )
     """
     _q: list[float] = (
         query.tolist()  # type: ignore[union-attr]
         if hasattr(query, "tolist")
         else list(query)
     )
-    return SearchQuery(path, _q, top_k, fetch_data=fetch_data)
+    return SearchQuery(
+        path, _q, top_k,
+        fetch_data=fetch_data,
+        partition_filter=partition_filter,
+        score_fn=score_fn,
+        hybrid_text=hybrid_text,
+        text_column=text_column,
+        bm25_weight=bm25_weight,
+    )

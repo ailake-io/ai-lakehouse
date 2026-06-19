@@ -77,6 +77,76 @@ class TestAilakeDestinationConfig:
         )
         assert cfg.table_path("my_stream") == "s3://bucket/lake/my_stream"
 
+    def test_partition_by_from_dict(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "cmd", "embed_cmd": "x",
+             "partition_by": "agent_id"}
+        )
+        assert cfg.partition_by == "agent_id"
+
+    def test_partition_by_default_empty(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "cmd", "embed_cmd": "x"}
+        )
+        assert cfg.partition_by == ""
+
+    # ── Phase Q: partition_fields / format_version ────────────────────────────
+
+    def test_partition_fields_from_dict(self):
+        fields = [{"column": "agent_id", "transform": "identity", "column_type": "string"}]
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "cmd", "embed_cmd": "x",
+             "partition_fields": fields}
+        )
+        assert cfg.partition_fields == fields
+
+    def test_partition_fields_default_empty_list(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "cmd", "embed_cmd": "x"}
+        )
+        assert cfg.partition_fields == []
+
+    def test_format_version_from_dict(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "cmd", "embed_cmd": "x",
+             "format_version": 3}
+        )
+        assert cfg.format_version == 3
+
+    def test_format_version_default_is_2(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "cmd", "embed_cmd": "x"}
+        )
+        assert cfg.format_version == 2
+
+    def test_validate_invalid_format_version(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "cmd", "embed_cmd": "x",
+             "format_version": 4}
+        )
+        errors = cfg.validate()
+        assert any("format_version" in e for e in errors)
+
+    def test_validate_partition_fields_missing_key(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "cmd", "embed_cmd": "x",
+             "partition_fields": [{"column": "x", "transform": "identity"}]}  # missing column_type
+        )
+        errors = cfg.validate()
+        assert any("column_type" in e for e in errors)
+
+    def test_validate_partition_fields_valid(self):
+        fields = [
+            {"column": "agent_id", "transform": "identity", "column_type": "string"},
+            {"column": "ts", "transform": "truncate[4]", "column_type": "string"},
+        ]
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "cmd", "embed_cmd": "x",
+             "partition_fields": fields}
+        )
+        errors = cfg.validate()
+        assert not errors
+
 
 # ---------------------------------------------------------------------------
 # Text extraction
@@ -323,6 +393,119 @@ class TestStreamWriter:
         call_kwargs = fake_ailake.open_table.call_args[1]
         assert call_kwargs.get("embedding_model") == "text-embedding-3-small"
         assert call_kwargs.get("embedding_model_version") == "1"
+
+    def test_partition_by_passed_to_open_table(self):
+        """StreamWriter forwards partition_by from config to ailake.open_table()."""
+        cfg = _make_cfg(partition_by="agent_id")
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "x"})
+            writer.commit()
+
+        call_kwargs = fake_ailake.open_table.call_args[1]
+        assert call_kwargs.get("partition_by") == "agent_id", (
+            f"partition_by not forwarded to open_table; kwargs={call_kwargs}"
+        )
+
+    def test_partition_by_absent_when_empty(self):
+        """partition_by is NOT passed to open_table when config has empty string."""
+        cfg = _make_cfg()  # partition_by defaults to ""
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "x"})
+            writer.commit()
+
+        call_kwargs = fake_ailake.open_table.call_args[1]
+        assert "partition_by" not in call_kwargs, (
+            f"partition_by should be absent when empty; kwargs={call_kwargs}"
+        )
+
+    # ── Phase Q: partition_fields / format_version forwarded to open_table ────
+
+    def test_partition_fields_passed_to_open_table(self):
+        fields = [{"column": "agent_id", "transform": "identity", "column_type": "string"}]
+        cfg = _make_cfg(partition_fields=fields)
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "x"})
+            writer.commit()
+
+        call_kwargs = fake_ailake.open_table.call_args[1]
+        assert call_kwargs.get("partition_fields") == fields, (
+            f"partition_fields not forwarded to open_table; kwargs={call_kwargs}"
+        )
+
+    def test_partition_fields_absent_when_empty(self):
+        cfg = _make_cfg()  # partition_fields defaults to []
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "x"})
+            writer.commit()
+
+        call_kwargs = fake_ailake.open_table.call_args[1]
+        assert "partition_fields" not in call_kwargs, (
+            f"partition_fields should be absent when empty; kwargs={call_kwargs}"
+        )
+
+    def test_format_version_3_passed_to_open_table(self):
+        cfg = _make_cfg(format_version=3)
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "x"})
+            writer.commit()
+
+        call_kwargs = fake_ailake.open_table.call_args[1]
+        assert call_kwargs.get("format_version") == 3, (
+            f"format_version not forwarded to open_table; kwargs={call_kwargs}"
+        )
+
+    def test_format_version_2_not_passed_to_open_table(self):
+        cfg = _make_cfg()  # format_version defaults to 2
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "x"})
+            writer.commit()
+
+        call_kwargs = fake_ailake.open_table.call_args[1]
+        assert "format_version" not in call_kwargs, (
+            f"format_version should be absent for default v2; kwargs={call_kwargs}"
+        )
 
 
 # ---------------------------------------------------------------------------

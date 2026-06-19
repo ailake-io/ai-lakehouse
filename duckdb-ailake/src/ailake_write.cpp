@@ -26,7 +26,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/common/types/value.hpp"
 
@@ -120,22 +120,34 @@ static void AilakeWriteExecFull(
 ) {
     auto &lib = ailake::AilakeLib::get();
 
-    auto table_path_v = args.data[0].GetValue(0);
-    auto ids_v        = args.data[1].GetValue(0);
-    auto emb_v        = args.data[2].GetValue(0);
-    auto vec_col_v    = args.data[3].GetValue(0);
-    auto metric_v     = args.data[4].GetValue(0);
-    auto precision_v  = args.data[5].GetValue(0);
+    auto table_path_v  = args.data[0].GetValue(0);
+    auto ids_v         = args.data[1].GetValue(0);
+    auto emb_v         = args.data[2].GetValue(0);
+    auto vec_col_v     = args.data[3].GetValue(0);
+    auto metric_v      = args.data[4].GetValue(0);
+    auto precision_v   = args.data[5].GetValue(0);
 
     if (table_path_v.IsNull() || ids_v.IsNull() || emb_v.IsNull()) {
         result.SetValue(0, Value::BIGINT(-1));
         return;
     }
 
-    std::string warehouse = StringValue::Get(table_path_v);
-    std::string vec_col   = vec_col_v.IsNull()   ? "embedding" : StringValue::Get(vec_col_v);
-    std::string metric    = metric_v.IsNull()    ? "cosine"    : StringValue::Get(metric_v);
-    std::string precision = precision_v.IsNull() ? "f16"       : StringValue::Get(precision_v);
+    std::string warehouse    = StringValue::Get(table_path_v);
+    std::string vec_col      = vec_col_v.IsNull()    ? "embedding" : StringValue::Get(vec_col_v);
+    std::string metric       = metric_v.IsNull()     ? "cosine"    : StringValue::Get(metric_v);
+    std::string precision    = precision_v.IsNull()  ? "f16"       : StringValue::Get(precision_v);
+
+    // Optional partition args (arity 7+)
+    std::string partition_by, partition_value, partition_fields_json;
+    int format_version = 2;
+    if ((idx_t)args.data.size() > 6 && !args.data[6].GetValue(0).IsNull())
+        partition_by          = StringValue::Get(args.data[6].GetValue(0));
+    if ((idx_t)args.data.size() > 7 && !args.data[7].GetValue(0).IsNull())
+        partition_value       = StringValue::Get(args.data[7].GetValue(0));
+    if ((idx_t)args.data.size() > 8 && !args.data[8].GetValue(0).IsNull())
+        partition_fields_json = StringValue::Get(args.data[8].GetValue(0));
+    if ((idx_t)args.data.size() > 9 && !args.data[9].GetValue(0).IsNull())
+        format_version        = IntegerValue::Get(args.data[9].GetValue(0));
 
     auto ids        = extract_bigint_list(ids_v);
     auto embeddings = extract_float_list_list(emb_v);
@@ -161,14 +173,18 @@ static void AilakeWriteExecFull(
         metric,
         precision,
         ids,
-        embeddings
+        embeddings,
+        partition_by,
+        partition_value,
+        partition_fields_json,
+        format_version
     );
     result.SetValue(0, Value::BIGINT(snap));
 }
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
-void RegisterAilakeWrite(duckdb::DatabaseInstance &db) {
+void RegisterAilakeWrite(duckdb::ExtensionLoader &loader) {
     ScalarFunctionSet write_set("ailake_write_batch");
 
     // Arity 3: (table_path, ids, embeddings) — defaults: embedding / cosine / f16
@@ -192,5 +208,64 @@ void RegisterAilakeWrite(duckdb::DatabaseInstance &db) {
         AilakeWriteExecFull
     ));
 
-    ExtensionUtil::RegisterFunction(db, write_set);
+    // Arity 7: (table_path, ids, embeddings, vec_col, metric, precision, partition_by)
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 8: (table_path, ids, embeddings, vec_col, metric, precision, partition_by, partition_value)
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 9: + partition_fields_json VARCHAR
+    // partition_fields_json: JSON array like '[{"column":"x","transform":"identity","column_type":"string"}]'
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 10: + format_version INTEGER (2 or 3)
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    loader.RegisterFunction( write_set);
 }

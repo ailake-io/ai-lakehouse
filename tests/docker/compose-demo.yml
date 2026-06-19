@@ -85,6 +85,7 @@ services:
       NESSIE_URI: "http://nessie:19120/api/v1"
       DEMO_TABLE_PATH: /data/ailake_demo
       DEMO_MULTIMODAL_PATH: /data/ailake_multimodal
+      DEMO_AGENT_PATH: /data/ailake_agent
       DEMO_DIM: "32"
       # Engine endpoints — consumed by notebooks 04/05 when engines profile is active.
       # Values match container names so they also work without the profile
@@ -137,6 +138,60 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+
+  # ── GPU service (--profile gpu) ─────────────────────────────────────────────
+  #
+  # Requirements on the host:
+  #   - NVIDIA GPU + driver ≥ 525 (CUDA 12 compatible)
+  #   - NVIDIA Container Toolkit: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/
+  #     apt install -y nvidia-container-toolkit && systemctl restart docker
+  #
+  # Usage:
+  #   docker compose -f tests/docker/compose-demo.yml --profile gpu up -d
+  #   open http://localhost:8889   (different host port to avoid collision with cpu jupyter)
+  #
+  # The GPU variant uses the same image as the CPU jupyter service.
+  # ailake detects the GPU at runtime via libloading (no recompile needed).
+  # Notebook 10_gpu_demo.ipynb is pre-loaded and starts with hardware_info().
+
+  jupyter-gpu:
+    profiles: ["gpu"]
+    build:
+      context: ../..
+      dockerfile: tests/docker/demo/Dockerfile
+    container_name: ailake-demo-jupyter-gpu
+    ports:
+      - "8889:8888"
+    volumes:
+      - demo-data:/data
+    environment:
+      MINIO_ENDPOINT: "http://minio:9000"
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      NESSIE_URI: "http://nessie:19120/api/v1"
+      DEMO_TABLE_PATH: /data/ailake_demo
+      DEMO_MULTIMODAL_PATH: /data/ailake_multimodal
+      DEMO_AGENT_PATH: /data/ailake_agent
+      DEMO_DIM: "32"
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      BQ_EMULATOR_HOST: bigquery-emulator
+      BQ_EMULATOR_PORT: "9050"
+      BQ_PROJECT: ailake-demo
+      # Hint to notebooks that GPU is expected on this service variant.
+      AILAKE_GPU_DEMO: "1"
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      nessie:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 volumes:
   minio-data:

@@ -37,7 +37,9 @@ fn u8_to_metric(v: u8) -> AilakeResult<VectorMetric> {
         1 => Ok(VectorMetric::Euclidean),
         2 => Ok(VectorMetric::DotProduct),
         3 => Ok(VectorMetric::NormalizedCosine),
-        _ => Err(AilakeError::Catalog(format!("unknown metric byte: {v}"))),
+        _ => Err(AilakeError::Catalog(format!(
+            "HNSW index deserialization: unknown metric byte {v} (valid: 0=Cosine, 1=Euclidean, 2=DotProduct, 3=NormalizedCosine)"
+        ))),
     }
 }
 

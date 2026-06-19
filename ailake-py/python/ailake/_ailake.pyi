@@ -3,7 +3,7 @@
 # Stubs for the compiled Rust extension ailake._ailake.
 # This file is the authoritative type source for type checkers and IDEs.
 
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, Union
 
 
 class VectorColSpec:
@@ -47,6 +47,9 @@ class TableWriter:
         embedding_model: Optional[str] = None,
         embedding_model_version: Optional[str] = None,
         embed_fn: Optional[Callable[[list[str]], list[list[float]]]] = None,
+        partition_by: Optional[str] = None,
+        partition_value: Optional[str] = None,
+        bm25_text_column: Optional[str] = None,
     ) -> None:
         """Open or create an AI-Lake table at *path*.
 
@@ -85,6 +88,7 @@ class TableWriter:
         self,
         texts: Sequence[str],
         embeddings: Optional[Sequence[Sequence[float]]] = None,
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> None:
         """Buffer a batch of rows.  Call :meth:`commit` to persist.
 
@@ -94,6 +98,10 @@ class TableWriter:
                         match *texts*.  May be omitted when *embed_fn* was
                         passed to :meth:`__init__` — embeddings are generated
                         automatically.
+            extra_columns: Optional dict of ``{column_name: [values]}`` for
+                           additional Parquet columns.  Types are inferred:
+                           ``bool`` → ``Boolean``, ``float`` → ``Float32``,
+                           ``int`` → ``Int64``, ``str`` → ``Utf8``.
         """
         ...
 
@@ -101,6 +109,7 @@ class TableWriter:
         self,
         texts: Sequence[str],
         embeddings: Sequence[Sequence[float]],
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> None:
         """Deferred-index write — Parquet persisted immediately (~200k vec/s).
 
@@ -111,6 +120,7 @@ class TableWriter:
         Args:
             texts: One string per row.
             embeddings: One embedding (list of floats) per row.
+            extra_columns: Optional extra Parquet columns (see :meth:`write_batch`).
         """
         ...
 
@@ -119,6 +129,7 @@ class TableWriter:
         texts: Sequence[str],
         embeddings: Sequence[Sequence[float]],
         batch_id: str,
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> None:
         """Idempotent write — no-op if *batch_id* was already committed.
 
@@ -126,6 +137,7 @@ class TableWriter:
             texts: One string per row.
             embeddings: One embedding per row.
             batch_id: Unique key for this batch (e.g. Airflow ``run_id + task_id``).
+            extra_columns: Optional extra Parquet columns (see :meth:`write_batch`).
         """
         ...
 
@@ -207,13 +219,29 @@ def search(
     path: str,
     query: Sequence[float],
     top_k: int = 10,
+    partition_filter: Optional[str] = None,
+    hybrid_text: Optional[str] = None,
+    text_column: str = "chunk_text",
+    bm25_weight: float = 0.5,
 ) -> list[dict[str, object]]:
     """Search a table for the top-*k* nearest vectors to *query*.
+
+    When *hybrid_text* is provided, performs hybrid BM25+vector search:
+    HNSW retrieves a larger candidate pool, BM25 scores candidates against
+    *hybrid_text*, and results are fused via RRF.  Requires BM25 stats
+    accumulated at write time via ``TableWriter(bm25_text_column=...)``.
 
     Args:
         path: Table root — same value used when writing.
         query: Query embedding as a flat list of floats.
         top_k: Number of neighbours to return (default 10).
+        partition_filter: When set, only files tagged with this partition value are
+                          searched (manifest-level pruning).
+        hybrid_text: Optional text query for BM25 scoring.  Enables hybrid mode.
+        text_column: Parquet column containing document text for BM25 (default
+                     ``"chunk_text"``).
+        bm25_weight: Weight for BM25 signal in RRF fusion — ``0.0`` = pure vector,
+                     ``1.0`` = pure BM25 (default ``0.5``).
 
     Returns:
         List of dicts with keys ``row_id`` (int), ``distance`` (float),
@@ -222,10 +250,139 @@ def search(
     ...
 
 
+def search_text(
+    path: str,
+    query_text: str,
+    top_k: int = 10,
+    text_column: str = "chunk_text",
+    partition_filter: Optional[str] = None,
+) -> list[dict[str, object]]:
+    """Pure BM25 full-text search — no vector query required.
+
+    Scans all Parquet files and ranks rows by BM25 score against *query_text*.
+    O(N) complexity — best for small/medium tables or offline ranking.
+    Requires BM25 stats accumulated at write time via
+    ``TableWriter(bm25_text_column=...)``.
+
+    Args:
+        path: Table root — same value used when writing.
+        query_text: Text query to score against.
+        top_k: Number of results to return (default 10).
+        text_column: Parquet column containing document text (default ``"chunk_text"``).
+        partition_filter: Optional partition value for manifest-level pruning.
+
+    Returns:
+        List of dicts with keys ``row_id`` (int), ``distance`` (float — negated
+        BM25 score; lower = more relevant, consistent with vector search convention),
+        ``file`` (str).
+    """
+    ...
+
+
+class WorkingMemoryBuffer:
+    """Bounded in-memory FIFO queue for agent short-term memory.
+
+    When full (``len == max_rows``), the oldest entry is evicted on ``push``.
+    Supports brute-force cosine search and draining to an AI-Lake table.
+
+    Args:
+        max_rows: Maximum number of entries to hold (default 1000).
+
+    Example::
+
+        wm = ailake.WorkingMemoryBuffer(max_rows=100)
+        wm.push("rust async patterns", embed(["rust async patterns"])[0], importance=0.8)
+        hits = wm.search(query_vec, top_k=5)
+        wm.drain_to_table(writer)
+    """
+
+    def __init__(self, max_rows: int = 1000) -> None: ...
+
+    def push(
+        self,
+        text: str,
+        embedding: Sequence[float],
+        importance: float = 1.0,
+    ) -> None:
+        """Add entry to buffer, evicting oldest if full.
+
+        Args:
+            text: Text content for this entry.
+            embedding: Embedding vector — list of floats.
+            importance: Agent-assigned salience in ``[0.0, 1.0]`` (default 1.0).
+        """
+        ...
+
+    def search(
+        self,
+        query: Sequence[float],
+        top_k: int = 10,
+    ) -> list[dict[str, object]]:
+        """Brute-force cosine search over buffer entries.
+
+        Args:
+            query: Query embedding.
+            top_k: Results to return (default 10).
+
+        Returns:
+            List of dicts with keys ``text`` (str), ``distance`` (float),
+            ``importance`` (float).  Sorted by ascending distance.
+        """
+        ...
+
+    def drain_to_table(self, writer: "TableWriter") -> None:
+        """Write all buffered entries to *writer* and clear the buffer.
+
+        Calls ``writer.write_batch(texts, embeddings)`` with all current entries.
+        Buffer is empty after this call.
+
+        Args:
+            writer: Open ``TableWriter`` to drain into.
+        """
+        ...
+
+    def is_full(self) -> bool:
+        """Return ``True`` when ``len(self) == max_rows``."""
+        ...
+
+    def is_empty(self) -> bool:
+        """Return ``True`` when buffer holds no entries."""
+        ...
+
+    def __len__(self) -> int: ...
+
+
+def decay_memories(
+    path: str,
+    decay_lambda: float = 0.1,
+) -> int:
+    """Recompute ``recency_weight`` for all rows in an episodic memory table.
+
+    Reads the ``last_accessed_at`` column (ISO-8601 date string) from each
+    data file, applies ``recency_weight = exp(-lambda × days_since_access)``,
+    rewrites the file with the updated column, and commits a new Iceberg
+    snapshot via ``SnapshotOperation::Overwrite``.
+
+    Call periodically (e.g. nightly) to ensure stale memories are naturally
+    down-ranked in hybrid recall scoring.
+
+    Args:
+        path: Table root — same value used when writing.
+        decay_lambda: Exponential decay rate.  Default ``0.1`` gives a
+                      half-life of ~7 days.  Use ``0.693`` for daily decay,
+                      ``0.023`` for monthly decay.
+
+    Returns:
+        Number of Parquet files updated.
+    """
+    ...
+
+
 def search_with_data(
     path: str,
     query: Sequence[float],
     top_k: int = 10,
+    partition_filter: Optional[str] = None,
 ) -> bytes:
     """Search and return full row data serialized as Arrow IPC bytes.
 
@@ -238,6 +395,9 @@ def search_with_data(
         path: Table root — same value used when writing.
         query: Query embedding as a flat list of floats.
         top_k: Number of neighbours to return (default 10).
+        partition_filter: When set, only files tagged with this partition value are
+                          searched (manifest-level pruning). Pass ``agent_id`` for
+                          per-agent isolated search without post-scan filtering.
 
     Returns:
         Arrow IPC file-format bytes.  Deserialize to a ``pyarrow.Table``
@@ -320,6 +480,7 @@ def search_multimodal(
     queries: Sequence[tuple[str, Sequence[float], float]],
     top_k: int = 10,
     dim: Optional[int] = None,
+    partition_filter: Optional[str] = None,
 ) -> list[dict[str, object]]:
     """Cross-modal search: fuse results from N vector columns via Reciprocal Rank Fusion.
 
@@ -350,3 +511,110 @@ def search_multimodal(
         )
     """
     ...
+
+
+# ── Agent (Phase 9) ────────────────────────────────────────────────────────────
+
+_Vector = Union[Sequence[float], Any]  # list[float] or numpy/torch array with .tolist()
+
+class Agent:
+    """High-level agent memory helper — Phase 9.
+
+    Wraps ``TableWriter`` + vector search + ``assemble_context`` for agent
+    frameworks (LangChain, CrewAI, AutoGen).
+
+    Args:
+        table_path: Local path or object-storage URI for the memory table.
+        embed_fn:   ``Callable[[list[str]], list[list[float]]]``.
+        agent_id:   Stable UUID string (auto-generated if omitted).
+        session_id: Current session UUID (auto-generated if omitted).
+        metric:     Distance metric (default ``"cosine"``).
+        lambda_:    Recency decay rate (default 0.099 ≈ weekly half-life).
+    """
+
+    def __init__(
+        self,
+        table_path: str,
+        embed_fn: Callable[[list[str]], list[list[float]]],
+        agent_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        metric: str = "cosine",
+        lambda_: float = 0.099,
+    ) -> None: ...
+
+    @property
+    def agent_id(self) -> str: ...
+
+    @property
+    def session_id(self) -> str: ...
+
+    def remember(self, text: str, importance: float = 1.0) -> str:
+        """Buffer *text* as an episodic memory.  Returns ``mem_id`` UUID.
+
+        Call :meth:`commit` to persist.
+        """
+        ...
+
+    def log_tool_call(
+        self,
+        name: str,
+        input: object,
+        output: object,
+        outcome: str = "success",
+        latency_ms: int = 0,
+        importance: float = 0.5,
+    ) -> str:
+        """Buffer a tool-call record.  Returns ``call_id`` UUID.
+
+        Call :meth:`commit` to persist.
+        """
+        ...
+
+    def commit(self) -> int:
+        """Persist buffered records as a new Iceberg snapshot.  Returns snapshot id."""
+        ...
+
+    def recall(
+        self,
+        query: _Vector,
+        top_k: int = 10,
+        oversample: int = 3,
+    ) -> list[dict]:
+        """Retrieve *top_k* memories with hybrid scoring.
+
+        Uses manifest-level partition pruning: only files written by this agent
+        (tagged with ``partition_value=agent_id``) are searched — no post-scan filter.
+
+        Returns list of dicts sorted by hybrid score (lower = better), each with:
+        ``text``, ``distance``, ``score``, ``recency``, ``importance``,
+        ``type`` (``"memory"`` or ``"tool_call"``), ``agent_id``, ``session_id``,
+        ``created_at``, and type-specific fields (``mem_id`` or ``call_id``,
+        ``tool_name``, ``tool_input_json``, ``tool_output_json``, ``outcome``).
+        """
+        ...
+
+    def assemble_context(self, query: _Vector, max_tokens: int = 4096) -> str:
+        """Recall memories and format as XML context for an LLM.
+
+        Returns XML string ready for inclusion in a Claude / GPT-4 prompt.
+        """
+        ...
+
+    async def remember_async(self, text: str, importance: float = 1.0) -> str: ...
+    async def recall_async(self, query: _Vector, top_k: int = 10) -> list[dict]: ...
+    async def commit_async(self) -> int: ...
+
+    def __enter__(self) -> "Agent": ...
+    def __exit__(self, *_: Any) -> None: ...
+
+def delete_where(path: str, column: str, values: list[str]) -> None: ...
+def add_column(
+    path: str,
+    name: str,
+    col_type: str,
+    *,
+    required: bool = False,
+    initial_default: Optional[str] = None,
+) -> int: ...
+def rename_column(path: str, old_name: str, new_name: str) -> int: ...
+def hardware_info() -> dict[str, str]: ...

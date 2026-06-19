@@ -194,6 +194,63 @@ def test_write_empty_returns_minus_one():
     require(row is not None and row[0] == -1, f"expected -1 for empty write, got {row}")
     print("PASS: empty write returns -1")
 
+def test_write_with_partition_by():
+    """Arity-7: (table_path, ids, embeddings, vec_col, metric, precision, partition_by)."""
+    conn = setup_connection()
+    table_dir = make_table_dir()
+    n, dim = 2, 4
+    embs = small_embeddings(n, dim)
+
+    ids_sql = "[" + ", ".join(str(i) for i in range(n)) + "]::BIGINT[]"
+    emb_sql = "[" + ", ".join(
+        "[" + ", ".join(str(f) for f in row) + "]::FLOAT[]"
+        for row in embs
+    ) + "]"
+
+    row = conn.execute(f"""
+        SELECT ailake_write_batch(
+            'file://{table_dir}',
+            {ids_sql},
+            {emb_sql},
+            'embedding',
+            'cosine',
+            'f16',
+            'agent_id'
+        )
+    """).fetchone()
+    require(row is not None, "arity-7 write_batch returned NULL")
+    require(row[0] != -1, f"arity-7 write_batch returned -1 (error); table_dir={table_dir}")
+    print(f"PASS: arity-7 write_batch (partition_by='agent_id') snap_id={row[0]}")
+
+def test_write_with_partition_by_and_value():
+    """Arity-8: (table_path, ids, embeddings, vec_col, metric, precision, partition_by, partition_value)."""
+    conn = setup_connection()
+    table_dir = make_table_dir()
+    n, dim = 3, 4
+    embs = small_embeddings(n, dim)
+
+    ids_sql = "[" + ", ".join(str(i) for i in range(n)) + "]::BIGINT[]"
+    emb_sql = "[" + ", ".join(
+        "[" + ", ".join(str(f) for f in row) + "]::FLOAT[]"
+        for row in embs
+    ) + "]"
+
+    row = conn.execute(f"""
+        SELECT ailake_write_batch(
+            'file://{table_dir}',
+            {ids_sql},
+            {emb_sql},
+            'embedding',
+            'cosine',
+            'f16',
+            'agent_id',
+            'agent-A'
+        )
+    """).fetchone()
+    require(row is not None, "arity-8 write_batch returned NULL")
+    require(row[0] != -1, f"arity-8 write_batch returned -1 (error); table_dir={table_dir}")
+    print(f"PASS: arity-8 write_batch (partition_by + partition_value='agent-A') snap_id={row[0]}")
+
 if __name__ == "__main__":
     if not pathlib.Path(EXT_PATH).exists():
         print(f"SKIP: extension not found at {EXT_PATH} — build first with cmake")
@@ -204,5 +261,7 @@ if __name__ == "__main__":
     test_write_full_signature()
     test_write_then_search()
     test_write_empty_returns_minus_one()
+    test_write_with_partition_by()
+    test_write_with_partition_by_and_value()
 
     print("\nAll write tests passed.")

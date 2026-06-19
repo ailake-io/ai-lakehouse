@@ -4,7 +4,10 @@ package io.ailake.spark
 
 import org.apache.spark.sql.catalyst.plans.logical.{Filter, LocalRelation}
 import org.scalatest.funsuite.AnyFunSuite
+import org.junit.runner.RunWith
+import org.scalatestplus.junit.JUnitRunner
 
+@RunWith(classOf[JUnitRunner])
 class VectorScanStrategyTest extends AnyFunSuite {
 
   private val strategy = new VectorScanStrategy

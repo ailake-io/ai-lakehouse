@@ -113,12 +113,24 @@ Runs geometric pruning across all manifest entries, then per-file HNSW or IVF-PQ
 
 ```cpp
 struct SearchOptions {
-    int   top_k             = 10;
-    int   ef_search         = 0;     // 0 → top_k * 5
-    float pruning_threshold = 0.8f;
-    bool  use_flat_fallback = true;  // flat scan when index not yet built
-    const HardwareProfile* hw = nullptr; // nullptr = auto-detect
+    int         top_k             = 10;
+    int         ef_search         = 0;        // 0 → top_k * 5
+    float       pruning_threshold = 0.8f;
+    bool        use_flat_fallback = true;     // flat scan when index not yet built
+    std::string partition_filter;             // "" = no filter; restrict to matching partition_value (Phase 9)
+    const HardwareProfile* hw = nullptr;     // nullptr = auto-detect
 };
+```
+
+Set `partition_filter` to restrict search to files written with a matching `partition_value`. Pruning happens at the manifest level before any HNSW I/O:
+
+```cpp
+ailake::SearchOptions opts;
+opts.top_k            = 10;
+opts.partition_filter = "agent-42";
+
+auto results = ailake::search(catalog, "default", "agents",
+                              query.data(), query.size(), opts);
 ```
 
 ### `FileSearchResult`
@@ -249,6 +261,43 @@ search_multimodal(HadoopCatalog& catalog,
 ```
 
 Uses geometric pruning on the primary column centroid, dispatches HNSW search per column (using `DataFileEntry::extra_vector_indexes` for secondary columns), then fuses ranked lists with RRF.
+
+## Write operations
+
+The C++ header-only SDK delegates write operations (write_batch, delete_where, evolve_schema) to the `ailake` CLI binary via subprocess. No Rust FFI required at the C++ layer.
+
+### `ailake::delete_where`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Commit an Iceberg equality delete (no data files rewritten)
+ailake::delete_where(
+    "/path/to/warehouse",  // warehouse root
+    "default",             // namespace
+    "my_table",            // table name
+    "id",                  // equality delete column
+    {"doc-1", "doc-2"}    // values to delete
+);
+// throws std::runtime_error on failure
+```
+
+### `ailake::evolve_schema`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Metadata-only schema evolution (no data files rewritten; field IDs are stable)
+ailake::evolve_schema(
+    "/path/to/warehouse",
+    "default",
+    "my_table",
+    {{"source_url", "string", false, ""}},  // add_columns: {name, type, required, initial_default}
+    {}                                        // rename_columns: {} empty = no renames
+);
+```
+
+Both functions invoke the `ailake` binary via `resolve_bin()` (respects `AILAKE_BIN` env var) and parse the JSON response. An empty `values` list in `delete_where` is a no-op.
 
 ## Low-level index access
 

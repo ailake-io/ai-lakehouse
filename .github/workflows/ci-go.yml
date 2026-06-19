@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: ailake-go/go.mod
-          cache-dependency-path: ailake-go/go.sum
+          cache: false  # self-hosted runner keeps module cache on disk; cache restore causes tar "File exists" noise
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -32,8 +32,8 @@ jobs:
         working-directory: ailake-go
         run: go test ./... -v -timeout 60s
 
-      - name: Build libailake_jni.so (fixture generation)
-        run: cargo build --release -p ailake-jni
+      - name: Build libailake_jni.so and ailake-cli (fixture generation + integration tests)
+        run: cargo build --release -p ailake-jni -p ailake-cli
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -52,4 +52,5 @@ jobs:
         working-directory: ailake-go
         run: go test ./... -v -timeout 120s
         env:
-          AILAKE_FIXTURE: ../compat-fixture
+          AILAKE_FIXTURE: ${{ github.workspace }}/compat-fixture
+          AILAKE_BIN: ${{ github.workspace }}/target/release/ailake

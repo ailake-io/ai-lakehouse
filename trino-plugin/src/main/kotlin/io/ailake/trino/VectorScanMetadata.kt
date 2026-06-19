@@ -29,6 +29,8 @@ class VectorScanMetadata(
     private val namespace: String,
     private val tableName: String,
     private val embeddingModel: String? = null,
+    private val partitionFields: List<AilakeNative.PartitionFieldDef> = emptyList(),
+    private val formatVersion: Int = 2,
 ) : ConnectorMetadata {
 
     companion object {
@@ -66,7 +68,7 @@ class VectorScanMetadata(
         if (schemaTableName.schemaName != SCHEMA) return null
         return when (schemaTableName.tableName) {
             TABLE_SEARCH -> VectorScanTableHandle(tableUri, vectorColumn, dim)
-            TABLE_INGEST -> AilakeIngestTableHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel)
+            TABLE_INGEST -> AilakeIngestTableHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel, partitionFields, formatVersion)
             else -> null
         }
     }

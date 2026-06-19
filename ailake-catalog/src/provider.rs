@@ -33,6 +33,23 @@ impl TableIdent {
 
 pub type SnapshotId = i64;
 
+/// Iceberg V3 Deletion Vector reference stored in a manifest entry.
+///
+/// Points to a Roaring Bitmap blob inside a Puffin `.dvd` file.
+/// `offset` + `length` address the blob bytes directly — no full Puffin
+/// footer parse required for Phase B read support.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletionVector {
+    /// Absolute path to the Puffin `.dvd` file in the object store.
+    pub path: String,
+    /// Byte offset of the Roaring Bitmap blob within the Puffin file.
+    pub offset: u64,
+    /// Byte length of the Roaring Bitmap blob.
+    pub length: u64,
+    /// Number of deleted rows (bitmap popcount; -1 when unknown).
+    pub cardinality: i64,
+}
+
 /// HNSW index info for one additional (non-primary) vector column.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtraVectorIndex {
@@ -72,6 +89,42 @@ pub struct DataFileEntry {
     /// can be identified without reading the main metadata.json.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
+    /// Partition value for this file (e.g. the agent_id UUID).
+    /// Written per-file when `VectorStoragePolicy::partition_by` is set.
+    /// Enables manifest-level pruning: search skips files whose partition_value
+    /// doesn't match the requested partition filter, avoiding all HNSW I/O.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_value: Option<String>,
+    /// Iceberg V3 Deletion Vector: Roaring Bitmap of deleted row positions.
+    /// None for V2 tables or V3 tables with no deletes for this file.
+    /// When present, scanner masks these row IDs from HNSW results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion_vector: Option<DeletionVector>,
+    /// Iceberg V3 Row Lineage: globally unique first row ID assigned to this file.
+    /// Computed at commit time from the table's cumulative `next-row-id` counter.
+    /// None for V2 tables (row lineage requires format-version=3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_row_id: Option<i64>,
+}
+
+/// One field from the current Iceberg table schema (Phase G).
+///
+/// Parsed from `schemas[current-schema-id].fields` in `metadata.json`.
+/// Used by `SchemaFiller` to inject missing columns when reading old files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaField {
+    pub id: i32,
+    pub name: String,
+    pub required: bool,
+    /// Iceberg type string, e.g. `"int"`, `"string"`, `"timestamptz"`.
+    pub iceberg_type: String,
+    /// Value injected when reading old files that predate this field.
+    /// `None` → null is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_default: Option<serde_json::Value>,
+    /// Default value written to new files. Same as `initial_default` in most cases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_default: Option<serde_json::Value>,
 }
 
 /// Iceberg-compatible table metadata read from the catalog.
@@ -83,6 +136,24 @@ pub struct TableMetadata {
     /// Ailake-specific properties: ailake.vector-column, ailake.dim, etc.
     pub properties: HashMap<String, String>,
     pub current_snapshot_id: Option<SnapshotId>,
+    /// Absolute path to the Puffin stats file for the current snapshot (Phase F).
+    /// `None` for V2 tables or V3 tables without any committed statistics yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_statistics_path: Option<String>,
+    /// Current schema fields parsed from `metadata.json` (Phase G).
+    /// Empty for tables created before Phase G or tables with no schema committed.
+    /// Used by `SchemaFiller` in the scanner to inject missing columns with defaults.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_fields: Vec<SchemaField>,
+    /// Equality delete files active in the current snapshot (Phase H).
+    /// Loaded from delete manifests (content=2 in the manifest list).
+    /// Populated by `CatalogProvider::list_equality_deletes` — empty until first call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equality_delete_files: Vec<EqualityDeleteFile>,
+    /// Active partition spec for this table (Phase I).
+    /// `None` for unpartitioned tables or tables created before Phase I.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_spec: Option<PartitionSpec>,
 }
 
 /// Iceberg schema update carried inside a snapshot commit.
@@ -99,6 +170,22 @@ pub struct IcebergSchemaUpdate {
     pub name_mapping_json: String,
 }
 
+/// Reference to an Iceberg equality delete file (Phase H).
+///
+/// The delete file is an Avro file with `content=2` whose rows contain equality
+/// predicates — any data row matching one of those rows is logically deleted.
+/// `equality_ids` lists the field IDs used for the equality check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EqualityDeleteFile {
+    /// Absolute or warehouse-relative path of the Avro delete file.
+    pub path: String,
+    /// Field IDs whose values must all match to delete a data row.
+    pub equality_ids: Vec<i32>,
+    /// Number of predicates (rows) in the delete file.
+    pub record_count: u64,
+    pub file_size_bytes: u64,
+}
+
 /// Snapshot commit request.
 #[derive(Debug, Clone)]
 pub struct NewSnapshot {
@@ -111,6 +198,13 @@ pub struct NewSnapshot {
     /// Additional table-level properties to merge on commit (e.g. secondary column dims).
     /// Keys use `ailake.dim-<col>` / `ailake.metric-<col>` convention.
     pub extra_properties: HashMap<String, String>,
+    /// Per-file BM25 Bloom filter bytes for term-level file pruning (Phase F).
+    /// Key = data file path (relative, matches `DataFileEntry::path`).
+    /// Written to the Puffin stats file on V3 commits; ignored for V2 tables.
+    pub bloom_filters: Vec<(String, Vec<u8>)>,
+    /// Equality delete files to add to this snapshot (Phase H).
+    /// Written as a separate delete manifest with content=2 in the manifest list.
+    pub equality_delete_files: Vec<EqualityDeleteFile>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,11 +215,50 @@ pub enum SnapshotOperation {
     Replace,
 }
 
+/// One field in an Iceberg partition spec (Phase I).
+///
+/// For an `identity` partition on column "agent_id":
+/// `source_id=1` (must match the field id in the table schema),
+/// `field_id=1000` (Iceberg convention: partition fields start at 1000).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionField {
+    /// Field ID of the source column in the table schema.
+    pub source_id: i32,
+    /// Partition field ID (≥ 1000 by convention).
+    pub field_id: i32,
+    /// Partition column name (usually same as the source column).
+    pub name: String,
+    /// Transform function: "identity", "bucket[N]", "truncate[W]", "year", etc.
+    pub transform: String,
+    /// Iceberg type of the source column ("string", "int", "long", "uuid").
+    /// Derived from the table schema at read time; stored here for encoding.
+    pub source_type: String,
+}
+
+/// Iceberg partition spec (Phase I).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionSpec {
+    pub spec_id: i32,
+    pub fields: Vec<PartitionField>,
+}
+
+impl PartitionSpec {
+    /// True when this spec has no partition fields (unpartitioned table).
+    pub fn is_unpartitioned(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
 /// Schema properties passed at table creation time.
 #[derive(Debug, Clone)]
 pub struct TableProperties {
     pub policy: VectorStoragePolicy,
     pub extra: HashMap<String, String>,
+    /// Iceberg format version to write. 2 = default (V2). 3 = opt-in V3.
+    pub format_version: u8,
+    /// Iceberg type of the partition column when `policy.partition_by` is set.
+    /// Defaults to `"string"` when `None`. Supported: "string", "uuid", "int", "long".
+    pub partition_column_type: Option<String>,
 }
 
 /// Unified catalog interface. All backends implement this trait.
@@ -148,6 +281,36 @@ pub trait CatalogProvider: Send + Sync {
     ) -> AilakeResult<Vec<DataFileEntry>>;
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()>;
+
+    /// Apply schema evolution (add columns / rename columns) without rewriting data files.
+    ///
+    /// Returns the new `schema-id` assigned in `metadata.json`.
+    /// Old files missing new columns will have their values filled at read time using
+    /// `AddColumnRequest::initial_default` (Phase G `SchemaFiller`).
+    ///
+    /// Default implementation returns an error — override in file-based backends.
+    async fn evolve_schema(
+        &self,
+        _table: &TableIdent,
+        _evolution: crate::schema_evolution::SchemaEvolution,
+    ) -> AilakeResult<i32> {
+        Err(ailake_core::AilakeError::Catalog(
+            "evolve_schema not supported by this catalog backend".into(),
+        ))
+    }
+
+    /// Return all equality delete files active in the current (or specified) snapshot.
+    ///
+    /// Reads delete manifests (manifest list entries with `content=1`) and parses their
+    /// `content=2` entries. Default returns empty vec for catalog backends that do not
+    /// support Iceberg equality deletes.
+    async fn list_equality_deletes(
+        &self,
+        _table: &TableIdent,
+        _snapshot_id: Option<SnapshotId>,
+    ) -> AilakeResult<Vec<EqualityDeleteFile>> {
+        Ok(vec![])
+    }
 }
 
 /// Vector index metadata for a single data file.
@@ -202,6 +365,9 @@ pub fn make_multi_column_data_file_entry(
         index_status: IndexStatus::Ready,
         batch_id: None,
         embedding_model: None,
+        partition_value: None,
+        deletion_vector: None,
+        first_row_id: None,
     }
 }
 
@@ -238,6 +404,9 @@ pub fn make_data_file_entry_indexing(
         index_status: IndexStatus::Indexing,
         batch_id: None,
         embedding_model: None,
+        partition_value: None,
+        deletion_vector: None,
+        first_row_id: None,
     }
 }
 

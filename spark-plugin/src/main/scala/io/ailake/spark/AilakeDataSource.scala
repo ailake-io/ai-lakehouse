@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.spark
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.spark.sql.connector.catalog.Table
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.sources.DataSourceRegister
@@ -48,7 +49,17 @@ class AilakeDataSource extends TableProvider with DataSourceRegister {
     val tableName    = opts.getOrDefault("tableName",
       opts.getOrDefault("table-name",
         tableUri.stripSuffix("/").split("/").last))
-    new AilakeTable(AilakeWriteHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision))
+    val pfJson       = opts.getOrDefault("partition-fields", opts.getOrDefault("partitionFields", "[]"))
+    val partitionFields: Seq[AilakeNative.PartitionFieldDef] = if (pfJson == "[]" || pfJson.isEmpty) Seq.empty else {
+      val node = new ObjectMapper().readTree(pfJson)
+      (0 until node.size()).map { i =>
+        val n = node.get(i)
+        AilakeNative.PartitionFieldDef(n.get("column").asText(), n.get("transform").asText(), n.get("column_type").asText())
+      }.toSeq
+    }
+    val formatVersion = opts.getOrDefault("format-version", opts.getOrDefault("formatVersion", "2")).toInt
+    new AilakeTable(AilakeWriteHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision,
+      partitionFields = partitionFields, formatVersion = formatVersion))
   }
 
   private def requireOpt(opts: CaseInsensitiveStringMap, keys: String*): String =

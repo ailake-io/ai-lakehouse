@@ -60,7 +60,9 @@ impl TryFrom<u8> for Precision {
             1 => Ok(Precision::F16),
             2 => Ok(Precision::I8),
             3 => Ok(Precision::Binary),
-            _ => Err(AilakeError::UnsupportedFormatVersion(v as u16)),
+            _ => Err(AilakeError::InvalidArgument(format!(
+                "invalid precision byte: {v} (valid: 0=F32, 1=F16, 2=I8, 3=Binary)"
+            ))),
         }
     }
 }
@@ -73,7 +75,9 @@ impl TryFrom<u8> for DistanceMetric {
             1 => Ok(DistanceMetric::Euclidean),
             2 => Ok(DistanceMetric::DotProduct),
             3 => Ok(DistanceMetric::NormalizedCosine),
-            _ => Err(AilakeError::UnsupportedFormatVersion(v as u16)),
+            _ => Err(AilakeError::InvalidArgument(format!(
+                "invalid distance metric byte: {v} (valid: 0=Cosine, 1=Euclidean, 2=DotProduct, 3=NormalizedCosine)"
+            ))),
         }
     }
 }
@@ -176,6 +180,25 @@ impl AilakeTrailer {
             flags: u16::from_le_bytes([b[18], b[19]]),
         })
     }
+}
+
+/// Returns the byte offset in `buf` where the Parquet footer thrift starts.
+///
+/// Parquet tail layout: `[...footer_thrift...][footer_len: u32 LE][PAR1: 4 bytes]`
+///
+/// Used by both the writer (to know where to splice AILK sections) and the reader
+/// (to locate the AILK trailer for KV-less bootstrap).
+pub fn parquet_footer_start(buf: &[u8]) -> AilakeResult<usize> {
+    let len = buf.len();
+    if len < 8 {
+        return Err(AilakeError::Parquet("file too small".into()));
+    }
+    if &buf[len - 4..] != b"PAR1" {
+        return Err(AilakeError::Parquet("missing PAR1 footer magic".into()));
+    }
+    let footer_thrift_len = u32::from_le_bytes(buf[len - 8..len - 4].try_into().unwrap()) as usize;
+    len.checked_sub(8 + footer_thrift_len)
+        .ok_or_else(|| AilakeError::Parquet("footer length overflow".into()))
 }
 
 #[cfg(test)]

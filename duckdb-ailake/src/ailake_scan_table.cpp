@@ -18,7 +18,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/value.hpp"
 
@@ -285,7 +285,7 @@ static void AilakeScanScan(
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
-void RegisterAilakeScan(duckdb::DatabaseInstance &db) {
+void RegisterAilakeScan(duckdb::ExtensionLoader &loader) {
     TableFunction func(
         "ailake_scan",
         {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::FLOAT), LogicalType::INTEGER},
@@ -298,5 +298,5 @@ void RegisterAilakeScan(duckdb::DatabaseInstance &db) {
     func.named_parameters["ef_search"]  = LogicalType::INTEGER;
     func.named_parameters["table_name"] = LogicalType::VARCHAR;
 
-    ExtensionUtil::RegisterFunction(db, func);
+    loader.RegisterFunction( func);
 }

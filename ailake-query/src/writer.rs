@@ -13,11 +13,34 @@ use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBat
 use ailake_index::{IvfPqCodebook, IvfPqConfig};
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
+use arrow_array::Array;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
 use serde_json;
 use tracing::{error, info, warn};
+
+/// Apply partition transforms and return the final stored value.
+/// For multi-column specs, raw must be \x1f-separated; each part is transformed
+/// independently and the result is rejoined with \x1f.
+/// For single-column (partition_by path), raw is returned as-is (identity only).
+fn apply_partition_transforms(policy: &VectorStoragePolicy, raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    if policy.partition_fields.is_empty() {
+        return Some(raw.to_string());
+    }
+    let parts: Vec<&str> = raw.split('\x1f').collect();
+    let transformed: Vec<String> = policy
+        .partition_fields
+        .iter()
+        .enumerate()
+        .map(|(i, pf)| {
+            let v = parts.get(i).copied().unwrap_or("");
+            pf.apply(v)
+        })
+        .collect();
+    Some(transformed.join("\x1f"))
+}
 
 /// One vector column for a multi-column write batch.
 pub struct MultiVectorBatch<'a> {
@@ -44,6 +67,13 @@ pub struct TableWriter {
     /// Shared codebook cell for deferred IVF-PQ builds. Cloneable Arc so each
     /// background task can access it; OnceCell guarantees training runs exactly once.
     deferred_ivf_codebook: Arc<tokio::sync::OnceCell<IvfPqCodebook>>,
+    /// When set, BM25 IDF stats are accumulated from this Parquet column on each
+    /// write_batch call and persisted to `metadata/ailake_bm25_stats.bin`.
+    /// Enables hybrid vector+BM25 search via `SearchConfig::hybrid`.
+    bm25_text_column: Option<String>,
+    /// Per-file Bloom filters built during write_batch when bm25_text_column is set.
+    /// Flushed to NewSnapshot::bloom_filters on commit (Phase F Puffin stats).
+    pending_blooms: Vec<(String, Vec<u8>)>,
 }
 
 impl TableWriter {
@@ -65,7 +95,21 @@ impl TableWriter {
             extra_vec_policies: Vec::new(),
             cached_ivf_codebook: None,
             deferred_ivf_codebook: Arc::new(tokio::sync::OnceCell::new()),
+            bm25_text_column: None,
+            pending_blooms: Vec::new(),
         }
+    }
+
+    /// Enable BM25 hybrid search by accumulating IDF stats from `column` on each write.
+    ///
+    /// After calling this, every `write_batch*` call will tokenize the specified column,
+    /// update the corpus IDF stats, and persist them to `metadata/ailake_bm25_stats.bin`.
+    /// This file is then loaded automatically by `SearchConfig::hybrid` at query time.
+    ///
+    /// Typical usage: `TableWriter::new(...).with_bm25("chunk_text")`.
+    pub fn with_bm25(mut self, text_column: impl Into<String>) -> Self {
+        self.bm25_text_column = Some(text_column.into());
+        self
     }
 
     pub fn with_parent_snapshot(mut self, id: SnapshotId) -> Self {
@@ -115,6 +159,8 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
 
         // Spawn background HNSW build (fire-and-forget; errors are logged).
@@ -132,6 +178,12 @@ impl TableWriter {
                 );
             }
         });
+
+        // Update BM25 IDF stats + build Bloom filter (Phase F) for the new file.
+        if self.bm25_text_column.is_some() {
+            self.update_bm25_stats_from_batch(batch).await?;
+            self.build_bloom_for_file(batch, &file_path);
+        }
 
         Ok(())
     }
@@ -172,6 +224,8 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
 
         let store = self.store.clone();
@@ -314,7 +368,15 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
+
+        // Update BM25 IDF stats + build Bloom filter (Phase F).
+        if self.bm25_text_column.is_some() {
+            self.update_bm25_stats_from_batch(batch).await?;
+            self.build_bloom_for_file(batch, &file_path);
+        }
         Ok(())
     }
 
@@ -443,6 +505,8 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -550,6 +614,8 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -626,6 +692,8 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
 
         // Clone all column data for the background task.
@@ -658,6 +726,91 @@ impl TableWriter {
     /// No-op when `pending_files` is empty (e.g., all `write_batch_idempotent`
     /// calls were skipped because their `batch_id` was already committed).
     /// Returns the current snapshot id in that case (or 0 if no snapshot exists yet).
+    /// Build a Bloom filter from the BM25 text column and store it for the given file.
+    /// Called alongside `update_bm25_stats_from_batch` for every write_batch. The filter
+    /// is flushed to the Puffin stats file at commit time (Phase F).
+    fn build_bloom_for_file(&mut self, batch: &RecordBatch, file_path: &str) {
+        use arrow_array::cast::AsArray;
+        let col_name = match &self.bm25_text_column {
+            Some(c) => c.clone(),
+            None => return,
+        };
+        let col = match batch.column_by_name(&col_name) {
+            Some(c) => c,
+            None => return,
+        };
+        let str_arr = match col.as_string_opt::<i32>() {
+            Some(a) => a,
+            None => return,
+        };
+        // Size the filter for ~10× unique terms per row at 1% FPR.
+        let cap = (batch.num_rows() * 10).max(128);
+        let mut bloom = crate::bloom::BloomFilter::with_capacity(cap, 0.01);
+        for i in 0..str_arr.len() {
+            if str_arr.is_valid(i) {
+                for term in crate::bm25::tokenize(str_arr.value(i)) {
+                    bloom.insert(&term);
+                }
+            }
+        }
+        self.pending_blooms
+            .push((file_path.to_string(), bloom.to_bytes()));
+    }
+
+    /// Update BM25 IDF stats from a batch's text column and persist to storage.
+    ///
+    /// Read-modify-write: loads existing stats (if any), merges new DF counts,
+    /// writes back. Concurrent writers may lose some DF deltas; acceptable for
+    /// approximate BM25 (same as Iceberg without OCC). Compaction rebuilds accurately.
+    async fn update_bm25_stats_from_batch(&self, batch: &RecordBatch) -> AilakeResult<()> {
+        use arrow_array::cast::AsArray;
+
+        let col_name = match &self.bm25_text_column {
+            Some(c) => c.as_str(),
+            None => return Ok(()),
+        };
+        let col = match batch.column_by_name(col_name) {
+            Some(c) => c,
+            None => {
+                tracing::warn!(
+                    "ailake: BM25 text column '{}' not found in batch — skipping IDF update",
+                    col_name
+                );
+                return Ok(());
+            }
+        };
+        let str_arr = match col.as_string_opt::<i32>() {
+            Some(a) => a,
+            None => {
+                tracing::warn!(
+                    "ailake: BM25 text column '{}' is not a Utf8 column — skipping",
+                    col_name
+                );
+                return Ok(());
+            }
+        };
+
+        let texts: Vec<&str> = (0..str_arr.len())
+            .filter(|&i| str_arr.is_valid(i))
+            .map(|i| str_arr.value(i))
+            .collect();
+
+        // Load existing stats
+        let stats_path = crate::bm25::BM25_STATS_FILE;
+        let mut stats: crate::bm25::IdfStats = match self.store.get(stats_path).await {
+            Ok(bytes) => crate::bm25::IdfStats::from_bytes(&bytes).unwrap_or_default(),
+            Err(_) => crate::bm25::IdfStats::default(),
+        };
+
+        stats.merge_batch(&texts);
+
+        let bytes = stats.to_bytes()?;
+        self.store
+            .put(stats_path, bytes::Bytes::from(bytes))
+            .await?;
+        Ok(())
+    }
+
     pub async fn commit(mut self) -> AilakeResult<SnapshotId> {
         if self.pending_files.is_empty() {
             let current = self
@@ -682,6 +835,12 @@ impl TableWriter {
                 format!("ailake.metric-{}", ep.column_name),
                 ailake_parquet::schema::metric_str(ep.metric).to_string(),
             );
+            if let Some(modality) = ep.modality {
+                extra_properties.insert(
+                    format!("ailake.modality-{}", ep.column_name),
+                    modality.as_str().to_string(),
+                );
+            }
         }
         let snapshot = NewSnapshot {
             snapshot_id: new_snapshot_id(),
@@ -690,6 +849,8 @@ impl TableWriter {
             operation: SnapshotOperation::Append,
             iceberg_schema,
             extra_properties,
+            bloom_filters: std::mem::take(&mut self.pending_blooms),
+            equality_delete_files: vec![],
         };
         self.catalog.commit_snapshot(&self.table, snapshot).await
     }
@@ -700,13 +861,37 @@ impl TableWriter {
         store: Arc<dyn Store>,
         policy: VectorStoragePolicy,
         table: TableIdent,
+        format_version: u8,
     ) -> AilakeResult<Self> {
-        // Try to load; if not found, create
+        // Track existing file count so new writers start their part counter past
+        // any already-committed files, preventing name collisions on sequential writes.
+        let existing_file_count: u32;
+
         match catalog.load_table(&table).await {
             Ok(existing_meta) => {
+                // Hard error: dim stored in table metadata must match the policy dim.
+                // validate_embedding_dim() only checks vectors vs policy.dim; without this
+                // check a caller can open with dim=16 on a dim=8 table and silently corrupt it.
+                if let Some(stored_dim_str) = existing_meta.properties.get("ailake.vector-dim") {
+                    if let Ok(stored_dim) = stored_dim_str.parse::<u32>() {
+                        if stored_dim != policy.dim {
+                            let table_model = policy
+                                .embedding_model
+                                .as_ref()
+                                .map(|m| m.to_property_value())
+                                .unwrap_or_else(|| format!("dim={}", stored_dim));
+                            return Err(AilakeError::ModelMismatch {
+                                table_model,
+                                table_dim: stored_dim,
+                                batch_model: format!("dim={}", policy.dim),
+                                batch_dim: policy.dim,
+                            });
+                        }
+                    }
+                }
                 // Warn when writing with a different model name into an existing table.
-                // Dim mismatch is a hard error caught at write_batch time; name divergence
-                // is softer — same dim, different model (e.g. fine-tune vs base) — warn only.
+                // Name divergence is softer — same dim, different model (e.g. fine-tune vs
+                // base) — warn only.
                 if let Some(incoming) = &policy.embedding_model {
                     if let Some(stored_val) = existing_meta
                         .properties
@@ -722,20 +907,30 @@ impl TableWriter {
                         }
                     }
                 }
+                existing_file_count = catalog
+                    .list_files(&table, None)
+                    .await
+                    .unwrap_or_default()
+                    .len() as u32;
             }
             Err(_) => {
                 catalog
                     .create_table(
                         &table,
                         &TableProperties {
+                            partition_column_type: policy.partition_column_type.clone(),
                             policy: policy.clone(),
                             extra: std::collections::HashMap::new(),
+                            format_version,
                         },
                     )
                     .await?;
+                existing_file_count = 0;
             }
         }
-        Ok(Self::new(catalog, store, policy, table))
+        let mut writer = Self::new(catalog, store, policy, table);
+        writer.part_counter = Arc::new(AtomicU32::new(existing_file_count));
+        Ok(writer)
     }
 }
 
@@ -915,7 +1110,7 @@ fn arrow_type_to_iceberg(dt: &arrow_schema::DataType, nested_id: &mut i32) -> se
 }
 
 /// Background task: reads a Parquet-only shard, builds full AILK file, patches catalog.
-async fn build_and_patch_index(
+pub(crate) async fn build_and_patch_index(
     store: Arc<dyn Store>,
     catalog: Arc<dyn CatalogProvider>,
     policy: VectorStoragePolicy,
@@ -1003,6 +1198,8 @@ async fn build_and_patch_index(
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
                     extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
+                    equality_delete_files: vec![],
                 },
             )
             .await?;
@@ -1127,6 +1324,8 @@ async fn build_ivf_pq_and_patch_index(
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
                     extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
+                    equality_delete_files: vec![],
                 },
             )
             .await?;
@@ -1270,6 +1469,8 @@ async fn build_and_patch_multi_index(
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
                     extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
+                    equality_delete_files: vec![],
                 },
             )
             .await?;
@@ -1314,6 +1515,10 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
         }
     }
 
@@ -1493,7 +1698,7 @@ mod tests {
         let pol = policy("embedding", 4);
         let ident = TableIdent::new("default", "t");
 
-        let mut writer = TableWriter::create_or_open(catalog, store, pol, ident)
+        let mut writer = TableWriter::create_or_open(catalog, store, pol, ident, 2)
             .await
             .unwrap();
 
@@ -1532,7 +1737,7 @@ mod tests {
         let primary_pol = policy("embedding", 4);
         let ident = TableIdent::new("default", "t");
 
-        let mut writer = TableWriter::create_or_open(catalog, store, primary_pol, ident)
+        let mut writer = TableWriter::create_or_open(catalog, store, primary_pol, ident, 2)
             .await
             .unwrap();
 

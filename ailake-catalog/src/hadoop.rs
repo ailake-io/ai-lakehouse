@@ -6,14 +6,17 @@ use std::sync::Arc;
 
 use ailake_core::{AilakeError, AilakeResult};
 use async_trait::async_trait;
+use base64::Engine as _;
 
 use crate::avro_manifest::{
-    read_manifest_file, read_manifest_list, write_manifest_file, write_manifest_list_multi,
+    read_equality_delete_manifest, read_manifest_file, read_manifest_list_typed,
+    write_equality_delete_manifest, write_manifest_file, write_manifest_list_multi_typed,
+    write_partition_stats_parquet,
 };
-use crate::metadata::{IcebergMetadata, IcebergSnapshot};
+use crate::metadata::{IcebergMetadata, IcebergPartitionStatsRef, IcebergSnapshot};
 use crate::provider::{
-    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, TableIdent, TableMetadata,
-    TableProperties,
+    CatalogProvider, DataFileEntry, EqualityDeleteFile, NewSnapshot, SnapshotId, TableIdent,
+    TableMetadata, TableProperties,
 };
 use ailake_store::Store;
 use bytes::Bytes;
@@ -92,7 +95,18 @@ impl HadoopCatalog {
 impl CatalogProvider for HadoopCatalog {
     async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
         let location = self.table_root(name);
-        let mut meta = IcebergMetadata::new(&location, &props.policy);
+        // Prefer TableProperties.partition_column_type; fall back to policy field (set via Python/CLI).
+        let pct = props
+            .partition_column_type
+            .as_deref()
+            .or(props.policy.partition_column_type.as_deref());
+        let mut meta = IcebergMetadata::new(
+            &location,
+            &props.policy,
+            props.format_version,
+            pct,
+            &props.policy.partition_fields,
+        );
         for (k, v) in &props.extra {
             meta.properties.insert(k.clone(), v.clone());
         }
@@ -114,9 +128,20 @@ impl CatalogProvider for HadoopCatalog {
         let seq = meta.last_sequence_number + 1;
         let table_root = self.table_root(table);
 
-        // Minimal Iceberg schema JSON for this table (empty fields; readers get column info from Parquet)
-        let table_schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
-        let partition_spec_json = r#"[{"spec-id":0,"fields":[]}]"#;
+        // Serialize the actual Iceberg schema for this table (phase I: may contain partition column).
+        let current_schema = meta
+            .schemas
+            .iter()
+            .find(|s| s["schema-id"].as_i64() == Some(meta.current_schema_id as i64))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"schema-id":0,"type":"struct","fields":[]}));
+        let table_schema_json = serde_json::to_string(&current_schema)
+            .unwrap_or_else(|_| r#"{"schema-id":0,"type":"struct","fields":[]}"#.to_string());
+        let partition_spec_json = serde_json::to_string(&meta.partition_specs)
+            .unwrap_or_else(|_| r#"[{"spec-id":0,"fields":[]}]"#.to_string());
+
+        // Parse the active partition spec for native partition value encoding.
+        let active_partition_spec = meta.to_table_metadata().partition_spec;
 
         // Write Avro manifest file for the new data files.
         // Iceberg spec requires absolute file paths in manifests. Prefix relative paths
@@ -129,7 +154,9 @@ impl CatalogProvider for HadoopCatalog {
             } else {
                 None
             };
-        let abs_files: Vec<DataFileEntry> = snapshot
+        // Build absolute-path file list. For V3 tables, assign first_row_id from
+        // the table's next-row-id counter so every row has a globally unique ID.
+        let mut abs_files: Vec<DataFileEntry> = snapshot
             .files
             .iter()
             .map(|f| {
@@ -143,14 +170,29 @@ impl CatalogProvider for HadoopCatalog {
                 DataFileEntry { path, ..f.clone() }
             })
             .collect();
+
+        if meta.format_version >= 3 {
+            let mut next_id = meta.next_row_id;
+            for f in abs_files.iter_mut() {
+                // Compaction pre-sets first_row_id from source files — respect it.
+                // Only allocate fresh IDs (and advance the counter) for brand-new files.
+                if f.first_row_id.is_none() {
+                    f.first_row_id = Some(next_id);
+                    next_id += f.record_count as i64;
+                }
+            }
+            meta.next_row_id = next_id;
+        }
         let added_rows: i64 = abs_files.iter().map(|f| f.record_count as i64).sum();
         let manifest_file_path = format!("{}/metadata/{}-m0.avro", table_root, snap_id);
         let manifest_bytes = write_manifest_file(
             &abs_files,
             snap_id,
             seq,
-            table_schema_json,
-            partition_spec_json,
+            &table_schema_json,
+            &partition_spec_json,
+            meta.format_version as u8,
+            active_partition_spec.as_ref(),
         );
         let manifest_len = manifest_bytes.len();
         self.store.put(&manifest_file_path, manifest_bytes).await?;
@@ -158,28 +200,53 @@ impl CatalogProvider for HadoopCatalog {
         // Collect manifest paths from the previous snapshot (if any) for the manifest list.
         // Replace/Overwrite: new manifest IS the complete state — don't inherit old manifests.
         // Append/Delete: inherit previous manifests so old files remain visible.
-        let mut all_manifests: Vec<(String, i64)> = Vec::new();
+        // Manifests carry content: 0=data, 1=delete.
+        let mut all_manifests: Vec<(String, i64, i32)> = Vec::new();
         if matches!(
             snapshot.operation,
             crate::provider::SnapshotOperation::Append | crate::provider::SnapshotOperation::Delete
         ) {
             if let Some(prev_snap) = meta.snapshots.last() {
                 if let Ok(ml_bytes) = self.store.get(&prev_snap.manifest_list).await {
-                    if let Ok(prev_manifests) = read_manifest_list(&ml_bytes) {
-                        for prev_path in prev_manifests {
+                    if let Ok(prev_manifests) = read_manifest_list_typed(&ml_bytes) {
+                        for (prev_path, content) in prev_manifests {
                             let len = self.store.file_size(&prev_path).await.unwrap_or(0) as i64;
-                            all_manifests.push((prev_path, len));
+                            all_manifests.push((prev_path, len, content));
                         }
                     }
                 }
             }
         }
-        all_manifests.push((manifest_file_path.clone(), manifest_len as i64));
+        all_manifests.push((manifest_file_path.clone(), manifest_len as i64, 0));
+
+        // Phase H: write delete manifest for equality delete files (if any).
+        let abs_eq_deletes: Vec<EqualityDeleteFile> = snapshot
+            .equality_delete_files
+            .iter()
+            .map(|d| EqualityDeleteFile {
+                path: if d.path.starts_with('/') || d.path.contains("://") {
+                    d.path.clone()
+                } else {
+                    format!("{}/{}", table_root, d.path)
+                },
+                equality_ids: d.equality_ids.clone(),
+                record_count: d.record_count,
+                file_size_bytes: d.file_size_bytes,
+            })
+            .collect();
+        if !abs_eq_deletes.is_empty() {
+            let del_manifest_path = format!("{}/metadata/{}-eq-del.avro", table_root, snap_id);
+            let del_manifest_bytes = write_equality_delete_manifest(&abs_eq_deletes, snap_id, seq);
+            let del_manifest_len = del_manifest_bytes.len();
+            self.store
+                .put(&del_manifest_path, del_manifest_bytes)
+                .await?;
+            all_manifests.push((del_manifest_path, del_manifest_len as i64, 1));
+        }
 
         // Write Avro manifest list for this snapshot
         let manifest_list_path = format!("{}/metadata/snap-{}-1.avro", table_root, snap_id);
-        // Build manifest list from all manifests
-        let ml_bytes = write_manifest_list_multi(&all_manifests, snap_id, seq, added_rows);
+        let ml_bytes = write_manifest_list_multi_typed(&all_manifests, snap_id, seq, added_rows);
         self.store.put(&manifest_list_path, ml_bytes).await?;
 
         let now_ms = std::time::SystemTime::now()
@@ -226,6 +293,113 @@ impl CatalogProvider for HadoopCatalog {
             meta.properties.insert(k, v);
         }
 
+        // Phase F: write Puffin stats file for V3 tables (vector stats + BM25 bloom).
+        if meta.format_version >= 3 {
+            let vector_stats = collect_vector_stats(&abs_files);
+            let bm25_blooms: Vec<crate::puffin::BM25BloomEntry> = snapshot
+                .bloom_filters
+                .iter()
+                .map(|(path, bytes)| crate::puffin::BM25BloomEntry {
+                    path: path.clone(),
+                    bloom_bytes: bytes.clone(),
+                })
+                .collect();
+
+            if !vector_stats.is_empty() {
+                match crate::puffin::AilakePuffinWriter::write_stats(
+                    &vector_stats,
+                    &bm25_blooms,
+                    snap_id,
+                ) {
+                    Ok(result) => {
+                        let puffin_path = format!("{table_root}/metadata/stats-{snap_id}.puffin");
+                        let puffin_len = result.bytes.len() as u64;
+                        if let Err(e) = self.store.put(&puffin_path, result.bytes).await {
+                            tracing::warn!("ailake: Phase F — failed to write Puffin stats: {e}");
+                        } else {
+                            use crate::metadata::{BlobRef, IcebergStatisticsRef};
+                            let mut blob_refs = vec![BlobRef {
+                                blob_type: crate::puffin::BLOB_TYPE_VECTOR_STATS.to_string(),
+                                snapshot_id: snap_id,
+                                fields: vec![],
+                                offset: result.vector_stats_blob.0,
+                                length: result.vector_stats_blob.1,
+                            }];
+                            if let Some((off, len)) = result.bm25_bloom_blob {
+                                blob_refs.push(BlobRef {
+                                    blob_type: crate::puffin::BLOB_TYPE_BM25_BLOOM.to_string(),
+                                    snapshot_id: snap_id,
+                                    fields: vec![],
+                                    offset: off,
+                                    length: len,
+                                });
+                            }
+                            meta.statistics.push(IcebergStatisticsRef {
+                                snapshot_id: snap_id,
+                                statistics_path: puffin_path,
+                                file_size_in_bytes: puffin_len,
+                                file_footer_size_in_bytes: result.footer_size as u64,
+                                blob_file_references: blob_refs,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("ailake: Phase F — Puffin stats encode error: {e}");
+                    }
+                }
+            }
+        }
+
+        // Phase J: write partition statistics Parquet file for partitioned tables.
+        // Covers ALL data files in this snapshot (reads every data manifest) so that
+        // Spark/Trino can do partition-level aggregations without scanning data files.
+        if let Some(spec) = &active_partition_spec {
+            if !spec.is_unpartitioned() {
+                let mut all_data_entries: Vec<DataFileEntry> = Vec::new();
+                for (mpath, _len, content) in &all_manifests {
+                    if *content != 0 {
+                        continue;
+                    }
+                    match self.store.get(mpath).await {
+                        Ok(mb) => match read_manifest_file(&mb) {
+                            Ok(entries) => all_data_entries.extend(entries),
+                            Err(e) => {
+                                tracing::warn!("ailake: Phase J — manifest read error {mpath}: {e}")
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!("ailake: Phase J — store get error {mpath}: {e}")
+                        }
+                    }
+                }
+
+                match write_partition_stats_parquet(spec, &all_data_entries) {
+                    Ok(stats_bytes) => {
+                        let stats_path =
+                            format!("{table_root}/metadata/partition-stats-{snap_id}.parquet");
+                        let stats_len = stats_bytes.len() as u64;
+                        match self.store.put(&stats_path, stats_bytes).await {
+                            Ok(()) => {
+                                meta.partition_statistics.push(IcebergPartitionStatsRef {
+                                    snapshot_id: snap_id,
+                                    statistics_path: stats_path,
+                                    file_size_in_bytes: stats_len,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "ailake: Phase J — failed to write partition stats: {e}"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("ailake: Phase J — partition stats encode error: {e}");
+                    }
+                }
+            }
+        }
+
         self.save_metadata(table, &meta).await?;
         Ok(snap_id)
     }
@@ -247,20 +421,56 @@ impl CatalogProvider for HadoopCatalog {
             .find(|s| s.snapshot_id == snap_id)
             .ok_or_else(|| AilakeError::Catalog(format!("snapshot {snap_id} not found")))?;
 
-        // Read Avro manifest list → manifest file paths
+        // Read Avro manifest list → manifest file paths (content=0 = data manifests only)
         let ml_bytes = self.store.get(&snap.manifest_list).await?;
-        let manifest_paths =
-            read_manifest_list(&ml_bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
+        let manifest_entries =
+            read_manifest_list_typed(&ml_bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
 
-        // Read each manifest file → data file entries (with AI-Lake metadata from key_metadata)
+        // Read each data manifest file → data file entries (with AI-Lake metadata from key_metadata)
         let mut entries: Vec<DataFileEntry> = Vec::new();
-        for mpath in manifest_paths {
+        for (mpath, content) in manifest_entries {
+            if content != 0 {
+                continue; // skip delete manifests (content=1)
+            }
             let mf_bytes = self.store.get(&mpath).await?;
             let file_entries =
                 read_manifest_file(&mf_bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
             entries.extend(file_entries);
         }
         Ok(entries)
+    }
+
+    async fn list_equality_deletes(
+        &self,
+        table: &TableIdent,
+        snapshot_id: Option<SnapshotId>,
+    ) -> AilakeResult<Vec<EqualityDeleteFile>> {
+        let meta = self.load_raw_metadata(table).await?;
+        let snap_id = match snapshot_id.or(meta.current_snapshot_id) {
+            Some(id) => id,
+            None => return Ok(vec![]),
+        };
+        let snap = meta
+            .snapshots
+            .iter()
+            .find(|s| s.snapshot_id == snap_id)
+            .ok_or_else(|| AilakeError::Catalog(format!("snapshot {snap_id} not found")))?;
+
+        let ml_bytes = self.store.get(&snap.manifest_list).await?;
+        let manifest_entries =
+            read_manifest_list_typed(&ml_bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
+
+        let mut deletes: Vec<EqualityDeleteFile> = Vec::new();
+        for (mpath, content) in manifest_entries {
+            if content != 1 {
+                continue; // only delete manifests
+            }
+            let mf_bytes = self.store.get(&mpath).await?;
+            let entries = read_equality_delete_manifest(&mf_bytes)
+                .map_err(|e| AilakeError::Catalog(e.to_string()))?;
+            deletes.extend(entries);
+        }
+        Ok(deletes)
     }
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()> {
@@ -277,6 +487,119 @@ impl CatalogProvider for HadoopCatalog {
         }
         Ok(())
     }
+
+    /// Apply schema evolution without rewriting data files (Phase G).
+    ///
+    /// Steps:
+    /// 1. Load current `metadata.json`.
+    /// 2. Clone the current schema; apply renames (field name only, id stable).
+    /// 3. Append added fields with fresh field-ids and `initial-default` / `write-default`.
+    /// 4. Push new schema entry with `schema-id = current + 1`.
+    /// 5. Write new `metadata.json` (no new snapshot — pure metadata change).
+    ///
+    /// Returns the new `schema-id`.
+    async fn evolve_schema(
+        &self,
+        table: &TableIdent,
+        evolution: crate::schema_evolution::SchemaEvolution,
+    ) -> AilakeResult<i32> {
+        use ailake_core::AilakeError;
+
+        let mut meta = self.load_raw_metadata(table).await?;
+        let current_id = meta.current_schema_id;
+
+        // Clone current schema's fields array.
+        let current_schema = meta
+            .schemas
+            .iter()
+            .find(|s| s["schema-id"].as_i64() == Some(current_id as i64))
+            .ok_or_else(|| AilakeError::Catalog("current schema not found in metadata".into()))?
+            .clone();
+
+        let mut fields: Vec<serde_json::Value> = current_schema["fields"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        // Apply renames first (preserves field-ids).
+        for rename in &evolution.renames {
+            for field in fields.iter_mut() {
+                if field["name"].as_str() == Some(rename.old_name.as_str()) {
+                    field["name"] = serde_json::Value::String(rename.new_name.clone());
+                }
+            }
+        }
+
+        // Apply column additions.
+        let mut last_col_id = meta.last_column_id;
+        for add in evolution.adds {
+            last_col_id += 1;
+            let mut field = serde_json::json!({
+                "id": last_col_id,
+                "name": add.name,
+                "required": add.required,
+                "type": add.iceberg_type,
+            });
+            // Prefer explicit initial_default; fall back to write_default.
+            let init_default = add.initial_default.or_else(|| add.write_default.clone());
+            if let Some(ref d) = init_default {
+                field["initial-default"] = d.clone();
+            }
+            if let Some(ref wd) = add.write_default {
+                field["write-default"] = wd.clone();
+            }
+            if let Some(doc) = add.doc {
+                field["doc"] = serde_json::Value::String(doc);
+            }
+            fields.push(field);
+        }
+
+        let new_schema_id = current_id + 1;
+        let new_schema = serde_json::json!({
+            "schema-id": new_schema_id,
+            "type": "struct",
+            "fields": fields,
+        });
+
+        meta.schemas.push(new_schema);
+        meta.current_schema_id = new_schema_id;
+        meta.last_column_id = last_col_id;
+        meta.last_updated_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        self.save_metadata(table, &meta).await?;
+        tracing::info!(
+            "ailake: schema evolved — table={}/{}, new schema-id={new_schema_id}, \
+             last-column-id={last_col_id}",
+            table.namespace,
+            table.name
+        );
+        Ok(new_schema_id)
+    }
+}
+
+/// Extract centroid + radius from each DataFileEntry for Phase F Puffin stats.
+/// Files without centroid metadata (e.g. Indexing status) are skipped.
+fn collect_vector_stats(files: &[DataFileEntry]) -> Vec<crate::puffin::VectorStatEntry> {
+    files
+        .iter()
+        .filter_map(|f| {
+            let b64 = f.centroid_b64.as_ref()?;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+            let centroid: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            let radius = f.radius?;
+            Some(crate::puffin::VectorStatEntry {
+                path: f.path.clone(),
+                centroid,
+                radius,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -302,8 +625,14 @@ mod tests {
                 ivf_residual: false,
                 embedding_model: None,
                 modality: None,
+                partition_by: None,
+                partition_value: None,
+                partition_column_type: None,
+                partition_fields: vec![],
             },
             extra: std::collections::HashMap::new(),
+            format_version: 2,
+            partition_column_type: None,
         }
     }
 
@@ -316,7 +645,7 @@ mod tests {
 
         catalog.create_table(&table, &make_props()).await.unwrap();
         let meta = catalog.load_table(&table).await.unwrap();
-        assert_eq!(meta.format_version, 2);
+        assert_eq!(meta.format_version, 2); // make_props uses format_version=2
         assert!(meta.properties.contains_key("ailake.vector-column"));
     }
 
@@ -346,15 +675,311 @@ mod tests {
                 index_status: crate::provider::IndexStatus::Ready,
                 batch_id: None,
                 embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
         };
         let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 
         let files = catalog.list_files(&table, Some(snap_id)).await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "data/part-00001.parquet");
+    }
+
+    #[tokio::test]
+    async fn v3_assigns_first_row_id_monotonically() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let catalog = HadoopCatalog::new(store, "warehouse");
+        let table = TableIdent::new("default", "v3docs");
+
+        let mut props = make_props();
+        props.format_version = 3;
+        catalog.create_table(&table, &props).await.unwrap();
+
+        // First commit — 10 rows → first_row_id=0, next_row_id advances to 10.
+        let snap1 = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00001.parquet".to_string(),
+                record_count: 10,
+                file_size_bytes: 1024,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".to_string()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None, // assigned by catalog at commit time
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap1).await.unwrap();
+
+        // Second commit — 25 rows → first_row_id=10.
+        let snap2_id = new_snapshot_id();
+        let snap2 = NewSnapshot {
+            snapshot_id: snap2_id,
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00002.parquet".to_string(),
+                record_count: 25,
+                file_size_bytes: 2048,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".to_string()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap2).await.unwrap();
+
+        let files = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(files.len(), 2);
+        // File 1: first_row_id=0
+        let f1 = files
+            .iter()
+            .find(|f| f.path.ends_with("part-00001.parquet"))
+            .unwrap();
+        assert_eq!(f1.first_row_id, Some(0), "first file must start at row 0");
+        // File 2: first_row_id=10 (after the 10 rows of file 1)
+        let f2 = files
+            .iter()
+            .find(|f| f.path.ends_with("part-00002.parquet"))
+            .unwrap();
+        assert_eq!(
+            f2.first_row_id,
+            Some(10),
+            "second file must start after first file's rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_does_not_assign_first_row_id() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let catalog = HadoopCatalog::new(store, "warehouse");
+        let table = TableIdent::new("default", "v2docs");
+
+        catalog.create_table(&table, &make_props()).await.unwrap();
+
+        let snap = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00001.parquet".to_string(),
+                record_count: 10,
+                file_size_bytes: 1024,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".to_string()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap).await.unwrap();
+
+        let files = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(
+            files[0].first_row_id, None,
+            "V2 tables must not have first_row_id"
+        );
+    }
+
+    /// Compaction pre-sets `first_row_id` on the merged file.
+    /// `commit_snapshot` must not overwrite it and must not advance `next_row_id`.
+    #[tokio::test]
+    async fn compaction_preserves_first_row_id_and_next_row_id_does_not_balloon() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let catalog = HadoopCatalog::new(Arc::clone(&store) as Arc<dyn Store>, "warehouse");
+        let table = TableIdent::new("default", "compact_rowid");
+
+        let mut props = make_props();
+        props.format_version = 3;
+        catalog.create_table(&table, &props).await.unwrap();
+
+        // Write two files: 10 rows + 25 rows → next_row_id advances to 35.
+        let snap1 = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00001.parquet".to_string(),
+                record_count: 10,
+                file_size_bytes: 1024,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".into()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap1).await.unwrap();
+
+        let snap2 = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00002.parquet".to_string(),
+                record_count: 25,
+                file_size_bytes: 2048,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".into()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap2).await.unwrap();
+
+        // Simulate compaction: merged file pre-sets first_row_id=0 (min of source files).
+        // next_row_id is 35; compaction must NOT push it to 70.
+        let snap_compact = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-merged.parquet".to_string(),
+                record_count: 35,
+                file_size_bytes: 3072,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".into()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: Some(0), // pre-set by compaction — must be respected
+            }],
+            operation: crate::provider::SnapshotOperation::Replace,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap_compact).await.unwrap();
+
+        let files = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(files.len(), 1);
+        // first_row_id must remain 0 — commit_snapshot must not overwrite it.
+        assert_eq!(
+            files[0].first_row_id,
+            Some(0),
+            "compaction first_row_id=0 must survive commit_snapshot"
+        );
+
+        // next fresh write must start at 35 (not 70).
+        let snap_new = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![DataFileEntry {
+                path: "data/part-00004.parquet".to_string(),
+                record_count: 5,
+                file_size_bytes: 512,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".into()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None, // fresh write
+            }],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap_new).await.unwrap();
+
+        let files = catalog.list_files(&table, None).await.unwrap();
+        let new_file = files
+            .iter()
+            .find(|f| f.path.ends_with("part-00004.parquet"))
+            .unwrap();
+        assert_eq!(
+            new_file.first_row_id,
+            Some(35),
+            "fresh write after compaction must start at 35, not 70"
+        );
     }
 }

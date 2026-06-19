@@ -28,6 +28,10 @@ fn make_policy(dim: u32) -> VectorStoragePolicy {
         ivf_residual: false,
         embedding_model: None,
         modality: None,
+        partition_by: None,
+        partition_value: None,
+        partition_column_type: None,
+        partition_fields: vec![],
     }
 }
 
@@ -44,6 +48,7 @@ async fn write_table(dir: &TempDir, table_name: &str, rows: usize, dim: u32) {
         Arc::clone(&store) as Arc<dyn Store>,
         make_policy(dim),
         table,
+        2,
     )
     .await
     .unwrap();

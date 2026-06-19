@@ -22,6 +22,8 @@
 #include "hnsw.hpp"
 #include "ivfpq.hpp"
 #include "catalog.hpp"
+#include "schema.hpp"
+#include "write.hpp"
 #include "rocm/blas.hpp"
 
 #include <algorithm>
@@ -47,6 +49,10 @@ struct SearchOptions {
     // When nullptr (default), detect_hardware() is called automatically.
     // Pass an explicit profile to force CPU-only or a specific backend.
     const HardwareProfile* hw = nullptr;
+
+    // Restrict search to files tagged with this partition value (Phase 9).
+    // Empty string means no filtering.
+    std::string partition_filter;
 
     const HardwareProfile& hardware() const {
         return hw ? *hw : detect_hardware();
@@ -205,9 +211,20 @@ search(HadoopCatalog& catalog,
         }
     }
 
+    // Partition pruning (Phase 9): filter by partition_value before geometric pruning.
+    std::vector<DataFileEntry> partitioned;
+    if (!opts.partition_filter.empty()) {
+        for (auto& e : entries) {
+            if (e.partition_value == opts.partition_filter)
+                partitioned.push_back(e);
+        }
+    } else {
+        partitioned = entries;
+    }
+
     // Geometric pruning
     std::vector<DataFileEntry> survivors;
-    for (auto& e : entries) {
+    for (auto& e : partitioned) {
         if (e.centroid.empty()) { survivors.push_back(e); continue; }
         float d = compute_distance(metric, q, e.centroid.data(), e.centroid.size());
         if (d - e.radius <= opts.pruning_threshold)
@@ -268,6 +285,17 @@ search_multimodal(HadoopCatalog& catalog,
     auto entries = catalog.list_files(ns, tbl);
     auto primary_metric = metric_from_str(info.vector_metric);
 
+    // Partition pruning (Phase 9): filter by partition_value before geometric pruning.
+    std::vector<DataFileEntry> partitioned_mm;
+    if (!opts.partition_filter.empty()) {
+        for (auto& e : entries) {
+            if (e.partition_value == opts.partition_filter)
+                partitioned_mm.push_back(e);
+        }
+    } else {
+        partitioned_mm = entries;
+    }
+
     // Geometric pruning using primary column centroid.
     const float* prune_q = nullptr;
     for (auto& mq : queries) {
@@ -279,7 +307,7 @@ search_multimodal(HadoopCatalog& catalog,
     if (!prune_q && !queries.empty()) prune_q = queries[0].query.data();
 
     std::vector<DataFileEntry> survivors;
-    for (auto& e : entries) {
+    for (auto& e : partitioned_mm) {
         if (e.centroid.empty() || !prune_q) { survivors.push_back(e); continue; }
         float d = compute_distance(primary_metric, prune_q, e.centroid.data(), e.centroid.size());
         if (d - e.radius <= opts.pruning_threshold) survivors.push_back(e);

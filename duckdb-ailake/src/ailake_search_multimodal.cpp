@@ -17,7 +17,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/value.hpp"
 
@@ -29,6 +29,7 @@ struct AilakeMultimodalBindData : public TableFunctionData {
     std::string                        warehouse;
     std::vector<ailake::ModalQueryArg> queries;
     int                                top_k = 10;
+    std::string                        partition_filter;
 };
 
 // ── Global state ──────────────────────────────────────────────────────────────
@@ -114,6 +115,14 @@ static unique_ptr<FunctionData> AilakeMultimodalBind(
         throw InvalidInputException("ailake_search_multimodal: top_k must be > 0");
     }
 
+    // named args (optional)
+    for (auto &named : input.named_parameters) {
+        if (named.first == "partition_filter") {
+            if (!named.second.IsNull())
+                data->partition_filter = StringValue::Get(named.second);
+        }
+    }
+
     return_types = {LogicalType::BIGINT, LogicalType::FLOAT, LogicalType::VARCHAR};
     names        = {"row_id", "rrf_score", "file_path"};
 
@@ -138,7 +147,8 @@ static unique_ptr<GlobalTableFunctionState> AilakeMultimodalInit(
         bind.warehouse,
         "table",
         bind.queries,
-        bind.top_k
+        bind.top_k,
+        bind.partition_filter
     );
 
     return std::move(state);
@@ -180,7 +190,7 @@ static void AilakeMultimodalScan(
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
-void RegisterAilakeSearchMultimodal(duckdb::DatabaseInstance &db) {
+void RegisterAilakeSearchMultimodal(duckdb::ExtensionLoader &loader) {
     // weight is declared DOUBLE so SQL literal 1.0 (DOUBLE) matches without coercion.
     // queries arg: LIST(STRUCT(col VARCHAR, query FLOAT[], weight DOUBLE))
     auto struct_type = LogicalType::STRUCT({
@@ -197,5 +207,7 @@ void RegisterAilakeSearchMultimodal(duckdb::DatabaseInstance &db) {
         AilakeMultimodalInit
     );
 
-    ExtensionUtil::RegisterFunction(db, func);
+    func.named_parameters["partition_filter"] = LogicalType::VARCHAR;
+
+    loader.RegisterFunction( func);
 }

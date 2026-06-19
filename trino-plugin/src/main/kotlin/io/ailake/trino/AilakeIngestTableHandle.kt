@@ -23,4 +23,6 @@ data class AilakeIngestTableHandle @JsonCreator constructor(
     @JsonProperty("metric")          val metric:          String,
     @JsonProperty("precision")       val precision:       String,
     @JsonProperty("embeddingModel")  val embeddingModel:  String? = null,
+    @JsonProperty("partitionFields") val partitionFields: List<AilakeNative.PartitionFieldDef> = emptyList(),
+    @JsonProperty("formatVersion")   val formatVersion:   Int = 2,
 ) : ConnectorTableHandle, ConnectorInsertTableHandle

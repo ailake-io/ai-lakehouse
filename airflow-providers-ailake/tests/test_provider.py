@@ -17,6 +17,8 @@ from airflow_providers_ailake import get_provider_info
 from airflow_providers_ailake.hooks.ailake import AilakeHook
 from airflow_providers_ailake.operators.ailake import (
     AilakeCompactOperator,
+    AilakeDeleteWhereOperator,
+    AilakeEvolveSchemaOperator,
     AilakeSearchOperator,
     AilakeWriteOperator,
 )
@@ -126,6 +128,23 @@ class TestAilakeHook:
         assert len(results) == 1
         assert results[0]["row_id"] == 7
 
+    def test_search_partition_filter_passed_to_cli(self):
+        payload = json.dumps({"results": []})
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed(stdout=payload)) as mock_cli:
+            hook.search("default.docs", query=[0.1, 0.2], top_k=5, partition_filter="agent-A")
+        args = mock_cli.call_args[0]
+        assert "--partition-filter" in args, f"--partition-filter missing: {args}"
+        assert "agent-A" in args, f"partition_filter value missing: {args}"
+
+    def test_search_no_partition_filter_when_none(self):
+        payload = json.dumps({"results": []})
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed(stdout=payload)) as mock_cli:
+            hook.search("default.docs", query=[0.1], top_k=1, partition_filter=None)
+        args = mock_cli.call_args[0]
+        assert "--partition-filter" not in args, "--partition-filter should be absent when None"
+
 
 # ---------------------------------------------------------------------------
 # AilakeWriteOperator
@@ -158,6 +177,30 @@ class TestAilakeWriteOperator:
     def test_default_batch_id_is_templated(self):
         op = self._op()
         assert "run_id" in op.batch_id or "task" in op.batch_id
+
+    def test_write_operator_partition_by_passed_to_cli(self):
+        op = self._op(partition_by="agent_id", partition_value="agent-A")
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                    op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--partition-by" in args, f"--partition-by missing from CLI args: {args}"
+        assert "agent_id" in args, f"partition_by value missing from CLI args: {args}"
+        assert "--partition-value" in args, f"--partition-value missing from CLI args: {args}"
+        assert "agent-A" in args, f"partition_value missing from CLI args: {args}"
+
+    def test_write_operator_no_partition_args_when_not_set(self):
+        op = self._op()
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                    op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--partition-by" not in args, "--partition-by should be absent when not set"
+        assert "--partition-value" not in args, "--partition-value should be absent when not set"
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +250,8 @@ class TestAilakeSearchOperator:
                 returned = op.execute(context={})
 
         mock_search.assert_called_once_with(
-            "default.docs", query=[0.1, 0.2, 0.3], top_k=5, pruning_threshold=0.8
+            "default.docs", query=[0.1, 0.2, 0.3], top_k=5, pruning_threshold=0.8,
+            partition_filter=None,
         )
         assert returned == results
 
@@ -227,13 +271,30 @@ class TestAilakeSearchOperator:
             with patch.object(hook, "search", return_value=[]) as mock_search:
                 op.execute(context=context)
         mock_search.assert_called_once_with(
-            "default.docs", query=query, top_k=3, pruning_threshold=0.8
+            "default.docs", query=query, top_k=3, pruning_threshold=0.8,
+            partition_filter=None,
         )
 
     def test_execute_raises_without_query(self):
         op = AilakeSearchOperator(task_id="search", table="default.docs")
         with pytest.raises(ValueError, match="query_vector or query_xcom_task_id"):
             op.execute(context={"ti": MagicMock()})
+
+    def test_search_operator_partition_filter_passed_to_hook(self):
+        op = AilakeSearchOperator(
+            task_id="search",
+            table="default.docs",
+            query_vector=[0.1, 0.2],
+            partition_filter="agent-A",
+        )
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "search", return_value=[]) as mock_search:
+                op.execute(context={})
+        mock_search.assert_called_once_with(
+            "default.docs", query=[0.1, 0.2], top_k=10, pruning_threshold=0.8,
+            partition_filter="agent-A",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -304,3 +365,240 @@ class TestAilakeSnapshotSensor:
                 result = sensor.poke(context)
         assert result is True
         assert store["snapshot_id"] == 99
+
+
+# ---------------------------------------------------------------------------
+# AilakeHook — delete_where / evolve_schema
+# ---------------------------------------------------------------------------
+
+
+class TestAilakeHookDeleteEvolve:
+    def test_delete_where_calls_cli(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+            hook.delete_where("default.docs", "doc_id", ["a", "b", "c"])
+        args = mock_cli.call_args[0]
+        assert "delete-where" in args
+        assert "default.docs" in args
+        assert "--col" in args
+        assert "doc_id" in args
+        assert "--vals" in args
+        assert "a,b,c" in args
+
+    def test_delete_where_noop_on_empty_values(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+            hook.delete_where("default.docs", "doc_id", [])
+        mock_cli.assert_not_called()
+
+    def test_evolve_schema_add_column(self):
+        hook = _make_hook()
+        stdout = "Evolved schema. new_schema_id: 5\n"
+        with patch.object(hook, "run_cli", return_value=_completed(stdout=stdout)) as mock_cli:
+            schema_id = hook.evolve_schema(
+                "default.docs",
+                add_columns=[{"name": "score", "type": "float", "initial_default": "0.0"}],
+            )
+        args = mock_cli.call_args[0]
+        assert "evolve" in args
+        assert "--add" in args
+        assert "score:float" in args
+        assert "--initial-default" in args
+        assert "0.0" in args
+        assert schema_id == 5
+
+    def test_evolve_schema_rename_column(self):
+        hook = _make_hook()
+        stdout = "new_schema_id: 7\n"
+        with patch.object(hook, "run_cli", return_value=_completed(stdout=stdout)) as mock_cli:
+            schema_id = hook.evolve_schema(
+                "default.docs",
+                rename_columns=[{"from": "old_col", "to": "new_col"}],
+            )
+        args = mock_cli.call_args[0]
+        assert "--rename" in args
+        assert "old_col:new_col" in args
+        assert schema_id == 7
+
+    def test_evolve_schema_noop_returns_zero(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+            result = hook.evolve_schema("default.docs")
+        mock_cli.assert_not_called()
+        assert result == 0
+
+    def test_evolve_schema_returns_minus_one_on_no_id_in_output(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed(stdout="done\n")):
+            result = hook.evolve_schema(
+                "default.docs",
+                add_columns=[{"name": "x", "type": "string"}],
+            )
+        assert result == -1
+
+
+# ---------------------------------------------------------------------------
+# AilakeWriteOperator — partition_fields / format_version (Phase Q)
+# ---------------------------------------------------------------------------
+
+
+class TestAilakeWriteOperatorPhaseQ:
+    def _op(self, **kwargs):
+        return AilakeWriteOperator(
+            task_id="write",
+            table="default.docs",
+            source_file="/tmp/data.parquet",
+            **kwargs,
+        )
+
+    def test_partition_fields_passed_as_json_to_cli(self):
+        fields = [{"column": "agent_id", "transform": "identity", "column_type": "string"}]
+        op = self._op(partition_fields=fields)
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                    op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--partition-fields" in args, f"--partition-fields missing: {args}"
+        import json as _json
+        pf_idx = list(args).index("--partition-fields") + 1
+        parsed = _json.loads(args[pf_idx])
+        assert parsed == fields
+
+    def test_format_version_3_passed_to_cli(self):
+        op = self._op(format_version=3)
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                    op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--format-version" in args
+        assert "3" in args
+
+    def test_format_version_2_not_passed_to_cli(self):
+        op = self._op(format_version=2)
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                    op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--format-version" not in args, "--format-version should be absent for default v2"
+
+    def test_partition_fields_absent_when_none(self):
+        op = self._op()
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                    op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--partition-fields" not in args
+
+
+# ---------------------------------------------------------------------------
+# AilakeDeleteWhereOperator
+# ---------------------------------------------------------------------------
+
+
+class TestAilakeDeleteWhereOperator:
+    def _op(self, **kwargs):
+        return AilakeDeleteWhereOperator(
+            task_id="delete",
+            table="default.docs",
+            column="doc_id",
+            **kwargs,
+        )
+
+    def test_execute_calls_delete_where_on_hook(self):
+        op = self._op(values=["id-1", "id-2"])
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "delete_where") as mock_dw:
+                op.execute(context={})
+        mock_dw.assert_called_once_with("default.docs", "doc_id", ["id-1", "id-2"])
+
+    def test_execute_reads_values_from_xcom(self):
+        op = self._op(values_xcom_task_id="upstream", values_xcom_key="ids")
+        ti = MagicMock()
+        ti.xcom_pull.return_value = ["x", "y"]
+        context = {"ti": ti}
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "delete_where") as mock_dw:
+                op.execute(context=context)
+        mock_dw.assert_called_once_with("default.docs", "doc_id", ["x", "y"])
+
+    def test_execute_raises_when_xcom_returns_none(self):
+        op = self._op(values_xcom_task_id="upstream")
+        ti = MagicMock()
+        ti.xcom_pull.return_value = None
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with pytest.raises(ValueError, match="XCom pull"):
+                op.execute(context={"ti": ti})
+
+    def test_execute_raises_without_values_or_xcom(self):
+        op = self._op()
+        with pytest.raises(ValueError, match="values or values_xcom_task_id"):
+            op.execute(context={"ti": MagicMock()})
+
+    def test_execute_noop_on_empty_values_list(self):
+        op = self._op(values=[])
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "delete_where") as mock_dw:
+                op.execute(context={})
+        mock_dw.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# AilakeEvolveSchemaOperator
+# ---------------------------------------------------------------------------
+
+
+class TestAilakeEvolveSchemaOperator:
+    def _op(self, **kwargs):
+        return AilakeEvolveSchemaOperator(
+            task_id="evolve",
+            table="default.docs",
+            **kwargs,
+        )
+
+    def test_execute_calls_evolve_schema_on_hook(self):
+        add_cols = [{"name": "score", "type": "float", "initial_default": "0.0"}]
+        rename_cols = [{"from": "old", "to": "new"}]
+        op = self._op(add_columns=add_cols, rename_columns=rename_cols)
+        hook = _make_hook()
+        ti = MagicMock()
+        context = {"ti": ti}
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "evolve_schema", return_value=5) as mock_es:
+                result = op.execute(context=context)
+        mock_es.assert_called_once_with(
+            "default.docs",
+            add_columns=add_cols,
+            rename_columns=rename_cols,
+        )
+        assert result == 5
+        ti.xcom_push.assert_called_once_with(key="schema_id", value=5)
+
+    def test_execute_noop_on_empty_lists(self):
+        op = self._op()
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "evolve_schema") as mock_es:
+                result = op.execute(context={"ti": MagicMock()})
+        mock_es.assert_not_called()
+        assert result == 0
+
+    def test_schema_id_pushed_to_xcom(self):
+        op = self._op(add_columns=[{"name": "x", "type": "string"}])
+        hook = _make_hook()
+        ti = MagicMock()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "evolve_schema", return_value=9):
+                op.execute(context={"ti": ti})
+        ti.xcom_push.assert_called_once_with(key="schema_id", value=9)

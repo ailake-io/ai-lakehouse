@@ -42,4 +42,12 @@ tasks.shadowJar {
 
 tasks.test {
     useJUnit()
+    // Spark 3.x accesses JDK internals sealed in JDK 17+
+    jvmArgs(
+        "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+        "--add-opens=java.base/java.nio=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+        "--add-opens=java.base/java.util=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+    )
 }

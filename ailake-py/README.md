@@ -134,6 +134,10 @@ Opens or creates an AI-Lake table at `path`.
 | `embedding_model` | `None` | Embedding model name stored in Iceberg properties (`ailake.embedding-model`). Used for mismatch detection and migration tracking. |
 | `embedding_model_version` | `None` | Optional model version. Stored as `"<name>@<version>"` in Iceberg properties. |
 | `embed_fn` | `None` | Auto-embed callable `list[str] → list[list[float]]`. When set, `insert(texts)` and `write_batch(texts)` can be called without passing `embeddings` — the callable is invoked automatically. |
+| `partition_by` | `None` | Single-column Iceberg identity partition (e.g. `"agent_id"`). Stored in `metadata.json`. Prefer `partition_fields` for new tables. |
+| `partition_value` | `None` | Per-write value for `partition_by`. Tagged in `key_metadata`; used for manifest-level pruning at search time. |
+| `partition_fields` | `None` | Multi-column Iceberg partition spec. List of `(column, transform, column_type)` tuples. Supports all Iceberg transforms: `"identity"`, `"year"`, `"month"`, `"day"`, `"hour"`, `"bucket[N]"`, `"truncate[N]"`. Takes precedence over `partition_by`. Example: `[("topic_id","identity","int"),("date","month","date")]`. |
+| `format_version` | `2` | Iceberg format version. Set to `3` to write an Iceberg v3 table. |
 
 ### `Table`
 
@@ -187,9 +191,9 @@ df = table.search(query, top_k=10, fetch_data=True).to_pandas()
 
 `fetch_data=True` reads each matching Parquet file once and uses `arrow_select::take` to extract only the matched rows — no full table scan.
 
-### `search(path, query, top_k=10, fetch_data=False) → SearchQuery`
+### `search(path, query, top_k=10, fetch_data=False, partition_filter=None) → SearchQuery`
 
-Module-level search returning the same chainable `SearchQuery`.
+Module-level search returning the same chainable `SearchQuery`. Pass `partition_filter` to restrict results to files written with a specific `partition_value` — pruning happens at the manifest level before any HNSW I/O.
 
 ### `VectorColSpec(column, dim, metric="cosine", modality=None)`
 
@@ -242,6 +246,45 @@ results = ailake.search_multimodal(
 Each column is searched by its own HNSW. Per-column dimensions are auto-detected
 from `ailake.dim-<col>` Iceberg properties written at `commit()` time — no `dim`
 argument needed when reading tables written with `write_batch_multi`.
+
+### `Agent(table_path, embed_fn, agent_id=None)` — Phase 9 episodic memory
+
+High-level helper for agent frameworks (LangChain, CrewAI, AutoGen). Wraps `TableWriter` + `search` + `ContextAssembler` with hybrid scoring (distance × recency × importance) and automatic per-agent partition isolation.
+
+```python
+import ailake
+
+agent = ailake.Agent(
+    table_path="s3://my-lake/agents/",
+    embed_fn=my_embed_fn,         # list[str] → list[list[float]]
+    agent_id="agent-uuid-here",   # isolates reads/writes to this agent's shard
+)
+
+# Store a memory with optional importance score
+agent.remember("Deployment failed due to OOM on Tuesday", importance=0.9)
+
+# Recall relevant memories — hybrid score = distance × recency × importance
+results = agent.recall("deployment issues", top_k=5)
+
+# Log a tool call for later retrieval
+agent.log_tool_call(
+    name="web_search",
+    input={"q": "python asyncio timeout"},
+    output={"hits": 5},
+    outcome="success",
+    latency_ms=120,
+)
+
+# Assemble context for LLM prompt (dedup + token budget)
+context_xml = agent.assemble_context("why did deployment fail?", max_tokens=4096)
+```
+
+| Method | Description |
+|---|---|
+| `remember(text, importance=1.0)` | Embeds `text` and stores it as an `EpisodicMemorySchema` row tagged with `agent_id`. |
+| `recall(query, top_k=5)` | Embeds `query`, searches with `partition_filter=self.agent_id`, applies hybrid score. |
+| `log_tool_call(name, input, output, outcome="success", latency_ms=0)` | Stores a `ToolCallSchema` row — searchable by tool name and context. |
+| `assemble_context(query, max_tokens=4096)` | `recall()` + `ContextAssembler` — returns prompt-ready XML. |
 
 ### `migrate_embeddings(path, old_column, new_column, embed_fn, *, ...)`
 
@@ -313,7 +356,46 @@ writer.write_batch_auto_deferred(texts, embeddings)
 writer.commit()
 ```
 
-`TableWriter` parameters: same as `open_table()` (includes `pq_only`, `ivf_residual`, `pre_normalize`, `hnsw_m`, `hnsw_ef_construction`, `embedding_model`, `embedding_model_version`, `embed_fn`).
+`TableWriter` parameters: same as `open_table()` (includes `pq_only`, `ivf_residual`, `pre_normalize`, `hnsw_m`, `hnsw_ef_construction`, `embedding_model`, `embedding_model_version`, `embed_fn`, `partition_by`, `partition_value`, `partition_fields`, `format_version`).
+
+### `delete_where(path, column, values) → None`
+
+Commits an Iceberg equality delete. No data files are rewritten.
+
+```python
+ailake.delete_where("./my_table", "id", ["doc-obsolete-1", "doc-obsolete-2"])
+```
+
+### `add_column(path, name, col_type, *, required=False, initial_default=None) → int`
+
+Adds column to live table schema. Returns new `schema_id`. No data files rewritten.
+
+```python
+ailake.add_column("./my_table", "source_url", "string", required=False, initial_default="")
+```
+
+### `rename_column(path, old_name, new_name) → int`
+
+Renames column. Returns new `schema_id`.
+
+### `hardware_info() → dict[str, str]`
+
+Returns hardware profile of current machine.
+
+```python
+info = ailake.hardware_info()
+# {
+#   "backend":           "cpu-simd",   # or "nvidia-cuda" / "amd-rocm"
+#   "has_cuda":          "false",
+#   "has_rocm":          "false",
+#   "cpu_logical_cores": "16",
+#   "has_avx2":          "true",
+#   "has_avx512":        "false",
+#   "recommend_ivf_pq":  "true",       # true when has GPU OR (cores > 8 AND n >= 5000)
+# }
+```
+
+Call before `write_batch_auto_deferred` to understand what index type will be selected.
 
 ### `assemble_context(chunks, max_tokens=4096, dedup_threshold=0.05) → str`
 

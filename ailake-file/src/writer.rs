@@ -10,8 +10,8 @@ use arrow_array::RecordBatch;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::footer::{
-    AilakeHeader, AilakeTrailer, DistanceMetric, Precision, AILAKE_FORMAT_VERSION,
-    FLAG_INDEX_IVF_PQ, HEADER_SIZE, TRAILER_SIZE,
+    parquet_footer_start, AilakeHeader, AilakeTrailer, DistanceMetric, Precision,
+    AILAKE_FORMAT_VERSION, FLAG_INDEX_IVF_PQ, HEADER_SIZE, TRAILER_SIZE,
 };
 
 /// Which index algorithm to embed in the AILK section.
@@ -85,6 +85,63 @@ impl AilakeFileWriter {
         self
     }
 
+    /// Write `batch` + `embeddings` using a **pre-built** `HnswIndex`.
+    ///
+    /// Skips the O(N log N) HNSW construction — the caller is responsible for
+    /// building and populating the index. The index must contain exactly
+    /// `embeddings.len()` nodes with RowIds `0..N` matching `embeddings[0..N]`
+    /// in order.
+    ///
+    /// Used by incremental compaction to reuse the dominant file's existing
+    /// index and only insert vectors from smaller files.
+    pub fn write_with_prebuilt_hnsw(
+        &self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+        hnsw: &ailake_index::HnswIndex,
+    ) -> AilakeResult<Bytes> {
+        use ailake_core::AilakeError;
+
+        let parquet_writer = ParquetVectorWriter::new(self.policy.clone());
+
+        // Pass 1: write Parquet without KV to measure the row-group section size.
+        let (parquet_v1, record_count) = parquet_writer.write_batch(batch, embeddings)?;
+        let footer_start = parquet_footer_start(&parquet_v1)?;
+
+        let index_bytes = HnswSerializer::to_bytes(hnsw)?;
+        let ailk_section = build_ailk_section_from_index_bytes(
+            &self.policy,
+            embeddings,
+            record_count,
+            footer_start as u64,
+            &index_bytes,
+            0u16, // flags=0: HNSW (not IVF-PQ)
+        )?;
+
+        let kv_val = footer_start.to_string();
+        let kv_refs: &[(&str, &str)] = &[("ailake.footer_offset", kv_val.as_str())];
+
+        // Pass 2: write Parquet with AILK offset KV embedded.
+        let (parquet_v2, _) = parquet_writer.write_batch_with_kv(batch, embeddings, kv_refs)?;
+        let footer_start_v2 = parquet_footer_start(&parquet_v2).map_err(|e| {
+            AilakeError::Parquet(format!(
+                "footer_start unstable in write_with_prebuilt_hnsw: {e}"
+            ))
+        })?;
+        debug_assert_eq!(
+            footer_start, footer_start_v2,
+            "footer_start must be stable across KV injection"
+        );
+
+        let footer_len_v2 = parquet_v2.len() - footer_start_v2;
+        let mut out = BytesMut::with_capacity(footer_start + ailk_section.len() + footer_len_v2);
+        out.put_slice(&parquet_v1[..footer_start]);
+        drop(parquet_v1);
+        out.put(ailk_section);
+        out.put_slice(&parquet_v2[footer_start_v2..]);
+        Ok(out.freeze())
+    }
+
     /// Write RecordBatch + embeddings as plain Parquet, with no AILK section.
     ///
     /// Used by `TableWriter::write_batch_deferred()` to persist data immediately
@@ -116,6 +173,85 @@ impl AilakeFileWriter {
             embeddings,
         };
         self.write_multi(batch, &[col])
+    }
+
+    /// Single-pass streaming write — no `ailake.footer_offset` KV injection.
+    ///
+    /// Produces a valid AI-Lake file in a **single Parquet write pass** without any
+    /// seek or footer rewrite. Safe for append-only destinations (HDFS strict mode,
+    /// piped stdout, write-once distributed filesystems).
+    ///
+    /// Readers bootstrap the AILK section from the `AilakeTrailer` (the 24 bytes
+    /// immediately preceding the Parquet footer) instead of from the Parquet KV
+    /// metadata. Both bootstrap paths are supported by `AilakeFileReader`.
+    ///
+    /// Trade-off vs `write()`:
+    /// - One Parquet write instead of two — saves CPU + memory for large batches.
+    /// - On S3, the AILK offset is derived from bytes already fetched in the
+    ///   footer range-GET (trailer is the 24 bytes before the footer). No extra GET.
+    pub fn write_single_pass(
+        &self,
+        batch: &RecordBatch,
+        embeddings: &[Vec<f32>],
+    ) -> AilakeResult<Bytes> {
+        let col = VectorColumnBatch {
+            policy: &self.policy,
+            embeddings,
+        };
+        self.write_multi_single_pass(batch, &[col])
+    }
+
+    /// Multi-column variant of `write_single_pass`.
+    pub fn write_multi_single_pass(
+        &self,
+        batch: &RecordBatch,
+        columns: &[VectorColumnBatch<'_>],
+    ) -> AilakeResult<Bytes> {
+        use ailake_core::AilakeError;
+
+        if columns.is_empty() {
+            return Err(AilakeError::InvalidArgument(
+                "write_multi_single_pass requires at least one vector column".into(),
+            ));
+        }
+
+        let primary = &columns[0];
+        let parquet_writer = ParquetVectorWriter::new(primary.policy.clone());
+
+        // Single Parquet write — no KV injection for ailake.footer_offset.
+        // Extra KV still present (dim, metric, record_count, etc.) for Iceberg compat.
+        let (parquet_bytes, record_count) =
+            parquet_writer.write_batch(batch, primary.embeddings)?;
+        let footer_start = parquet_footer_start(&parquet_bytes)?;
+
+        // Build all AILK sections. Offsets are relative to the final assembled file,
+        // where AILK sections start at `footer_start` (right after row groups).
+        let mut ailk_sections: Vec<Bytes> = Vec::with_capacity(columns.len());
+        let mut current_offset = footer_start as u64;
+        for col in columns.iter() {
+            let section = build_ailk_section(
+                col.policy,
+                col.embeddings,
+                record_count,
+                current_offset,
+                &self.index_type,
+                self.shared_codebook.as_deref(),
+            )?;
+            current_offset += section.len() as u64;
+            ailk_sections.push(section);
+        }
+
+        // Assemble: [row groups] + [AILK sections] + [original Parquet footer].
+        // No footer rewrite needed — reader uses AilakeTrailer for bootstrap.
+        let total_ailk: usize = ailk_sections.iter().map(|s| s.len()).sum();
+        let mut out = BytesMut::with_capacity(parquet_bytes.len() + total_ailk);
+        out.put_slice(&parquet_bytes[..footer_start]);
+        for section in ailk_sections {
+            out.put(section);
+        }
+        out.put_slice(&parquet_bytes[footer_start..]);
+
+        Ok(out.freeze())
     }
 
     /// Write RecordBatch + multiple vector columns into a single AI-Lake file.
@@ -171,6 +307,10 @@ impl AilakeFileWriter {
         }
 
         // Pass 2 — write Parquet with all AILK offset KVs embedded.
+        // Only the Parquet footer changes between pass 1 and pass 2 (KV metadata
+        // is stored in the footer thrift, not in row groups). Row group offsets and
+        // payloads are byte-for-byte identical, so footer_start is stable across
+        // both passes. We reuse pass-1's row groups and take only the footer from pass 2.
         let kv_refs: Vec<(&str, &str)> = kv_owned
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -178,12 +318,19 @@ impl AilakeFileWriter {
         let (parquet_v2, _) =
             parquet_writer.write_batch_with_kv(batch, primary.embeddings, &kv_refs)?;
         let footer_start_v2 = parquet_footer_start(&parquet_v2)?;
+        debug_assert_eq!(
+            footer_start, footer_start_v2,
+            "footer_start must be stable across KV injection (row groups unchanged)"
+        );
 
-        // Splice: [PAR1 + row groups] + [all AILK sections] + [Parquet footer + PAR1]
+        // Splice: [PAR1 + row groups from v1] + [AILK sections] + [Parquet footer+PAR1 from v2]
+        // Using v1's row groups here lets us release v2's large row group allocation sooner.
         let total_ailk: usize = ailk_sections.iter().map(|s| s.len()).sum();
-        let total = footer_start_v2 + total_ailk + (parquet_v2.len() - footer_start_v2);
+        let footer_len_v2 = parquet_v2.len() - footer_start_v2;
+        let total = footer_start + total_ailk + footer_len_v2;
         let mut out = BytesMut::with_capacity(total);
-        out.put_slice(&parquet_v2[..footer_start_v2]);
+        out.put_slice(&parquet_v1[..footer_start]);
+        drop(parquet_v1); // row groups copied; free the v1 allocation
         for section in ailk_sections {
             out.put(section);
         }
@@ -191,6 +338,67 @@ impl AilakeFileWriter {
 
         Ok(out.freeze())
     }
+}
+
+/// Build a complete AILK section using **pre-serialized** index bytes.
+/// Same layout as `build_ailk_section` but skips the index build step.
+fn build_ailk_section_from_index_bytes(
+    policy: &VectorStoragePolicy,
+    embeddings: &[Vec<f32>],
+    record_count: u64,
+    ailk_abs_offset: u64,
+    index_bytes: &[u8],
+    flags: u16,
+) -> AilakeResult<Bytes> {
+    let norm_storage: Vec<Vec<f32>>;
+    let (emb_for_centroid, centroid_metric) =
+        if policy.pre_normalize && policy.metric == ailake_core::VectorMetric::Cosine {
+            norm_storage = embeddings
+                .iter()
+                .map(|v| ailake_vec::normalize_l2(v))
+                .collect();
+            (
+                norm_storage.as_slice(),
+                ailake_core::VectorMetric::NormalizedCosine,
+            )
+        } else {
+            (embeddings, policy.metric)
+        };
+
+    let centroid = compute_centroid_and_radius(emb_for_centroid, centroid_metric);
+    let centroid_bytes = encode_centroid(&centroid);
+
+    let centroid_offset = HEADER_SIZE as u64;
+    let centroid_len = centroid_bytes.len() as u64;
+    let index_offset_in_ailk = centroid_offset + centroid_len;
+    let index_len = index_bytes.len() as u64;
+    let ailk_total_len = HEADER_SIZE as u64 + centroid_len + index_len + TRAILER_SIZE as u64;
+
+    let header = AilakeHeader {
+        format_version: AILAKE_FORMAT_VERSION,
+        flags,
+        dim: policy.dim,
+        precision: Precision::from(policy.precision),
+        distance_metric: DistanceMetric::from(policy.metric),
+        record_count,
+        centroid_offset,
+        centroid_len,
+        hnsw_offset: index_offset_in_ailk,
+        hnsw_len: index_len,
+    };
+    let trailer = AilakeTrailer {
+        footer_offset: ailk_abs_offset,
+        footer_len: ailk_total_len,
+        format_version: AILAKE_FORMAT_VERSION,
+        flags,
+    };
+
+    let mut buf = BytesMut::with_capacity(ailk_total_len as usize);
+    buf.put_slice(&header.to_bytes());
+    buf.put_slice(&centroid_bytes);
+    buf.put_slice(index_bytes);
+    buf.put_slice(&trailer.to_bytes());
+    Ok(buf.freeze())
 }
 
 /// Build a complete AILK section (header + centroid + index + trailer) for one vector column.
@@ -307,24 +515,6 @@ fn build_ailk_section(
     Ok(buf.freeze())
 }
 
-/// Returns the byte offset in `buf` where the Parquet footer thrift starts.
-/// Layout of buf tail: [...footer_thrift...][footer_len u32 LE][PAR1 4 bytes]
-fn parquet_footer_start(buf: &[u8]) -> AilakeResult<usize> {
-    use ailake_core::AilakeError;
-    let len = buf.len();
-    if len < 8 {
-        return Err(AilakeError::Parquet("file too small".into()));
-    }
-    if &buf[len - 4..] != b"PAR1" {
-        return Err(AilakeError::Parquet("missing PAR1 footer magic".into()));
-    }
-    let footer_thrift_len = u32::from_le_bytes(buf[len - 8..len - 4].try_into().unwrap()) as usize;
-    let start = len
-        .checked_sub(8 + footer_thrift_len)
-        .ok_or_else(|| AilakeError::Parquet("footer length overflow".into()))?;
-    Ok(start)
-}
-
 fn encode_centroid(c: &Centroid) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(c.values.len() * 4 + 4);
     for &v in &c.values {
@@ -356,7 +546,92 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
         }
+    }
+
+    #[test]
+    fn write_single_pass_valid_parquet_and_ailk() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3]))]).unwrap();
+        let embs: Vec<Vec<f32>> = (0..3).map(|_| vec![0.1, 0.2, 0.3, 0.4]).collect();
+
+        let writer = AilakeFileWriter::new(make_policy(4));
+        let file = writer.write_single_pass(&batch, &embs).unwrap();
+
+        // Must be valid Parquet envelope
+        assert_eq!(&file[..4], b"PAR1");
+        assert_eq!(&file[file.len() - 4..], b"PAR1");
+        // AILK magic present
+        assert!(file.windows(4).any(|w| w == b"AILK"));
+    }
+
+    #[test]
+    fn write_single_pass_reader_bootstrap_from_trailer() {
+        use crate::reader::AilakeFileReader;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![10, 20, 30]))])
+                .unwrap();
+        let embs: Vec<Vec<f32>> = (0..3).map(|i| vec![i as f32, 0.0, 0.0, 0.0]).collect();
+
+        let writer = AilakeFileWriter::new(make_policy(4));
+        let file_bytes = writer.write_single_pass(&batch, &embs).unwrap();
+
+        // Single-pass files have NO ailake.footer_offset in Parquet KV.
+        // AilakeFileReader must bootstrap from AilakeTrailer instead.
+        let reader = AilakeFileReader::new(file_bytes, "embedding", 4);
+        assert!(
+            reader.is_ailake_file(),
+            "single-pass file must be recognised as AI-Lake file via trailer bootstrap"
+        );
+        let header = reader.read_header().expect("must read AILK header");
+        assert_eq!(header.dim, 4);
+        assert_eq!(header.record_count, 3);
+    }
+
+    #[test]
+    fn write_and_write_single_pass_same_index() {
+        // Both write paths must produce an index that returns the same nearest neighbour
+        // for a fixed query — verifying that single-pass doesn't corrupt the HNSW.
+        use crate::reader::AilakeFileReader;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5]))],
+        )
+        .unwrap();
+        let embs: Vec<Vec<f32>> = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 0.0, 1.0],
+            vec![0.5, 0.5, 0.0, 0.0],
+        ];
+        let policy = make_policy(4);
+        let writer = AilakeFileWriter::new(policy);
+
+        let bytes_two_pass = writer.write(&batch, &embs).unwrap();
+        let bytes_single_pass = writer.write_single_pass(&batch, &embs).unwrap();
+
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+
+        let reader_tp = AilakeFileReader::new(bytes_two_pass, "embedding", 4);
+        let reader_sp = AilakeFileReader::new(bytes_single_pass, "embedding", 4);
+
+        let idx_tp = reader_tp.load_index().unwrap();
+        let idx_sp = reader_sp.load_index().unwrap();
+
+        let res_tp = idx_tp.search(&query, 1, 50);
+        let res_sp = idx_sp.search(&query, 1, 50);
+
+        assert_eq!(res_tp[0].0, res_sp[0].0, "nearest neighbour must match");
     }
 
     #[test]
@@ -399,6 +674,10 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
         };
 
         let writer = AilakeFileWriter::new(policy1.clone());

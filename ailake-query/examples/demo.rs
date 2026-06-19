@@ -139,6 +139,10 @@ async fn main() {
         ivf_residual: false,
         embedding_model: None,
         modality: None,
+        partition_by: None,
+        partition_value: None,
+        partition_column_type: None,
+        partition_fields: vec![],
     };
 
     // ---- write ----
@@ -149,6 +153,7 @@ async fn main() {
         Arc::clone(&store),
         policy.clone(),
         table.clone(),
+        2,
     )
     .await
     .unwrap();
@@ -181,6 +186,9 @@ async fn main() {
             ef_search: 50,
             pruning_threshold: f32::INFINITY,
             rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
+            hybrid: None,
         },
         "embedding",
         dim,

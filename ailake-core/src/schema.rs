@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+use crate::error::{AilakeError, AilakeResult};
 use crate::types::{EmbeddingModelInfo, VectorMetric, VectorModality, VectorPrecision};
 use serde::{Deserialize, Serialize};
 
@@ -18,10 +19,23 @@ pub mod llm_columns {
     pub const CHUNK_SUMMARY: &str = "chunk_summary";
     pub const SOURCE_URI: &str = "source_uri";
     pub const PAGE_NUMBER: &str = "page_number";
+    /// Arrow type: `Timestamp(Nanosecond, Some("UTC"))` — use `ailake_core::now_ns()` to populate.
     pub const CREATED_AT: &str = "created_at";
     pub const DOCUMENT_DATE: &str = "document_date";
     pub const EMBEDDING: &str = "embedding";
     pub const CONTEXT_EMBEDDING: &str = "context_embedding";
+}
+
+/// Current UTC time as Unix epoch nanoseconds.
+///
+/// Use for `created_at` and `last_accessed_at` columns in `LlmContextSchema`
+/// and `EpisodicMemorySchema` tables. Arrow type for these columns must be
+/// `Timestamp(Nanosecond, Some("UTC"))` — Iceberg maps this to `timestamptz`.
+pub fn now_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
 }
 
 /// Vector storage configuration applied at table creation time.
@@ -66,6 +80,99 @@ pub struct VectorStoragePolicy {
     /// Allows readers to select the correct HNSW by modality without reading data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modality: Option<VectorModality>,
+    /// Column to partition by (e.g. "agent_id"). Stored in Iceberg metadata as an identity
+    /// partition spec, enabling file-level pruning for per-agent search without post-scan filtering.
+    /// Set this at table creation time; all files written to this table carry the partition column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_by: Option<String>,
+    /// Runtime partition value for this writer instance (not stored in table metadata).
+    /// When set, each file written by this TableWriter is tagged with this value, enabling
+    /// the search path to prune files from other partitions (e.g., other agents).
+    /// Typical usage: set to `agent_id` in Agent.__init__.
+    #[serde(skip)]
+    pub partition_value: Option<String>,
+    /// Iceberg type of the partition column ("string", "uuid", "int", "long").
+    /// Used when writing the Iceberg schema and partition spec at table creation.
+    /// Defaults to "string" when `None`.  Only relevant when `partition_by` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_column_type: Option<String>,
+    /// Multi-column / non-identity partition spec (Phase K).
+    ///
+    /// When non-empty, takes precedence over `partition_by` + `partition_column_type`
+    /// for table creation.  Supports `identity` and `truncate[W]` transforms.
+    /// Values at write time are provided via `partition_value` encoded as
+    /// `\x1f`-separated compound string ("val1\x1fval2") matching field order.
+    ///
+    /// Example (two-column identity):
+    /// ```ignore
+    /// partition_fields: vec![
+    ///     PartitionDef::identity("agent_id", "string"),
+    ///     PartitionDef::identity("session_id", "string"),
+    /// ]
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partition_fields: Vec<PartitionDef>,
+}
+
+/// One field in a multi-column partition spec (Phase K).
+///
+/// Supported transforms: `"identity"` and `"truncate[W]"` (string prefix / int rounding).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PartitionDef {
+    /// Source column name in the table schema.
+    pub column: String,
+    /// Iceberg transform string: `"identity"` or `"truncate[W]"`.
+    pub transform: String,
+    /// Iceberg type of the source column: `"string"`, `"int"`, `"long"`, `"uuid"`.
+    pub column_type: String,
+}
+
+impl PartitionDef {
+    pub fn identity(column: impl Into<String>, column_type: impl Into<String>) -> Self {
+        Self {
+            column: column.into(),
+            transform: "identity".into(),
+            column_type: column_type.into(),
+        }
+    }
+
+    pub fn truncate(
+        column: impl Into<String>,
+        width: usize,
+        column_type: impl Into<String>,
+    ) -> Self {
+        Self {
+            column: column.into(),
+            transform: format!("truncate[{width}]"),
+            column_type: column_type.into(),
+        }
+    }
+
+    /// Apply this transform to a raw column value.
+    /// - `identity` → returns value unchanged.
+    /// - `truncate[W]` → returns first W characters (strings) or value rounded down to
+    ///   the nearest multiple of W (integers, parsed and re-formatted as string).
+    pub fn apply(&self, raw: &str) -> String {
+        if let Some(w) = self.truncate_width() {
+            if matches!(self.column_type.as_str(), "int" | "long" | "integer") {
+                // Integer truncation: round down to multiple of W
+                if let Ok(n) = raw.parse::<i64>() {
+                    return (n - n.rem_euclid(w as i64)).to_string();
+                }
+            }
+            // String truncation: first W chars
+            raw.chars().take(w).collect()
+        } else {
+            raw.to_string()
+        }
+    }
+
+    fn truncate_width(&self) -> Option<usize> {
+        self.transform
+            .strip_prefix("truncate[")
+            .and_then(|s| s.strip_suffix(']'))
+            .and_then(|s| s.parse().ok())
+    }
 }
 
 impl VectorStoragePolicy {
@@ -83,6 +190,10 @@ impl VectorStoragePolicy {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
         }
     }
 }
@@ -152,3 +263,96 @@ pub mod multimodal_columns {
 /// thumbnail_b64:     Utf8
 /// ```
 pub struct MultimodalContextSchema;
+
+// ── Phase 9 — Agent / Episodic Memory ────────────────────────────────────────
+
+/// Outcome of a tool call recorded in a `ToolCallSchema` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallOutcome {
+    Success,
+    Failure,
+    Timeout,
+}
+
+impl ToolCallOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+impl std::fmt::Display for ToolCallOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ToolCallOutcome {
+    type Err = AilakeError;
+    fn from_str(s: &str) -> AilakeResult<Self> {
+        match s {
+            "success" => Ok(Self::Success),
+            "failure" => Ok(Self::Failure),
+            "timeout" => Ok(Self::Timeout),
+            other => Err(AilakeError::InvalidArgument(format!(
+                "unknown ToolCallOutcome '{other}' (valid: success, failure, timeout)"
+            ))),
+        }
+    }
+}
+
+/// Canonical column names for agent tool-call history tables.
+///
+/// Each row records one tool invocation: agent identity, session context,
+/// inputs/outputs as JSON, outcome, and latency. The `embedding` column
+/// (from `llm_columns::EMBEDDING`) holds a vector over the concatenated
+/// `tool_name + tool_input_json` text, enabling semantic search over past
+/// tool calls ("when did the agent call X in contexts similar to Y?").
+///
+/// Usage: include these columns alongside `llm_columns::*` in the Arrow
+/// schema of a `ToolCallSchema` table.
+pub mod tool_call_columns {
+    /// UUID of the agent instance (identifies which agent performed the call).
+    pub const AGENT_ID: &str = "agent_id";
+    /// UUID of the conversation / task session.
+    pub const SESSION_ID: &str = "session_id";
+    /// Zero-based index of this tool call within the session.
+    pub const STEP_INDEX: &str = "step_index";
+    /// Name of the tool that was invoked (e.g. "web_search", "code_exec").
+    pub const TOOL_NAME: &str = "tool_name";
+    /// JSON-serialized input arguments passed to the tool.
+    pub const TOOL_INPUT_JSON: &str = "tool_input_json";
+    /// JSON-serialized output returned by the tool (or error message on failure).
+    pub const TOOL_OUTPUT_JSON: &str = "tool_output_json";
+    /// Outcome of the call: "success" | "failure" | "timeout".
+    /// Use `ToolCallOutcome` enum for typed access.
+    pub const OUTCOME: &str = "outcome";
+    /// Wall-clock latency of the tool call in milliseconds.
+    pub const LATENCY_MS: &str = "latency_ms";
+}
+
+/// Marker struct for agent tool-call history tables (Phase 9).
+/// Actual schema is enforced by column names in `tool_call_columns` module.
+///
+/// A tool-call table extends `LlmContextSchema` with agent identity and
+/// invocation metadata, enabling semantic search over an agent's history:
+///
+/// ```text
+/// agent_id:         Utf8          -- UUID string
+/// session_id:       Utf8          -- UUID string
+/// step_index:       UInt32
+/// tool_name:        Utf8
+/// tool_input_json:  Utf8
+/// tool_output_json: Utf8
+/// outcome:          Utf8          -- "success" | "failure" | "timeout"
+/// latency_ms:       UInt32
+/// embedding:        FixedSizeBinary(N)  -- F16, over tool_name+tool_input_json
+/// ```
+///
+/// Recommended index: one HNSW over `embedding` (text, cosine).
+/// Partition by `agent_id` via `VectorStoragePolicy` for isolated per-agent search.
+pub struct ToolCallSchema;

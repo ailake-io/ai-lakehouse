@@ -492,6 +492,12 @@ impl HnswIndex {
     /// Dispatch on `self.metric` once; all inner search logic is monomorphic.
     /// For NormalizedCosine, the query is normalized here before traversal so
     /// callers do not need to pre-normalize manually.
+    ///
+    /// When `flat_vecs_f16` is populated (set by `quantize_to_f16`) and the
+    /// metric is `NormalizedCosine`, HNSW traversal uses F16 distances for
+    /// cache efficiency, then re-scores the returned candidates with exact F32
+    /// so the final ranking is correct despite F16 rounding. The re-score cost
+    /// is O(top_k × dim) — negligible vs traversal over O(ef × dim) candidates.
     pub fn search(&self, query: &[f32], top_k: usize, ef: usize) -> Vec<(RowId, f32)> {
         match self.metric {
             VectorMetric::Cosine => self.search_typed::<CosineDist>(query, top_k, ef),
@@ -499,7 +505,28 @@ impl HnswIndex {
             VectorMetric::DotProduct => self.search_typed::<DotProductDist>(query, top_k, ef),
             VectorMetric::NormalizedCosine => {
                 let q_norm = normalize_l2(query);
-                self.search_typed::<NormalizedCosineDist>(&q_norm, top_k, ef)
+                if self.flat_vecs_f16.is_some() {
+                    // F16 error (~0.001) exceeds true 1-dot distances between similar unit
+                    // vectors (~0.0002). The F16 top-k may not contain the true nearest
+                    // neighbour at all. Fix: fetch a larger candidate pool (ef-sized or at
+                    // least top_k*10), re-score every candidate with exact F32, then truncate.
+                    let pool = ef.max(top_k * 10).max(top_k);
+                    let mut candidates =
+                        self.search_typed::<NormalizedCosineDist>(&q_norm, pool, ef);
+                    let dim = self.dim as usize;
+                    for (row_id, dist) in &mut candidates {
+                        let idx = row_id.as_u64() as usize;
+                        let v = &self.flat_vecs[idx * dim..(idx + 1) * dim];
+                        *dist = NormalizedCosineDist::dist(&q_norm, v);
+                    }
+                    candidates.sort_unstable_by(|a, b| {
+                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    candidates.truncate(top_k);
+                    candidates
+                } else {
+                    self.search_typed::<NormalizedCosineDist>(&q_norm, top_k, ef)
+                }
             }
         }
     }
@@ -586,18 +613,17 @@ impl HnswIndex {
 
     /// Quantize flat_vecs → flat_vecs_f16.
     ///
-    /// After calling this, HNSW search uses F16 distances (half the memory bandwidth
-    /// per distance call vs F32). Pair with `rerank_factor` in `SearchConfig` to
-    /// recover the precision lost by F16 approximation.
-    /// F32 vectors are retained for brute-force fallback.
+    /// After calling this, HNSW traversal uses F16 distances (half the memory
+    /// bandwidth per distance call vs F32). F32 vectors are retained for
+    /// brute-force fallback and for exact re-scoring after traversal.
     ///
-    /// No-op for `NormalizedCosine`: F16 quantization error (~0.001 per unit vector)
-    /// can exceed the true `1-dot` distance between very similar pre-normalized vectors
-    /// (~0.0002 for consecutive embeddings), causing wrong nearest-neighbour results.
+    /// For `NormalizedCosine`, F16 error (~0.001) can exceed the true `1-dot`
+    /// distance between very similar unit vectors (~0.0002). The F16 cache
+    /// benefit is still applied for the graph traversal phase; `search()` then
+    /// re-scores the final `top_k` candidates with exact F32 to restore correct
+    /// ranking. Pair with `rerank_factor` in `SearchConfig` for an additional
+    /// Parquet-level exact re-score when maximum precision is required.
     pub fn quantize_to_f16(&mut self) {
-        if self.metric == VectorMetric::NormalizedCosine {
-            return;
-        }
         let f16_vecs: Vec<f16> = self.flat_vecs.iter().map(|&x| f16::from_f32(x)).collect();
         self.flat_vecs_f16 = Some(f16_vecs);
     }
@@ -610,6 +636,134 @@ impl HnswIndex {
     }
     pub fn dim(&self) -> u32 {
         self.dim
+    }
+
+    /// Insert one new node into the live HNSW graph.
+    ///
+    /// Uses the same insertion algorithm as the build pass (Algorithm 1, Malkov & Yashunin 2018):
+    /// random level sampling, greedy descent to the insertion layer, bidirectional
+    /// connections with SELECT-NEIGHBORS-HEURISTIC, and connection pruning.
+    ///
+    /// **Complexity**: O(log N) amortised per call.
+    ///
+    /// **F16 cache**: invalidated after insert. Call `quantize_to_f16()` once after
+    /// a batch of insertions to restore the fast-traversal path.
+    ///
+    /// **Row ID contract**: the caller must supply a unique `row_id`. The value
+    /// should match the row's position in the merged Parquet file so that search
+    /// results can be correlated with tabular data without an extra lookup table.
+    pub fn insert_node(&mut self, row_id: RowId, vector: Vec<f32>) {
+        self.flat_vecs_f16 = None; // stale after new vectors added
+        match self.metric {
+            VectorMetric::Cosine => self.insert_node_typed::<CosineDist>(row_id, vector),
+            VectorMetric::Euclidean => self.insert_node_typed::<EuclideanDist>(row_id, vector),
+            VectorMetric::DotProduct => self.insert_node_typed::<DotProductDist>(row_id, vector),
+            VectorMetric::NormalizedCosine => {
+                let v = normalize_l2(&vector);
+                self.insert_node_typed::<NormalizedCosineDist>(row_id, v);
+            }
+        }
+    }
+
+    fn insert_node_typed<M: DistFn>(&mut self, row_id: RowId, vector: Vec<f32>) {
+        let dim = self.dim as usize;
+        let i = self.row_ids.len(); // index of the new node (before push)
+
+        // Append to flat storage. Clone the query vector before extending so
+        // the borrow on flat_vecs is released before we need &mut self.neighbors.
+        let q: Vec<f32> = vector.clone();
+        self.flat_vecs.extend_from_slice(&vector);
+        self.row_ids.push(row_id.as_u64());
+
+        let m = self.config.m;
+        let ef_c = self.config.ef_construction;
+        let ml = 1.0_f64 / (m as f64).ln();
+        let l = random_level(&mut rand::thread_rng(), ml);
+
+        self.node_levels.push(l);
+        self.neighbors.push(vec![Vec::new(); l + 1]);
+
+        let n = i + 1; // total nodes after insertion
+
+        let ep = match self.entry_point {
+            None => {
+                // First node: becomes the entry point.
+                self.entry_point = Some(i);
+                self.max_layer = l;
+                return;
+            }
+            Some(ep) => ep,
+        };
+
+        let mut eps: Vec<usize> = vec![ep];
+        let mut tracker = VisitedTracker::default();
+
+        // Greedy descent above the insertion layer (ef=1): find the best entry
+        // point for the layer where this node will be connected.
+        for lc in (l + 1..=self.max_layer).rev() {
+            tracker.prepare(n);
+            let w = search_layer::<M>(
+                &q,
+                &eps,
+                1,
+                lc,
+                &self.flat_vecs,
+                None,
+                dim,
+                &self.neighbors,
+                &self.node_levels,
+                &mut tracker,
+            );
+            eps = vec![w[0].1];
+        }
+
+        // Connect the new node at each layer from min(l, max_layer) down to 0.
+        for lc in (0..=l.min(self.max_layer)).rev() {
+            let m_lc = if lc == 0 { 2 * m } else { m };
+            tracker.prepare(n);
+            let w = search_layer::<M>(
+                &q,
+                &eps,
+                ef_c,
+                lc,
+                &self.flat_vecs,
+                None,
+                dim,
+                &self.neighbors,
+                &self.node_levels,
+                &mut tracker,
+            );
+
+            let selected = select_neighbors_heuristic::<M>(&w, &self.flat_vecs, dim, m_lc, true);
+            self.neighbors[i][lc] = selected.clone();
+
+            // Add back-edges from each selected neighbor to the new node; prune if needed.
+            for &nb in &selected {
+                self.neighbors[nb][lc].push(i);
+                let m_max = if lc == 0 { 2 * m } else { m };
+                if self.neighbors[nb][lc].len() > m_max {
+                    // Clone nb's vector to release the immutable borrow on flat_vecs
+                    // before passing &mut self.neighbors[nb] to prune_connections.
+                    let nb_start = nb * dim;
+                    let nb_vec: Vec<f32> = self.flat_vecs[nb_start..nb_start + dim].to_vec();
+                    prune_connections::<M>(
+                        &mut self.neighbors[nb][lc],
+                        &nb_vec,
+                        &self.flat_vecs,
+                        dim,
+                        m_max,
+                    );
+                }
+            }
+
+            eps = w.iter().map(|&(_, idx)| idx).collect();
+        }
+
+        // Promote to entry point if this node spans more layers.
+        if l > self.max_layer {
+            self.entry_point = Some(i);
+            self.max_layer = l;
+        }
     }
 }
 
@@ -976,5 +1130,149 @@ mod tests {
             results.iter().map(|(id, _)| id.as_u64() as usize).collect();
         let recall = found.intersection(&gt_ids).count() as f64 / gt_ids.len() as f64;
         assert!(recall >= 0.8, "recall@10={recall:.2} < 0.8");
+    }
+
+    /// NormalizedCosine + F16 in-memory: traversal uses F16, final ranking uses exact F32.
+    /// Verifies that nearest neighbor is correct despite F16 rounding errors.
+    #[test]
+    fn normedcosine_f16_quantize_correct_nearest() {
+        // Two nearly-identical unit vectors whose 1-dot distance is ~0.0004 —
+        // smaller than F16 quantization error (~0.001). Without the F32 re-score
+        // step the nearest-neighbour would be wrong.
+        let dim = 32usize;
+        let mut v0: Vec<f32> = vec![0.0; dim];
+        let mut v1: Vec<f32> = vec![0.0; dim];
+        let mut v2: Vec<f32> = vec![0.0; dim];
+        // v0 = unit vec along axis 0
+        v0[0] = 1.0;
+        // v1 = nearly same as v0 (1-dot ≈ 1e-4)
+        v1[0] = (1.0f32 - 1e-4).sqrt();
+        v1[1] = 1e-2_f32.sqrt();
+        let norm1: f32 = v1.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for x in &mut v1 {
+            *x /= norm1;
+        }
+        // v2 = moderately different (1-dot ≈ 0.1)
+        v2[0] = 0.9f32.sqrt();
+        v2[1] = 0.1f32.sqrt();
+        let norm2: f32 = v2.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for x in &mut v2 {
+            *x /= norm2;
+        }
+
+        let mut b = HnswBuilder::new(
+            dim as u32,
+            VectorMetric::NormalizedCosine,
+            Default::default(),
+        );
+        b.insert(RowId::new(0), v0.clone());
+        b.insert(RowId::new(1), v1.clone());
+        b.insert(RowId::new(2), v2.clone());
+        let mut idx = b.build();
+
+        // Enable F16 in-memory quantization (now allowed for NormalizedCosine).
+        idx.quantize_to_f16();
+        assert!(
+            idx.flat_vecs_f16.is_some(),
+            "F16 should be populated for NormalizedCosine"
+        );
+
+        // Query is v0 itself — nearest must be row 0, then row 1.
+        let results = idx.search(&v0, 2, 50);
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].0,
+            RowId::new(0),
+            "nearest to v0 must be v0 (row 0)"
+        );
+        assert_eq!(
+            results[1].0,
+            RowId::new(1),
+            "second nearest to v0 must be v1 (row 1)"
+        );
+        // Distances must be sorted ascending.
+        assert!(results[0].1 <= results[1].1);
+    }
+
+    /// insert_node adds a new vector to an existing graph and the graph remains searchable.
+    #[test]
+    fn insert_node_extends_existing_graph() {
+        let mut b = HnswBuilder::new(4, VectorMetric::Cosine, Default::default());
+        b.insert(RowId::new(0), vec![1.0, 0.0, 0.0, 0.0]);
+        b.insert(RowId::new(1), vec![0.0, 1.0, 0.0, 0.0]);
+        b.insert(RowId::new(2), vec![0.0, 0.0, 1.0, 0.0]);
+        let mut idx = b.build();
+
+        assert_eq!(idx.node_count(), 3);
+
+        // Insert a 4th node that is closest to the 3rd (row 2).
+        idx.insert_node(RowId::new(3), vec![0.0, 0.0, 0.9, 0.1]);
+        assert_eq!(idx.node_count(), 4);
+
+        // Search for the newly inserted vector; it should be nearest to itself.
+        let results = idx.search(&[0.0, 0.0, 0.9, 0.1], 1, 50);
+        assert_eq!(
+            results[0].0,
+            RowId::new(3),
+            "nearest to inserted vector must be itself"
+        );
+
+        // The original top-1 result for [1,0,0,0] must still be row 0.
+        let results = idx.search(&[1.0, 0.0, 0.0, 0.0], 1, 50);
+        assert_eq!(results[0].0, RowId::new(0));
+    }
+
+    /// insert_node works for NormalizedCosine (vector is pre-normalised internally).
+    #[test]
+    fn insert_node_normalized_cosine() {
+        let mut b = HnswBuilder::new(4, VectorMetric::NormalizedCosine, Default::default());
+        b.insert(RowId::new(0), vec![1.0, 0.0, 0.0, 0.0]);
+        b.insert(RowId::new(1), vec![0.0, 1.0, 0.0, 0.0]);
+        let mut idx = b.build();
+
+        // Un-normalised input: insert_node should normalise internally.
+        idx.insert_node(RowId::new(2), vec![0.0, 0.0, 3.0, 0.0]);
+        assert_eq!(idx.node_count(), 3);
+
+        // After normalisation, [0,0,3,0] → [0,0,1,0], nearest to [0,0,1,0] is itself.
+        let results = idx.search(&[0.0, 0.0, 1.0, 0.0], 1, 50);
+        assert_eq!(results[0].0, RowId::new(2));
+    }
+
+    /// insert_node into a single-node graph (entry point with no neighbors yet).
+    #[test]
+    fn insert_node_into_single_node_graph() {
+        let mut b = HnswBuilder::new(4, VectorMetric::Euclidean, Default::default());
+        b.insert(RowId::new(0), vec![0.0, 0.0, 0.0, 0.0]);
+        let mut idx = b.build();
+
+        idx.insert_node(RowId::new(1), vec![1.0, 0.0, 0.0, 0.0]);
+        idx.insert_node(RowId::new(2), vec![0.0, 1.0, 0.0, 0.0]);
+
+        assert_eq!(idx.node_count(), 3);
+
+        let results = idx.search(&[1.0, 0.0, 0.0, 0.0], 1, 50);
+        assert_eq!(results[0].0, RowId::new(1));
+    }
+
+    /// quantize_to_f16 works for all metrics (including NormalizedCosine).
+    #[test]
+    fn quantize_to_f16_populates_for_all_metrics() {
+        for metric in [
+            VectorMetric::Cosine,
+            VectorMetric::Euclidean,
+            VectorMetric::DotProduct,
+            VectorMetric::NormalizedCosine,
+        ] {
+            let mut b = HnswBuilder::new(4, metric, Default::default());
+            b.insert(RowId::new(0), vec![1.0, 0.0, 0.0, 0.0]);
+            b.insert(RowId::new(1), vec![0.0, 1.0, 0.0, 0.0]);
+            let mut idx = b.build();
+            idx.quantize_to_f16();
+            assert!(
+                idx.flat_vecs_f16.is_some(),
+                "flat_vecs_f16 should be Some for metric {metric:?}"
+            );
+        }
     }
 }

@@ -93,26 +93,77 @@ NATIVE_LIB_DIR=$(pwd)/target/release
 
 The library exports C-ABI symbols consumed by JNA. All three plugins use the JSON-envelope API:
 
+> **Note**: JVM bindings use JNA + C-ABI (`#[no_mangle]` Rust exports). `uniffi` was removed from the workspace in Phase 4 — there is no generated bindings layer.
+
 ```c
+// Vector search
 // request_json: {"warehouse":"...","namespace":"default","table":"...","vec_col":"embedding",
-//                "dim":1536,"query":[...],"top_k":10}
+//                "dim":1536,"query":[...],"top_k":10,
+//                "partition_filter":"agent-42",  ← optional
+//                "hybrid_text":"rust programming", ← optional (BM25)
+//                "text_column":"chunk_text",        ← optional, default "chunk_text"
+//                "bm25_weight":0.5}                 ← optional, default 0.5
 // Returns: {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
-// Caller must free with ailake_free_string.
 char* ailake_search_json(const char* request_json);
 
+// Write batch (auto-selects IVF-PQ or HNSW based on HardwareProfile::detect())
 // request_json: {"warehouse":"...","namespace":"default","table":"...",
 //                "dim":1536,"ids":[...],"embeddings":[[...],...],
 //                "metric":"cosine","precision":"f16",
-//                "embedding_model":"text-embedding-3-small@v1"}  ← optional
+//                "embedding_model":"text-embedding-3-small@v1",  ← optional
+//                "partition_by":"agent_id",     ← optional (single-col identity partition)
+//                "partition_value":"agent-42",  ← optional
+//                "partition_fields":[{"column":"topic_id","transform":"identity","column_type":"int"}],
+//                "format_version":3}            ← optional, default 2
 // Returns: {"ok":true,"snapshot_id":N}
-// On dim mismatch: {"ok":false,"error":"query dim=512 does not match table dim=1536 (...)"}
 char* ailake_write_batch_json(const char* request_json);
+
+// Pure BM25 full-text search (no HNSW required, O(N) scan)
+// request_json: {"warehouse":"...","namespace":"default","table":"...",
+//                "query_text":"rust programming","top_k":10,
+//                "text_column":"chunk_text","partition_filter":"agent-42"}
+// Returns: {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
+// distance = negated BM25 score (lower = more relevant).
+char* ailake_search_text_json(const char* request_json);
+
+// Equality delete — writes Iceberg delete file and commits Delete snapshot
+// request_json: {"warehouse":"...","namespace":"default","table":"...",
+//                "column":"id","values":["0","1","2"]}
+// Returns: {"ok":true} or {"ok":false,"error":"..."}
+// Empty values array is a no-op (returns ok=true without writing a file).
+char* ailake_delete_where_json(const char* request_json);
+
+// Schema evolution — metadata-only, no data files rewritten
+// request_json: {"warehouse":"...","namespace":"default","table":"...",
+//                "add_columns":[{"name":"source_url","type":"string","initial_default":""}],
+//                "rename_columns":[{"from":"source_url","to":"url"}]}
+// Returns: {"ok":true,"new_schema_id":N}
+// Empty arrays = no-op, returns new_schema_id=current schema id.
+char* ailake_evolve_schema_json(const char* request_json);
+
+// Multimodal search (search across multiple HNSW columns, fused via RRF)
+char* ailake_search_multimodal_json(const char* request_json);
 
 void ailake_free_string(char* ptr);
 
 // Static version string — do NOT free.
 const char* ailake_version();
 ```
+
+### JSON-envelope field reference
+
+All optional fields are `#[serde(default)]` — absent fields deserialize to empty / `None`, backward-compatible with callers that omit them.
+
+| Field | Function | Type | Description |
+|---|---|---|---|
+| `partition_filter` | search, search_text, search_multimodal | string | Restrict to files with matching `partition_value`. Pruned before centroid check. |
+| `partition_by` | write_batch | string | Single-column identity partition column (legacy; prefer `partition_fields`). |
+| `partition_value` | write_batch | string | Value for `partition_by` column. |
+| `partition_fields` | write_batch | array | Multi-column partition spec: `[{column, transform, column_type}]`. Supports all Iceberg transforms (identity, year, month, day, hour, bucket[N], truncate[N]). |
+| `format_version` | write_batch | int | Iceberg format version (2 or 3). Default: 2. |
+| `hybrid_text` | search | string | BM25 query text. When set, retrieves 10×top_k HNSW candidates, scores by BM25, fuses via RRF. |
+| `text_column` | search, search_text | string | Parquet column for BM25 scoring. Default: `"chunk_text"`. |
+| `bm25_weight` | search | float | BM25 weight in RRF fusion (0.0 = pure vector, 1.0 = pure BM25). Default: `0.5`. |
 
 ---
 
@@ -453,6 +504,152 @@ cd spark-plugin
 
 ---
 
+## Flink connector (`ailake-flink`)
+
+`ailake-flink` implements `DynamicTableSink` via `VectorScanTableFactory` — a Flink Table API / SQL connector that writes AI-Lake tables as part of Flink streaming or batch jobs.
+
+### Build
+
+```bash
+cd ailake-flink
+./gradlew shadowJar
+# Output: build/libs/ailake-flink-<version>-plugin.jar
+```
+
+### Add to Flink job classpath
+
+```bash
+flink run \
+  --jarfile my-pipeline.jar \
+  --classpath ailake-flink-<version>-plugin.jar \
+  -Dtaskmanager.extraLibFolders=/opt/ailake/lib  # directory containing libailake_jni.so
+```
+
+### SQL DDL
+
+```sql
+-- Create sink table (Flink SQL)
+CREATE TABLE ailake_sink (
+    id         STRING,
+    text       STRING,
+    embedding  ARRAY<FLOAT>
+) WITH (
+    'connector'        = 'ailake',
+    'table.uri'        = 's3://my-lake/docs/',
+    'vector.column'    = 'embedding',
+    'dim'              = '1536',
+    'metric'           = 'cosine',
+    'precision'        = 'f16',
+    'partition.fields' = '[{"column":"topic_id","transform":"identity","column_type":"int"}]',
+    'format.version'   = '3'
+);
+
+-- Insert from another Flink table
+INSERT INTO ailake_sink SELECT id, text, embedding FROM source_table;
+```
+
+### Kotlin API (low-level)
+
+```kotlin
+import io.ailake.flink.internal.AilakeNativeLoader
+
+val loader = AilakeNativeLoader()
+
+// Write batch (auto-selects IVF-PQ or HNSW based on hardware detection)
+loader.writeBatch(
+    tableUri       = "s3://my-lake/docs/",
+    namespace      = "default",
+    tableName      = "docs",
+    dim            = 1536,
+    ids            = listOf("doc-1", "doc-2"),
+    embeddings     = listOf(floatArrayOf(...), floatArrayOf(...)),
+    metric         = "cosine",
+    partitionFields = listOf(
+        AilakeNativeLoader.PartitionFieldDef("topic_id", "identity", "int"),
+    ),
+    formatVersion  = 3,
+)
+
+// Equality delete (writes Iceberg delete file)
+loader.deleteWhere(tableUri, "default", "docs", "id", listOf("doc-1", "doc-2"))
+
+// Schema evolution (metadata-only)
+loader.evolveSchema(
+    tableUri, "default", "docs",
+    addCols    = listOf(AilakeNativeLoader.AddColReq("source_url", "string")),
+    renameCols = listOf(AilakeNativeLoader.RenameColReq("source_url", "url")),
+)
+```
+
+### Supported options
+
+| Option | Default | Description |
+|---|---|---|
+| `connector` | — | Must be `"ailake"` |
+| `table.uri` | required | AI-Lake table root URI (S3, GCS, Azure, local) |
+| `vector.column` | `"embedding"` | Arrow column containing `ARRAY<FLOAT>` values |
+| `dim` | required | Embedding dimension |
+| `metric` | `"cosine"` | Distance metric (`cosine`, `euclidean`, `dot_product`) |
+| `precision` | `"f16"` | Storage precision (`f32`, `f16`, `i8`) |
+| `partition.fields` | `"[]"` | JSON array of `{column, transform, column_type}` objects |
+| `format.version` | `"2"` | Iceberg format version (`2` or `3`) |
+
+---
+
+## Delete and schema evolution (all plugins)
+
+All three JVM plugins expose `deleteWhere()` and `evolveSchema()` via the JNA bridge.
+
+### Spark (Scala)
+
+```scala
+import io.ailake.spark.AilakeNative
+
+// Equality delete — returns true on success, false on empty values or absent lib
+val ok = AilakeNative.deleteWhere(
+  tableUri  = "s3://my-lake/docs/",
+  namespace = "default",
+  tableName = "docs",
+  column    = "id",
+  values    = Seq("doc-1", "doc-2"),
+)
+
+// Schema evolution — returns new schema_id, 0 for no-op, -1 on error
+val schemaId = AilakeNative.evolveSchema(
+  tableUri   = "s3://my-lake/docs/",
+  namespace  = "default",
+  tableName  = "docs",
+  addCols    = Seq(AilakeNative.AddColReq("source_url", "string", None)),
+  renameCols = Seq(AilakeNative.RenameColReq("source_url", "url")),
+)
+```
+
+### Trino (Kotlin)
+
+```kotlin
+import io.ailake.trino.AilakeNative
+
+AilakeNative.deleteWhere("s3://my-lake/docs/", "default", "docs", "id", listOf("doc-1"))
+
+val schemaId = AilakeNative.evolveSchema(
+    "s3://my-lake/docs/", "default", "docs",
+    addCols    = listOf(AilakeNative.AddColReq("source_url", "string", null)),
+    renameCols = listOf(AilakeNative.RenameColReq("source_url", "url")),
+)
+```
+
+### Flink (Kotlin)
+
+```kotlin
+import io.ailake.flink.internal.AilakeNativeLoader
+
+val loader = AilakeNativeLoader()
+loader.deleteWhere(tableUri, "default", "docs", "id", listOf("doc-1"))
+loader.evolveSchema(tableUri, "default", "docs", addCols = listOf(...), renameCols = listOf(...))
+```
+
+---
+
 ## Cross-modal search (Phase 8)
 
 All three JVM plugins expose `searchMultimodal()` backed by `ailake_search_multimodal_json` in `libailake_jni.so`.
@@ -525,11 +722,30 @@ val rows: List<MultimodalSearchRow> = AilakeNative.searchMultimodal(tableUri, qu
 import io.ailake.flink.internal.AilakeNativeLoader
 
 val loader = AilakeNativeLoader()
+
+// Cross-modal RRF search
 val queries = listOf(
     Triple(0.6f, "embedding",         queryVec1),
     Triple(0.4f, "context_embedding", queryVec2),
 )
 val rows = loader.searchMultimodal(tableUri, queries, topK = 20)
+
+// Vector search with optional BM25 hybrid scoring (Phase 9)
+val hybridRows = loader.search(
+    tableUri, queryVec, topK = 10,
+    hybridText  = "rust programming",   // optional — null = pure vector
+    textColumn  = "chunk_text",         // optional, default "chunk_text"
+    bm25Weight  = 0.5f,                 // optional, default 0.5
+)
+
+// Pure BM25 full-text search (Phase 9)
+val textRows = loader.searchText(
+    tableUri,
+    queryText       = "rust programming async",
+    topK            = 10,
+    textColumn      = "chunk_text",
+    partitionFilter = "agent-42",       // optional
+)
 ```
 
 ### Architecture diagram (multimodal path)

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
-"""Airflow operators for AI-Lake: write, compact, search."""
+"""Airflow operators for AI-Lake: write, compact, search, delete_where, evolve_schema."""
 
 from __future__ import annotations
 
+import json
 from typing import Any, Sequence
 
 from airflow.models import BaseOperator
@@ -38,6 +39,10 @@ class AilakeWriteOperator(BaseOperator):
         source_file: str,
         embeddings_column: str = "embedding",
         batch_id: str = "{{ run_id }}_{{ task.task_id }}",
+        partition_by: str | None = None,
+        partition_value: str | None = None,
+        partition_fields: list[dict[str, Any]] | None = None,
+        format_version: int = 2,
         ailake_conn_id: str = AilakeHook.default_conn_name,
         **kwargs: Any,
     ) -> None:
@@ -46,6 +51,10 @@ class AilakeWriteOperator(BaseOperator):
         self.source_file = source_file
         self.embeddings_column = embeddings_column
         self.batch_id = batch_id
+        self.partition_by = partition_by
+        self.partition_value = partition_value
+        self.partition_fields = partition_fields
+        self.format_version = format_version
         self.ailake_conn_id = ailake_conn_id
 
     def execute(self, context: Context) -> None:
@@ -55,8 +64,6 @@ class AilakeWriteOperator(BaseOperator):
         info = hook.get_table_info(self.table)
         snapshot_id = info.get("snapshot_id")
         if snapshot_id is not None:
-            # Ask the CLI if batch_id is present — we use ailake insert which
-            # internally calls write_batch_idempotent when --batch-id is supplied.
             self.log.info(
                 "table %s has snapshot %s; inserting with batch_id=%s",
                 self.table,
@@ -64,12 +71,23 @@ class AilakeWriteOperator(BaseOperator):
                 self.batch_id,
             )
 
+        extra_args: list[str] = []
+        if self.partition_by:
+            extra_args += ["--partition-by", self.partition_by]
+        if self.partition_value:
+            extra_args += ["--partition-value", self.partition_value]
+        if self.partition_fields:
+            extra_args += ["--partition-fields", json.dumps(self.partition_fields)]
+        if self.format_version != 2:
+            extra_args += ["--format-version", str(self.format_version)]
+
         result = hook.run_cli(
             "insert",
             self.table,
             self.source_file,
             "--embeddings", self.embeddings_column,
             "--batch-id", self.batch_id,
+            *extra_args,
         )
         self.log.info(result.stdout.strip())
 
@@ -145,6 +163,7 @@ class AilakeSearchOperator(BaseOperator):
         query_xcom_key: str = "return_value",
         top_k: int = 10,
         pruning_threshold: float = 0.8,
+        partition_filter: str | None = None,
         ailake_conn_id: str = AilakeHook.default_conn_name,
         **kwargs: Any,
     ) -> None:
@@ -155,6 +174,7 @@ class AilakeSearchOperator(BaseOperator):
         self.query_xcom_key = query_xcom_key
         self.top_k = top_k
         self.pruning_threshold = pruning_threshold
+        self.partition_filter = partition_filter
         self.ailake_conn_id = ailake_conn_id
 
     def execute(self, context: Context) -> list[dict[str, Any]]:
@@ -179,6 +199,142 @@ class AilakeSearchOperator(BaseOperator):
             query=query,
             top_k=self.top_k,
             pruning_threshold=self.pruning_threshold,
+            partition_filter=self.partition_filter,
         )
         self.log.info("search returned %d results", len(results))
         return results
+
+
+class AilakeDeleteWhereOperator(BaseOperator):
+    """Logically delete rows matching a column equality predicate.
+
+    Wraps ``ailake delete-where <table> --col <col> --vals <v1,v2,...>``.
+
+    Deleted rows are masked at scan time via an Iceberg equality delete file —
+    no data files are rewritten.  The operator is idempotent: deleting
+    already-deleted rows is a no-op.
+
+    :param table: Fully-qualified table name (``namespace.table``).
+    :param column: Column to match on (equality predicate).
+    :param values: List of values to delete.  May be a Jinja template that
+        resolves to a list, or use ``values_xcom_task_id`` to read from XCom.
+    :param values_xcom_task_id: Task id whose XCom holds the values list.
+    :param values_xcom_key: XCom key (default ``"return_value"``).
+    :param ailake_conn_id: Airflow connection id.
+    """
+
+    template_fields: Sequence[str] = ("table", "column")
+    ui_color = "#ffd0d0"
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        column: str,
+        values: list[str] | None = None,
+        values_xcom_task_id: str | None = None,
+        values_xcom_key: str = "return_value",
+        ailake_conn_id: str = AilakeHook.default_conn_name,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.table = table
+        self.column = column
+        self.values = values
+        self.values_xcom_task_id = values_xcom_task_id
+        self.values_xcom_key = values_xcom_key
+        self.ailake_conn_id = ailake_conn_id
+
+    def execute(self, context: Context) -> None:
+        if self.values is not None:
+            values = self.values
+        elif self.values_xcom_task_id is not None:
+            values = context["ti"].xcom_pull(
+                task_ids=self.values_xcom_task_id,
+                key=self.values_xcom_key,
+            )
+            if values is None:
+                raise ValueError(
+                    f"XCom pull from task '{self.values_xcom_task_id}' "
+                    f"key '{self.values_xcom_key}' returned None"
+                )
+        else:
+            raise ValueError("Provide values or values_xcom_task_id")
+
+        if not values:
+            self.log.info("delete_where: values list is empty — no-op")
+            return
+
+        hook = AilakeHook(ailake_conn_id=self.ailake_conn_id)
+        hook.delete_where(self.table, self.column, list(values))
+        self.log.info(
+            "delete_where: table=%s column=%s deleted %d value(s)",
+            self.table,
+            self.column,
+            len(values),
+        )
+
+
+class AilakeEvolveSchemaOperator(BaseOperator):
+    """Apply a metadata-only schema evolution to an AI-Lake table.
+
+    Wraps ``ailake evolve <table> [--add name:type [--initial-default JSON]]
+    [--rename old:new]``.
+
+    No data files are rewritten.  The new ``schema_id`` is pushed to XCom
+    under key ``"schema_id"`` for downstream tasks.
+
+    :param table: Fully-qualified table name (``namespace.table``).
+    :param add_columns: Columns to add.  Each entry must have ``name`` and
+        ``type`` keys; ``initial_default`` is optional (a JSON literal:
+        ``null``, ``0``, ``0.0``, ``"unknown"``).
+    :param rename_columns: Columns to rename.  Each entry must have ``from``
+        and ``to`` keys.
+    :param ailake_conn_id: Airflow connection id.
+
+    Example::
+
+        AilakeEvolveSchemaOperator(
+            task_id="add_score_col",
+            table="default.docs",
+            add_columns=[{"name": "score", "type": "float", "initial_default": "0.0"}],
+            rename_columns=[{"from": "old_name", "to": "new_name"}],
+        )
+    """
+
+    template_fields: Sequence[str] = ("table",)
+    ui_color = "#e0d4f0"
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        add_columns: list[dict[str, Any]] | None = None,
+        rename_columns: list[dict[str, Any]] | None = None,
+        ailake_conn_id: str = AilakeHook.default_conn_name,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.table = table
+        self.add_columns = add_columns or []
+        self.rename_columns = rename_columns or []
+        self.ailake_conn_id = ailake_conn_id
+
+    def execute(self, context: Context) -> int:
+        if not self.add_columns and not self.rename_columns:
+            self.log.info("evolve_schema: nothing to evolve — no-op")
+            return 0
+
+        hook = AilakeHook(ailake_conn_id=self.ailake_conn_id)
+        schema_id = hook.evolve_schema(
+            self.table,
+            add_columns=self.add_columns or None,
+            rename_columns=self.rename_columns or None,
+        )
+        self.log.info(
+            "evolve_schema: table=%s new_schema_id=%s",
+            self.table,
+            schema_id,
+        )
+        context["ti"].xcom_push(key="schema_id", value=schema_id)
+        return schema_id

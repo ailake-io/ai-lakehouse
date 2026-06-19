@@ -6,7 +6,10 @@ use ailake_parquet::ParquetVectorReader;
 use arrow_array::RecordBatch;
 use bytes::Bytes;
 
-use crate::footer::{AilakeHeader, DistanceMetric, FLAG_INDEX_IVF_PQ, HEADER_SIZE};
+use crate::footer::{
+    parquet_footer_start, AilakeHeader, AilakeTrailer, DistanceMetric, FLAG_INDEX_IVF_PQ,
+    HEADER_SIZE, TRAILER_SIZE,
+};
 
 pub struct AilakeFileReader {
     bytes: Bytes,
@@ -25,29 +28,54 @@ impl AilakeFileReader {
     }
 
     /// Returns the absolute byte offset of the primary AILK section.
-    /// Reads `ailake.footer_offset` from the Parquet footer key-value metadata.
+    ///
+    /// Tries `ailake.footer_offset` from Parquet KV metadata first (files written
+    /// by `write()` / `write_multi()`). Falls back to `AilakeTrailer` bootstrap for
+    /// files produced by `write_single_pass()` / `write_multi_single_pass()`.
     pub fn ailk_offset(&self) -> AilakeResult<u64> {
         let reader = ParquetVectorReader::new(self.bytes.clone(), &self.vector_column);
-        let val = reader
-            .kv_metadata("ailake.footer_offset")?
-            .ok_or(AilakeError::NotAnAilakeFile)?;
-        val.parse::<u64>().map_err(|_| AilakeError::NotAnAilakeFile)
+        if let Some(val) = reader.kv_metadata("ailake.footer_offset")? {
+            return val.parse::<u64>().map_err(|_| AilakeError::NotAnAilakeFile);
+        }
+        self.ailk_offset_from_trailer()
     }
 
     /// Returns the absolute byte offset of the AILK section for a named vector column.
     ///
-    /// For additional columns tries `ailake.{column}.footer_offset` first,
-    /// then falls back to `ailake.footer_offset` (primary / single-column files).
+    /// Resolution order:
+    ///   1. `ailake.{column}.footer_offset` KV (extra columns in multi-column files)
+    ///   2. `ailake.footer_offset` KV (primary column or single-column files)
+    ///   3. `AilakeTrailer` scan (streaming / single-pass files without KV injection)
     pub fn ailk_offset_for_column(&self, column: &str) -> AilakeResult<u64> {
         let reader = ParquetVectorReader::new(self.bytes.clone(), column);
         let col_key = format!("ailake.{column}.footer_offset");
         if let Some(val) = reader.kv_metadata(&col_key)? {
             return val.parse::<u64>().map_err(|_| AilakeError::NotAnAilakeFile);
         }
-        let val = reader
-            .kv_metadata("ailake.footer_offset")?
-            .ok_or(AilakeError::NotAnAilakeFile)?;
-        val.parse::<u64>().map_err(|_| AilakeError::NotAnAilakeFile)
+        if let Some(val) = reader.kv_metadata("ailake.footer_offset")? {
+            return val.parse::<u64>().map_err(|_| AilakeError::NotAnAilakeFile);
+        }
+        self.ailk_offset_from_trailer()
+    }
+
+    /// Bootstrap AILK offset from the `AilakeTrailer` embedded just before the Parquet footer.
+    ///
+    /// The `AilakeTrailer` (24 bytes) ends immediately before the Parquet footer thrift
+    /// in every AI-Lake file. On S3, the trailer bytes are already present in the initial
+    /// footer range-GET (same GET that fetches the Parquet footer), so this bootstrap path
+    /// costs no additional I/O compared to the KV path.
+    fn ailk_offset_from_trailer(&self) -> AilakeResult<u64> {
+        let buf = self.bytes.as_ref();
+        let footer_start = parquet_footer_start(buf)?;
+        if footer_start < TRAILER_SIZE {
+            return Err(AilakeError::NotAnAilakeFile);
+        }
+        let trailer_start = footer_start - TRAILER_SIZE;
+        let trailer_bytes: &[u8; TRAILER_SIZE] = buf[trailer_start..footer_start]
+            .try_into()
+            .map_err(|_| AilakeError::NotAnAilakeFile)?;
+        let trailer = AilakeTrailer::from_bytes(trailer_bytes)?;
+        Ok(trailer.footer_offset)
     }
 
     /// Returns true if the file contains an embedded AILK section.
@@ -246,6 +274,10 @@ mod tests {
             ivf_residual: false,
             embedding_model: None,
             modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
         }
     }
 
