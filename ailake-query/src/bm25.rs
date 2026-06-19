@@ -91,7 +91,7 @@ impl IdfStats {
             // Keep highest-DF terms — common terms anchor BM25 normalization (avgdl)
             // and appear most in queries. Rare unseen terms get max-IDF approximation.
             let mut pairs: Vec<(String, u64)> = self.term_df.drain().collect();
-            pairs.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            pairs.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
             pairs.truncate(MAX_VOCAB);
             self.term_df = pairs.into_iter().collect();
         }
@@ -100,12 +100,12 @@ impl IdfStats {
     /// Serialize to zstd-compressed bincode bytes.
     pub fn to_bytes(&self) -> AilakeResult<Vec<u8>> {
         let raw = bincode::serialize(self).map_err(|e| AilakeError::Bincode(e.to_string()))?;
-        zstd::encode_all(&raw[..], 3).map_err(|e| AilakeError::Io(e))
+        zstd::encode_all(&raw[..], 3).map_err(AilakeError::Io)
     }
 
     /// Deserialize from zstd-compressed bincode bytes.
     pub fn from_bytes(bytes: &[u8]) -> AilakeResult<Self> {
-        let raw = zstd::decode_all(bytes).map_err(|e| AilakeError::Io(e))?;
+        let raw = zstd::decode_all(bytes).map_err(AilakeError::Io)?;
         bincode::deserialize(&raw).map_err(|e| AilakeError::Bincode(e.to_string()))
     }
 }
@@ -157,20 +157,15 @@ impl<'a> BM25Scorer<'a> {
 }
 
 /// Fusion method for combining vector and BM25 ranked lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HybridFusion {
     /// Reciprocal Rank Fusion: `score = w_vec/(k+rank_vec) + w_bm25/(k+rank_bm25)`.
     /// Default k=60 (standard RRF). Returned score is negated so sort-ascending = best first.
+    #[default]
     Rrf,
     /// Linear combination after min-max normalization:
     /// `score = (1-bm25_weight) * norm_dist + bm25_weight * (1 - norm_bm25)`.
     Linear,
-}
-
-impl Default for HybridFusion {
-    fn default() -> Self {
-        Self::Rrf
-    }
 }
 
 /// Configuration for hybrid vector+BM25 search.

@@ -333,6 +333,7 @@ impl CompactionExecutor {
             })
             .collect();
 
+        #[allow(clippy::type_complexity)]
         let raw: Vec<(RecordBatch, Vec<Vec<f32>>, bool, Option<Bytes>)> =
             try_join_all(futs).await?.into_iter().flatten().collect();
 

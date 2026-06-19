@@ -46,6 +46,7 @@ use crate::schema_filler::SchemaFiller;
 ///     hybrid_score(distance, recency, importance)
 /// });
 /// ```
+#[allow(clippy::type_complexity)]
 pub struct ScoreFn(pub std::sync::Arc<dyn Fn(f32, &RecordBatch) -> f32 + Send + Sync>);
 
 impl ScoreFn {
@@ -380,7 +381,7 @@ pub async fn search(
                 // Skip rows marked as deleted by a V3 Deletion Vector.
                 if dv_bitmap
                     .as_ref()
-                    .map_or(false, |bm| bm.contains(row_id.as_u64() as u32))
+                    .is_some_and(|bm| bm.contains(row_id.as_u64() as u32))
                 {
                     continue;
                 }

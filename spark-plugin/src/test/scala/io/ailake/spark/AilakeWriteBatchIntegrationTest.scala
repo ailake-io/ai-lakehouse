@@ -8,6 +8,7 @@ import java.io.File
 import scala.math.sqrt
 import org.junit.runner.RunWith
 import org.scalatestplus.junit.JUnitRunner
+import io.ailake.spark.AilakeNative.{AddColReq, PartitionFieldDef}
 
 /**
  * End-to-end integration test for AilakeNative.writeBatch (Spark side).

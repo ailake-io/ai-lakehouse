@@ -53,8 +53,8 @@ impl BloomFilter {
         let h2 = fnv64a(term, 0xcbf29ce484222325u64);
         let m = self.num_bits as u64;
         let mut out = [0usize; K];
-        for i in 0..K {
-            out[i] = (h1.wrapping_add((i as u64).wrapping_mul(h2)) % m) as usize;
+        for (i, slot) in out.iter_mut().enumerate().take(K) {
+            *slot = (h1.wrapping_add((i as u64).wrapping_mul(h2)) % m) as usize;
         }
         out
     }
@@ -92,7 +92,7 @@ impl BloomFilter {
             return None;
         }
         let num_bits = u64::from_le_bytes(bytes[0..8].try_into().ok()?) as usize;
-        if num_bits == 0 || num_bits % 64 != 0 {
+        if num_bits == 0 || !num_bits.is_multiple_of(64) {
             return None;
         }
         let word_count = num_bits / 64;

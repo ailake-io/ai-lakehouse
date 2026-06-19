@@ -15,8 +15,8 @@ use ailake_catalog::{read_equality_delete_values, EqualityDeleteFile};
 use ailake_core::{AilakeError, AilakeResult};
 use ailake_store::Store;
 use arrow_array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
-    RecordBatch, StringArray,
+    Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, RecordBatch,
+    StringArray,
 };
 use arrow_schema::DataType;
 
@@ -137,8 +137,8 @@ impl EqualityDeleteFilter {
             let array = batch.column(col_idx);
             let dtype = array.data_type();
 
-            for i in 0..n {
-                if !keep[i] {
+            for (i, keep_slot) in keep.iter_mut().enumerate().take(n) {
+                if !*keep_slot {
                     continue;
                 }
                 if array.is_null(i) {
@@ -191,7 +191,7 @@ impl EqualityDeleteFilter {
                 };
                 if let Some(s) = val_str {
                     if delete_values.contains(&s) {
-                        keep[i] = false;
+                        *keep_slot = false;
                     }
                 }
             }

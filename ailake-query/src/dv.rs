@@ -54,8 +54,6 @@ mod tests {
     use ailake_store::LocalStore;
     use bytes::Bytes;
     use roaring::RoaringBitmap;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
     fn make_bitmap_bytes(deleted: &[u32]) -> Vec<u8> {
         let mut bm = RoaringBitmap::new();

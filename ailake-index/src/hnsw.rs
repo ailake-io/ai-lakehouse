@@ -505,22 +505,28 @@ impl HnswIndex {
             VectorMetric::DotProduct => self.search_typed::<DotProductDist>(query, top_k, ef),
             VectorMetric::NormalizedCosine => {
                 let q_norm = normalize_l2(query);
-                let mut results = self.search_typed::<NormalizedCosineDist>(&q_norm, top_k, ef);
-                // F16 traversal error (~0.001) can exceed true 1-dot distance
-                // (~0.0002) for very similar unit vectors. Re-score final
-                // candidates with exact F32 to restore correct ranking.
                 if self.flat_vecs_f16.is_some() {
+                    // F16 error (~0.001) exceeds true 1-dot distances between similar unit
+                    // vectors (~0.0002). The F16 top-k may not contain the true nearest
+                    // neighbour at all. Fix: fetch a larger candidate pool (ef-sized or at
+                    // least top_k*10), re-score every candidate with exact F32, then truncate.
+                    let pool = ef.max(top_k * 10).max(top_k);
+                    let mut candidates =
+                        self.search_typed::<NormalizedCosineDist>(&q_norm, pool, ef);
                     let dim = self.dim as usize;
-                    for (row_id, dist) in &mut results {
+                    for (row_id, dist) in &mut candidates {
                         let idx = row_id.as_u64() as usize;
                         let v = &self.flat_vecs[idx * dim..(idx + 1) * dim];
                         *dist = NormalizedCosineDist::dist(&q_norm, v);
                     }
-                    results.sort_unstable_by(|a, b| {
+                    candidates.sort_unstable_by(|a, b| {
                         a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
                     });
+                    candidates.truncate(top_k);
+                    candidates
+                } else {
+                    self.search_typed::<NormalizedCosineDist>(&q_norm, top_k, ef)
                 }
-                results
             }
         }
     }
