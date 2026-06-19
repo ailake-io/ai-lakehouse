@@ -14,7 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{info, warn};
 
-use ailake_catalog::{new_snapshot_id, CatalogProvider, NewSnapshot, SnapshotOperation, TableIdent};
+use ailake_catalog::{
+    new_snapshot_id, CatalogProvider, NewSnapshot, SnapshotOperation, TableIdent,
+};
 use ailake_core::{AilakeError, AilakeResult, VectorStoragePolicy};
 use ailake_file::{AilakeFileReader, AilakeFileWriter};
 use ailake_store::Store;
@@ -94,7 +96,10 @@ impl MemoryDecayJob {
             let (batch, embeddings) = match reader.read_parquet() {
                 Ok(pair) => pair,
                 Err(e) => {
-                    warn!("ailake: MemoryDecayJob skipping {} — read error: {}", file_entry.path, e);
+                    warn!(
+                        "ailake: MemoryDecayJob skipping {} — read error: {}",
+                        file_entry.path, e
+                    );
                     new_entries.push(file_entry.clone());
                     continue;
                 }
@@ -114,8 +119,7 @@ impl MemoryDecayJob {
             let new_size = new_bytes.len() as u64;
             self.store.put(&file_entry.path, new_bytes.clone()).await?;
 
-            let centroid =
-                compute_centroid_and_radius(&embeddings, self.policy.metric);
+            let centroid = compute_centroid_and_radius(&embeddings, self.policy.metric);
             let new_reader =
                 AilakeFileReader::new(new_bytes, &self.policy.column_name, self.policy.dim);
             let header = new_reader.read_header()?;
@@ -138,7 +142,9 @@ impl MemoryDecayJob {
         }
 
         if updated == 0 {
-            info!("ailake: MemoryDecayJob — no files with last_accessed_at column; skipping commit");
+            info!(
+                "ailake: MemoryDecayJob — no files with last_accessed_at column; skipping commit"
+            );
             return Ok(0);
         }
 
@@ -150,10 +156,13 @@ impl MemoryDecayJob {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
-                equality_delete_files: vec![],
+            equality_delete_files: vec![],
         };
         self.catalog.commit_snapshot(table, snap).await?;
-        info!("ailake: MemoryDecayJob — updated recency_weight in {} files (lambda={})", updated, self.decay_lambda);
+        info!(
+            "ailake: MemoryDecayJob — updated recency_weight in {} files (lambda={})",
+            updated, self.decay_lambda
+        );
         Ok(updated)
     }
 }
@@ -205,10 +214,7 @@ fn apply_decay(batch: &RecordBatch, today_day: i64, lambda: f32) -> AilakeResult
         .ok_or_else(|| AilakeError::Catalog("last_accessed_at column not found".into()))?;
 
     let days_old = days_old_vec(col, today_day)?;
-    let new_weights: Vec<f32> = days_old
-        .into_iter()
-        .map(|d| (-lambda * d).exp())
-        .collect();
+    let new_weights: Vec<f32> = days_old.into_iter().map(|d| (-lambda * d).exp()).collect();
 
     let new_weight_array = Arc::new(Float32Array::from(new_weights));
 
@@ -217,8 +223,9 @@ fn apply_decay(batch: &RecordBatch, today_day: i64, lambda: f32) -> AilakeResult
     let decay_field = Field::new(RECENCY_WEIGHT_COL, DataType::Float32, false);
 
     let mut new_fields: Vec<arrow_schema::FieldRef> = old_schema.fields().iter().cloned().collect();
-    let mut new_columns: Vec<Arc<dyn Array>> =
-        (0..batch.num_columns()).map(|i| batch.column(i).clone()).collect();
+    let mut new_columns: Vec<Arc<dyn Array>> = (0..batch.num_columns())
+        .map(|i| batch.column(i).clone())
+        .collect();
 
     if let Some(pos) = old_schema
         .fields()
@@ -233,8 +240,7 @@ fn apply_decay(batch: &RecordBatch, today_day: i64, lambda: f32) -> AilakeResult
     }
 
     let new_schema = Arc::new(arrow_schema::Schema::new(new_fields));
-    RecordBatch::try_new(new_schema, new_columns)
-        .map_err(|e| AilakeError::Arrow(e.to_string()))
+    RecordBatch::try_new(new_schema, new_columns).map_err(|e| AilakeError::Arrow(e.to_string()))
 }
 
 /// Parse first 10 chars of an ISO 8601 string as YYYY-MM-DD and return
@@ -294,7 +300,7 @@ mod tests {
         // 10 days ago
         let past_day = today - 10;
         let y = 1970 + past_day / 365; // rough
-        // Use a fixed known date instead
+                                       // Use a fixed known date instead
         let past_str = "2024-01-05T00:00:00"; // 10 days before 2024-01-15
 
         let schema = Arc::new(Schema::new(vec![
@@ -371,6 +377,9 @@ mod tests {
         // now_ns() must be > 2025-01-01 00:00:00 UTC in nanoseconds
         let floor_2025_ns: i64 = 55 * 365 * 86_400 * 1_000_000_000i64; // ~2025
         let t = ailake_core::now_ns();
-        assert!(t > floor_2025_ns, "now_ns() returned suspiciously small value: {t}");
+        assert!(
+            t > floor_2025_ns,
+            "now_ns() returned suspiciously small value: {t}"
+        );
     }
 }

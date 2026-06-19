@@ -196,8 +196,7 @@ pub fn parquet_footer_start(buf: &[u8]) -> AilakeResult<usize> {
     if &buf[len - 4..] != b"PAR1" {
         return Err(AilakeError::Parquet("missing PAR1 footer magic".into()));
     }
-    let footer_thrift_len =
-        u32::from_le_bytes(buf[len - 8..len - 4].try_into().unwrap()) as usize;
+    let footer_thrift_len = u32::from_le_bytes(buf[len - 8..len - 4].try_into().unwrap()) as usize;
     len.checked_sub(8 + footer_thrift_len)
         .ok_or_else(|| AilakeError::Parquet("footer length overflow".into()))
 }

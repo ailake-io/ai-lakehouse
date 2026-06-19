@@ -99,18 +99,14 @@ impl IdfStats {
 
     /// Serialize to zstd-compressed bincode bytes.
     pub fn to_bytes(&self) -> AilakeResult<Vec<u8>> {
-        let raw = bincode::serialize(self)
-            .map_err(|e| AilakeError::Bincode(e.to_string()))?;
-        zstd::encode_all(&raw[..], 3)
-            .map_err(|e| AilakeError::Io(e))
+        let raw = bincode::serialize(self).map_err(|e| AilakeError::Bincode(e.to_string()))?;
+        zstd::encode_all(&raw[..], 3).map_err(|e| AilakeError::Io(e))
     }
 
     /// Deserialize from zstd-compressed bincode bytes.
     pub fn from_bytes(bytes: &[u8]) -> AilakeResult<Self> {
-        let raw = zstd::decode_all(bytes)
-            .map_err(|e| AilakeError::Io(e))?;
-        bincode::deserialize(&raw)
-            .map_err(|e| AilakeError::Bincode(e.to_string()))
+        let raw = zstd::decode_all(bytes).map_err(|e| AilakeError::Io(e))?;
+        bincode::deserialize(&raw).map_err(|e| AilakeError::Bincode(e.to_string()))
     }
 }
 
@@ -248,8 +244,7 @@ impl HybridConfig {
 pub fn rrf_score(vec_rank: usize, bm25_rank: usize, bm25_weight: f32) -> f32 {
     const RRF_K: f32 = 60.0;
     let vec_weight = 1.0 - bm25_weight;
-    let rrf = vec_weight / (RRF_K + vec_rank as f32)
-        + bm25_weight / (RRF_K + bm25_rank as f32);
+    let rrf = vec_weight / (RRF_K + vec_rank as f32) + bm25_weight / (RRF_K + bm25_rank as f32);
     -rrf
 }
 
@@ -334,8 +329,14 @@ mod tests {
         let s2 = scorer.score(query, docs[2]);
 
         // docs[0] and docs[2] are about Rust — should score higher than docs[1]
-        assert!(s0 > s1, "rust doc scores higher than python doc: s0={s0}, s1={s1}");
-        assert!(s2 > s1, "rust doc scores higher than python doc: s2={s2}, s1={s1}");
+        assert!(
+            s0 > s1,
+            "rust doc scores higher than python doc: s0={s0}, s1={s1}"
+        );
+        assert!(
+            s2 > s1,
+            "rust doc scores higher than python doc: s2={s2}, s1={s1}"
+        );
     }
 
     #[test]
@@ -367,12 +368,18 @@ mod tests {
     #[test]
     fn rrf_score_is_negative() {
         let s = rrf_score(0, 0, 0.5);
-        assert!(s < 0.0, "RRF score should be negated for sort-ascending convention");
+        assert!(
+            s < 0.0,
+            "RRF score should be negated for sort-ascending convention"
+        );
     }
 
     #[test]
     fn linear_score_in_range() {
         let s = linear_score(0.5, 0.0, 1.0, 0.8, 0.0, 1.0, 0.5);
-        assert!((0.0..=1.0).contains(&s), "linear score should be in [0,1]: {s}");
+        assert!(
+            (0.0..=1.0).contains(&s),
+            "linear score should be in [0,1]: {s}"
+        );
     }
 }

@@ -138,7 +138,7 @@ impl MigrationJob {
                         iceberg_schema: None,
                         extra_properties: std::collections::HashMap::new(),
                         bloom_filters: vec![],
-                equality_delete_files: vec![],
+                        equality_delete_files: vec![],
                     },
                 )
                 .await?;
@@ -220,7 +220,7 @@ impl MigrationJob {
                     iceberg_schema: None,
                     extra_properties: std::collections::HashMap::new(),
                     bloom_filters: vec![],
-                equality_delete_files: vec![],
+                    equality_delete_files: vec![],
                 },
             )
             .await?;
@@ -351,8 +351,8 @@ impl MigrationJob {
             partition_by: None,
             partition_value: None,
             partition_column_type: None,
-                partition_fields: vec![],
-})
+            partition_fields: vec![],
+        })
     }
 }
 

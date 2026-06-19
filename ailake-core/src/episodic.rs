@@ -186,7 +186,10 @@ mod tests {
         let cfg = RecencyConfig::WEEKLY_DECAY;
         let half_life_days = std::f32::consts::LN_2 / cfg.lambda;
         let w = recency_weight(half_life_days, &cfg);
-        assert!((w - 0.5).abs() < 0.01, "expected ~0.5 at half-life, got {w}");
+        assert!(
+            (w - 0.5).abs() < 0.01,
+            "expected ~0.5 at half-life, got {w}"
+        );
     }
 
     #[test]
@@ -207,9 +210,12 @@ mod tests {
     fn hybrid_score_old_memory_ranks_worse() {
         // Low recency (old memory) → larger score → worse rank
         let d = 0.3_f32;
-        let old_memory = hybrid_score(d, 0.3, 1.0);   // recency 0.3 = accessed long ago
+        let old_memory = hybrid_score(d, 0.3, 1.0); // recency 0.3 = accessed long ago
         let recent_memory = hybrid_score(d, 1.0, 1.0); // recency 1.0 = just accessed
-        assert!(old_memory > recent_memory, "old memory should rank lower (higher score)");
+        assert!(
+            old_memory > recent_memory,
+            "old memory should rank lower (higher score)"
+        );
     }
 
     #[test]
@@ -218,7 +224,10 @@ mod tests {
         let d = 0.3_f32;
         let unimportant = hybrid_score(d, 1.0, 0.2);
         let important = hybrid_score(d, 1.0, 1.0);
-        assert!(unimportant > important, "unimportant memory should rank lower");
+        assert!(
+            unimportant > important,
+            "unimportant memory should rank lower"
+        );
     }
 
     #[test]

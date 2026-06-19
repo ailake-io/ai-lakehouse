@@ -49,9 +49,9 @@ impl PuffinWriter {
         snapshot_id: i64,
     ) -> AilakeResult<(Bytes, u64, u64)> {
         let mut blob = Vec::new();
-        bitmap.serialize_into(&mut blob).map_err(|e| {
-            AilakeError::Io(std::io::Error::other(format!("DV serialize: {e}")))
-        })?;
+        bitmap
+            .serialize_into(&mut blob)
+            .map_err(|e| AilakeError::Io(std::io::Error::other(format!("DV serialize: {e}"))))?;
 
         let blob_offset = PUFFIN_MAGIC.len() as u64;
         let blob_length = blob.len() as u64;
@@ -71,9 +71,8 @@ impl PuffinWriter {
         let footer_bytes = footer_json.as_bytes();
         let footer_len = (footer_bytes.len() as u32).to_le_bytes();
 
-        let mut out = Vec::with_capacity(
-            PUFFIN_MAGIC.len() * 2 + blob.len() + footer_bytes.len() + 4,
-        );
+        let mut out =
+            Vec::with_capacity(PUFFIN_MAGIC.len() * 2 + blob.len() + footer_bytes.len() + 4);
         out.extend_from_slice(PUFFIN_MAGIC);
         out.extend_from_slice(&blob);
         out.extend_from_slice(footer_bytes);
@@ -142,16 +141,12 @@ pub async fn delete_rows(
         .iter()
         .position(|f| f.path == file_path || f.path.ends_with(file_path))
         .ok_or_else(|| {
-            AilakeError::Catalog(format!(
-                "file '{file_path}' not found in current snapshot"
-            ))
+            AilakeError::Catalog(format!("file '{file_path}' not found in current snapshot"))
         })?;
 
     // Build bitmap: merge existing DV with new row_ids.
     let mut bitmap = if let Some(ref dv) = files[target_idx].deletion_vector {
-        load_deletion_vector(&store, dv)
-            .await
-            .unwrap_or_default()
+        load_deletion_vector(&store, dv).await.unwrap_or_default()
     } else {
         RoaringBitmap::new()
     };
@@ -162,8 +157,7 @@ pub async fn delete_rows(
 
     // Write Puffin .dvd file alongside table metadata.
     let snap_id = new_snapshot_id();
-    let (puffin_bytes, blob_offset, blob_length) =
-        PuffinWriter::write_single_dv(&bitmap, snap_id)?;
+    let (puffin_bytes, blob_offset, blob_length) = PuffinWriter::write_single_dv(&bitmap, snap_id)?;
     let table_root = meta.location.trim_end_matches('/');
     let dv_path = format!("{table_root}/metadata/dv-{snap_id}.dvd");
     store.put(&dv_path, puffin_bytes).await?;
@@ -186,7 +180,7 @@ pub async fn delete_rows(
         iceberg_schema: None,
         extra_properties: std::collections::HashMap::new(),
         bloom_filters: vec![],
-                equality_delete_files: vec![],
+        equality_delete_files: vec![],
     };
     catalog.commit_snapshot(table, snapshot).await?;
     Ok(())
@@ -290,9 +284,9 @@ mod tests {
                 modality: None,
                 partition_by: None,
                 partition_value: None,
-            partition_column_type: None,
-                        partition_fields: vec![],
-},
+                partition_column_type: None,
+                partition_fields: vec![],
+            },
             extra: std::collections::HashMap::new(),
             format_version,
             partition_column_type: None,
@@ -337,7 +331,7 @@ mod tests {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
-                equality_delete_files: vec![],
+            equality_delete_files: vec![],
         };
         catalog.commit_snapshot(&table, snap).await.unwrap();
         (catalog, table)
@@ -361,7 +355,10 @@ mod tests {
 
         let files = catalog.list_files(&table, None).await.unwrap();
         assert_eq!(files.len(), 1);
-        let dv = files[0].deletion_vector.as_ref().expect("DV should be present");
+        let dv = files[0]
+            .deletion_vector
+            .as_ref()
+            .expect("DV should be present");
         assert_eq!(dv.cardinality, 3);
 
         // Verify Puffin file was created and bitmap is correct.

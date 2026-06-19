@@ -64,27 +64,43 @@ fn build_batch_with_extra(
 
             // Infer type from first element
             let first = values.first().map(|x| x.bind(py));
-            if first.as_ref().map(|x| x.is_instance_of::<pyo3::types::PyBool>()).unwrap_or(false) {
-                let arr: Vec<Option<bool>> = values.iter()
+            if first
+                .as_ref()
+                .map(|x| x.is_instance_of::<pyo3::types::PyBool>())
+                .unwrap_or(false)
+            {
+                let arr: Vec<Option<bool>> = values
+                    .iter()
                     .map(|x| x.bind(py).extract::<bool>().ok())
                     .collect();
                 fields.push(Field::new(&col_name, DataType::Boolean, true));
                 arrays.push(Arc::new(BooleanArray::from(arr)));
-            } else if first.as_ref().map(|x| x.is_instance_of::<pyo3::types::PyFloat>()).unwrap_or(false) {
-                let arr: Vec<Option<f32>> = values.iter()
+            } else if first
+                .as_ref()
+                .map(|x| x.is_instance_of::<pyo3::types::PyFloat>())
+                .unwrap_or(false)
+            {
+                let arr: Vec<Option<f32>> = values
+                    .iter()
                     .map(|x| x.bind(py).extract::<f32>().ok())
                     .collect();
                 fields.push(Field::new(&col_name, DataType::Float32, true));
                 arrays.push(Arc::new(Float32Array::from(arr)));
-            } else if first.as_ref().map(|x| x.is_instance_of::<pyo3::types::PyInt>()).unwrap_or(false) {
-                let arr: Vec<Option<i64>> = values.iter()
+            } else if first
+                .as_ref()
+                .map(|x| x.is_instance_of::<pyo3::types::PyInt>())
+                .unwrap_or(false)
+            {
+                let arr: Vec<Option<i64>> = values
+                    .iter()
                     .map(|x| x.bind(py).extract::<i64>().ok())
                     .collect();
                 fields.push(Field::new(&col_name, DataType::Int64, true));
                 arrays.push(Arc::new(Int64Array::from(arr)));
             } else {
                 // Default: string column
-                let arr: Vec<Option<String>> = values.iter()
+                let arr: Vec<Option<String>> = values
+                    .iter()
                     .map(|x| x.bind(py).extract::<String>().ok())
                     .collect();
                 fields.push(Field::new(&col_name, DataType::Utf8, true));
@@ -94,8 +110,7 @@ fn build_batch_with_extra(
     }
 
     let schema = Arc::new(Schema::new(fields));
-    RecordBatch::try_new(schema, arrays)
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+    RecordBatch::try_new(schema, arrays).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>) {
@@ -210,7 +225,13 @@ impl TableWriter {
 
         let stored_embed_fn = embed_fn.map(|f| f.clone_ref(py));
         let mut writer = rt
-            .block_on(RsTableWriter::create_or_open(catalog, store, policy, table, format_version))
+            .block_on(RsTableWriter::create_or_open(
+                catalog,
+                store,
+                policy,
+                table,
+                format_version,
+            ))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         if let Some(col) = bm25_text_column {
             writer = writer.with_bm25(col);
@@ -1274,8 +1295,14 @@ fn delete_where(table_path: &str, column: &str, values: Vec<String>) -> PyResult
     let (catalog, store) = local_catalog_store(table_path);
     let table = TableIdent::new("default", "table");
     let value_refs: Vec<&str> = values.iter().map(String::as_str).collect();
-    rt.block_on(ailake_query::delete_where(catalog, store, &table, column, &value_refs))
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+    rt.block_on(ailake_query::delete_where(
+        catalog,
+        store,
+        &table,
+        column,
+        &value_refs,
+    ))
+    .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 #[pymodule]

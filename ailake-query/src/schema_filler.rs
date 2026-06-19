@@ -58,11 +58,7 @@ impl SchemaFiller {
         for sf in missing {
             let dtype = iceberg_type_to_arrow(&sf.iceberg_type);
             let arr = make_default_array(&dtype, sf.initial_default.as_ref(), n)?;
-            new_fields.push(Arc::new(Field::new(
-                sf.name.clone(),
-                dtype,
-                !sf.required,
-            )));
+            new_fields.push(Arc::new(Field::new(sf.name.clone(), dtype, !sf.required)));
             new_cols.push(arr);
         }
 
@@ -209,16 +205,14 @@ mod tests {
     #[test]
     fn injects_missing_column_with_null_default() {
         let batch = make_base_batch();
-        let fields = vec![
-            SchemaField {
-                id: 3,
-                name: "score".into(),
-                required: false,
-                iceberg_type: "float".into(),
-                initial_default: None,
-                write_default: None,
-            },
-        ];
+        let fields = vec![SchemaField {
+            id: 3,
+            name: "score".into(),
+            required: false,
+            iceberg_type: "float".into(),
+            initial_default: None,
+            write_default: None,
+        }];
         let filled = SchemaFiller::fill(batch, &fields).unwrap();
         assert_eq!(filled.num_columns(), 3);
         assert_eq!(filled.num_rows(), 3);
@@ -236,16 +230,14 @@ mod tests {
     #[test]
     fn injects_missing_column_with_value_default() {
         let batch = make_base_batch();
-        let fields = vec![
-            SchemaField {
-                id: 4,
-                name: "score".into(),
-                required: false,
-                iceberg_type: "float".into(),
-                initial_default: Some(serde_json::json!(0.5)),
-                write_default: None,
-            },
-        ];
+        let fields = vec![SchemaField {
+            id: 4,
+            name: "score".into(),
+            required: false,
+            iceberg_type: "float".into(),
+            initial_default: Some(serde_json::json!(0.5)),
+            write_default: None,
+        }];
         let filled = SchemaFiller::fill(batch, &fields).unwrap();
         let score_col = filled
             .column_by_name("score")
@@ -260,16 +252,14 @@ mod tests {
     #[test]
     fn injects_string_column_with_default() {
         let batch = make_base_batch();
-        let fields = vec![
-            SchemaField {
-                id: 5,
-                name: "category".into(),
-                required: false,
-                iceberg_type: "string".into(),
-                initial_default: Some(serde_json::json!("uncategorized")),
-                write_default: None,
-            },
-        ];
+        let fields = vec![SchemaField {
+            id: 5,
+            name: "category".into(),
+            required: false,
+            iceberg_type: "string".into(),
+            initial_default: Some(serde_json::json!("uncategorized")),
+            write_default: None,
+        }];
         let filled = SchemaFiller::fill(batch, &fields).unwrap();
         let cat = filled
             .column_by_name("category")

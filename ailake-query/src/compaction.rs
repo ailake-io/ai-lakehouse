@@ -321,7 +321,10 @@ impl CompactionExecutor {
                             "ailake: compact_incremental skipping {} — not an AI-Lake file",
                             path
                         );
-                        return Ok::<Option<(RecordBatch, Vec<Vec<f32>>, bool, Option<Bytes>)>, ailake_core::AilakeError>(None);
+                        return Ok::<
+                            Option<(RecordBatch, Vec<Vec<f32>>, bool, Option<Bytes>)>,
+                            ailake_core::AilakeError,
+                        >(None);
                     }
                     let (batch, vecs) = reader.read_parquet()?;
                     let retained = if is_dom { Some(bytes) } else { None };
@@ -403,8 +406,7 @@ impl CompactionExecutor {
 
         // Write the merged file using the pre-built index (no rebuild).
         let writer = AilakeFileWriter::new(self.policy.clone());
-        let file_bytes =
-            writer.write_with_prebuilt_hnsw(&merged_batch, &all_embeddings, &hnsw)?;
+        let file_bytes = writer.write_with_prebuilt_hnsw(&merged_batch, &all_embeddings, &hnsw)?;
         let file_size = file_bytes.len() as u64;
         self.store.put(output_path, file_bytes.clone()).await?;
 
@@ -551,7 +553,7 @@ impl CompactionExecutor {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
-                equality_delete_files: vec![],
+            equality_delete_files: vec![],
         };
         catalog.commit_snapshot(table, snapshot).await?;
 
@@ -602,7 +604,7 @@ impl CompactionExecutor {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
-                equality_delete_files: vec![],
+            equality_delete_files: vec![],
         };
         catalog.commit_snapshot(table, snapshot).await?;
 
@@ -789,9 +791,16 @@ mod tests {
                 path: "c.parquet".into(),
                 record_count: 1,
                 file_size_bytes: 300,
-                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
-                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
-                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
@@ -800,9 +809,16 @@ mod tests {
                 path: "a.parquet".into(),
                 record_count: 1,
                 file_size_bytes: 100,
-                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
-                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
-                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
@@ -811,9 +827,16 @@ mod tests {
                 path: "b.parquet".into(),
                 record_count: 1,
                 file_size_bytes: 200,
-                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
-                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
-                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
@@ -851,9 +874,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        partition_column_type: None,
-                partition_fields: vec![],
-};
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let embs_a: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
@@ -960,9 +983,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        partition_column_type: None,
-                partition_fields: vec![],
-};
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
 
@@ -982,10 +1005,7 @@ mod tests {
         .unwrap();
 
         // Small file: 2 rows.
-        let embs_small: Vec<Vec<f32>> = vec![
-            vec![0.0, 0.0, 0.0, 1.0],
-            vec![0.5, 0.5, 0.5, 0.5],
-        ];
+        let embs_small: Vec<Vec<f32>> = vec![vec![0.0, 0.0, 0.0, 1.0], vec![0.5, 0.5, 0.5, 0.5]];
         let batch_small = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int32Array::from(vec![6i32, 7]))],
@@ -1111,19 +1131,16 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        partition_column_type: None,
-                partition_fields: vec![],
-};
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
 
         // Two equal-sized files (50/50 split — no dominant, both below 40% threshold).
         let make_batch = |ids: Vec<i32>, embs: Vec<Vec<f32>>| {
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![Arc::new(Int32Array::from(ids))],
-            )
-            .unwrap();
+            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(ids))])
+                .unwrap();
             AilakeFileWriter::new(policy.clone())
                 .write(&batch, &embs)
                 .unwrap()
@@ -1142,9 +1159,16 @@ mod tests {
                 path: "data/a.parquet".into(),
                 record_count: 2,
                 file_size_bytes: bytes_a.len() as u64,
-                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
-                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
-                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
@@ -1153,9 +1177,16 @@ mod tests {
                 path: "data/b.parquet".into(),
                 record_count: 2,
                 file_size_bytes: bytes_b.len() as u64,
-                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
-                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
-                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
@@ -1211,9 +1242,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        partition_column_type: None,
-                partition_fields: vec![],
-};
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
 
         use ailake_catalog::TableProperties;
         catalog
@@ -1257,9 +1288,16 @@ mod tests {
                 path: "data/a.parquet".into(),
                 record_count: 2,
                 file_size_bytes: bytes_a.len() as u64,
-                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
-                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
-                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
@@ -1268,9 +1306,16 @@ mod tests {
                 path: "data/b.parquet".into(),
                 record_count: 2,
                 file_size_bytes: bytes_b.len() as u64,
-                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
-                vector_column: None, vector_dim: None, extra_vector_indexes: vec![],
-                index_status: IndexStatus::Ready, batch_id: None, embedding_model: None,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,

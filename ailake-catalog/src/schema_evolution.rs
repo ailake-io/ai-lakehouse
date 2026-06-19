@@ -56,7 +56,11 @@ impl SchemaEvolution {
         self
     }
 
-    pub fn rename_column(mut self, old_name: impl Into<String>, new_name: impl Into<String>) -> Self {
+    pub fn rename_column(
+        mut self,
+        old_name: impl Into<String>,
+        new_name: impl Into<String>,
+    ) -> Self {
         self.renames.push(RenameColumnRequest {
             old_name: old_name.into(),
             new_name: new_name.into(),

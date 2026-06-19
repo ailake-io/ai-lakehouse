@@ -22,9 +22,9 @@ fn make_policy(dim: u32) -> VectorStoragePolicy {
         modality: None,
         partition_by: None,
         partition_value: None,
-    partition_column_type: None,
+        partition_column_type: None,
         partition_fields: vec![],
-}
+    }
 }
 
 #[test]

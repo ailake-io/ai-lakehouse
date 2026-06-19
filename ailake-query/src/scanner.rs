@@ -139,7 +139,10 @@ impl SearchConfig {
         self
     }
 
-    pub fn with_score_fn(mut self, f: impl Fn(f32, &RecordBatch) -> f32 + Send + Sync + 'static) -> Self {
+    pub fn with_score_fn(
+        mut self,
+        f: impl Fn(f32, &RecordBatch) -> f32 + Send + Sync + 'static,
+    ) -> Self {
         self.score_fn = Some(ScoreFn::new(f));
         self
     }
@@ -375,7 +378,10 @@ pub async fn search(
             let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
             for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
                 // Skip rows marked as deleted by a V3 Deletion Vector.
-                if dv_bitmap.as_ref().map_or(false, |bm| bm.contains(row_id.as_u64() as u32)) {
+                if dv_bitmap
+                    .as_ref()
+                    .map_or(false, |bm| bm.contains(row_id.as_u64() as u32))
+                {
                     continue;
                 }
                 // Phase H: skip rows matched by an equality delete predicate.
@@ -415,7 +421,10 @@ pub async fn search(
 
         for (row_id, approx_dist) in local_results {
             // Skip rows marked as deleted by a V3 Deletion Vector.
-            if dv_bitmap.as_ref().map_or(false, |bm| bm.contains(row_id.as_u64() as u32)) {
+            if dv_bitmap
+                .as_ref()
+                .map_or(false, |bm| bm.contains(row_id.as_u64() as u32))
+            {
                 continue;
             }
             let idx = row_id.as_u64() as usize;
@@ -488,7 +497,7 @@ pub async fn search(
             bm25_rank_of[*orig_idx] = rank;
         }
 
-        use crate::bm25::{HybridFusion, linear_score, rrf_score};
+        use crate::bm25::{linear_score, rrf_score, HybridFusion};
 
         let fused: Vec<f32> = match h.fusion {
             HybridFusion::Rrf => vec_ranks
@@ -497,22 +506,43 @@ pub async fn search(
                 .map(|(i, &vr)| rrf_score(vr, bm25_rank_of[i], h.bm25_weight))
                 .collect(),
             HybridFusion::Linear => {
-                let min_d = raw_candidates.iter().map(|r| r.1).fold(f32::INFINITY, f32::min);
-                let max_d = raw_candidates.iter().map(|r| r.1).fold(f32::NEG_INFINITY, f32::max);
+                let min_d = raw_candidates
+                    .iter()
+                    .map(|r| r.1)
+                    .fold(f32::INFINITY, f32::min);
+                let max_d = raw_candidates
+                    .iter()
+                    .map(|r| r.1)
+                    .fold(f32::NEG_INFINITY, f32::max);
                 let min_b = bm25_scores.iter().copied().fold(f32::INFINITY, f32::min);
-                let max_b = bm25_scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let max_b = bm25_scores
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
                 raw_candidates
                     .iter()
                     .enumerate()
                     .map(|(i, r)| {
-                        linear_score(r.1, min_d, max_d, bm25_scores[i], min_b, max_b, h.bm25_weight)
+                        linear_score(
+                            r.1,
+                            min_d,
+                            max_d,
+                            bm25_scores[i],
+                            min_b,
+                            max_b,
+                            h.bm25_weight,
+                        )
                     })
                     .collect()
             }
         };
 
         for (i, (row_id, _, file_path, _)) in raw_candidates.into_iter().enumerate() {
-            all_results.push(SearchResult { row_id, distance: fused[i], file_path });
+            all_results.push(SearchResult {
+                row_id,
+                distance: fused[i],
+                file_path,
+            });
         }
 
         // For RRF: lower (more negative) = better; for Linear: lower = better. Same convention.
@@ -1092,8 +1122,7 @@ pub async fn search_text(
         .map(String::as_str)
         .unwrap_or(crate::bm25::BM25_STATS_FILE);
     let stats = match store.get(stats_path).await {
-        Ok(bytes) => crate::bm25::IdfStats::from_bytes(&bytes)
-            .unwrap_or_default(),
+        Ok(bytes) => crate::bm25::IdfStats::from_bytes(&bytes).unwrap_or_default(),
         Err(_) => {
             debug!(
                 "ailake: BM25 stats not found at '{}' — using empty corpus IDF",
@@ -1354,9 +1383,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        partition_column_type: None,
-                partition_fields: vec![],
-}
+            partition_column_type: None,
+            partition_fields: vec![],
+        }
     }
 
     async fn write_demo_table(dir: &TempDir, dim: usize, rows: usize) {
@@ -1629,9 +1658,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        partition_column_type: None,
-                partition_fields: vec![],
-};
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
 
         let mut writer = crate::TableWriter::create_or_open(
             catalog.clone(),

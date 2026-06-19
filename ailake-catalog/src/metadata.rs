@@ -61,7 +61,11 @@ pub struct IcebergMetadata {
     /// Partition statistics files (Parquet). Written for partitioned tables on every commit.
     /// Referenced under `"partition-statistics"` in metadata.json (Iceberg spec §3.6).
     /// Enables Spark/Trino to do partition-level aggregations without scanning data files.
-    #[serde(rename = "partition-statistics", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "partition-statistics",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub partition_statistics: Vec<IcebergPartitionStatsRef>,
 }
 
@@ -79,7 +83,11 @@ pub struct IcebergStatisticsRef {
     pub file_footer_size_in_bytes: u64,
     /// Blob descriptors within the Puffin file. May be empty — readers can
     /// always parse the Puffin footer directly for full blob metadata.
-    #[serde(rename = "blob-file-references", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "blob-file-references",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub blob_file_references: Vec<BlobRef>,
 }
 
@@ -347,14 +355,10 @@ impl IcebergMetadata {
                             Value::String(s) => s.clone(),
                             other => other.to_string(),
                         };
-                        let initial_default = f
-                            .get("initial-default")
-                            .filter(|v| !v.is_null())
-                            .cloned();
-                        let write_default = f
-                            .get("write-default")
-                            .filter(|v| !v.is_null())
-                            .cloned();
+                        let initial_default =
+                            f.get("initial-default").filter(|v| !v.is_null()).cloned();
+                        let write_default =
+                            f.get("write-default").filter(|v| !v.is_null()).cloned();
                         Some(crate::provider::SchemaField {
                             id,
                             name,
@@ -390,7 +394,13 @@ impl IcebergMetadata {
                             .find(|sf| sf.id == source_id)
                             .map(|sf| sf.iceberg_type.clone())
                             .unwrap_or_else(|| "string".to_string());
-                        Some(PartitionField { source_id, field_id, name, transform, source_type })
+                        Some(PartitionField {
+                            source_id,
+                            field_id,
+                            name,
+                            transform,
+                            source_type,
+                        })
                     })
                     .collect();
                 if fields.is_empty() {
@@ -443,8 +453,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
             partition_column_type: None,
-                partition_fields: vec![],
-}
+            partition_fields: vec![],
+        }
     }
 
     #[test]

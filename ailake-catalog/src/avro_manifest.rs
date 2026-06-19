@@ -197,10 +197,10 @@ pub fn write_manifest_file(
         encode_int(0, &mut rec); // content=DATA
         encode_string(&f.path, &mut rec); // file_path
         encode_string("PARQUET", &mut rec); // file_format
-        // partition r102: encode native partition values when spec is active;
-        // empty record (0 bytes) for unpartitioned tables.
-        // For multi-column specs, partition_value is \x1f-separated; each field
-        // gets its own union slot in the Avro record.
+                                            // partition r102: encode native partition values when spec is active;
+                                            // empty record (0 bytes) for unpartitioned tables.
+                                            // For multi-column specs, partition_value is \x1f-separated; each field
+                                            // gets its own union slot in the Avro record.
         if let Some(spec) = partition_spec {
             if !spec.fields.is_empty() {
                 let raw = f.partition_value.as_deref().unwrap_or("");
@@ -420,12 +420,14 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                                 let vals: Vec<String> = parts
                                     .iter()
                                     .filter_map(|(_, pv)| match pv {
-                                        Value::Union(idx, inner) if *idx > 0 => match inner.as_ref() {
-                                            Value::String(s) => Some(s.clone()),
-                                            Value::Int(n) => Some(n.to_string()),
-                                            Value::Long(n) => Some(n.to_string()),
-                                            _ => None,
-                                        },
+                                        Value::Union(idx, inner) if *idx > 0 => {
+                                            match inner.as_ref() {
+                                                Value::String(s) => Some(s.clone()),
+                                                Value::Int(n) => Some(n.to_string()),
+                                                Value::Long(n) => Some(n.to_string()),
+                                                _ => None,
+                                            }
+                                        }
                                         Value::String(s) => Some(s.clone()),
                                         Value::Int(n) => Some(n.to_string()),
                                         Value::Long(n) => Some(n.to_string()),
@@ -522,9 +524,7 @@ struct AilakeEntryExt {
 fn parse_v3_deletion_vector(
     df_fields: &[(String, Value)],
 ) -> Option<crate::provider::DeletionVector> {
-    let dv_val = df_fields
-        .iter()
-        .find(|(k, _)| k == "deletion_vector")?;
+    let dv_val = df_fields.iter().find(|(k, _)| k == "deletion_vector")?;
 
     let dv_record = match &dv_val.1 {
         Value::Union(_, inner) => {
@@ -542,13 +542,25 @@ fn parse_v3_deletion_vector(
         dv_record
             .iter()
             .find(|(k, _)| k == name)
-            .and_then(|(_, v)| if let Value::String(s) = v { Some(s.clone()) } else { None })
+            .and_then(|(_, v)| {
+                if let Value::String(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
     };
     let get_long = |name: &str| {
         dv_record
             .iter()
             .find(|(k, _)| k == name)
-            .and_then(|(_, v)| if let Value::Long(n) = v { Some(*n) } else { None })
+            .and_then(|(_, v)| {
+                if let Value::Long(n) = v {
+                    Some(*n)
+                } else {
+                    None
+                }
+            })
     };
 
     let path = get_str("path")?;
@@ -556,7 +568,12 @@ fn parse_v3_deletion_vector(
     let length = get_long("length")? as u64;
     let cardinality = get_long("cardinality").unwrap_or(-1);
 
-    Some(crate::provider::DeletionVector { path, offset, length, cardinality })
+    Some(crate::provider::DeletionVector {
+        path,
+        offset,
+        length,
+        cardinality,
+    })
 }
 
 /// Extract V3 `first_row_id` from the native Avro `data_file.first_row_id` field.
@@ -567,7 +584,11 @@ fn parse_v3_first_row_id(df_fields: &[(String, Value)]) -> Option<i64> {
         .find(|(k, _)| k == "first_row_id")
         .and_then(|(_, v)| match v {
             Value::Union(_, inner) => {
-                if let Value::Long(n) = inner.as_ref() { Some(*n) } else { None }
+                if let Value::Long(n) = inner.as_ref() {
+                    Some(*n)
+                } else {
+                    None
+                }
             }
             Value::Long(n) => Some(*n),
             _ => None,
@@ -596,12 +617,22 @@ pub fn read_manifest_list_typed(data: &[u8]) -> apache_avro::AvroResult<Vec<(Str
                 .iter()
                 .find(|(k, _)| k == "manifest_path")
                 .and_then(|(_, v)| {
-                    if let Value::String(s) = v { Some(s.clone()) } else { None }
+                    if let Value::String(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
                 });
             let content: i32 = fields
                 .iter()
                 .find(|(k, _)| k == "content")
-                .and_then(|(_, v)| if let Value::Int(n) = v { Some(*n) } else { None })
+                .and_then(|(_, v)| {
+                    if let Value::Int(n) = v {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or(0);
             if let Some(p) = path {
                 results.push((p, content));
@@ -673,11 +704,11 @@ pub fn write_equality_delete_manifest(
         encode_union_long(1, snapshot_id, &mut rec); // snapshot_id
         encode_union_long(1, sequence_number, &mut rec); // sequence_number
         encode_union_long(1, sequence_number, &mut rec); // file_sequence_number
-        // data_file record
+                                                         // data_file record
         encode_int(2, &mut rec); // content=EQUALITY_DELETES
         encode_string(&d.path, &mut rec); // file_path
         encode_string("AVRO", &mut rec); // file_format
-        // partition r102: empty record → 0 bytes
+                                         // partition r102: empty record → 0 bytes
         encode_long(d.record_count as i64, &mut rec); // record_count
         encode_long(d.file_size_bytes as i64, &mut rec); // file_size_in_bytes
         encode_union_null(&mut rec); // column_sizes
@@ -688,7 +719,7 @@ pub fn write_equality_delete_manifest(
         encode_union_null(&mut rec); // upper_bounds
         encode_union_null(&mut rec); // key_metadata
         encode_union_null(&mut rec); // split_offsets
-        // equality_ids: union index 1 (array) + zigzag-encoded array of ints
+                                     // equality_ids: union index 1 (array) + zigzag-encoded array of ints
         encode_long(1, &mut rec); // union: non-null array
         encode_long(d.equality_ids.len() as i64, &mut rec); // block count
         for &id in &d.equality_ids {
@@ -728,12 +759,21 @@ pub fn read_equality_delete_manifest(
     for value in reader {
         let value = value?;
         if let Value::Record(fields) = value {
-            let data_file = fields.iter().find(|(k, _)| k == "data_file").map(|(_, v)| v);
+            let data_file = fields
+                .iter()
+                .find(|(k, _)| k == "data_file")
+                .map(|(_, v)| v);
             if let Some(Value::Record(df_fields)) = data_file {
                 let content: i32 = df_fields
                     .iter()
                     .find(|(k, _)| k == "content")
-                    .and_then(|(_, v)| if let Value::Int(n) = v { Some(*n) } else { None })
+                    .and_then(|(_, v)| {
+                        if let Value::Int(n) = v {
+                            Some(*n)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(0);
                 if content != 2 {
                     continue;
@@ -741,16 +781,34 @@ pub fn read_equality_delete_manifest(
                 let path = df_fields
                     .iter()
                     .find(|(k, _)| k == "file_path")
-                    .and_then(|(_, v)| if let Value::String(s) = v { Some(s.clone()) } else { None });
+                    .and_then(|(_, v)| {
+                        if let Value::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    });
                 let record_count = df_fields
                     .iter()
                     .find(|(k, _)| k == "record_count")
-                    .and_then(|(_, v)| if let Value::Long(n) = v { Some(*n as u64) } else { None })
+                    .and_then(|(_, v)| {
+                        if let Value::Long(n) = v {
+                            Some(*n as u64)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(0);
                 let file_size_bytes = df_fields
                     .iter()
                     .find(|(k, _)| k == "file_size_in_bytes")
-                    .and_then(|(_, v)| if let Value::Long(n) = v { Some(*n as u64) } else { None })
+                    .and_then(|(_, v)| {
+                        if let Value::Long(n) = v {
+                            Some(*n as u64)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(0);
                 let equality_ids = df_fields
                     .iter()
@@ -758,18 +816,32 @@ pub fn read_equality_delete_manifest(
                     .and_then(|(_, v)| match v {
                         Value::Union(_, inner) => {
                             if let Value::Array(arr) = inner.as_ref() {
-                                Some(arr.iter().filter_map(|item| {
-                                    if let Value::Int(n) = item { Some(*n) } else { None }
-                                }).collect())
+                                Some(
+                                    arr.iter()
+                                        .filter_map(|item| {
+                                            if let Value::Int(n) = item {
+                                                Some(*n)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect(),
+                                )
                             } else {
                                 None
                             }
                         }
-                        Value::Array(arr) => {
-                            Some(arr.iter().filter_map(|item| {
-                                if let Value::Int(n) = item { Some(*n) } else { None }
-                            }).collect())
-                        }
+                        Value::Array(arr) => Some(
+                            arr.iter()
+                                .filter_map(|item| {
+                                    if let Value::Int(n) = item {
+                                        Some(*n)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect(),
+                        ),
                         _ => None,
                     })
                     .unwrap_or_default();
@@ -814,10 +886,22 @@ pub fn write_equality_delete_avro(
     for val in values {
         use apache_avro::types::Value as AV;
         let avro_val = match avro_type {
-            "int" => val.parse::<i32>().map(AV::Int).unwrap_or(AV::String(val.to_string())),
-            "long" => val.parse::<i64>().map(AV::Long).unwrap_or(AV::String(val.to_string())),
-            "float" => val.parse::<f32>().map(AV::Float).unwrap_or(AV::String(val.to_string())),
-            "double" => val.parse::<f64>().map(AV::Double).unwrap_or(AV::String(val.to_string())),
+            "int" => val
+                .parse::<i32>()
+                .map(AV::Int)
+                .unwrap_or(AV::String(val.to_string())),
+            "long" => val
+                .parse::<i64>()
+                .map(AV::Long)
+                .unwrap_or(AV::String(val.to_string())),
+            "float" => val
+                .parse::<f32>()
+                .map(AV::Float)
+                .unwrap_or(AV::String(val.to_string())),
+            "double" => val
+                .parse::<f64>()
+                .map(AV::Double)
+                .unwrap_or(AV::String(val.to_string())),
             _ => AV::String(val.to_string()),
         };
         let record = AV::Record(vec![(col_name.to_string(), avro_val)]);
@@ -919,7 +1003,11 @@ pub fn write_partition_stats_parquet(
 
     for (key, (rc, fc, ts)) in &sorted {
         // Empty string = null partition (files with no partition value).
-        part_vals.push(if key.is_empty() { None } else { Some(key.as_str()) });
+        part_vals.push(if key.is_empty() {
+            None
+        } else {
+            Some(key.as_str())
+        });
         record_counts.push(*rc);
         file_counts.push(*fc);
         total_sizes.push(*ts);
@@ -1126,8 +1214,7 @@ mod tests {
             ("metadata/m0-eq-del.avro".to_string(), 256i64, 1i32),
         ];
         let bytes = write_manifest_list_multi_typed(&manifests, 99, 1, 10);
-        let typed =
-            read_manifest_list_typed(&bytes).expect("read_manifest_list_typed failed");
+        let typed = read_manifest_list_typed(&bytes).expect("read_manifest_list_typed failed");
         assert_eq!(typed.len(), 2);
         assert_eq!(typed[0].0, "metadata/m0.avro");
         assert_eq!(typed[0].1, 0); // data
@@ -1180,10 +1267,7 @@ mod tests {
         let entries = read_manifest_file(&bytes).expect("partition roundtrip failed");
         assert_eq!(entries.len(), 1);
         // Native partition value must be read back correctly.
-        assert_eq!(
-            entries[0].partition_value.as_deref(),
-            Some("agent-abc-123")
-        );
+        assert_eq!(entries[0].partition_value.as_deref(), Some("agent-abc-123"));
     }
 
     #[test]
@@ -1364,12 +1448,9 @@ mod tests {
 
         // Read back with parquet crate and verify row count.
         use parquet::file::reader::{FileReader, SerializedFileReader};
-        let reader = SerializedFileReader::new(bytes::Bytes::from(bytes.to_vec()))
-            .expect("valid parquet");
-        let row_count: usize = reader
-            .get_row_iter(None)
-            .expect("iter")
-            .count();
+        let reader =
+            SerializedFileReader::new(bytes::Bytes::from(bytes.to_vec())).expect("valid parquet");
+        let row_count: usize = reader.get_row_iter(None).expect("iter").count();
         // 2 distinct partition values → 2 rows
         assert_eq!(row_count, 2, "expected one row per partition value");
     }
@@ -1392,8 +1473,8 @@ mod tests {
         assert!(!bytes.is_empty());
 
         use parquet::file::reader::{FileReader, SerializedFileReader};
-        let reader = SerializedFileReader::new(bytes::Bytes::from(bytes.to_vec()))
-            .expect("valid parquet");
+        let reader =
+            SerializedFileReader::new(bytes::Bytes::from(bytes.to_vec())).expect("valid parquet");
         let row_count = reader.get_row_iter(None).expect("iter").count();
         assert_eq!(row_count, 0);
     }
@@ -1420,8 +1501,8 @@ mod tests {
 
         use parquet::file::reader::{FileReader, SerializedFileReader};
         use parquet::record::RowAccessor;
-        let reader = SerializedFileReader::new(bytes::Bytes::from(bytes.to_vec()))
-            .expect("valid parquet");
+        let reader =
+            SerializedFileReader::new(bytes::Bytes::from(bytes.to_vec())).expect("valid parquet");
 
         let mut rc_us = 0i64;
         let mut rc_eu = 0i64;

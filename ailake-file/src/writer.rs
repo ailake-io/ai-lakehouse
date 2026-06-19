@@ -122,18 +122,19 @@ impl AilakeFileWriter {
         let kv_refs: &[(&str, &str)] = &[("ailake.footer_offset", kv_val.as_str())];
 
         // Pass 2: write Parquet with AILK offset KV embedded.
-        let (parquet_v2, _) =
-            parquet_writer.write_batch_with_kv(batch, embeddings, kv_refs)?;
-        let footer_start_v2 = parquet_footer_start(&parquet_v2)
-            .map_err(|e| AilakeError::Parquet(format!("footer_start unstable in write_with_prebuilt_hnsw: {e}")))?;
+        let (parquet_v2, _) = parquet_writer.write_batch_with_kv(batch, embeddings, kv_refs)?;
+        let footer_start_v2 = parquet_footer_start(&parquet_v2).map_err(|e| {
+            AilakeError::Parquet(format!(
+                "footer_start unstable in write_with_prebuilt_hnsw: {e}"
+            ))
+        })?;
         debug_assert_eq!(
             footer_start, footer_start_v2,
             "footer_start must be stable across KV injection"
         );
 
         let footer_len_v2 = parquet_v2.len() - footer_start_v2;
-        let mut out =
-            BytesMut::with_capacity(footer_start + ailk_section.len() + footer_len_v2);
+        let mut out = BytesMut::with_capacity(footer_start + ailk_section.len() + footer_len_v2);
         out.put_slice(&parquet_v1[..footer_start]);
         drop(parquet_v1);
         out.put(ailk_section);
@@ -548,8 +549,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
             partition_column_type: None,
-                partition_fields: vec![],
-}
+            partition_fields: vec![],
+        }
     }
 
     #[test]
@@ -576,10 +577,9 @@ mod tests {
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let batch =
-            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![10, 20, 30]))]).unwrap();
-        let embs: Vec<Vec<f32>> = (0..3)
-            .map(|i| vec![i as f32, 0.0, 0.0, 0.0])
-            .collect();
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![10, 20, 30]))])
+                .unwrap();
+        let embs: Vec<Vec<f32>> = (0..3).map(|i| vec![i as f32, 0.0, 0.0, 0.0]).collect();
 
         let writer = AilakeFileWriter::new(make_policy(4));
         let file_bytes = writer.write_single_pass(&batch, &embs).unwrap();
@@ -679,8 +679,8 @@ mod tests {
             partition_by: None,
             partition_value: None,
             partition_column_type: None,
-                partition_fields: vec![],
-};
+            partition_fields: vec![],
+        };
 
         let writer = AilakeFileWriter::new(policy1.clone());
         let file = writer

@@ -122,7 +122,10 @@ mod tests {
             bf.insert(t);
         }
         for t in &terms {
-            assert!(bf.may_contain(t), "term '{t}' should be found after insertion");
+            assert!(
+                bf.may_contain(t),
+                "term '{t}' should be found after insertion"
+            );
         }
     }
 
@@ -163,6 +166,9 @@ mod tests {
     fn definitely_absent_term_returns_false() {
         let bf = BloomFilter::with_capacity(64, 0.001);
         // Never inserted anything — every term must be absent.
-        assert!(!bf.may_contain("anything"), "empty filter must return false for all terms");
+        assert!(
+            !bf.may_contain("anything"),
+            "empty filter must return false for all terms"
+        );
     }
 }

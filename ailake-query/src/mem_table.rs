@@ -364,9 +364,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        partition_column_type: None,
-                partition_fields: vec![],
-}
+            partition_column_type: None,
+            partition_fields: vec![],
+        }
     }
 
     fn make_batch(ids: &[i32]) -> RecordBatch {
@@ -493,7 +493,7 @@ mod tests {
     fn working_memory_search_ranks_similar_first() {
         let mut wm = WorkingMemoryBuffer::new(10);
         wm.push("near", vec![1.0, 0.0, 0.0], 1.0);
-        wm.push("far",  vec![0.0, 1.0, 0.0], 1.0);
+        wm.push("far", vec![0.0, 1.0, 0.0], 1.0);
         wm.push("very far", vec![0.0, 0.0, 1.0], 1.0);
 
         let query = vec![1.0, 0.0, 0.0];
@@ -532,9 +532,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        partition_column_type: None,
-                partition_fields: vec![],
-};
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
         catalog
             .create_table(
                 &table,

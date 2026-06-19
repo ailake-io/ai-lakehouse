@@ -35,7 +35,10 @@ impl EqualityDeleteFilter {
     ///
     /// For each file, downloads the Avro payload from `store` and extracts
     /// `(column_name, value)` pairs. All files are merged into one filter.
-    pub async fn from_files(store: &Arc<dyn Store>, files: &[EqualityDeleteFile]) -> AilakeResult<Self> {
+    pub async fn from_files(
+        store: &Arc<dyn Store>,
+        files: &[EqualityDeleteFile],
+    ) -> AilakeResult<Self> {
         let mut filters: HashMap<String, HashSet<String>> = HashMap::new();
         for edf in files {
             let bytes = store.get(&edf.path).await?;
@@ -49,7 +52,9 @@ impl EqualityDeleteFilter {
     }
 
     pub fn empty() -> Self {
-        Self { filters: HashMap::new() }
+        Self {
+            filters: HashMap::new(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -140,36 +145,48 @@ impl EqualityDeleteFilter {
                     continue; // null never matches a delete predicate
                 }
                 let val_str: Option<String> = match dtype {
-                    DataType::Utf8 => {
-                        Some(array.as_any().downcast_ref::<StringArray>()
+                    DataType::Utf8 => Some(
+                        array
+                            .as_any()
+                            .downcast_ref::<StringArray>()
                             .map(|a| a.value(i).to_string())
-                            .unwrap_or_default())
-                    }
-                    DataType::LargeUtf8 => {
-                        Some(array.as_any().downcast_ref::<arrow_array::LargeStringArray>()
+                            .unwrap_or_default(),
+                    ),
+                    DataType::LargeUtf8 => Some(
+                        array
+                            .as_any()
+                            .downcast_ref::<arrow_array::LargeStringArray>()
                             .map(|a| a.value(i).to_string())
-                            .unwrap_or_default())
-                    }
-                    DataType::Int32 => {
-                        Some(array.as_any().downcast_ref::<Int32Array>()
+                            .unwrap_or_default(),
+                    ),
+                    DataType::Int32 => Some(
+                        array
+                            .as_any()
+                            .downcast_ref::<Int32Array>()
                             .map(|a| a.value(i).to_string())
-                            .unwrap_or_default())
-                    }
-                    DataType::Int64 => {
-                        Some(array.as_any().downcast_ref::<Int64Array>()
+                            .unwrap_or_default(),
+                    ),
+                    DataType::Int64 => Some(
+                        array
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
                             .map(|a| a.value(i).to_string())
-                            .unwrap_or_default())
-                    }
-                    DataType::Float32 => {
-                        Some(array.as_any().downcast_ref::<Float32Array>()
+                            .unwrap_or_default(),
+                    ),
+                    DataType::Float32 => Some(
+                        array
+                            .as_any()
+                            .downcast_ref::<Float32Array>()
                             .map(|a| a.value(i).to_string())
-                            .unwrap_or_default())
-                    }
-                    DataType::Float64 => {
-                        Some(array.as_any().downcast_ref::<Float64Array>()
+                            .unwrap_or_default(),
+                    ),
+                    DataType::Float64 => Some(
+                        array
+                            .as_any()
+                            .downcast_ref::<Float64Array>()
                             .map(|a| a.value(i).to_string())
-                            .unwrap_or_default())
-                    }
+                            .unwrap_or_default(),
+                    ),
                     _ => None,
                 };
                 if let Some(s) = val_str {
@@ -231,7 +248,11 @@ mod tests {
         let f = filter_with(filters);
         let result = f.apply(make_batch()).unwrap();
         assert_eq!(result.num_rows(), 3);
-        let ids = result.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let ids = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(ids.value(0), "doc-a");
         assert_eq!(ids.value(1), "doc-c");
         assert_eq!(ids.value(2), "doc-d");
@@ -247,7 +268,11 @@ mod tests {
         let f = filter_with(filters);
         let result = f.apply(make_batch()).unwrap();
         assert_eq!(result.num_rows(), 2);
-        let ids = result.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let ids = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(ids.value(0), "doc-b");
         assert_eq!(ids.value(1), "doc-d");
     }
@@ -268,7 +293,11 @@ mod tests {
         let f = filter_with(filters);
         let result = f.apply(make_batch()).unwrap();
         assert_eq!(result.num_rows(), 2);
-        let ids = result.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let ids = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(ids.value(0), "doc-a");
         assert_eq!(ids.value(1), "doc-c");
     }

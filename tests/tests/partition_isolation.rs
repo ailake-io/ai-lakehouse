@@ -33,7 +33,7 @@ fn policy(partition_by: Option<String>, partition_value: Option<String>) -> Vect
         partition_value,
         partition_column_type: None,
         partition_fields: vec![],
-}
+    }
 }
 
 async fn write_agent_shard(
@@ -48,11 +48,7 @@ async fn write_agent_shard(
     use arrow_schema::{DataType, Field, Schema};
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
     let ids: Vec<i32> = (0..embs.len() as i32).collect();
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![Arc::new(Int32Array::from(ids))],
-    )
-    .unwrap();
+    let batch = RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(ids))]).unwrap();
 
     let mut writer = TableWriter::create_or_open(
         Arc::clone(&catalog) as Arc<dyn ailake_catalog::CatalogProvider>,
@@ -93,8 +89,22 @@ async fn partition_filter_isolates_per_agent_search() {
     center_b[1] = 1.0;
     let embs_b = fixtures::cluster_around(&center_b, dim, 50, 0.05);
 
-    write_agent_shard(Arc::clone(&catalog), Arc::clone(&store), &table, "agent-A", embs_a.clone()).await;
-    write_agent_shard(Arc::clone(&catalog), Arc::clone(&store), &table, "agent-B", embs_b).await;
+    write_agent_shard(
+        Arc::clone(&catalog),
+        Arc::clone(&store),
+        &table,
+        "agent-A",
+        embs_a.clone(),
+    )
+    .await;
+    write_agent_shard(
+        Arc::clone(&catalog),
+        Arc::clone(&store),
+        &table,
+        "agent-B",
+        embs_b,
+    )
+    .await;
 
     // Query is agent-A's center vector.
     let query = center_a.clone();
@@ -120,7 +130,10 @@ async fn partition_filter_isolates_per_agent_search() {
     .await
     .unwrap();
 
-    assert!(!results_a.is_empty(), "agent-A search should return results");
+    assert!(
+        !results_a.is_empty(),
+        "agent-A search should return results"
+    );
     assert!(
         results_a[0].distance < 0.2,
         "top-1 for agent-A partition should be near center_a, got dist {}",
@@ -175,7 +188,14 @@ async fn partition_filter_nonexistent_returns_empty() {
     let mut center = vec![0.0f32; dim];
     center[0] = 1.0;
     let embs = fixtures::cluster_around(&center, dim, 10, 0.05);
-    write_agent_shard(Arc::clone(&catalog), Arc::clone(&store), &table, "agent-A", embs).await;
+    write_agent_shard(
+        Arc::clone(&catalog),
+        Arc::clone(&store),
+        &table,
+        "agent-A",
+        embs,
+    )
+    .await;
 
     let results = search(
         &table,
@@ -220,7 +240,14 @@ async fn unfiltered_search_spans_all_partitions() {
         let mut center = vec![0.0f32; dim];
         center[i] = 1.0;
         let embs = fixtures::cluster_around(&center, dim, 30, 0.05);
-        write_agent_shard(Arc::clone(&catalog), Arc::clone(&store), &table, agent, embs).await;
+        write_agent_shard(
+            Arc::clone(&catalog),
+            Arc::clone(&store),
+            &table,
+            agent,
+            embs,
+        )
+        .await;
     }
 
     // Query near agent-X's cluster center
@@ -252,7 +279,10 @@ async fn unfiltered_search_spans_all_partitions() {
     let results_x = search(
         &table,
         &query,
-        SearchConfig { partition_filter: Some("agent-X".to_string()), ..base_cfg },
+        SearchConfig {
+            partition_filter: Some("agent-X".to_string()),
+            ..base_cfg
+        },
         "embedding",
         dim as u32,
         Arc::clone(&catalog) as Arc<dyn ailake_catalog::CatalogProvider>,
@@ -374,7 +404,10 @@ async fn score_fn_constant_zero_returns_rows() {
     .await
     .unwrap();
 
-    assert!(!results.is_empty(), "expected results with constant score_fn");
+    assert!(
+        !results.is_empty(),
+        "expected results with constant score_fn"
+    );
     for r in &results {
         assert!(
             (r.distance - 0.0f32).abs() < 1e-6,

@@ -505,8 +505,7 @@ impl HnswIndex {
             VectorMetric::DotProduct => self.search_typed::<DotProductDist>(query, top_k, ef),
             VectorMetric::NormalizedCosine => {
                 let q_norm = normalize_l2(query);
-                let mut results =
-                    self.search_typed::<NormalizedCosineDist>(&q_norm, top_k, ef);
+                let mut results = self.search_typed::<NormalizedCosineDist>(&q_norm, top_k, ef);
                 // F16 traversal error (~0.001) can exceed true 1-dot distance
                 // (~0.0002) for very similar unit vectors. Re-score final
                 // candidates with exact F32 to restore correct ranking.
@@ -1144,12 +1143,16 @@ mod tests {
         v1[0] = (1.0f32 - 1e-4).sqrt();
         v1[1] = 1e-2_f32.sqrt();
         let norm1: f32 = v1.iter().map(|x| x * x).sum::<f32>().sqrt();
-        for x in &mut v1 { *x /= norm1; }
+        for x in &mut v1 {
+            *x /= norm1;
+        }
         // v2 = moderately different (1-dot ≈ 0.1)
         v2[0] = 0.9f32.sqrt();
         v2[1] = 0.1f32.sqrt();
         let norm2: f32 = v2.iter().map(|x| x * x).sum::<f32>().sqrt();
-        for x in &mut v2 { *x /= norm2; }
+        for x in &mut v2 {
+            *x /= norm2;
+        }
 
         let mut b = HnswBuilder::new(
             dim as u32,
@@ -1163,13 +1166,24 @@ mod tests {
 
         // Enable F16 in-memory quantization (now allowed for NormalizedCosine).
         idx.quantize_to_f16();
-        assert!(idx.flat_vecs_f16.is_some(), "F16 should be populated for NormalizedCosine");
+        assert!(
+            idx.flat_vecs_f16.is_some(),
+            "F16 should be populated for NormalizedCosine"
+        );
 
         // Query is v0 itself — nearest must be row 0, then row 1.
         let results = idx.search(&v0, 2, 50);
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, RowId::new(0), "nearest to v0 must be v0 (row 0)");
-        assert_eq!(results[1].0, RowId::new(1), "second nearest to v0 must be v1 (row 1)");
+        assert_eq!(
+            results[0].0,
+            RowId::new(0),
+            "nearest to v0 must be v0 (row 0)"
+        );
+        assert_eq!(
+            results[1].0,
+            RowId::new(1),
+            "second nearest to v0 must be v1 (row 1)"
+        );
         // Distances must be sorted ascending.
         assert!(results[0].1 <= results[1].1);
     }
@@ -1191,7 +1205,11 @@ mod tests {
 
         // Search for the newly inserted vector; it should be nearest to itself.
         let results = idx.search(&[0.0, 0.0, 0.9, 0.1], 1, 50);
-        assert_eq!(results[0].0, RowId::new(3), "nearest to inserted vector must be itself");
+        assert_eq!(
+            results[0].0,
+            RowId::new(3),
+            "nearest to inserted vector must be itself"
+        );
 
         // The original top-1 result for [1,0,0,0] must still be row 0.
         let results = idx.search(&[1.0, 0.0, 0.0, 0.0], 1, 50);

@@ -401,9 +401,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                 modality: modality.map(VectorModality::from),
                 partition_by: None,
                 partition_value: None,
-            partition_column_type: None,
-                        partition_fields: vec![],
-};
+                partition_column_type: None,
+                partition_fields: vec![],
+            };
 
             catalog
                 .create_table(
@@ -413,7 +413,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                         extra: std::collections::HashMap::new(),
                         format_version,
                         partition_column_type: None,
-                        },
+                    },
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -467,9 +467,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                     modality: first_modality,
                     partition_by: None,
                     partition_value: None,
-                partition_column_type: None,
-                                partition_fields: vec![],
-};
+                    partition_column_type: None,
+                    partition_fields: vec![],
+                };
                 mv_owned.push((first_policy, first_embs));
 
                 for (col_name, dim, metric, modality) in &col_specs[1..] {
@@ -490,18 +490,23 @@ async fn run(cli: Cli) -> Result<(), String> {
                         modality: *modality,
                         partition_by: None,
                         partition_value: None,
-                    partition_column_type: None,
-                                        partition_fields: vec![],
-};
+                        partition_column_type: None,
+                        partition_fields: vec![],
+                    };
                     mv_owned.push((policy, embs));
                 }
 
                 // Use first policy as the table-level policy for create_or_open.
                 let table_policy = mv_owned[0].0.clone();
-                let mut writer =
-                    TableWriter::create_or_open(catalog, Arc::clone(&store), table_policy, ident, 2)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                let mut writer = TableWriter::create_or_open(
+                    catalog,
+                    Arc::clone(&store),
+                    table_policy,
+                    ident,
+                    2,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
 
                 let batches: Vec<MultiVectorBatch<'_>> = mv_owned
                     .iter()
@@ -531,7 +536,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                     return Err(format!(
                         "embedding column '{}' is empty or contains no vectors in source file",
                         embeddings
-                    ).into());
+                    )
+                    .into());
                 }
 
                 // Load existing policy from catalog, or default to cosine/f16.
@@ -559,9 +565,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                         modality: None,
                         partition_by: None,
                         partition_value: None,
-                    partition_column_type: None,
-                                        partition_fields: vec![],
-},
+                        partition_column_type: None,
+                        partition_fields: vec![],
+                    },
                     Err(_) => VectorStoragePolicy {
                         column_name: embeddings.clone(),
                         dim,
@@ -577,9 +583,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                         modality: None,
                         partition_by: None,
                         partition_value: None,
-                    partition_column_type: None,
-                                        partition_fields: vec![],
-},
+                        partition_column_type: None,
+                        partition_fields: vec![],
+                    },
                 };
 
                 let mut writer =
@@ -731,9 +737,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                 modality: None,
                 partition_by: None,
                 partition_value: None,
-            partition_column_type: None,
-                        partition_fields: vec![],
-};
+                partition_column_type: None,
+                partition_fields: vec![],
+            };
 
             let files = catalog
                 .list_files(&ident, None)
@@ -840,9 +846,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                 modality: None,
                 partition_by: None,
                 partition_value: None,
-            partition_column_type: None,
-                        partition_fields: vec![],
-};
+                partition_column_type: None,
+                partition_fields: vec![],
+            };
             serve::run(
                 catalog as Arc<dyn CatalogProvider>,
                 store,
@@ -1052,7 +1058,10 @@ async fn run(cli: Cli) -> Result<(), String> {
             )
             .await
             .map_err(|e| e.to_string())?;
-            println!("delete-where committed: {} predicates on column '{col}'", values.len());
+            println!(
+                "delete-where committed: {} predicates on column '{col}'",
+                values.len()
+            );
             Ok(())
         }
 

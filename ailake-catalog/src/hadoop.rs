@@ -100,7 +100,13 @@ impl CatalogProvider for HadoopCatalog {
             .partition_column_type
             .as_deref()
             .or(props.policy.partition_column_type.as_deref());
-        let mut meta = IcebergMetadata::new(&location, &props.policy, props.format_version, pct, &props.policy.partition_fields);
+        let mut meta = IcebergMetadata::new(
+            &location,
+            &props.policy,
+            props.format_version,
+            pct,
+            &props.policy.partition_fields,
+        );
         for (k, v) in &props.extra {
             meta.properties.insert(k.clone(), v.clone());
         }
@@ -129,13 +135,10 @@ impl CatalogProvider for HadoopCatalog {
             .find(|s| s["schema-id"].as_i64() == Some(meta.current_schema_id as i64))
             .cloned()
             .unwrap_or_else(|| serde_json::json!({"schema-id":0,"type":"struct","fields":[]}));
-        let table_schema_json = serde_json::to_string(&current_schema).unwrap_or_else(|_| {
-            r#"{"schema-id":0,"type":"struct","fields":[]}"#.to_string()
-        });
-        let partition_spec_json =
-            serde_json::to_string(&meta.partition_specs).unwrap_or_else(|_| {
-                r#"[{"spec-id":0,"fields":[]}]"#.to_string()
-            });
+        let table_schema_json = serde_json::to_string(&current_schema)
+            .unwrap_or_else(|_| r#"{"schema-id":0,"type":"struct","fields":[]}"#.to_string());
+        let partition_spec_json = serde_json::to_string(&meta.partition_specs)
+            .unwrap_or_else(|_| r#"[{"spec-id":0,"fields":[]}]"#.to_string());
 
         // Parse the active partition spec for native partition value encoding.
         let active_partition_spec = meta.to_table_metadata().partition_spec;
@@ -232,12 +235,12 @@ impl CatalogProvider for HadoopCatalog {
             })
             .collect();
         if !abs_eq_deletes.is_empty() {
-            let del_manifest_path =
-                format!("{}/metadata/{}-eq-del.avro", table_root, snap_id);
-            let del_manifest_bytes =
-                write_equality_delete_manifest(&abs_eq_deletes, snap_id, seq);
+            let del_manifest_path = format!("{}/metadata/{}-eq-del.avro", table_root, snap_id);
+            let del_manifest_bytes = write_equality_delete_manifest(&abs_eq_deletes, snap_id, seq);
             let del_manifest_len = del_manifest_bytes.len();
-            self.store.put(&del_manifest_path, del_manifest_bytes).await?;
+            self.store
+                .put(&del_manifest_path, del_manifest_bytes)
+                .await?;
             all_manifests.push((del_manifest_path, del_manifest_len as i64, 1));
         }
 
@@ -309,13 +312,10 @@ impl CatalogProvider for HadoopCatalog {
                     snap_id,
                 ) {
                     Ok(result) => {
-                        let puffin_path =
-                            format!("{table_root}/metadata/stats-{snap_id}.puffin");
+                        let puffin_path = format!("{table_root}/metadata/stats-{snap_id}.puffin");
                         let puffin_len = result.bytes.len() as u64;
                         if let Err(e) = self.store.put(&puffin_path, result.bytes).await {
-                            tracing::warn!(
-                                "ailake: Phase F — failed to write Puffin stats: {e}"
-                            );
+                            tracing::warn!("ailake: Phase F — failed to write Puffin stats: {e}");
                         } else {
                             use crate::metadata::{BlobRef, IcebergStatisticsRef};
                             let mut blob_refs = vec![BlobRef {
@@ -423,8 +423,8 @@ impl CatalogProvider for HadoopCatalog {
 
         // Read Avro manifest list → manifest file paths (content=0 = data manifests only)
         let ml_bytes = self.store.get(&snap.manifest_list).await?;
-        let manifest_entries = read_manifest_list_typed(&ml_bytes)
-            .map_err(|e| AilakeError::Catalog(e.to_string()))?;
+        let manifest_entries =
+            read_manifest_list_typed(&ml_bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
 
         // Read each data manifest file → data file entries (with AI-Lake metadata from key_metadata)
         let mut entries: Vec<DataFileEntry> = Vec::new();
@@ -457,8 +457,8 @@ impl CatalogProvider for HadoopCatalog {
             .ok_or_else(|| AilakeError::Catalog(format!("snapshot {snap_id} not found")))?;
 
         let ml_bytes = self.store.get(&snap.manifest_list).await?;
-        let manifest_entries = read_manifest_list_typed(&ml_bytes)
-            .map_err(|e| AilakeError::Catalog(e.to_string()))?;
+        let manifest_entries =
+            read_manifest_list_typed(&ml_bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
 
         let mut deletes: Vec<EqualityDeleteFile> = Vec::new();
         for (mpath, content) in manifest_entries {
@@ -541,9 +541,7 @@ impl CatalogProvider for HadoopCatalog {
                 "type": add.iceberg_type,
             });
             // Prefer explicit initial_default; fall back to write_default.
-            let init_default = add
-                .initial_default
-                .or_else(|| add.write_default.clone());
+            let init_default = add.initial_default.or_else(|| add.write_default.clone());
             if let Some(ref d) = init_default {
                 field["initial-default"] = d.clone();
             }
@@ -630,8 +628,8 @@ mod tests {
                 partition_by: None,
                 partition_value: None,
                 partition_column_type: None,
-                        partition_fields: vec![],
-},
+                partition_fields: vec![],
+            },
             extra: std::collections::HashMap::new(),
             format_version: 2,
             partition_column_type: None,
@@ -685,7 +683,7 @@ mod tests {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
-                    equality_delete_files: vec![],
+            equality_delete_files: vec![],
         };
         let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
 
@@ -731,7 +729,7 @@ mod tests {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
-                    equality_delete_files: vec![],
+            equality_delete_files: vec![],
         };
         catalog.commit_snapshot(&table, snap1).await.unwrap();
 
@@ -762,18 +760,28 @@ mod tests {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
-                    equality_delete_files: vec![],
+            equality_delete_files: vec![],
         };
         catalog.commit_snapshot(&table, snap2).await.unwrap();
 
         let files = catalog.list_files(&table, None).await.unwrap();
         assert_eq!(files.len(), 2);
         // File 1: first_row_id=0
-        let f1 = files.iter().find(|f| f.path.ends_with("part-00001.parquet")).unwrap();
+        let f1 = files
+            .iter()
+            .find(|f| f.path.ends_with("part-00001.parquet"))
+            .unwrap();
         assert_eq!(f1.first_row_id, Some(0), "first file must start at row 0");
         // File 2: first_row_id=10 (after the 10 rows of file 1)
-        let f2 = files.iter().find(|f| f.path.ends_with("part-00002.parquet")).unwrap();
-        assert_eq!(f2.first_row_id, Some(10), "second file must start after first file's rows");
+        let f2 = files
+            .iter()
+            .find(|f| f.path.ends_with("part-00002.parquet"))
+            .unwrap();
+        assert_eq!(
+            f2.first_row_id,
+            Some(10),
+            "second file must start after first file's rows"
+        );
     }
 
     #[tokio::test]
@@ -810,12 +818,15 @@ mod tests {
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
             bloom_filters: vec![],
-                    equality_delete_files: vec![],
+            equality_delete_files: vec![],
         };
         catalog.commit_snapshot(&table, snap).await.unwrap();
 
         let files = catalog.list_files(&table, None).await.unwrap();
-        assert_eq!(files[0].first_row_id, None, "V2 tables must not have first_row_id");
+        assert_eq!(
+            files[0].first_row_id, None,
+            "V2 tables must not have first_row_id"
+        );
     }
 
     /// Compaction pre-sets `first_row_id` on the merged file.
@@ -839,11 +850,19 @@ mod tests {
                 path: "data/part-00001.parquet".to_string(),
                 record_count: 10,
                 file_size_bytes: 1024,
-                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
-                vector_column: Some("embedding".into()), vector_dim: Some(4),
-                extra_vector_indexes: vec![], index_status: crate::provider::IndexStatus::Ready,
-                batch_id: None, embedding_model: None, partition_value: None,
-                deletion_vector: None, first_row_id: None,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".into()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
@@ -860,11 +879,19 @@ mod tests {
                 path: "data/part-00002.parquet".to_string(),
                 record_count: 25,
                 file_size_bytes: 2048,
-                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
-                vector_column: Some("embedding".into()), vector_dim: Some(4),
-                extra_vector_indexes: vec![], index_status: crate::provider::IndexStatus::Ready,
-                batch_id: None, embedding_model: None, partition_value: None,
-                deletion_vector: None, first_row_id: None,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".into()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
@@ -883,10 +910,17 @@ mod tests {
                 path: "data/part-merged.parquet".to_string(),
                 record_count: 35,
                 file_size_bytes: 3072,
-                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
-                vector_column: Some("embedding".into()), vector_dim: Some(4),
-                extra_vector_indexes: vec![], index_status: crate::provider::IndexStatus::Ready,
-                batch_id: None, embedding_model: None, partition_value: None,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".into()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
                 deletion_vector: None,
                 first_row_id: Some(0), // pre-set by compaction — must be respected
             }],
@@ -915,11 +949,19 @@ mod tests {
                 path: "data/part-00004.parquet".to_string(),
                 record_count: 5,
                 file_size_bytes: 512,
-                centroid_b64: None, radius: None, hnsw_offset: None, hnsw_len: None,
-                vector_column: Some("embedding".into()), vector_dim: Some(4),
-                extra_vector_indexes: vec![], index_status: crate::provider::IndexStatus::Ready,
-                batch_id: None, embedding_model: None, partition_value: None,
-                deletion_vector: None, first_row_id: None, // fresh write
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: Some("embedding".into()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: crate::provider::IndexStatus::Ready,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None, // fresh write
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
@@ -930,7 +972,10 @@ mod tests {
         catalog.commit_snapshot(&table, snap_new).await.unwrap();
 
         let files = catalog.list_files(&table, None).await.unwrap();
-        let new_file = files.iter().find(|f| f.path.ends_with("part-00004.parquet")).unwrap();
+        let new_file = files
+            .iter()
+            .find(|f| f.path.ends_with("part-00004.parquet"))
+            .unwrap();
         assert_eq!(
             new_file.first_row_id,
             Some(35),

@@ -82,15 +82,12 @@ impl AilakePuffinWriter {
         snap_id: i64,
     ) -> AilakeResult<PuffinStatsResult> {
         // Blob 1: vector stats (bincode, no compression — small random-access data)
-        let vec_blob = bincode::serialize(vector_stats)
-            .map_err(|e| AilakeError::Bincode(e.to_string()))?;
+        let vec_blob =
+            bincode::serialize(vector_stats).map_err(|e| AilakeError::Bincode(e.to_string()))?;
 
         // Blob 2: BM25 bloom (optional)
         let bm25_blob: Option<Vec<u8>> = if !bm25_blooms.is_empty() {
-            Some(
-                bincode::serialize(bm25_blooms)
-                    .map_err(|e| AilakeError::Bincode(e.to_string()))?,
-            )
+            Some(bincode::serialize(bm25_blooms).map_err(|e| AilakeError::Bincode(e.to_string()))?)
         } else {
             None
         };
@@ -131,11 +128,7 @@ impl AilakePuffinWriter {
         let footer_len_le = (footer_size as u32).to_le_bytes();
 
         let mut out = Vec::with_capacity(
-            PUFFIN_MAGIC.len() * 2
-                + vec_blob.len()
-                + bm25_len as usize
-                + footer_size
-                + 4,
+            PUFFIN_MAGIC.len() * 2 + vec_blob.len() + bm25_len as usize + footer_size + 4,
         );
         out.extend_from_slice(PUFFIN_MAGIC);
         out.extend_from_slice(&vec_blob);
@@ -173,9 +166,7 @@ impl<'a> AilakePuffinReader<'a> {
         if n < 12 {
             return Err(AilakeError::Catalog("Puffin file too short".into()));
         }
-        let footer_len = u32::from_le_bytes(
-            self.data[n - 8..n - 4].try_into().unwrap(),
-        ) as usize;
+        let footer_len = u32::from_le_bytes(self.data[n - 8..n - 4].try_into().unwrap()) as usize;
         let footer_start = n - 8 - footer_len;
         serde_json::from_slice(&self.data[footer_start..footer_start + footer_len])
             .map_err(|e| AilakeError::Catalog(format!("Puffin footer parse: {e}")))
@@ -185,7 +176,9 @@ impl<'a> AilakePuffinReader<'a> {
         let offset = blob["offset"].as_u64().unwrap_or(0) as usize;
         let length = blob["length"].as_u64().unwrap_or(0) as usize;
         if offset + length > self.data.len() {
-            return Err(AilakeError::Catalog("Puffin blob offset out of range".into()));
+            return Err(AilakeError::Catalog(
+                "Puffin blob offset out of range".into(),
+            ));
         }
         Ok(&self.data[offset..offset + length])
     }
@@ -330,7 +323,8 @@ mod tests {
         let result = AilakePuffinWriter::write_stats(&stats, &[], 7).unwrap();
         // The declared footer_size must match what the reader parses.
         let n = result.bytes.len();
-        let footer_len_from_file = u32::from_le_bytes(result.bytes[n-8..n-4].try_into().unwrap()) as usize;
+        let footer_len_from_file =
+            u32::from_le_bytes(result.bytes[n - 8..n - 4].try_into().unwrap()) as usize;
         assert_eq!(footer_len_from_file, result.footer_size);
     }
 }

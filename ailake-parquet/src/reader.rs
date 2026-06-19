@@ -187,10 +187,12 @@ impl ParquetVectorReader {
             .column(vec_idx)
             .as_any()
             .downcast_ref::<ListArray>()
-            .ok_or_else(|| AilakeError::Parquet(format!(
-                "multi-vector column '{}' expected ListArray but got incompatible Arrow type",
-                self.vector_column
-            )))?;
+            .ok_or_else(|| {
+                AilakeError::Parquet(format!(
+                    "multi-vector column '{}' expected ListArray but got incompatible Arrow type",
+                    self.vector_column
+                ))
+            })?;
 
         let values = list_col
             .values()
@@ -253,9 +255,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        partition_column_type: None,
-                partition_fields: vec![],
-}
+            partition_column_type: None,
+            partition_fields: vec![],
+        }
     }
 
     #[test]

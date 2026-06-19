@@ -81,10 +81,7 @@ mod tests {
 
         let dvd_path = "data/dv-0001.dvd";
         let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
-        store
-            .put(dvd_path, Bytes::from(file_bytes))
-            .await
-            .unwrap();
+        store.put(dvd_path, Bytes::from(file_bytes)).await.unwrap();
 
         let dv = DeletionVector {
             path: dvd_path.to_string(),

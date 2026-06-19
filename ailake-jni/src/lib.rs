@@ -209,11 +209,23 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     };
     let query = std::slice::from_raw_parts(query_ptr, query_len as usize).to_vec();
     let dim = query.len() as u32;
-    let results: Vec<RowResultJson> =
-        match do_search(uri, "default", "table", "embedding", dim, query, top_k, 50, None, None, "chunk_text", 0.5) {
-            Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
-            Err(e) => return cstr_err_json(e),
-        };
+    let results: Vec<RowResultJson> = match do_search(
+        uri,
+        "default",
+        "table",
+        "embedding",
+        dim,
+        query,
+        top_k,
+        50,
+        None,
+        None,
+        "chunk_text",
+        0.5,
+    ) {
+        Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
+        Err(e) => return cstr_err_json(e),
+    };
     let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
     CString::new(json)
         .unwrap_or_else(|_| CString::new("[]").unwrap())
@@ -371,8 +383,12 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         #[serde(default = "default_col_type")]
         column_type: String,
     }
-    fn default_transform() -> String { "identity".into() }
-    fn default_col_type() -> String { "string".into() }
+    fn default_transform() -> String {
+        "identity".into()
+    }
+    fn default_col_type() -> String {
+        "string".into()
+    }
 
     #[derive(serde::Deserialize)]
     struct Req {
@@ -409,9 +425,15 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         ids: Vec<i64>,
         embeddings: Vec<Vec<f32>>,
     }
-    fn default_ns() -> String { "default".into() }
-    fn default_col() -> String { "embedding".into() }
-    fn default_format_version() -> u8 { 2 }
+    fn default_ns() -> String {
+        "default".into()
+    }
+    fn default_col() -> String {
+        "embedding".into()
+    }
+    fn default_format_version() -> u8 {
+        2
+    }
 
     if request_json.is_null() {
         return cstr_err_json("null request_json");
@@ -502,7 +524,8 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         };
 
     let result = rt().block_on(async {
-        let mut writer = TableWriter::create_or_open(catalog, store, policy, table, format_version).await?;
+        let mut writer =
+            TableWriter::create_or_open(catalog, store, policy, table, format_version).await?;
         writer.write_batch(&batch, &req.embeddings).await?;
         writer.commit().await
     });
@@ -584,9 +607,15 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
         #[serde(default)]
         partition_filter: Option<String>,
     }
-    fn default_ns_st() -> String { "default".into() }
-    fn default_topk_st() -> u32 { 10 }
-    fn default_text_col_st() -> String { "chunk_text".into() }
+    fn default_ns_st() -> String {
+        "default".into()
+    }
+    fn default_topk_st() -> u32 {
+        10
+    }
+    fn default_text_col_st() -> String {
+        "chunk_text".into()
+    }
 
     if request_json.is_null() {
         return cstr_err_json("null request_json");
@@ -605,7 +634,9 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
 
     debug!(
         "ailake_search_text_json: warehouse={} table={}.{} query={:?} top_k={}",
-        req.warehouse, req.namespace, req.table,
+        req.warehouse,
+        req.namespace,
+        req.table,
         &req.query_text[..req.query_text.len().min(60)],
         req.top_k
     );
@@ -1181,7 +1212,9 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
         column: String,
         values: Vec<String>,
     }
-    fn dw_default_ns() -> String { "default".into() }
+    fn dw_default_ns() -> String {
+        "default".into()
+    }
 
     if request_json.is_null() {
         return cstr_err_json("null request_json");
@@ -1200,7 +1233,11 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
 
     debug!(
         "ailake_delete_where_json: warehouse={} table={}.{} column={} values={}",
-        req.warehouse, req.namespace, req.table, req.column, req.values.len()
+        req.warehouse,
+        req.namespace,
+        req.table,
+        req.column,
+        req.values.len()
     );
 
     let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
@@ -1208,15 +1245,26 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
     let table = TableIdent::new(&req.namespace, &req.table);
     let values_ref: Vec<&str> = req.values.iter().map(String::as_str).collect();
 
-    let result = rt().block_on(delete_where(catalog, store, &table, &req.column, &values_ref));
+    let result = rt().block_on(delete_where(
+        catalog,
+        store,
+        &table,
+        &req.column,
+        &values_ref,
+    ));
 
     #[derive(serde::Serialize)]
-    struct Resp { ok: bool }
+    struct Resp {
+        ok: bool,
+    }
     match result {
         Ok(()) => {
             info!(
                 "ailake_delete_where_json: deleted {} values from column '{}' in {}.{}",
-                req.values.len(), req.column, req.namespace, req.table
+                req.values.len(),
+                req.column,
+                req.namespace,
+                req.table
             );
             CString::new(serde_json::to_string(&Resp { ok: true }).unwrap_or_default())
                 .unwrap_or_default()
@@ -1258,8 +1306,8 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
 /// Caller must free the returned pointer with `ailake_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) -> *mut c_char {
-    use ailake_catalog::{AddColumnRequest, RenameColumnRequest, SchemaEvolution};
     use ailake_catalog::provider::CatalogProvider;
+    use ailake_catalog::{AddColumnRequest, RenameColumnRequest, SchemaEvolution};
 
     #[derive(serde::Deserialize)]
     struct AddColReq {
@@ -1289,7 +1337,9 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
         #[serde(default)]
         rename_columns: Vec<RenameColReq>,
     }
-    fn es_default_ns() -> String { "default".into() }
+    fn es_default_ns() -> String {
+        "default".into()
+    }
 
     if request_json.is_null() {
         return cstr_err_json("null request_json");
@@ -1308,7 +1358,11 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
 
     debug!(
         "ailake_evolve_schema_json: warehouse={} table={}.{} add={} rename={}",
-        req.warehouse, req.namespace, req.table, req.add_columns.len(), req.rename_columns.len()
+        req.warehouse,
+        req.namespace,
+        req.table,
+        req.add_columns.len(),
+        req.rename_columns.len()
     );
 
     let mut evolution = SchemaEvolution::new();
@@ -1333,16 +1387,25 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
     let result = rt().block_on(catalog.evolve_schema(&table, evolution));
 
     #[derive(serde::Serialize)]
-    struct Resp { ok: bool, new_schema_id: i32 }
+    struct Resp {
+        ok: bool,
+        new_schema_id: i32,
+    }
     match result {
         Ok(schema_id) => {
             info!(
                 "ailake_evolve_schema_json: schema evolved for {}.{} new_schema_id={}",
                 req.namespace, req.table, schema_id
             );
-            CString::new(serde_json::to_string(&Resp { ok: true, new_schema_id: schema_id }).unwrap_or_default())
-                .unwrap_or_default()
-                .into_raw()
+            CString::new(
+                serde_json::to_string(&Resp {
+                    ok: true,
+                    new_schema_id: schema_id,
+                })
+                .unwrap_or_default(),
+            )
+            .unwrap_or_default()
+            .into_raw()
         }
         Err(e) => {
             warn!("ailake_evolve_schema_json: failed: {}", e);
@@ -1430,7 +1493,11 @@ mod tests {
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         // Expect I/O error (not JSON parse error)
         assert!(json.contains("error"), "expected error json, got: {}", json);
-        assert!(!json.contains("JSON parse"), "unexpected JSON parse error: {}", json);
+        assert!(
+            !json.contains("JSON parse"),
+            "unexpected JSON parse error: {}",
+            json
+        );
         unsafe { ailake_free_string(ptr) };
     }
 

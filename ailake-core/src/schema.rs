@@ -129,10 +129,18 @@ pub struct PartitionDef {
 
 impl PartitionDef {
     pub fn identity(column: impl Into<String>, column_type: impl Into<String>) -> Self {
-        Self { column: column.into(), transform: "identity".into(), column_type: column_type.into() }
+        Self {
+            column: column.into(),
+            transform: "identity".into(),
+            column_type: column_type.into(),
+        }
     }
 
-    pub fn truncate(column: impl Into<String>, width: usize, column_type: impl Into<String>) -> Self {
+    pub fn truncate(
+        column: impl Into<String>,
+        width: usize,
+        column_type: impl Into<String>,
+    ) -> Self {
         Self {
             column: column.into(),
             transform: format!("truncate[{width}]"),

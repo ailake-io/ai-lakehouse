@@ -9,11 +9,11 @@ use ailake_catalog::{
     TableIdent, TableProperties, VectorIndexInfo,
 };
 use ailake_core::{AilakeError, AilakeResult, EmbeddingModelInfo, VectorStoragePolicy};
-use arrow_array::Array;
 use ailake_file::{AilakeFileReader, AilakeFileWriter, IndexType, VectorColumnBatch};
 use ailake_index::{IvfPqCodebook, IvfPqConfig};
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
+use arrow_array::Array;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
@@ -24,10 +24,7 @@ use tracing::{error, info, warn};
 /// For multi-column specs, raw must be \x1f-separated; each part is transformed
 /// independently and the result is rejoined with \x1f.
 /// For single-column (partition_by path), raw is returned as-is (identity only).
-fn apply_partition_transforms(
-    policy: &VectorStoragePolicy,
-    raw: Option<&str>,
-) -> Option<String> {
+fn apply_partition_transforms(policy: &VectorStoragePolicy, raw: Option<&str>) -> Option<String> {
     let raw = raw?;
     if policy.partition_fields.is_empty() {
         return Some(raw.to_string());
@@ -162,7 +159,8 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
 
         // Spawn background HNSW build (fire-and-forget; errors are logged).
@@ -226,7 +224,8 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
 
         let store = self.store.clone();
@@ -369,7 +368,8 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
 
         // Update BM25 IDF stats + build Bloom filter (Phase F).
@@ -505,7 +505,8 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -613,7 +614,8 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
         Ok(())
     }
@@ -690,7 +692,8 @@ impl TableWriter {
             .embedding_model
             .as_ref()
             .map(|m| m.to_property_value());
-        entry.partition_value = apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.partition_value =
+            apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
         self.pending_files.push(entry);
 
         // Clone all column data for the background task.
@@ -750,7 +753,8 @@ impl TableWriter {
                 }
             }
         }
-        self.pending_blooms.push((file_path.to_string(), bloom.to_bytes()));
+        self.pending_blooms
+            .push((file_path.to_string(), bloom.to_bytes()));
     }
 
     /// Update BM25 IDF stats from a batch's text column and persist to storage.
@@ -768,14 +772,20 @@ impl TableWriter {
         let col = match batch.column_by_name(col_name) {
             Some(c) => c,
             None => {
-                tracing::warn!("ailake: BM25 text column '{}' not found in batch — skipping IDF update", col_name);
+                tracing::warn!(
+                    "ailake: BM25 text column '{}' not found in batch — skipping IDF update",
+                    col_name
+                );
                 return Ok(());
             }
         };
         let str_arr = match col.as_string_opt::<i32>() {
             Some(a) => a,
             None => {
-                tracing::warn!("ailake: BM25 text column '{}' is not a Utf8 column — skipping", col_name);
+                tracing::warn!(
+                    "ailake: BM25 text column '{}' is not a Utf8 column — skipping",
+                    col_name
+                );
                 return Ok(());
             }
         };
@@ -795,7 +805,9 @@ impl TableWriter {
         stats.merge_batch(&texts);
 
         let bytes = stats.to_bytes()?;
-        self.store.put(stats_path, bytes::Bytes::from(bytes)).await?;
+        self.store
+            .put(stats_path, bytes::Bytes::from(bytes))
+            .await?;
         Ok(())
     }
 
@@ -1485,9 +1497,9 @@ mod tests {
             modality: None,
             partition_by: None,
             partition_value: None,
-        partition_column_type: None,
-                partition_fields: vec![],
-}
+            partition_column_type: None,
+            partition_fields: vec![],
+        }
     }
 
     fn update_for(schema: &Schema, pol: &VectorStoragePolicy) -> IcebergSchemaUpdate {

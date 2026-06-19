@@ -29,9 +29,9 @@ fn make_policy(dim: u32) -> VectorStoragePolicy {
         modality: None,
         partition_by: None,
         partition_value: None,
-    partition_column_type: None,
+        partition_column_type: None,
         partition_fields: vec![],
-}
+    }
 }
 
 fn rand_unit_vec(dim: usize, seed: u64) -> Vec<f32> {
@@ -112,8 +112,7 @@ async fn search_text_returns_most_relevant_doc() {
         .map(|i| rand_unit_vec(dim as usize, i as u64))
         .collect();
 
-    let (_dir, catalog, store, table) =
-        setup_bm25_table(&texts, &embeddings, dim).await;
+    let (_dir, catalog, store, table) = setup_bm25_table(&texts, &embeddings, dim).await;
 
     let results = search_text(
         &table,
@@ -158,8 +157,7 @@ async fn search_text_returns_top_k_limit() {
         .map(|i| rand_unit_vec(dim as usize, i as u64))
         .collect();
 
-    let (_dir, catalog, store, table) =
-        setup_bm25_table(&texts, &embeddings, dim).await;
+    let (_dir, catalog, store, table) = setup_bm25_table(&texts, &embeddings, dim).await;
 
     let results = search_text(
         &table,
@@ -193,8 +191,7 @@ async fn hybrid_search_rrf_returns_top_k() {
         .map(|i| rand_unit_vec(dim as usize, i as u64 + 100))
         .collect();
 
-    let (_dir, catalog, store, table) =
-        setup_bm25_table(&texts, &embeddings, dim).await;
+    let (_dir, catalog, store, table) = setup_bm25_table(&texts, &embeddings, dim).await;
 
     // Use embedding of first doc as query — both vector and text point to "rust"
     let query = embeddings[0].clone();
@@ -261,8 +258,14 @@ async fn bm25_scorer_ranks_rust_docs_above_python() {
     let s_rust1 = scorer.score(query, docs[0]);
     let s_python = scorer.score(query, docs[1]);
     let s_rust2 = scorer.score(query, docs[2]);
-    assert!(s_rust1 > s_python, "rust doc > python doc: {s_rust1} > {s_python}");
-    assert!(s_rust2 > s_python, "rust doc > python doc: {s_rust2} > {s_python}");
+    assert!(
+        s_rust1 > s_python,
+        "rust doc > python doc: {s_rust1} > {s_python}"
+    );
+    assert!(
+        s_rust2 > s_python,
+        "rust doc > python doc: {s_rust2} > {s_python}"
+    );
 }
 
 #[tokio::test]
@@ -295,5 +298,8 @@ async fn write_batch_auto_deferred_creates_file() {
     assert!(snap > 0);
 
     let files = catalog.list_files(&table, None).await.unwrap();
-    assert!(!files.is_empty(), "should have at least one file after deferred write");
+    assert!(
+        !files.is_empty(),
+        "should have at least one file after deferred write"
+    );
 }
