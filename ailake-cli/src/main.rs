@@ -1113,7 +1113,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .await
                 .map_err(|e| e.to_string())?;
 
-            println!("schema evolved — new schema-id: {new_schema_id}");
+            println!("new_schema_id: {new_schema_id}");
             Ok(())
         }
 
