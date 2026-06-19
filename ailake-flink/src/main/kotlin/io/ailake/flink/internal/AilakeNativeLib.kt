@@ -42,17 +42,20 @@ interface AilakeNativeLib : Library {
      * Write a batch of records to an AI-Lake table.
      *
      * Request JSON fields:
-     *   warehouse        (String)    warehouse root path
-     *   namespace        (String)    Iceberg namespace
-     *   table            (String)    table name
-     *   vec_col          (String)    vector column name
-     *   dim              (Int)       vector dimensionality
-     *   metric           (String?)   "euclidean" | "cosine" | "dot_product"
-     *   precision        (String?)   "f32" | "f16" | "i8"
-     *   ids              (Long[])    row IDs
-     *   embeddings       (Float[][]) one embedding per row
-     *   partition_by     (String?)   optional — Iceberg identity partition column (e.g. "agent_id")
-     *   partition_value  (String?)   optional — value for partition_by in key_metadata of written files
+     *   warehouse         (String)    warehouse root path
+     *   namespace         (String)    Iceberg namespace
+     *   table             (String)    table name
+     *   vec_col           (String)    vector column name
+     *   dim               (Int)       vector dimensionality
+     *   metric            (String?)   "euclidean" | "cosine" | "dot_product"
+     *   precision         (String?)   "f32" | "f16" | "i8"
+     *   ids               (Long[])    row IDs
+     *   embeddings        (Float[][]) one embedding per row
+     *   partition_by      (String?)   optional — Iceberg identity partition column (e.g. "agent_id")
+     *   partition_value   (String?)   optional — value for partition_by in key_metadata of written files
+     *   partition_fields  (Array?)    optional — multi-column partition spec (Phase K);
+     *                                 each entry: {column, transform, column_type}
+     *   format_version    (Int?)      optional — Iceberg format version, default 2
      *
      * Response JSON: `{"ok":true,"snapshot_id":N}` or `{"ok":false,"error":"..."}`
      */
@@ -100,6 +103,34 @@ interface AilakeNativeLib : Library {
      * where distance = negated BM25 score (lower = more relevant).
      */
     fun ailake_search_text_json(requestJson: String): Pointer
+
+    /**
+     * Logically delete rows matching a column equality predicate.
+     *
+     * Request JSON fields:
+     *   warehouse  (String)   warehouse root path
+     *   namespace  (String)   Iceberg namespace
+     *   table      (String)   table name
+     *   column     (String)   column name to match
+     *   values     (String[]) values to delete (equality match)
+     *
+     * Response JSON: `{"ok":true}` or `{"ok":false,"error":"..."}`
+     */
+    fun ailake_delete_where_json(requestJson: String): Pointer
+
+    /**
+     * Apply a metadata-only schema evolution to the table.
+     *
+     * Request JSON fields:
+     *   warehouse        (String)  warehouse root path
+     *   namespace        (String)  Iceberg namespace
+     *   table            (String)  table name
+     *   add_columns      (Array)   [{name, type, initial_default?}] — initial_default is a JSON literal
+     *   rename_columns   (Array)   [{from, to}]
+     *
+     * Response JSON: `{"ok":true,"new_schema_id":N}` or `{"ok":false,"error":"..."}`
+     */
+    fun ailake_evolve_schema_json(requestJson: String): Pointer
 
     /** Free a string pointer returned by any ailake_* function. */
     fun ailake_free_string(ptr: Pointer)

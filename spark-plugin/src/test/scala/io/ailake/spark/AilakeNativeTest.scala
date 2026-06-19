@@ -28,4 +28,84 @@ class AilakeNativeTest extends AnyFunSuite {
     assert(r.toString.contains("99"))
     assert(r.toString.contains("my-file.parquet"))
   }
+
+  // ── Phase P: writeBatch with partitionFields / formatVersion ─────────────────
+
+  test("writeBatch returns None when native library absent with partitionFields") {
+    val pf = AilakeNative.PartitionFieldDef("agent_id", "identity", "string")
+    val result = AilakeNative.writeBatch(
+      tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
+      vectorColumn = "embedding", dim = 4, metric = "cosine", precision = "f16",
+      ids = Seq(1L), embeddings = Seq(Seq(0.1f, 0.2f, 0.3f, 0.4f)),
+      partitionFields = Seq(pf), formatVersion = 3,
+    )
+    assert(result.isEmpty)
+  }
+
+  test("writeBatch returns None when native library absent (formatVersion=2 default)") {
+    val result = AilakeNative.writeBatch(
+      tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
+      vectorColumn = "embedding", dim = 2, metric = "euclidean", precision = "f32",
+      ids = Seq(1L), embeddings = Seq(Seq(1.0f, 0.0f)),
+    )
+    assert(result.isEmpty)
+  }
+
+  test("PartitionFieldDef equality") {
+    val p1 = AilakeNative.PartitionFieldDef("col", "identity", "string")
+    val p2 = AilakeNative.PartitionFieldDef("col", "identity", "string")
+    assert(p1 == p2)
+  }
+
+  test("PartitionFieldDef toString contains column name") {
+    val p = AilakeNative.PartitionFieldDef("session_id", "truncate[4]", "string")
+    assert(p.toString.contains("session_id"))
+  }
+
+  // ── Phase P: deleteWhere ──────────────────────────────────────────────────────
+
+  test("deleteWhere returns false when native library absent") {
+    val ok = AilakeNative.deleteWhere("s3://b/t/", "default", "tbl", "doc_id", Seq("x"))
+    assert(!ok)
+  }
+
+  test("deleteWhere returns false for empty values") {
+    val ok = AilakeNative.deleteWhere("s3://b/t/", "default", "tbl", "doc_id", Seq.empty)
+    assert(!ok)
+  }
+
+  // ── Phase P: evolveSchema ─────────────────────────────────────────────────────
+
+  test("evolveSchema returns -1 when native library absent") {
+    val id = AilakeNative.evolveSchema(
+      tableUri = "s3://b/t/", namespace = "default", tableName = "tbl",
+      addCols = Seq(AilakeNative.AddColReq("score", "float")),
+      renameCols = Seq.empty,
+    )
+    assert(id == -1)
+  }
+
+  test("evolveSchema returns 0 for empty add and rename") {
+    val id = AilakeNative.evolveSchema(
+      tableUri = "s3://b/t/", namespace = "default", tableName = "tbl",
+      addCols = Seq.empty, renameCols = Seq.empty,
+    )
+    assert(id == 0)
+  }
+
+  test("AddColReq default initialDefault is None") {
+    val r = AilakeNative.AddColReq("score", "float")
+    assert(r.initialDefault.isEmpty)
+  }
+
+  test("AddColReq with initialDefault") {
+    val r = AilakeNative.AddColReq("score", "float", Some("0.0"))
+    assert(r.initialDefault.contains("0.0"))
+  }
+
+  test("RenameColReq equality") {
+    val r1 = AilakeNative.RenameColReq("old_col", "new_col")
+    val r2 = AilakeNative.RenameColReq("old_col", "new_col")
+    assert(r1 == r2)
+  }
 }
