@@ -7,7 +7,6 @@ import logging
 import sys
 from typing import Any, Iterable, Mapping
 
-from airbyte_cdk import AirbyteLogger
 from airbyte_cdk.destinations import Destination
 from airbyte_cdk.models import (
     AirbyteConnectionStatus,
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 class AilakeDestination(Destination):
     def check(
         self,
-        logger: AirbyteLogger,
+        logger: logging.Logger,
         config: Mapping[str, Any],
     ) -> AirbyteConnectionStatus:
         try:
