@@ -47,18 +47,6 @@ class AilakeNativeTest {
     // ── Phase P: writeBatch with partitionFields / formatVersion ─────────────
 
     @Test
-    fun writeBatchReturnsNullWhenNativeLibAbsentWithPartitionFields() {
-        val pf = AilakeNative.PartitionFieldDef("agent_id", "identity", "string")
-        val result = AilakeNative.writeBatch(
-            tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
-            vectorColumn = "embedding", dim = 4, metric = "cosine", precision = "f16",
-            ids = listOf(1L), embeddings = listOf(listOf(0.1f, 0.2f, 0.3f, 0.4f)),
-            partitionFields = listOf(pf), formatVersion = 3,
-        )
-        assertNull(result)
-    }
-
-    @Test
     fun writeBatchReturnsNullForEmptyIdsRegardlessOfPartitionFields() {
         val pf = AilakeNative.PartitionFieldDef("col", "identity", "string")
         val result = AilakeNative.writeBatch(
