@@ -869,9 +869,29 @@ impl TableWriter {
 
         match catalog.load_table(&table).await {
             Ok(existing_meta) => {
+                // Hard error: dim stored in table metadata must match the policy dim.
+                // validate_embedding_dim() only checks vectors vs policy.dim; without this
+                // check a caller can open with dim=16 on a dim=8 table and silently corrupt it.
+                if let Some(stored_dim_str) = existing_meta.properties.get("ailake.vector-dim") {
+                    if let Ok(stored_dim) = stored_dim_str.parse::<u32>() {
+                        if stored_dim != policy.dim {
+                            let table_model = policy
+                                .embedding_model
+                                .as_ref()
+                                .map(|m| m.to_property_value())
+                                .unwrap_or_else(|| format!("dim={}", stored_dim));
+                            return Err(AilakeError::ModelMismatch {
+                                table_model,
+                                table_dim: stored_dim,
+                                batch_model: format!("dim={}", policy.dim),
+                                batch_dim: policy.dim,
+                            });
+                        }
+                    }
+                }
                 // Warn when writing with a different model name into an existing table.
-                // Dim mismatch is a hard error caught at write_batch time; name divergence
-                // is softer — same dim, different model (e.g. fine-tune vs base) — warn only.
+                // Name divergence is softer — same dim, different model (e.g. fine-tune vs
+                // base) — warn only.
                 if let Some(incoming) = &policy.embedding_model {
                     if let Some(stored_val) = existing_meta
                         .properties

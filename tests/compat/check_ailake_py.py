@@ -586,14 +586,15 @@ with tempfile.TemporaryDirectory() as tmp:
     writer.write_batch([f"doc_{i}" for i in range(N)], [make_embedding(i) for i in range(N)])
     writer.commit()
 
-    writer2 = ailake.TableWriter(path, vector_column="embedding", dim=DIM * 2, metric="cosine")
     try:
+        writer2 = ailake.TableWriter(path, vector_column="embedding", dim=DIM * 2, metric="cosine")
         writer2.write_batch(
             [f"bad_{i}" for i in range(N)],
             [[0.1] * (DIM * 2) for _ in range(N)],
         )
         writer2.commit()
-        print("WARN (ModelMismatch): no error raised for dim mismatch — check writer.rs:ModelMismatch")
+        print("FAIL (ModelMismatch): no error raised for dim mismatch — create_or_open must reject it")
+        sys.exit(1)
     except Exception as e:
         print(f"PASS (ModelMismatch): raised {type(e).__name__} on dim mismatch")
 
