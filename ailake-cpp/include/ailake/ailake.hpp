@@ -23,6 +23,7 @@
 #include "ivfpq.hpp"
 #include "catalog.hpp"
 #include "schema.hpp"
+#include "write.hpp"
 #include "rocm/blas.hpp"
 
 #include <algorithm>

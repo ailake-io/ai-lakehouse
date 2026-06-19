@@ -84,7 +84,7 @@ endif()
 if(AILAKE_TESTS)
   enable_testing()
 
-  foreach(_test footer hnsw ivfpq)
+  foreach(_test footer hnsw ivfpq write)
     add_executable(ailake_test_${_test} tests/test_${_test}.cpp)
     target_link_libraries(ailake_test_${_test} PRIVATE ailake)
     add_test(NAME test_${_test} COMMAND ailake_test_${_test})
