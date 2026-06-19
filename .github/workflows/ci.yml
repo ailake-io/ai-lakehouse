@@ -102,6 +102,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
@@ -118,6 +121,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
@@ -134,6 +140,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
@@ -183,7 +192,9 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
-      # - uses: actions/setup-python@v5  # not needed on self-hosted
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - name: Install maturin, build and check
         run: |
           rm -rf /tmp/ailake-py-venv
@@ -202,6 +213,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.7'
@@ -210,7 +224,6 @@ jobs:
       - name: Generate JNI fixture (dim=8, N=16)
         run: |
           python3 -m venv /tmp/ailake-jni-venv
-          /tmp/ailake-jni-venv/bin/pip install --quiet numpy
           AILAKE_LIB=target/release/libailake_jni.so \
             /tmp/ailake-jni-venv/bin/python3 tests/fixtures/write_jni_fixture.py /tmp/ailake-jni-fixture
       - name: Run Trino plugin unit tests

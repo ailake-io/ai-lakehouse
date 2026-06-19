@@ -71,12 +71,26 @@ impl ParquetVectorWriter {
             let cols = batch.columns().to_vec();
             (schema, cols)
         } else {
+            use ailake_core::VectorPrecision;
             let bytes_per_vec =
                 self.policy.dim as usize * self.policy.precision.bytes_per_element();
-            let flat: Vec<u8> = embeddings
-                .iter()
-                .flat_map(|v| Quantizer::f32_to_f16_bytes(v))
-                .collect();
+            let flat: Vec<u8> = match self.policy.precision {
+                VectorPrecision::F32 => embeddings
+                    .iter()
+                    .flat_map(|v| v.iter().flat_map(|&x| x.to_le_bytes()))
+                    .collect(),
+                VectorPrecision::I8 => embeddings
+                    .iter()
+                    .flat_map(|v| {
+                        let (quant, _) = Quantizer::f32_to_i8(v);
+                        quant.into_iter().map(|b| b as u8)
+                    })
+                    .collect(),
+                _ => embeddings
+                    .iter()
+                    .flat_map(|v| Quantizer::f32_to_f16_bytes(v))
+                    .collect(),
+            };
             let chunks: Vec<Option<&[u8]>> = flat.chunks_exact(bytes_per_vec).map(Some).collect();
             let vec_array = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
                 chunks.into_iter(),
@@ -173,13 +187,29 @@ impl ParquetVectorWriter {
             });
         }
 
+        use ailake_core::VectorPrecision;
         let bytes_per_vec = self.policy.dim as usize * self.policy.precision.bytes_per_element();
 
         // Encode all vectors flat: [row0_vec0, row0_vec1, ..., row1_vec0, ...]
-        let flat_bytes: Vec<u8> = embeddings_per_row
-            .iter()
-            .flat_map(|row| row.iter().flat_map(|v| Quantizer::f32_to_f16_bytes(v)))
-            .collect();
+        let flat_bytes: Vec<u8> = match self.policy.precision {
+            VectorPrecision::F32 => embeddings_per_row
+                .iter()
+                .flat_map(|row| row.iter().flat_map(|v| v.iter().flat_map(|&x| x.to_le_bytes())))
+                .collect(),
+            VectorPrecision::I8 => embeddings_per_row
+                .iter()
+                .flat_map(|row| {
+                    row.iter().flat_map(|v| {
+                        let (quant, _) = Quantizer::f32_to_i8(v);
+                        quant.into_iter().map(|b| b as u8)
+                    })
+                })
+                .collect(),
+            _ => embeddings_per_row
+                .iter()
+                .flat_map(|row| row.iter().flat_map(|v| Quantizer::f32_to_f16_bytes(v)))
+                .collect(),
+        };
 
         let total_vecs: usize = embeddings_per_row.iter().map(|r| r.len()).sum();
         let chunks: Vec<Option<&[u8]>> = flat_bytes.chunks_exact(bytes_per_vec).map(Some).collect();
