@@ -424,7 +424,7 @@ pub async fn search(
             // Skip rows marked as deleted by a V3 Deletion Vector.
             if dv_bitmap
                 .as_ref()
-                .map_or(false, |bm| bm.contains(row_id.as_u64() as u32))
+                .is_some_and(|bm| bm.contains(row_id.as_u64() as u32))
             {
                 continue;
             }
