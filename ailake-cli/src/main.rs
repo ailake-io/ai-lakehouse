@@ -536,8 +536,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     return Err(format!(
                         "embedding column '{}' is empty or contains no vectors in source file",
                         embeddings
-                    )
-                    .into());
+                    ));
                 }
 
                 // Load existing policy from catalog, or default to cosine/f16.

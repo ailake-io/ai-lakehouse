@@ -1307,7 +1307,7 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
 #[no_mangle]
 pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) -> *mut c_char {
     use ailake_catalog::provider::CatalogProvider;
-    use ailake_catalog::{AddColumnRequest, RenameColumnRequest, SchemaEvolution};
+    use ailake_catalog::{AddColumnRequest, SchemaEvolution};
 
     #[derive(serde::Deserialize)]
     struct AddColReq {
