@@ -160,3 +160,55 @@ class AilakeHook(BaseHook):
             *extra,
         )
         return json.loads(result.stdout).get("results", [])
+
+    def delete_where(
+        self,
+        table: str,
+        column: str,
+        values: list[str],
+    ) -> None:
+        """Logically delete rows where ``column`` equals any value in ``values``.
+
+        Wraps ``ailake delete-where <table> --col <col> --vals <v1,v2,...>``.
+        No-op when ``values`` is empty.
+        """
+        if not values:
+            return
+        vals_csv = ",".join(values)
+        self.run_cli("delete-where", table, "--col", column, "--vals", vals_csv)
+
+    def evolve_schema(
+        self,
+        table: str,
+        add_columns: list[dict[str, Any]] | None = None,
+        rename_columns: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Apply a metadata-only schema evolution to the table.
+
+        Wraps ``ailake evolve <table> [--add name:type [--initial-default JSON]]
+        [--rename old:new]``.
+
+        Each entry in ``add_columns`` must have ``name`` and ``type`` keys, and
+        optionally ``initial_default`` (a JSON literal: null, 0, 0.0, "unknown").
+        Each entry in ``rename_columns`` must have ``from`` and ``to`` keys.
+
+        Returns the new ``schema_id`` on success, ``-1`` when not parseable from
+        CLI output, ``0`` when both lists are empty (no-op).
+        """
+        extra: list[str] = []
+        for ac in (add_columns or []):
+            extra += ["--add", f"{ac['name']}:{ac['type']}"]
+            if ac.get("initial_default"):
+                extra += ["--initial-default", str(ac["initial_default"])]
+        for rc in (rename_columns or []):
+            extra += ["--rename", f"{rc['from']}:{rc['to']}"]
+        if not extra:
+            return 0
+        result = self.run_cli("evolve", table, *extra)
+        for line in result.stdout.splitlines():
+            if "new_schema_id:" in line:
+                try:
+                    return int(line.split("new_schema_id:")[1].strip().split()[0])
+                except (ValueError, IndexError):
+                    pass
+        return -1

@@ -153,6 +153,44 @@
         "description": "Maximum compression — raw F16 vectors discarded after index build. No reranking.",
         "default": false,
         "order": 16
+      },
+      "partition_fields": {
+        "type": "array",
+        "title": "Multi-column Partition Fields",
+        "description": "Multi-column Iceberg partition spec (Phase K). Each entry defines a partition field with column, transform (identity or truncate[W]), and column_type. When non-empty, takes precedence over the single-column partition_by field.",
+        "items": {
+          "type": "object",
+          "required": ["column", "transform", "column_type"],
+          "additionalProperties": false,
+          "properties": {
+            "column": {
+              "type": "string",
+              "title": "Column Name"
+            },
+            "transform": {
+              "type": "string",
+              "title": "Transform",
+              "description": "identity — pass-through; truncate[W] — truncate string to W chars or round int/long down to multiple of W.",
+              "examples": ["identity", "truncate[4]"]
+            },
+            "column_type": {
+              "type": "string",
+              "title": "Column Type",
+              "description": "Iceberg type of the partition column.",
+              "examples": ["string", "int", "long", "uuid"]
+            }
+          }
+        },
+        "default": [],
+        "order": 21
+      },
+      "format_version": {
+        "type": "integer",
+        "title": "Iceberg Format Version",
+        "description": "Iceberg format version for new tables. 2 = full ecosystem compatibility (default). 3 = V3 features (deletion vectors, row lineage, variant type) — requires Spark 4+, Trino 450+, or PyIceberg 0.8+.",
+        "enum": [2, 3],
+        "default": 2,
+        "order": 22
       }
     }
   }
