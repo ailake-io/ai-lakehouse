@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: ailake-go/go.mod
-          cache-dependency-path: ailake-go/go.sum
+          cache: false  # self-hosted runner keeps module cache on disk; cache restore causes tar "File exists" noise
 
       - uses: dtolnay/rust-toolchain@stable
 
