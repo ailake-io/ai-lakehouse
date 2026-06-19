@@ -72,10 +72,9 @@ def write_table(conn, table_path, n=5, dim=8):
     conn.execute(f"""
         SELECT ailake_write_batch(
             '{table_path}',
-            'default', 'evo_test',
-            'embedding', {dim}, 'cosine', 'f16',
             {list(range(n))}::BIGINT[],
-            {embs}::FLOAT[][]
+            {embs}::FLOAT[][],
+            'embedding', 'cosine', 'f16'
         )
     """)
 
