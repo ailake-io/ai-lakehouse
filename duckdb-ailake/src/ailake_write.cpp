@@ -26,7 +26,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/common/types/value.hpp"
 
@@ -184,7 +184,7 @@ static void AilakeWriteExecFull(
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
-void RegisterAilakeWrite(duckdb::DatabaseInstance &db) {
+void RegisterAilakeWrite(duckdb::ExtensionLoader &loader) {
     ScalarFunctionSet write_set("ailake_write_batch");
 
     // Arity 3: (table_path, ids, embeddings) — defaults: embedding / cosine / f16
@@ -267,5 +267,5 @@ void RegisterAilakeWrite(duckdb::DatabaseInstance &db) {
         AilakeWriteExecFull
     ));
 
-    ExtensionUtil::RegisterFunction(db, write_set);
+    loader.RegisterFunction( write_set);
 }

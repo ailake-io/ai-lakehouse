@@ -23,7 +23,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/common/types/value.hpp"
 
@@ -67,7 +67,7 @@ static void AilakeDeleteWhereExec(
     result.SetValue(0, Value::BOOLEAN(ok));
 }
 
-void RegisterAilakeDeleteWhere(duckdb::DatabaseInstance &db) {
+void RegisterAilakeDeleteWhere(duckdb::ExtensionLoader &loader) {
     ScalarFunction fn(
         "ailake_delete_where",
         {LogicalType::VARCHAR,
@@ -76,5 +76,5 @@ void RegisterAilakeDeleteWhere(duckdb::DatabaseInstance &db) {
         LogicalType::BOOLEAN,
         AilakeDeleteWhereExec
     );
-    ExtensionUtil::RegisterFunction(db, fn);
+    loader.RegisterFunction( fn);
 }

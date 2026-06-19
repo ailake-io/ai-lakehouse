@@ -17,7 +17,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/value.hpp"
 
@@ -190,7 +190,7 @@ static void AilakeMultimodalScan(
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
-void RegisterAilakeSearchMultimodal(duckdb::DatabaseInstance &db) {
+void RegisterAilakeSearchMultimodal(duckdb::ExtensionLoader &loader) {
     // weight is declared DOUBLE so SQL literal 1.0 (DOUBLE) matches without coercion.
     // queries arg: LIST(STRUCT(col VARCHAR, query FLOAT[], weight DOUBLE))
     auto struct_type = LogicalType::STRUCT({
@@ -209,5 +209,5 @@ void RegisterAilakeSearchMultimodal(duckdb::DatabaseInstance &db) {
 
     func.named_parameters["partition_filter"] = LogicalType::VARCHAR;
 
-    ExtensionUtil::RegisterFunction(db, func);
+    loader.RegisterFunction( func);
 }

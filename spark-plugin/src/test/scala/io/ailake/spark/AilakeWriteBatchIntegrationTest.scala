@@ -6,6 +6,8 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import java.io.File
 import scala.math.sqrt
+import org.junit.runner.RunWith
+import org.scalatestplus.junit.JUnitRunner
 
 /**
  * End-to-end integration test for AilakeNative.writeBatch (Spark side).
@@ -16,6 +18,7 @@ import scala.math.sqrt
  *
  * Tests that require the native lib are skipped automatically when env vars absent.
  */
+@RunWith(classOf[JUnitRunner])
 class AilakeWriteBatchIntegrationTest extends AnyFunSuite {
 
   private val libPath  = Option(System.getenv("AILAKE_LIB_PATH"))

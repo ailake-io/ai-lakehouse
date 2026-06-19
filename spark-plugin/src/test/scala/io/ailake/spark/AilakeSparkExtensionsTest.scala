@@ -6,7 +6,10 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.types.{DoubleType, LongType, StringType, StructField, StructType}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
+import org.junit.runner.RunWith
+import org.scalatestplus.junit.JUnitRunner
 
+@RunWith(classOf[JUnitRunner])
 class AilakeSparkExtensionsTest extends AnyFunSuite with BeforeAndAfterAll {
 
   @transient private var spark: SparkSession = _
@@ -56,7 +59,7 @@ class AilakeSparkExtensionsTest extends AnyFunSuite with BeforeAndAfterAll {
   test("VectorSearchPlan is converted to VectorScanExec by planner") {
     val plan = VectorSearchPlan("s3://t/", Array(1.0f), topK = 3)
     val execPlan = spark.sessionState.executePlan(plan).executedPlan
-    assert(execPlan.toString.contains("VectorScanExec"))
+    assert(execPlan.isInstanceOf[VectorScanExec], s"expected VectorScanExec, got: ${execPlan.getClass.getSimpleName}")
   }
 
   test("ailakeSearch with dimension 1536 produces valid empty result") {

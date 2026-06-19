@@ -23,7 +23,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/common/types/value.hpp"
 
@@ -58,7 +58,7 @@ static void AilakeEvolveSchemaExec(
     result.SetValue(0, Value::INTEGER(schema_id));
 }
 
-void RegisterAilakeEvolveSchema(duckdb::DatabaseInstance &db) {
+void RegisterAilakeEvolveSchema(duckdb::ExtensionLoader &loader) {
     ScalarFunction fn(
         "ailake_evolve_schema",
         {LogicalType::VARCHAR,
@@ -67,5 +67,5 @@ void RegisterAilakeEvolveSchema(duckdb::DatabaseInstance &db) {
         LogicalType::INTEGER,
         AilakeEvolveSchemaExec
     );
-    ExtensionUtil::RegisterFunction(db, fn);
+    loader.RegisterFunction( fn);
 }

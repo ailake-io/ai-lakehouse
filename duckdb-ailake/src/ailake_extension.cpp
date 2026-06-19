@@ -6,16 +6,16 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 
 #include <nlohmann/json.hpp>
 
 using namespace duckdb;
 
 // Forward declarations from ailake_search.cpp, ailake_search_multimodal.cpp, ailake_write.cpp
-void RegisterAilakeSearch(DatabaseInstance &db);
-void RegisterAilakeSearchMultimodal(DatabaseInstance &db);
-void RegisterAilakeWrite(DatabaseInstance &db);
+void RegisterAilakeSearch(duckdb::ExtensionLoader &loader);
+void RegisterAilakeSearchMultimodal(duckdb::ExtensionLoader &loader);
+void RegisterAilakeWrite(duckdb::ExtensionLoader &loader);
 
 // ── AilakeLib implementation ──────────────────────────────────────────────────
 
@@ -530,29 +530,25 @@ ScanResult AilakeLib::scan(
 // ── Extension entry points ────────────────────────────────────────────────────
 
 // Forward declarations
-void RegisterAilakeScan(duckdb::DatabaseInstance &db);
-void RegisterAilakeSearchText(duckdb::DatabaseInstance &db);
-void RegisterAilakeDeleteWhere(duckdb::DatabaseInstance &db);
-void RegisterAilakeEvolveSchema(duckdb::DatabaseInstance &db);
+void RegisterAilakeScan(duckdb::ExtensionLoader &loader);
+void RegisterAilakeSearchText(duckdb::ExtensionLoader &loader);
+void RegisterAilakeDeleteWhere(duckdb::ExtensionLoader &loader);
+void RegisterAilakeEvolveSchema(duckdb::ExtensionLoader &loader);
 
 extern "C" {
 
-DUCKDB_EXTENSION_API void ailake_init(DatabaseInstance &db) {
+DUCKDB_CPP_EXTENSION_ENTRY(ailake, loader) {
     // Try to load libailake_jni.so from environment/library path.
     // Non-fatal: functions still register and return clear errors at call time.
     ailake::AilakeLib::get().load();
 
-    RegisterAilakeSearch(db);
-    RegisterAilakeSearchMultimodal(db);
-    RegisterAilakeWrite(db);
-    RegisterAilakeScan(db);
-    RegisterAilakeSearchText(db);
-    RegisterAilakeDeleteWhere(db);
-    RegisterAilakeEvolveSchema(db);
-}
-
-DUCKDB_EXTENSION_API const char *ailake_version() {
-    return DuckDB::LibraryVersion();
+    RegisterAilakeSearch(loader);
+    RegisterAilakeSearchMultimodal(loader);
+    RegisterAilakeWrite(loader);
+    RegisterAilakeScan(loader);
+    RegisterAilakeSearchText(loader);
+    RegisterAilakeDeleteWhere(loader);
+    RegisterAilakeEvolveSchema(loader);
 }
 
 } // extern "C"

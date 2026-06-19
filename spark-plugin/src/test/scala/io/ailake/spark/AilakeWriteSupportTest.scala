@@ -4,7 +4,10 @@ package io.ailake.spark
 
 import org.apache.spark.sql.types._
 import org.scalatest.funsuite.AnyFunSuite
+import org.junit.runner.RunWith
+import org.scalatestplus.junit.JUnitRunner
 
+@RunWith(classOf[JUnitRunner])
 class AilakeWriteSupportTest extends AnyFunSuite {
 
   private def handle = AilakeWriteHandle(

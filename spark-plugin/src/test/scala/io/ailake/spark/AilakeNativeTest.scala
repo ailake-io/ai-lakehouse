@@ -4,7 +4,10 @@ package io.ailake.spark
 
 import org.apache.spark.sql.connector.expressions.Transform
 import org.scalatest.funsuite.AnyFunSuite
+import org.junit.runner.RunWith
+import org.scalatestplus.junit.JUnitRunner
 
+@RunWith(classOf[JUnitRunner])
 class AilakeNativeTest extends AnyFunSuite {
 
   test("search returns empty sequence when native library absent") {
@@ -33,6 +36,7 @@ class AilakeNativeTest extends AnyFunSuite {
   // ── Phase P: writeBatch with partitionFields / formatVersion ─────────────────
 
   test("writeBatch returns None when native library absent with partitionFields") {
+    assume(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
     val pf = AilakeNative.PartitionFieldDef("agent_id", "identity", "string")
     val result = AilakeNative.writeBatch(
       tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",

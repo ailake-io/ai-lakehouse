@@ -30,7 +30,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/value.hpp"
 
@@ -163,7 +163,7 @@ static void AilakeSearchTextScan(
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
-void RegisterAilakeSearchText(duckdb::DatabaseInstance &db) {
+void RegisterAilakeSearchText(duckdb::ExtensionLoader &loader) {
     TableFunction func(
         "ailake_search_text",
         {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER},
@@ -176,5 +176,5 @@ void RegisterAilakeSearchText(duckdb::DatabaseInstance &db) {
     func.named_parameters["partition_filter"] = LogicalType::VARCHAR;
     func.named_parameters["table_name"]       = LogicalType::VARCHAR;
 
-    ExtensionUtil::RegisterFunction(db, func);
+    loader.RegisterFunction( func);
 }

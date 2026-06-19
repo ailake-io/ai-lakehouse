@@ -8,7 +8,10 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 
 import scala.collection.JavaConverters._
+import org.junit.runner.RunWith
+import org.scalatestplus.junit.JUnitRunner
 
+@RunWith(classOf[JUnitRunner])
 class AilakeCatalogTest extends AnyFunSuite {
 
   private def makeCatalog(tableUri: String = "file:///tmp/test-table"): AilakeCatalog = {

@@ -4,7 +4,10 @@ package io.ailake.spark
 
 import org.apache.spark.sql.types.{DoubleType, LongType, StringType, StructField, StructType}
 import org.scalatest.funsuite.AnyFunSuite
+import org.junit.runner.RunWith
+import org.scalatestplus.junit.JUnitRunner
 
+@RunWith(classOf[JUnitRunner])
 class VectorSearchPlanTest extends AnyFunSuite {
 
   private val query = Array(0.1f, -0.2f, 0.3f)
