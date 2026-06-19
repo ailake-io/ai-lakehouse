@@ -2,12 +2,15 @@
 AI-Lake demo fixture generator.
 
 Writes multiple AI-Lake tables to demonstrate all SDK features:
-  - HNSW table      — 500 rows, dim=32 (main fixture, notebooks 01-05)
-  - PQ-only table   — 500 rows, dim=32, no raw vectors stored
-  - Deferred table  — 200 rows, write_batch_auto_deferred
-  - Residual-PQ     — 500 rows, ivf_residual=True
-  - Multimodal      — 200 rows, text embedding (dim=32) + image embedding (dim=16)
-  - Agent memory    — 100 rows across 2 agents (Phase 9 partition isolation demo)
+  - HNSW table        — 500 rows, dim=32 (main fixture, notebooks 01-05)
+  - PQ-only table     — 500 rows, dim=32, no raw vectors stored
+  - Deferred table    — 200 rows, write_batch_auto_deferred
+  - Residual-PQ       — 500 rows, ivf_residual=True
+  - Multimodal        — 200 rows, text embedding (dim=32) + image embedding (dim=16)
+  - Agent memory      — 100 rows across 2 agents (Phase 9 partition isolation demo)
+  - Partitioned v3    — 200 rows, partition_fields=[topic_id:identity:int], format_version=3
+  - Delete demo       — 100 rows, 10 pre-deleted via delete_where (notebook §29 demo)
+  - Schema-evo demo   — 100 rows, add_column source_url + rename (notebook §30 demo)
 
 Runs once at container startup via entrypoint.sh; skipped on restart if
 version-hint.text already exists in the main HNSW table.
@@ -28,6 +31,9 @@ MODEL_TRACKED_PATH  = str(pathlib.Path(TABLE_PATH).parent / "ailake_model_tracke
 MULTIMODAL_PATH     = str(pathlib.Path(TABLE_PATH).parent / "ailake_multimodal")
 AGENT_PATH          = os.environ.get("DEMO_AGENT_PATH",
                           str(pathlib.Path(TABLE_PATH).parent / "ailake_agent"))
+PARTITIONED_V3_PATH = str(pathlib.Path(TABLE_PATH).parent / "ailake_partitioned_v3")
+DELETE_DEMO_PATH    = str(pathlib.Path(TABLE_PATH).parent / "ailake_delete_demo")
+SCHEMA_EVO_PATH     = str(pathlib.Path(TABLE_PATH).parent / "ailake_schema_evo")
 BM25_PATH           = str(pathlib.Path(TABLE_PATH).parent / "ailake_bm25")
 DIM                 = int(os.environ.get("DEMO_DIM", "32"))
 IMAGE_DIM           = 16   # synthetic "CLIP-like" image embeddings (half the text dim)
@@ -208,6 +214,65 @@ def _write_bm25(texts: list[str], embeddings: list[list[float]]) -> None:
     print(f"[BM25]     Committed snapshot_id={snap_id}  rows=200  bm25_col=text")
 
 
+def _write_partitioned_v3(texts: list[str], embeddings: list[list[float]]) -> None:
+    """Iceberg format_version=3 + partition_fields demo (Phase L).
+
+    Partitions by topic_id (int, identity transform) — each of the 20 topics
+    gets its own Iceberg partition. Demonstrates geometric pruning at the
+    partition level: queries about "machine learning" only scan that partition.
+    """
+    from ailake import TableWriter
+    os.makedirs(PARTITIONED_V3_PATH, exist_ok=True)
+    N = 200
+    # Assign topic_id 0-19 round-robin across rows
+    topic_ids = [i % len(TOPICS) for i in range(N)]
+    w = TableWriter(
+        PARTITIONED_V3_PATH,
+        dim=DIM,
+        metric=METRIC,
+        partition_fields=[("topic_id", "identity", "int")],
+        format_version=3,
+    )
+    w.write_batch(texts[:N], embeddings[:N], extra_columns={"topic_id": topic_ids})
+    snap_id = w.commit()
+    print(
+        f"[PartV3]   Committed snapshot_id={snap_id}  rows={N}"
+        f"  partition=topic_id/identity  format_version=3"
+    )
+
+
+def _write_delete_demo(texts: list[str], embeddings: list[list[float]]) -> None:
+    """Delete-where demo table — 100 rows, rows 0-9 pre-deleted (notebook §29)."""
+    import ailake
+    os.makedirs(DELETE_DEMO_PATH, exist_ok=True)
+    w = ailake.TableWriter(DELETE_DEMO_PATH, dim=DIM, metric=METRIC)
+    w.write_batch(texts[:100], embeddings[:100])
+    snap_id = w.commit()
+    # Pre-delete rows 0-9 so notebook §29 shows "before/after" scan counts.
+    ailake.delete_where(DELETE_DEMO_PATH, "id", [str(i) for i in range(10)])
+    print(
+        f"[DelDemo]  Committed snapshot_id={snap_id}  rows=100  pre-deleted=10"
+    )
+
+
+def _write_schema_evo(texts: list[str], embeddings: list[list[float]]) -> None:
+    """Schema-evolution demo table — 100 rows, source_url column added (notebook §30)."""
+    import ailake
+    os.makedirs(SCHEMA_EVO_PATH, exist_ok=True)
+    w = ailake.TableWriter(SCHEMA_EVO_PATH, dim=DIM, metric=METRIC)
+    w.write_batch(texts[:100], embeddings[:100])
+    snap_id = w.commit()
+    # Add a new optional column — existing files unaffected (field-id stable).
+    schema_id = ailake.add_column(
+        SCHEMA_EVO_PATH, "source_url", "string",
+        required=False, initial_default="",
+    )
+    print(
+        f"[SchemaEvo] Committed snapshot_id={snap_id}  rows=100"
+        f"  add_column=source_url  new_schema_id={schema_id}"
+    )
+
+
 def _save_query_payload(embeddings: list[list[float]], texts: list[str]) -> None:
     query_payload = {
         "query_vector":       embeddings[0],
@@ -215,14 +280,17 @@ def _save_query_payload(embeddings: list[list[float]], texts: list[str]) -> None
         "dim":                DIM,
         "metric":             METRIC,
         "table_paths": {
-            "hnsw":          TABLE_PATH,
-            "pq_only":       PQ_PATH,
-            "residual":      RESIDUAL_PATH,
-            "deferred":      DEFERRED_PATH,
-            "model_tracked": MODEL_TRACKED_PATH,
-            "multimodal":    MULTIMODAL_PATH,
-            "agent":         AGENT_PATH,
-            "bm25":          BM25_PATH,
+            "hnsw":             TABLE_PATH,
+            "pq_only":          PQ_PATH,
+            "residual":         RESIDUAL_PATH,
+            "deferred":         DEFERRED_PATH,
+            "model_tracked":    MODEL_TRACKED_PATH,
+            "multimodal":       MULTIMODAL_PATH,
+            "agent":            AGENT_PATH,
+            "bm25":             BM25_PATH,
+            "partitioned_v3":   PARTITIONED_V3_PATH,
+            "delete_demo":      DELETE_DEMO_PATH,
+            "schema_evo":       SCHEMA_EVO_PATH,
         },
         "multimodal": {
             "text_dim":       DIM,
@@ -260,6 +328,9 @@ def main() -> None:
     _write_multimodal(texts, embeddings)
     _write_agent_memory(texts, embeddings)
     _write_bm25(texts, embeddings)
+    _write_partitioned_v3(texts, embeddings)
+    _write_delete_demo(texts, embeddings)
+    _write_schema_evo(texts, embeddings)
     _save_query_payload(embeddings, texts)
 
     _maybe_register_nessie(TABLE_PATH)

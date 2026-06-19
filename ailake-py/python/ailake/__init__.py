@@ -11,9 +11,13 @@ from ailake._ailake import (  # type: ignore[import]
     TableWriter as _TableWriter,
     VectorColSpec,
     WorkingMemoryBuffer,
+    add_column,
     assemble_context,
     decay_memories,
+    delete_where,
+    hardware_info,
     migrate_embeddings,
+    rename_column,
     search as _search_raw,
     search_multimodal,
     search_text,
@@ -43,6 +47,10 @@ __all__ = [
     "assemble_context",
     "migrate_embeddings",
     "decay_memories",
+    "delete_where",
+    "add_column",
+    "rename_column",
+    "hardware_info",
 ]
 
 # Backward-compat re-export: ailake.TableWriter still works.

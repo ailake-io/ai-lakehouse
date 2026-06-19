@@ -1322,5 +1322,46 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(add_column, m)?)?;
     m.add_function(wrap_pyfunction!(rename_column, m)?)?;
     m.add_function(wrap_pyfunction!(delete_where, m)?)?;
+    m.add_function(wrap_pyfunction!(hardware_info, m)?)?;
     Ok(())
+}
+
+/// Return detected hardware capabilities as a plain dict.
+///
+/// Keys:
+///   backend           — "nvidia-cuda" | "amd-rocm" | "cpu-simd"
+///   has_cuda          — "true" / "false"
+///   has_rocm          — "true" / "false"
+///   cpu_logical_cores — number of logical cores available to rayon
+///   has_avx2          — "true" / "false" (x86_64 only)
+///   has_avx512        — "true" / "false" (x86_64 AVX-512F only)
+///   recommend_ivf_pq  — "true" / "false" for a 5 000-vector batch (threshold probe)
+///
+/// Example::
+///
+///     info = ailake.hardware_info()
+///     print(info["backend"])   # "cpu-simd" or "nvidia-cuda" / "amd-rocm"
+#[pyfunction]
+fn hardware_info() -> std::collections::HashMap<String, String> {
+    use ailake_index::hardware::HardwareBackend;
+    use ailake_index::HardwareProfile;
+
+    let p = HardwareProfile::detect();
+    let backend = match p.backend {
+        HardwareBackend::NvidiaCuda => "nvidia-cuda",
+        HardwareBackend::AmdRocm => "amd-rocm",
+        HardwareBackend::CpuSimd => "cpu-simd",
+    };
+    let mut m = std::collections::HashMap::new();
+    m.insert("backend".into(), backend.into());
+    m.insert("has_cuda".into(), p.has_cuda.to_string());
+    m.insert("has_rocm".into(), p.has_rocm.to_string());
+    m.insert("cpu_logical_cores".into(), p.cpu_logical_cores.to_string());
+    m.insert("has_avx2".into(), p.has_avx2.to_string());
+    m.insert("has_avx512".into(), p.has_avx512.to_string());
+    m.insert(
+        "recommend_ivf_pq".into(),
+        p.recommend_ivf_pq(5_000).to_string(),
+    );
+    m
 }

@@ -16,6 +16,7 @@ ailake-query   = { path = "../ailake-query" }
 ailake-core    = { path = "../ailake-core" }
 ailake-catalog = { path = "../ailake-catalog" }
 ailake-store   = { path = "../ailake-store" }
+ailake-index   = { path = "../ailake-index" }
 pyo3           = { workspace = true }
 serde_json     = { workspace = true }
 tokio          = { workspace = true }
