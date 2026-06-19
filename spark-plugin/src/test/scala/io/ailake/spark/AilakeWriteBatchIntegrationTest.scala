@@ -16,6 +16,7 @@ import org.scalatestplus.junit.JUnitRunner
  *   AILAKE_LIB_PATH   — directory containing libailake_jni.so
  *   AILAKE_WRITE_DIR  — writable directory where a new table will be created
  *
+ * Covers Phase P: writeBatch with partitionFields/formatVersion, deleteWhere, evolveSchema.
  * Tests that require the native lib are skipped automatically when env vars absent.
  */
 @RunWith(classOf[JUnitRunner])
@@ -111,6 +112,90 @@ class AilakeWriteBatchIntegrationTest extends AnyFunSuite {
     val msg2 = w2.commit().asInstanceOf[AilakeCommitMessage]
     assert(msg1.snapshotId.isEmpty)
     assert(msg2.snapshotId.isEmpty)
+  }
+
+  // ── writeBatch with partitionFields + formatVersion ─────────────────────
+
+  test("writeBatch with partitionFields and formatVersion=3") {
+    assume(libPath.isDefined,  "AILAKE_LIB_PATH not set — skipping")
+    assume(writeDir.isDefined, "AILAKE_WRITE_DIR not set — skipping")
+    assume(libPresent,         "libailake_jni.so not found — skipping")
+
+    val tableUri = s"${writeDir.get}/integration-write-spark-partitioned"
+    val pf = PartitionFieldDef(column = "id", transform = "identity", columnType = "long")
+    val snap = AilakeNative.writeBatch(
+      tableUri     = tableUri,
+      namespace    = "default",
+      tableName    = "integration_partitioned_spark",
+      vectorColumn = "embedding",
+      dim          = 4,
+      metric       = "cosine",
+      precision    = "f16",
+      ids          = Seq(0L, 1L),
+      embeddings   = Seq(Seq(1.0f, 0.0f, 0.0f, 0.0f), Seq(0.0f, 1.0f, 0.0f, 0.0f)),
+      partitionFields = Seq(pf),
+      formatVersion   = 3,
+    )
+    assert(snap.isDefined, "writeBatch with partitionFields returned None")
+    println(s"[test] writeBatch partitionFields OK: snapshotId=${snap.get}")
+  }
+
+  // ── deleteWhere ───────────────────────────────────────────────────────────
+
+  test("deleteWhere marks rows deleted") {
+    assume(libPath.isDefined,  "AILAKE_LIB_PATH not set — skipping")
+    assume(writeDir.isDefined, "AILAKE_WRITE_DIR not set — skipping")
+    assume(libPresent,         "libailake_jni.so not found — skipping")
+
+    val tableUri = s"${writeDir.get}/integration-delete-spark"
+    AilakeNative.writeBatch(
+      tableUri     = tableUri,
+      namespace    = "default",
+      tableName    = "integration_delete_spark",
+      vectorColumn = "embedding",
+      dim          = 4,
+      metric       = "cosine",
+      precision    = "f16",
+      ids          = Seq(0L, 1L, 2L),
+      embeddings   = Seq(
+        Seq(1.0f, 0.0f, 0.0f, 0.0f),
+        Seq(0.0f, 1.0f, 0.0f, 0.0f),
+        Seq(0.0f, 0.0f, 1.0f, 0.0f),
+      ),
+    )
+    val ok = AilakeNative.deleteWhere(tableUri, "default", "integration_delete_spark", "id", Seq("0", "1"))
+    assert(ok, "deleteWhere returned false")
+    println(s"[test] deleteWhere OK: 2 rows marked deleted")
+  }
+
+  // ── evolveSchema ──────────────────────────────────────────────────────────
+
+  test("evolveSchema adds a column") {
+    assume(libPath.isDefined,  "AILAKE_LIB_PATH not set — skipping")
+    assume(writeDir.isDefined, "AILAKE_WRITE_DIR not set — skipping")
+    assume(libPresent,         "libailake_jni.so not found — skipping")
+
+    val tableUri = s"${writeDir.get}/integration-evolve-spark"
+    AilakeNative.writeBatch(
+      tableUri     = tableUri,
+      namespace    = "default",
+      tableName    = "integration_evolve_spark",
+      vectorColumn = "embedding",
+      dim          = 4,
+      metric       = "cosine",
+      precision    = "f16",
+      ids          = Seq(0L, 1L),
+      embeddings   = Seq(Seq(1.0f, 0.0f, 0.0f, 0.0f), Seq(0.0f, 1.0f, 0.0f, 0.0f)),
+    )
+    val schemaId = AilakeNative.evolveSchema(
+      tableUri   = tableUri,
+      namespace  = "default",
+      tableName  = "integration_evolve_spark",
+      addCols    = Seq(AddColReq(name = "source", colType = "string")),
+      renameCols = Seq.empty,
+    )
+    assert(schemaId >= 0, s"evolveSchema returned $schemaId, expected >= 0")
+    println(s"[test] evolveSchema OK: new_schema_id=$schemaId")
   }
 
   // ── AilakeDataWriterFactory ───────────────────────────────────────────────

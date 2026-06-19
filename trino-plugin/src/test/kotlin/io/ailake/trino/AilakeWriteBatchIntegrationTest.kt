@@ -14,6 +14,7 @@ import kotlin.math.sqrt
  *   AILAKE_LIB_PATH   — directory containing libailake_jni.so
  *   AILAKE_WRITE_DIR  — writable directory where a new table will be created
  *
+ * Covers Phase P: writeBatch with partitionFields/formatVersion, deleteWhere, evolveSchema.
  * Skipped automatically when either env var is absent.
  */
 class AilakeWriteBatchIntegrationTest {
@@ -89,5 +90,92 @@ class AilakeWriteBatchIntegrationTest {
         println("[test] search OK: rowId=${best.rowId} distance=${best.distance}")
         println()
         println("PASS (Trino): write+search roundtrip functional with real library.")
+    }
+
+    @Test
+    fun writeBatchWithPartitionFieldsAndFormatVersion3() {
+        assumeTrue(libPath != null)  { "AILAKE_LIB_PATH not set — skipping" }
+        assumeTrue(writeDir != null) { "AILAKE_WRITE_DIR not set — skipping" }
+        assumeTrue(libPresent)       { "libailake_jni.so not found — skipping" }
+
+        val tableUri = "$writeDir/integration-write-trino-partitioned"
+        val pf = PartitionFieldDef(column = "id", transform = "identity", columnType = "long")
+        val snap = AilakeNative.writeBatch(
+            tableUri        = tableUri,
+            namespace       = "default",
+            tableName       = "integration_partitioned_trino",
+            vectorColumn    = "embedding",
+            dim             = 4,
+            metric          = "cosine",
+            precision       = "f16",
+            ids             = listOf(0L, 1L),
+            embeddings      = listOf(
+                listOf(1.0f, 0.0f, 0.0f, 0.0f),
+                listOf(0.0f, 1.0f, 0.0f, 0.0f),
+            ),
+            partitionFields = listOf(pf),
+            formatVersion   = 3,
+        )
+        checkNotNull(snap) { "writeBatch with partitionFields returned null" }
+        println("[test] writeBatch partitionFields OK: snapshotId=$snap")
+    }
+
+    @Test
+    fun deleteWhereMarksRowsDeleted() {
+        assumeTrue(libPath != null)  { "AILAKE_LIB_PATH not set — skipping" }
+        assumeTrue(writeDir != null) { "AILAKE_WRITE_DIR not set — skipping" }
+        assumeTrue(libPresent)       { "libailake_jni.so not found — skipping" }
+
+        val tableUri = "$writeDir/integration-delete-trino"
+        AilakeNative.writeBatch(
+            tableUri     = tableUri,
+            namespace    = "default",
+            tableName    = "integration_delete_trino",
+            vectorColumn = "embedding",
+            dim          = 4,
+            metric       = "cosine",
+            precision    = "f16",
+            ids          = listOf(0L, 1L, 2L),
+            embeddings   = listOf(
+                listOf(1.0f, 0.0f, 0.0f, 0.0f),
+                listOf(0.0f, 1.0f, 0.0f, 0.0f),
+                listOf(0.0f, 0.0f, 1.0f, 0.0f),
+            ),
+        )
+        val ok = AilakeNative.deleteWhere(tableUri, "default", "integration_delete_trino", "id", listOf("0", "1"))
+        check(ok) { "deleteWhere returned false" }
+        println("[test] deleteWhere OK: 2 rows marked deleted")
+    }
+
+    @Test
+    fun evolveSchemaAddsColumn() {
+        assumeTrue(libPath != null)  { "AILAKE_LIB_PATH not set — skipping" }
+        assumeTrue(writeDir != null) { "AILAKE_WRITE_DIR not set — skipping" }
+        assumeTrue(libPresent)       { "libailake_jni.so not found — skipping" }
+
+        val tableUri = "$writeDir/integration-evolve-trino"
+        AilakeNative.writeBatch(
+            tableUri     = tableUri,
+            namespace    = "default",
+            tableName    = "integration_evolve_trino",
+            vectorColumn = "embedding",
+            dim          = 4,
+            metric       = "cosine",
+            precision    = "f16",
+            ids          = listOf(0L, 1L),
+            embeddings   = listOf(
+                listOf(1.0f, 0.0f, 0.0f, 0.0f),
+                listOf(0.0f, 1.0f, 0.0f, 0.0f),
+            ),
+        )
+        val schemaId = AilakeNative.evolveSchema(
+            tableUri   = tableUri,
+            namespace  = "default",
+            tableName  = "integration_evolve_trino",
+            addCols    = listOf(AddColReq(name = "source", colType = "string")),
+            renameCols = emptyList(),
+        )
+        check(schemaId >= 0) { "evolveSchema returned $schemaId, expected >= 0" }
+        println("[test] evolveSchema OK: new_schema_id=$schemaId")
     }
 }
