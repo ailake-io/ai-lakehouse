@@ -48,6 +48,7 @@ class AilakeNativeTest extends AnyFunSuite {
   }
 
   test("writeBatch returns None when native library absent (formatVersion=2 default)") {
+    assume(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
     val result = AilakeNative.writeBatch(
       tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
       vectorColumn = "embedding", dim = 2, metric = "euclidean", precision = "f32",

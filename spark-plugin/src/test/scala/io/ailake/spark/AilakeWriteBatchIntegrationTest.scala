@@ -65,7 +65,7 @@ class AilakeWriteBatchIntegrationTest extends AnyFunSuite {
     val snapshotId = AilakeNative.writeBatch(
       tableUri     = tableUri,
       namespace    = "default",
-      tableName    = "integration_write_spark",
+      tableName    = "table",
       vectorColumn = "embedding",
       dim          = dim,
       metric       = "cosine",
