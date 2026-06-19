@@ -52,5 +52,5 @@ jobs:
         working-directory: ailake-go
         run: go test ./... -v -timeout 120s
         env:
-          AILAKE_FIXTURE: ../compat-fixture
-          AILAKE_BIN: ../target/release/ailake
+          AILAKE_FIXTURE: ${{ github.workspace }}/compat-fixture
+          AILAKE_BIN: ${{ github.workspace }}/target/release/ailake

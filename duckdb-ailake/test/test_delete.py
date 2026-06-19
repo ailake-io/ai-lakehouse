@@ -68,14 +68,13 @@ def small_embeddings(n=5, dim=8):
 
 def write_table(conn, table_path, n=5, dim=8):
     embs = small_embeddings(n, dim)
-    flat = [x for row in embs for x in row]
     conn.execute(f"""
         SELECT ailake_write_batch(
             '{table_path}',
             'default', 'del_test',
             'embedding', {dim}, 'cosine', 'f16',
             {list(range(n))}::BIGINT[],
-            {flat}::FLOAT[]
+            {embs}::FLOAT[][]
         )
     """)
 

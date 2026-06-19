@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -53,10 +54,17 @@ func DeleteWhere(
 		return err
 	}
 
+	warehouse := catalog.Warehouse
+	if !filepath.IsAbs(warehouse) && !strings.Contains(warehouse, "://") {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
 	tableID := namespace + "." + table
 
 	args := []string{
-		"--store", catalog.Warehouse,
+		"--store", warehouse,
 		"delete-where", tableID,
 		"--col", column,
 		"--vals", strings.Join(values, ","),
@@ -89,10 +97,17 @@ func EvolveSchema(
 		return 0, err
 	}
 
+	warehouse := catalog.Warehouse
+	if !filepath.IsAbs(warehouse) && !strings.Contains(warehouse, "://") {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
 	tableID := namespace + "." + table
 
 	args := []string{
-		"--store", catalog.Warehouse,
+		"--store", warehouse,
 		"evolve", tableID,
 	}
 
