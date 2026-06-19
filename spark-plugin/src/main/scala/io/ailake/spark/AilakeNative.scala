@@ -48,20 +48,18 @@ object AilakeNative {
   }
 
   private lazy val lib: Option[Lib] =
-    Try(Native.load("ailake_jni", classOf[Lib]).asInstanceOf[Lib])
-      .fold(
-        err => {
-          log.warn(
-            "[ailake] Native library libailake_jni not found — vector search disabled. " +
-            "Set java.library.path or LD_LIBRARY_PATH to the directory containing libailake_jni.so. " +
-            "Error: {}", err.getMessage)
-          None
-        },
-        lib => {
-          log.info("[ailake] Native library libailake_jni loaded successfully")
-          Some(lib)
-        }
-      )
+    try {
+      val loaded = Native.load("ailake_jni", classOf[Lib]).asInstanceOf[Lib]
+      log.info("[ailake] Native library libailake_jni loaded successfully")
+      Some(loaded)
+    } catch {
+      case e: Throwable =>
+        log.warn(
+          "[ailake] Native library libailake_jni not found — vector search disabled. " +
+          "Set java.library.path or LD_LIBRARY_PATH to the directory containing libailake_jni.so. " +
+          "Error: {}", e.getMessage)
+        None
+    }
 
   // Single shared mapper; ObjectMapper is thread-safe after configuration.
   private val mapper = new ObjectMapper()
