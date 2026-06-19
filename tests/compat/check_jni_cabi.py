@@ -2,7 +2,8 @@
 #!/usr/bin/env python3
 """
 Validates the ailake-jni C-ABI:
-  ailake_write_batch_json + ailake_search_json + ailake_search_multimodal_json.
+  ailake_write_batch_json + ailake_search_json + ailake_search_multimodal_json +
+  ailake_delete_where_json + ailake_evolve_schema_json.
 This is the common interface used by all JVM connectors (Flink, Spark, Trino) via JNA.
 
 Library location (in order):
@@ -72,6 +73,12 @@ lib.ailake_search_json.restype = ctypes.c_void_p
 
 lib.ailake_search_multimodal_json.argtypes = [ctypes.c_char_p]
 lib.ailake_search_multimodal_json.restype = ctypes.c_void_p
+
+lib.ailake_delete_where_json.argtypes = [ctypes.c_char_p]
+lib.ailake_delete_where_json.restype = ctypes.c_void_p
+
+lib.ailake_evolve_schema_json.argtypes = [ctypes.c_char_p]
+lib.ailake_evolve_schema_json.restype = ctypes.c_void_p
 
 lib.ailake_free_string.argtypes = [ctypes.c_void_p]
 lib.ailake_free_string.restype = None
@@ -185,6 +192,59 @@ with tempfile.TemporaryDirectory() as tmp:
     assert best["rrf_score"] > 0, f"FAIL: rrf_score={best['rrf_score']}, expected > 0"
     print(f"PASS (search_multimodal): top-1 row_id={best['row_id']} rrf_score={best['rrf_score']:.6f}")
 
+# ── ailake_delete_where_json ──────────────────────────────────────────────────
+
+with tempfile.TemporaryDirectory() as tmp:
+    write_fixture(tmp, "default", "del_test")
+
+    resp = _call(lib.ailake_delete_where_json, {
+        "warehouse": tmp,
+        "namespace": "default",
+        "table": "del_test",
+        "column": "id",
+        "values": [0, 1, 2],
+    })
+    assert resp.get("ok"), f"FAIL: delete_where failed: {resp}"
+    print("PASS (delete_where): 3 rows marked deleted via equality delete")
+
+    # Empty values list must be a no-op (ok=true, no file written)
+    resp_noop = _call(lib.ailake_delete_where_json, {
+        "warehouse": tmp,
+        "namespace": "default",
+        "table": "del_test",
+        "column": "id",
+        "values": [],
+    })
+    assert resp_noop.get("ok"), f"FAIL: delete_where empty noop: {resp_noop}"
+    print("PASS (delete_where noop): empty values list is no-op")
+
+# ── ailake_evolve_schema_json ─────────────────────────────────────────────────
+
+with tempfile.TemporaryDirectory() as tmp:
+    write_fixture(tmp, "default", "evo_test")
+
+    resp = _call(lib.ailake_evolve_schema_json, {
+        "warehouse": tmp,
+        "namespace": "default",
+        "table": "evo_test",
+        "add_columns": [{"name": "source", "type": "string"}],
+        "rename_columns": [],
+    })
+    assert resp.get("ok"), f"FAIL: evolve_schema failed: {resp}"
+    assert "new_schema_id" in resp, f"FAIL: evolve_schema missing new_schema_id: {resp}"
+    print(f"PASS (evolve_schema add_column): new_schema_id={resp['new_schema_id']}")
+
+    # Empty add+rename must be a no-op
+    resp_noop = _call(lib.ailake_evolve_schema_json, {
+        "warehouse": tmp,
+        "namespace": "default",
+        "table": "evo_test",
+        "add_columns": [],
+        "rename_columns": [],
+    })
+    assert resp_noop.get("ok"), f"FAIL: evolve_schema empty noop: {resp_noop}"
+    print("PASS (evolve_schema noop): empty add/rename is no-op")
+
 # ── Optional: write Spark/Trino fixture (table="table") ───────────────────────
 
 spark_trino_fixture = os.environ.get("AILAKE_SPARK_TRINO_FIXTURE")
@@ -194,4 +254,4 @@ if spark_trino_fixture:
     print(f"PASS (spark/trino fixture): written to {spark_trino_fixture}/default/table")
 
 print()
-print("PASS: ailake-jni C-ABI (write + search + search_multimodal) — JNA bridge interface validated.")
+print("PASS: ailake-jni C-ABI (write + search + search_multimodal + delete_where + evolve_schema) — JNA bridge interface validated.")

@@ -22,8 +22,11 @@ jobs:
           cmake -S ailake-cpp -B ailake-cpp/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DAILAKE_CUDA=OFF \
-            -DAILAKE_TESTS=OFF \
+            -DAILAKE_TESTS=ON \
             -DAILAKE_EXAMPLES=ON
 
       - name: Build
         run: cmake --build ailake-cpp/build --parallel
+
+      - name: Test
+        run: ctest --test-dir ailake-cpp/build --output-on-failure --parallel

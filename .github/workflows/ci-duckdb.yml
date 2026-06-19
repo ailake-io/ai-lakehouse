@@ -5,11 +5,11 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  DUCKDB_VERSION: "v1.1.3"
-  # DuckDB manylinux pip wheels require extensions tagged linux_amd64_gcc4.
-  # Set explicitly so append_extension_metadata.py uses this regardless of
-  # whether duckdb is importable at cmake build time (Python setup runs after).
-  DUCKDB_PLATFORM: "linux_amd64_gcc4"
+  DUCKDB_VERSION: "v1.5.0"
+  # DuckDB ≥1.2 pip wheels use the standard linux_amd64 platform tag;
+  # gcc4/old-ABI builds were dropped in 1.2. Set explicitly so
+  # append_extension_metadata.py uses the right tag at cmake build time.
+  DUCKDB_PLATFORM: "linux_amd64"
 
 jobs:
   build-and-test:
@@ -82,3 +82,17 @@ jobs:
           AILAKE_LIB:     target/release/libailake_jni.so
           AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_FIXTURE: ./compat-fixture
+
+      - name: Run delete_where tests
+        run: python duckdb-ailake/test/test_delete.py
+        env:
+          AILAKE_LIB:    target/release/libailake_jni.so
+          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_TMPDIR: /tmp/ailake_duck_delete
+
+      - name: Run evolve_schema tests
+        run: python duckdb-ailake/test/test_evolve.py
+        env:
+          AILAKE_LIB:    target/release/libailake_jni.so
+          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_TMPDIR: /tmp/ailake_duck_evolve

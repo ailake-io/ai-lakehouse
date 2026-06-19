@@ -158,6 +158,16 @@ jobs:
           cd airflow-providers-ailake
           python -m pytest tests/ -v
 
+  test-airbyte:
+    name: test-airbyte
+    runs-on: [self-hosted, Linux]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install test dependencies
+        run: pip install pytest
+      - name: Run Airbyte destination unit tests
+        run: python -m pytest airbyte-destination-ailake/tests/ -v
+
   compat-ailake-py:
     name: compat-ailake-py
     runs-on: [self-hosted, Linux]
