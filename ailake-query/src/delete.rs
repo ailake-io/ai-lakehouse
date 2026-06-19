@@ -18,7 +18,7 @@ use ailake_catalog::{
         new_snapshot_id, CatalogProvider, DeletionVector, NewSnapshot, SnapshotOperation,
         TableIdent,
     },
-    DataFileEntry, EqualityDeleteFile,
+    DataFileEntry,
 };
 use ailake_core::{AilakeError, AilakeResult};
 use ailake_store::Store;

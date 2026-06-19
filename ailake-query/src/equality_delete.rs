@@ -15,7 +15,7 @@ use ailake_catalog::{read_equality_delete_values, EqualityDeleteFile};
 use ailake_core::{AilakeError, AilakeResult};
 use ailake_store::Store;
 use arrow_array::{
-    cast::AsArray, Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
+    Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
     RecordBatch, StringArray,
 };
 use arrow_schema::DataType;
