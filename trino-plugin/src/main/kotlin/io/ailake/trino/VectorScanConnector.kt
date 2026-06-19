@@ -21,9 +21,11 @@ class VectorScanConnector(
     private val namespace: String,
     private val tableName: String,
     private val embeddingModel: String? = null,
+    private val partitionFields: List<PartitionFieldDef> = emptyList(),
+    private val formatVersion: Int = 2,
 ) : Connector {
 
-    private val metadata = VectorScanMetadata(tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel)
+    private val metadata = VectorScanMetadata(tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel, partitionFields, formatVersion)
     private val splitManager = VectorScanSplitManager()
     private val recordSetProvider = VectorScanRecordSetProvider()
     private val pageSinkProvider = AilakePageSinkProvider()

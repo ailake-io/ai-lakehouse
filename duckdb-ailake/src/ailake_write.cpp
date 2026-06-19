@@ -137,12 +137,17 @@ static void AilakeWriteExecFull(
     std::string metric       = metric_v.IsNull()     ? "cosine"    : StringValue::Get(metric_v);
     std::string precision    = precision_v.IsNull()  ? "f16"       : StringValue::Get(precision_v);
 
-    // Optional partition args (arity 7 and 8)
-    std::string partition_by, partition_value;
+    // Optional partition args (arity 7+)
+    std::string partition_by, partition_value, partition_fields_json;
+    int format_version = 2;
     if ((idx_t)args.data.size() > 6 && !args.data[6].GetValue(0).IsNull())
-        partition_by    = StringValue::Get(args.data[6].GetValue(0));
+        partition_by          = StringValue::Get(args.data[6].GetValue(0));
     if ((idx_t)args.data.size() > 7 && !args.data[7].GetValue(0).IsNull())
-        partition_value = StringValue::Get(args.data[7].GetValue(0));
+        partition_value       = StringValue::Get(args.data[7].GetValue(0));
+    if ((idx_t)args.data.size() > 8 && !args.data[8].GetValue(0).IsNull())
+        partition_fields_json = StringValue::Get(args.data[8].GetValue(0));
+    if ((idx_t)args.data.size() > 9 && !args.data[9].GetValue(0).IsNull())
+        format_version        = IntegerValue::Get(args.data[9].GetValue(0));
 
     auto ids        = extract_bigint_list(ids_v);
     auto embeddings = extract_float_list_list(emb_v);
@@ -170,7 +175,9 @@ static void AilakeWriteExecFull(
         ids,
         embeddings,
         partition_by,
-        partition_value
+        partition_value,
+        partition_fields_json,
+        format_version
     );
     result.SetValue(0, Value::BIGINT(snap));
 }
@@ -224,6 +231,38 @@ void RegisterAilakeWrite(duckdb::DatabaseInstance &db) {
          LogicalType::VARCHAR,
          LogicalType::VARCHAR,
          LogicalType::VARCHAR},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 9: + partition_fields_json VARCHAR
+    // partition_fields_json: JSON array like '[{"column":"x","transform":"identity","column_type":"string"}]'
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 10: + format_version INTEGER (2 or 3)
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER},
         LogicalType::BIGINT,
         AilakeWriteExecFull
     ));

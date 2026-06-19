@@ -13,6 +13,7 @@
 #include "footer.hpp"
 #include <cstdint>
 #include <fstream>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -27,6 +28,26 @@
 #endif
 
 namespace ailake {
+
+// ---------------------------------------------------------------------------
+// PartitionDef / SchemaField — Phase K / N
+// ---------------------------------------------------------------------------
+
+// PartitionDef mirrors ailake_core::PartitionDef.
+// transform is "identity" or "truncate[W]" (e.g. "truncate[4]").
+struct PartitionDef {
+    std::string column;
+    std::string transform;
+    std::string column_type; // Iceberg type: "string", "int", "long", ...
+};
+
+// SchemaField mirrors one field in the Iceberg table schema.
+struct SchemaField {
+    int         id       = 0;
+    std::string name;
+    std::string type;    // Iceberg primitive type string
+    bool        required = false;
+};
 
 // ---------------------------------------------------------------------------
 // DataFileEntry — mirrors ailake_catalog::provider::DataFileEntry
@@ -80,11 +101,14 @@ struct TableInfo {
     std::string vector_dim;
     std::string vector_metric;
     std::string embedding_model; // "<name>" or "<name>@<version>"; empty if not set
-    int         files         = 0;
-    int         indexed_files = 0;
-    uint64_t    rows          = 0;
-    uint64_t    size_bytes    = 0;
+    int         files            = 0;
+    int         indexed_files    = 0;
+    uint64_t    rows             = 0;
+    uint64_t    size_bytes       = 0;
     std::optional<int64_t> snapshot_id;
+    int format_version           = 2;  // 2 or 3
+    std::vector<PartitionDef> partition_fields; // empty for unpartitioned tables
+    std::vector<SchemaField>  schema_fields;    // current schema fields
 };
 
 // ---------------------------------------------------------------------------
@@ -180,28 +204,158 @@ public:
         info.table    = ns + "." + tbl;
         info.location = dir;
 
-        auto get = [&](const std::string& key, std::string& out) {
-            auto pos = meta.find("\"" + key + "\":");
-            if (pos == std::string::npos) return;
-            pos = meta.find('"', pos + key.size() + 3);
-            if (pos == std::string::npos) return;
-            auto end = meta.find('"', pos + 1);
-            if (end == std::string::npos) return;
-            out = meta.substr(pos + 1, end - pos - 1);
+        // Helper: extract first string value after key in JSON text.
+        auto get_str_in = [](const std::string& json, const std::string& key) -> std::string {
+            auto pos = json.find("\"" + key + "\":");
+            if (pos == std::string::npos) return {};
+            pos = json.find('"', pos + key.size() + 3);
+            if (pos == std::string::npos) return {};
+            auto end = json.find('"', pos + 1);
+            if (end == std::string::npos) return {};
+            return json.substr(pos + 1, end - pos - 1);
         };
-        get("ailake.vector-column",  info.vector_column);
-        get("ailake.vector-dim",     info.vector_dim);
-        get("ailake.vector-metric",  info.vector_metric);
-        get("ailake.embedding-model", info.embedding_model);
+        // Helper: extract first integer value after key.
+        auto get_int_in = [](const std::string& json, const std::string& key) -> std::optional<int64_t> {
+            auto pos = json.find("\"" + key + "\":");
+            if (pos == std::string::npos) return {};
+            pos += key.size() + 3;
+            while (pos < json.size() && (json[pos]==' '||json[pos]=='\n'||json[pos]=='\r')) ++pos;
+            if (pos >= json.size() || json[pos] == 'n') return {};
+            try { return std::stoll(json.substr(pos)); } catch (...) { return {}; }
+        };
 
-        // current-snapshot-id
-        auto snap_pos = meta.find("\"current-snapshot-id\":");
-        if (snap_pos != std::string::npos) {
-            snap_pos += 23;
-            while (snap_pos < meta.size() && (meta[snap_pos]==' '||meta[snap_pos]=='\n')) ++snap_pos;
-            int64_t id = std::stoll(meta.substr(snap_pos));
-            info.snapshot_id = id;
+        info.vector_column   = get_str_in(meta, "ailake.vector-column");
+        info.vector_dim      = get_str_in(meta, "ailake.vector-dim");
+        info.vector_metric   = get_str_in(meta, "ailake.vector-metric");
+        info.embedding_model = get_str_in(meta, "ailake.embedding-model");
+
+        if (auto v = get_int_in(meta, "current-snapshot-id")) info.snapshot_id = *v;
+        if (auto v = get_int_in(meta, "format-version"))      info.format_version = (int)*v;
+
+        // --- Parse current schema fields ---
+        int current_schema_id = -1;
+        if (auto v = get_int_in(meta, "current-schema-id")) current_schema_id = (int)*v;
+
+        // Find the "schemas" array and iterate over JSON objects until schema-id matches.
+        {
+            auto schemas_pos = meta.find("\"schemas\":");
+            if (schemas_pos != std::string::npos) {
+                auto bracket = meta.find('[', schemas_pos);
+                if (bracket != std::string::npos) {
+                    // Walk schema objects: find each '{' ... '}' block.
+                    size_t p = bracket + 1;
+                    while (p < meta.size()) {
+                        auto obj_start = meta.find('{', p);
+                        if (obj_start == std::string::npos) break;
+                        // Find matching closing brace (depth-aware).
+                        size_t depth = 1; size_t q = obj_start + 1;
+                        while (q < meta.size() && depth > 0) {
+                            if (meta[q] == '{') ++depth;
+                            else if (meta[q] == '}') --depth;
+                            ++q;
+                        }
+                        std::string schema_obj = meta.substr(obj_start, q - obj_start);
+                        if (auto sid = get_int_in(schema_obj, "schema-id")) {
+                            if ((int)*sid == current_schema_id) {
+                                // Parse fields array inside this schema object.
+                                auto fa = schema_obj.find("\"fields\":");
+                                if (fa != std::string::npos) {
+                                    auto fb = schema_obj.find('[', fa);
+                                    if (fb != std::string::npos) {
+                                        size_t fp = fb + 1;
+                                        while (fp < schema_obj.size()) {
+                                            auto fo = schema_obj.find('{', fp);
+                                            if (fo == std::string::npos) break;
+                                            size_t fd = 1; size_t fq = fo + 1;
+                                            while (fq < schema_obj.size() && fd > 0) {
+                                                if (schema_obj[fq]=='{') ++fd;
+                                                else if (schema_obj[fq]=='}') --fd;
+                                                ++fq;
+                                            }
+                                            std::string fobj = schema_obj.substr(fo, fq - fo);
+                                            SchemaField sf;
+                                            if (auto id = get_int_in(fobj, "id")) sf.id = (int)*id;
+                                            sf.name = get_str_in(fobj, "name");
+                                            sf.type = get_str_in(fobj, "type");
+                                            // required: look for "required":true
+                                            sf.required = (fobj.find("\"required\":true") != std::string::npos);
+                                            if (!sf.name.empty()) info.schema_fields.push_back(sf);
+                                            fp = fq;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        p = q;
+                    }
+                }
+            }
         }
+
+        // Build field-id → type map for partition spec resolution.
+        std::map<int, std::string> field_type_by_id;
+        for (const auto& sf : info.schema_fields) field_type_by_id[sf.id] = sf.type;
+
+        // --- Parse default partition spec fields ---
+        int default_spec_id = -1;
+        if (auto v = get_int_in(meta, "default-spec-id")) default_spec_id = (int)*v;
+
+        {
+            auto specs_pos = meta.find("\"partition-specs\":");
+            if (specs_pos != std::string::npos) {
+                auto bracket = meta.find('[', specs_pos);
+                if (bracket != std::string::npos) {
+                    size_t p = bracket + 1;
+                    while (p < meta.size()) {
+                        auto obj_start = meta.find('{', p);
+                        if (obj_start == std::string::npos) break;
+                        size_t depth = 1; size_t q = obj_start + 1;
+                        while (q < meta.size() && depth > 0) {
+                            if (meta[q]=='{') ++depth;
+                            else if (meta[q]=='}') --depth;
+                            ++q;
+                        }
+                        std::string spec_obj = meta.substr(obj_start, q - obj_start);
+                        if (auto sid = get_int_in(spec_obj, "spec-id")) {
+                            if ((int)*sid == default_spec_id) {
+                                auto fa = spec_obj.find("\"fields\":");
+                                if (fa != std::string::npos) {
+                                    auto fb = spec_obj.find('[', fa);
+                                    if (fb != std::string::npos) {
+                                        size_t fp = fb + 1;
+                                        while (fp < spec_obj.size()) {
+                                            auto fo = spec_obj.find('{', fp);
+                                            if (fo == std::string::npos) break;
+                                            size_t fd = 1; size_t fq = fo + 1;
+                                            while (fq < spec_obj.size() && fd > 0) {
+                                                if (spec_obj[fq]=='{') ++fd;
+                                                else if (spec_obj[fq]=='}') --fd;
+                                                ++fq;
+                                            }
+                                            std::string fobj = spec_obj.substr(fo, fq - fo);
+                                            PartitionDef pd;
+                                            pd.column    = get_str_in(fobj, "name");
+                                            pd.transform = get_str_in(fobj, "transform");
+                                            if (auto src = get_int_in(fobj, "source-id")) {
+                                                auto it = field_type_by_id.find((int)*src);
+                                                if (it != field_type_by_id.end()) pd.column_type = it->second;
+                                            }
+                                            if (pd.column_type.empty()) pd.column_type = "string";
+                                            if (!pd.column.empty()) info.partition_fields.push_back(pd);
+                                            fp = fq;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        p = q;
+                    }
+                }
+            }
+        }
+
         return info;
     }
 

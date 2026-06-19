@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.flink
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import io.ailake.flink.internal.AilakeNativeLoader
+import io.ailake.flink.internal.PartitionFieldDef
 import org.apache.flink.configuration.ConfigOption
 import org.apache.flink.configuration.ConfigOptions
 import org.apache.flink.table.connector.sink.DynamicTableSink
@@ -48,9 +50,11 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
         val VEC_DIM         = ConfigOptions.key("vector.dim").intType().noDefaultValue()
         val VEC_METRIC      = ConfigOptions.key("vector.metric").stringType().defaultValue("euclidean")
         val VEC_PREC        = ConfigOptions.key("vector.precision").stringType().defaultValue("f16")
-        val SEARCH_TOPK     = ConfigOptions.key("search.top-k").intType().defaultValue(10)
-        val SEARCH_EF       = ConfigOptions.key("search.ef").intType().defaultValue(50)
-        val EMBEDDING_MODEL = ConfigOptions.key("embedding.model").stringType().noDefaultValue()
+        val SEARCH_TOPK       = ConfigOptions.key("search.top-k").intType().defaultValue(10)
+        val SEARCH_EF         = ConfigOptions.key("search.ef").intType().defaultValue(50)
+        val EMBEDDING_MODEL   = ConfigOptions.key("embedding.model").stringType().noDefaultValue()
+        val PARTITION_FIELDS  = ConfigOptions.key("partition.fields").stringType().defaultValue("[]")
+        val FORMAT_VERSION    = ConfigOptions.key("format.version").intType().defaultValue(2)
     }
 
     override fun factoryIdentifier(): String = IDENTIFIER
@@ -58,7 +62,7 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
     override fun requiredOptions(): Set<ConfigOption<*>> = setOf(WAREHOUSE, TABLE_NAME, VEC_DIM)
 
     override fun optionalOptions(): Set<ConfigOption<*>> =
-        setOf(NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF, EMBEDDING_MODEL)
+        setOf(NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF, EMBEDDING_MODEL, PARTITION_FIELDS, FORMAT_VERSION)
 
     override fun createDynamicTableSource(context: DynamicTableFactory.Context): DynamicTableSource {
         val helper = FactoryUtil.createTableFactoryHelper(this, context)
@@ -82,16 +86,26 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
         val opts = helper.options
         val embeddingModel = runCatching { opts.get(EMBEDDING_MODEL) }.getOrNull()
             ?.takeIf { it.isNotEmpty() }
+        val pfJson = opts.get(PARTITION_FIELDS)
+        val partitionFields: List<PartitionFieldDef> = if (pfJson == "[]" || pfJson.isBlank()) emptyList() else {
+            val node = ObjectMapper().readTree(pfJson)
+            (0 until node.size()).map { i ->
+                val n = node.get(i)
+                PartitionFieldDef(n.get("column").asText(), n.get("transform").asText(), n.get("column_type").asText())
+            }
+        }
         return AilakeVectorTableSink(
-            warehouse      = opts.get(WAREHOUSE),
-            namespace      = opts.get(NAMESPACE),
-            tableName      = opts.get(TABLE_NAME),
-            vecCol         = opts.get(VEC_COL),
-            dim            = opts.get(VEC_DIM),
-            metric         = opts.get(VEC_METRIC),
-            precision      = opts.get(VEC_PREC),
-            schema         = context.catalogTable.resolvedSchema,
-            embeddingModel = embeddingModel,
+            warehouse       = opts.get(WAREHOUSE),
+            namespace       = opts.get(NAMESPACE),
+            tableName       = opts.get(TABLE_NAME),
+            vecCol          = opts.get(VEC_COL),
+            dim             = opts.get(VEC_DIM),
+            metric          = opts.get(VEC_METRIC),
+            precision       = opts.get(VEC_PREC),
+            schema          = context.catalogTable.resolvedSchema,
+            embeddingModel  = embeddingModel,
+            partitionFields = partitionFields,
+            formatVersion   = opts.get(FORMAT_VERSION),
         )
     }
 }
