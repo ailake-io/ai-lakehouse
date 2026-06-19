@@ -63,6 +63,11 @@ static void AilakeDeleteWhereExec(
     std::string column    = StringValue::Get(column_v);
     auto        values    = extract_varchar_list(values_v);
 
+    if (values.empty()) {
+        result.SetValue(0, Value::BOOLEAN(true));
+        return;
+    }
+
     bool ok = lib.delete_where(warehouse, "table", column, values);
     result.SetValue(0, Value::BOOLEAN(ok));
 }
