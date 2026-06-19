@@ -223,6 +223,7 @@ jobs:
         run: cargo build --release -p ailake-jni
       - name: Generate JNI fixture (dim=8, N=16)
         run: |
+          rm -rf /tmp/ailake-jni-venv
           python3 -m venv /tmp/ailake-jni-venv
           AILAKE_LIB=target/release/libailake_jni.so \
             /tmp/ailake-jni-venv/bin/python3 tests/fixtures/write_jni_fixture.py /tmp/ailake-jni-fixture
