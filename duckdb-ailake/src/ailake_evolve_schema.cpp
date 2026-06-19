@@ -54,6 +54,17 @@ static void AilakeEvolveSchemaExec(
     std::string add_cols_json   = add_cols_v.IsNull()    ? "[]" : StringValue::Get(add_cols_v);
     std::string rename_cols_json = rename_cols_v.IsNull() ? "[]" : StringValue::Get(rename_cols_v);
 
+    auto is_empty_arr = [](const std::string &s) -> bool {
+        std::string t;
+        for (char c : s)
+            if (!std::isspace(static_cast<unsigned char>(c))) t += c;
+        return t.empty() || t == "[]";
+    };
+    if (is_empty_arr(add_cols_json) && is_empty_arr(rename_cols_json)) {
+        result.SetValue(0, Value::INTEGER(0));
+        return;
+    }
+
     int32_t schema_id = lib.evolve_schema(warehouse, "table", add_cols_json, rename_cols_json);
     result.SetValue(0, Value::INTEGER(schema_id));
 }
