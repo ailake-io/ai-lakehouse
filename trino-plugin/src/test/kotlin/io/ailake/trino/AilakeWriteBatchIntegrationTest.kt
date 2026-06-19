@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.trino
 
+import io.ailake.trino.AilakeNative.AddColReq
+import io.ailake.trino.AilakeNative.PartitionFieldDef
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import java.io.File
