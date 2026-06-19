@@ -194,7 +194,10 @@ impl ParquetVectorWriter {
         let flat_bytes: Vec<u8> = match self.policy.precision {
             VectorPrecision::F32 => embeddings_per_row
                 .iter()
-                .flat_map(|row| row.iter().flat_map(|v| v.iter().flat_map(|&x| x.to_le_bytes())))
+                .flat_map(|row| {
+                    row.iter()
+                        .flat_map(|v| v.iter().flat_map(|&x| x.to_le_bytes()))
+                })
                 .collect(),
             VectorPrecision::I8 => embeddings_per_row
                 .iter()
