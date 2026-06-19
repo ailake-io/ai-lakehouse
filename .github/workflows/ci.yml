@@ -164,7 +164,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install test dependencies
-        run: pip install pytest
+        run: pip install pytest numpy airbyte-cdk
       - name: Run Airbyte destination unit tests
         run: python -m pytest airbyte-destination-ailake/tests/ -v
 
