@@ -193,12 +193,34 @@ jobs:
     runs-on: [self-hosted, Linux]
     steps:
       - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
       - uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.7'
+      - name: Build libailake_jni.so
+        run: cargo build --release -p ailake-jni
+      - name: Generate JNI fixture (dim=8, N=16)
+        run: |
+          python3 -m venv /tmp/ailake-jni-venv
+          /tmp/ailake-jni-venv/bin/pip install --quiet numpy
+          AILAKE_LIB=target/release/libailake_jni.so \
+            /tmp/ailake-jni-venv/bin/python3 tests/fixtures/write_jni_fixture.py /tmp/ailake-jni-fixture
       - name: Run Trino plugin unit tests
         run: gradle -p trino-plugin test --no-daemon --no-configuration-cache
+        env:
+          AILAKE_LIB_PATH: ${{ github.workspace }}/target/release
+          AILAKE_WRITE_DIR: /tmp/ailake-trino-write
+          AILAKE_SPARK_TRINO_FIXTURE: /tmp/ailake-jni-fixture
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
       - name: Run Spark plugin unit tests
         run: gradle -p spark-plugin test --no-daemon --no-configuration-cache
+        env:
+          AILAKE_LIB_PATH: ${{ github.workspace }}/target/release
+          AILAKE_WRITE_DIR: /tmp/ailake-spark-write
+          AILAKE_SPARK_TRINO_FIXTURE: /tmp/ailake-jni-fixture
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
       - name: Run Flink plugin unit tests
         run: gradle -p ailake-flink test --no-daemon --no-configuration-cache
+        env:
+          AILAKE_NATIVE_LIB: ${{ github.workspace }}/target/release/libailake_jni.so
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
