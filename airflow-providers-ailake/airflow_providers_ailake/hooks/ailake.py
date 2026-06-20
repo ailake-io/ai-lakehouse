@@ -161,6 +161,35 @@ class AilakeHook(BaseHook):
         )
         return json.loads(result.stdout).get("results", [])
 
+    def search_text(
+        self,
+        table: str,
+        query_text: str,
+        text_columns: list[str] | None = None,
+        top_k: int = 10,
+        partition_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run full-text search and return results as a list of dicts.
+
+        Uses Tantivy FTS when present; falls back to BM25 brute-force.
+        Wraps ``ailake search <table> --text <query> --text-columns <cols>
+        --top-k <k> --format json``.
+        """
+        cols = ",".join(text_columns) if text_columns else "chunk_text"
+        extra: list[str] = []
+        if partition_filter:
+            extra += ["--partition-filter", partition_filter]
+        result = self.run_cli(
+            "search",
+            table,
+            "--text", query_text,
+            "--text-columns", cols,
+            "--top-k", str(top_k),
+            "--format", "json",
+            *extra,
+        )
+        return json.loads(result.stdout).get("results", [])
+
     def delete_where(
         self,
         table: str,
