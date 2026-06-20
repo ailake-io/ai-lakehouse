@@ -115,15 +115,16 @@ public:
         float                     bm25_weight      = 0.5f
     ) const;
 
-    // Execute ailake_search_text_json. Pure BM25 search, no vector required.
-    // Returns empty on any error or if ailake_search_text_json not available.
+    // Execute ailake_search_text_json. Tantivy O(log N) fast path when FTS blob
+    // present; fallback BM25 O(N) for legacy files. Returns empty on any error.
+    // text_columns: Parquet columns to search (sends "text_columns" JSON array).
     std::vector<SearchRow> search_text(
-        const std::string &warehouse,
-        const std::string &table_name,
-        const std::string &query_text,
-        int                top_k,
-        const std::string &text_column      = "chunk_text",
-        const std::string &partition_filter = ""
+        const std::string              &warehouse,
+        const std::string              &table_name,
+        const std::string              &query_text,
+        int                             top_k,
+        const std::vector<std::string> &text_columns    = {"chunk_text"},
+        const std::string              &partition_filter = ""
     ) const;
 
     // Execute ailake_scan_json. Returns pre-parsed columnar data.
@@ -147,6 +148,7 @@ public:
 
     // Execute ailake_write_batch_json. Returns snapshot_id or -1 on error.
     // partition_fields_json: JSON array like [{"column":"x","transform":"identity","column_type":"string"}]
+    // fts_columns_json: JSON array like ["chunk_text","title"] — empty = no FTS
     // format_version: 2 (default) or 3
     int64_t write_batch(
         const std::string              &warehouse,
@@ -161,7 +163,9 @@ public:
         const std::string              &partition_by          = "",
         const std::string              &partition_value       = "",
         const std::string              &partition_fields_json = "",
-        int                             format_version        = 2
+        int                             format_version        = 2,
+        const std::string              &fts_columns_json      = "",
+        const std::string              &fts_tokenizer         = ""
     ) const;
 
     // Execute ailake_delete_where_json. Returns true on success.

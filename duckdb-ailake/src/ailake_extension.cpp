@@ -193,22 +193,33 @@ std::vector<SearchRow> AilakeLib::search(
 }
 
 std::vector<SearchRow> AilakeLib::search_text(
-    const std::string &warehouse,
-    const std::string &table_name,
-    const std::string &query_text,
-    int                top_k,
-    const std::string &text_column,
-    const std::string &partition_filter
+    const std::string              &warehouse,
+    const std::string              &table_name,
+    const std::string              &query_text,
+    int                             top_k,
+    const std::vector<std::string> &text_columns,
+    const std::string              &partition_filter
 ) const {
     if (!search_text_fn_ || !free_fn_ || query_text.empty()) return {};
 
+    // Build "text_columns": ["col1","col2",...] JSON array
+    std::string cols_json = "[";
+    const auto &tc = text_columns.empty()
+        ? std::vector<std::string>{"chunk_text"}
+        : text_columns;
+    for (size_t i = 0; i < tc.size(); ++i) {
+        if (i > 0) cols_json += ',';
+        cols_json += json_escape(tc[i]);
+    }
+    cols_json += ']';
+
     std::string req =
-        "{\"warehouse\":"   + json_escape(warehouse)   +
-        ",\"namespace\":\"default\""                   +
-        ",\"table\":"       + json_escape(table_name)  +
-        ",\"query_text\":"  + json_escape(query_text)  +
-        ",\"top_k\":"       + std::to_string(top_k)    +
-        ",\"text_column\":" + json_escape(text_column);
+        "{\"warehouse\":"    + json_escape(warehouse)   +
+        ",\"namespace\":\"default\""                    +
+        ",\"table\":"        + json_escape(table_name)  +
+        ",\"query_text\":"   + json_escape(query_text)  +
+        ",\"top_k\":"        + std::to_string(top_k)    +
+        ",\"text_columns\":" + cols_json;
     if (!partition_filter.empty())
         req += ",\"partition_filter\":" + json_escape(partition_filter);
     req += "}";
@@ -249,7 +260,9 @@ int64_t AilakeLib::write_batch(
     const std::string              &partition_by,
     const std::string              &partition_value,
     const std::string              &partition_fields_json,
-    int                             format_version
+    int                             format_version,
+    const std::string              &fts_columns_json,
+    const std::string              &fts_tokenizer
 ) const {
     if (!write_fn_ || !free_fn_ || ids.empty()) return -1;
 
@@ -290,7 +303,11 @@ int64_t AilakeLib::write_batch(
     if (!partition_value.empty())
         req += ",\"partition_value\":"  + json_escape(partition_value);
     if (!partition_fields_json.empty())
-        req += ",\"partition_fields\":" + partition_fields_json; // already valid JSON array
+        req += ",\"partition_fields\":" + partition_fields_json;
+    if (!fts_columns_json.empty())
+        req += ",\"fts_columns\":"      + fts_columns_json;
+    if (!fts_tokenizer.empty())
+        req += ",\"fts_tokenizer\":"    + json_escape(fts_tokenizer);
     req += "}";
 
     char *raw = write_fn_(req.c_str());

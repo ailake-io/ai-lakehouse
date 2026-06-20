@@ -3,28 +3,27 @@
 //
 // ailake_search_text(table_path, query_text, top_k) → TABLE(row_id BIGINT, distance FLOAT, file_path VARCHAR)
 //
-// Pure BM25 full-text search — no embedding required.
-// O(N) per call — intended for small/medium tables or offline ranking.
-// Requires BM25 stats accumulated at write time via
-// TableWriter(bm25_text_column=...) in Python or writer.with_bm25() in Rust.
+// Full-text search — no embedding required.
+// Uses Tantivy per-file index (O(log N)) when present (Phase T); falls back to
+// BM25 brute-force (O(N)) for legacy files without FTS blob.
 //
 // table_path   VARCHAR   — AI-Lake table root
 // query_text   VARCHAR   — text query to score against
 // top_k        INTEGER   — number of results (default 10)
 //
 // Optional named parameters:
-// text_column      VARCHAR   default 'chunk_text'
-// partition_filter VARCHAR   default '' (no filter)
+// text_columns     VARCHAR[]  preferred — list of Parquet columns to search
+// text_column      VARCHAR    legacy single-column fallback, default 'chunk_text'
+// partition_filter VARCHAR    default '' (no filter)
 //
-// Returns: distance = negated BM25 score (lower = more relevant, consistent with
-//          vector search convention). ORDER BY distance ASC = most relevant first.
+// Returns: distance = negated BM25/Tantivy score (lower = more relevant).
 //
 // Example:
 //   SELECT * FROM ailake_search_text(
 //       'file:///data/my_table',
 //       'rust programming language',
 //       10,
-//       text_column := 'chunk_text'
+//       text_columns := ['chunk_text', 'document_title']
 //   ) ORDER BY distance;
 
 #include "ailake_extension.hpp"
@@ -39,12 +38,12 @@ using namespace duckdb;
 // ── Bind data ─────────────────────────────────────────────────────────────────
 
 struct AilakeSearchTextBindData : public TableFunctionData {
-    std::string warehouse;
-    std::string table_name      = "table";
-    std::string query_text;
-    int         top_k           = 10;
-    std::string text_column     = "chunk_text";
-    std::string partition_filter;
+    std::string              warehouse;
+    std::string              table_name      = "table";
+    std::string              query_text;
+    int                      top_k           = 10;
+    std::vector<std::string> text_columns    = {"chunk_text"};
+    std::string              partition_filter;
 };
 
 // ── Global state ──────────────────────────────────────────────────────────────
@@ -83,9 +82,24 @@ static unique_ptr<FunctionData> AilakeSearchTextBind(
 
     // named args (optional)
     for (auto &named : input.named_parameters) {
-        if (named.first == "text_column") {
-            if (!named.second.IsNull())
-                data->text_column = StringValue::Get(named.second);
+        if (named.first == "text_columns") {
+            // LIST(VARCHAR) — preferred multi-column form
+            if (!named.second.IsNull()) {
+                data->text_columns.clear();
+                for (const auto &child : ListValue::GetChildren(named.second)) {
+                    if (!child.IsNull())
+                        data->text_columns.push_back(StringValue::Get(child));
+                }
+                if (data->text_columns.empty())
+                    data->text_columns = {"chunk_text"};
+            }
+        } else if (named.first == "text_column") {
+            // VARCHAR — legacy single-column fallback; only applied when
+            // text_columns has not already been set to a multi-value list
+            if (!named.second.IsNull() && data->text_columns.size() == 1
+                    && data->text_columns[0] == "chunk_text") {
+                data->text_columns = {StringValue::Get(named.second)};
+            }
         } else if (named.first == "partition_filter") {
             if (!named.second.IsNull())
                 data->partition_filter = StringValue::Get(named.second);
@@ -120,7 +134,7 @@ static unique_ptr<GlobalTableFunctionState> AilakeSearchTextInit(
         bind.table_name,
         bind.query_text,
         bind.top_k,
-        bind.text_column,
+        bind.text_columns,
         bind.partition_filter
     );
 
@@ -172,7 +186,8 @@ void RegisterAilakeSearchText(duckdb::ExtensionLoader &loader) {
         AilakeSearchTextInit
     );
 
-    func.named_parameters["text_column"]      = LogicalType::VARCHAR;
+    func.named_parameters["text_columns"]     = LogicalType::LIST(LogicalType::VARCHAR);
+    func.named_parameters["text_column"]      = LogicalType::VARCHAR;  // legacy compat
     func.named_parameters["partition_filter"] = LogicalType::VARCHAR;
     func.named_parameters["table_name"]       = LogicalType::VARCHAR;
 
