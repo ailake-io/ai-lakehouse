@@ -131,8 +131,13 @@ def _call_search_text(req: dict) -> dict:
     finally:
         lib.ailake_free_string(ptr)
 
+# Use a separate warehouse for the FTS table so its data files don't collide with
+# the main table's data/part-00000.parquet (both write relative to warehouse root).
+fts_warehouse = str((out_dir / "fts").resolve())
+pathlib.Path(fts_warehouse).mkdir(parents=True, exist_ok=True)
+
 resp_fts = _call_write({
-    "warehouse": warehouse,
+    "warehouse": fts_warehouse,
     "namespace": namespace,
     "table": "fts_table",
     "vec_col": "embedding",
@@ -150,7 +155,7 @@ print(f"fts_table committed: snapshot_id={resp_fts['snapshot_id']}  rows={len(FT
 
 # Smoke-check FTS search so the fixture is guaranteed searchable
 resp_txt = _call_search_text({
-    "warehouse": warehouse,
+    "warehouse": fts_warehouse,
     "namespace": namespace,
     "table": "fts_table",
     "query_text": "rust",
