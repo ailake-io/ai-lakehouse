@@ -13,6 +13,7 @@
 package ailake
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -137,6 +138,90 @@ func EvolveSchema(
 		}
 	}
 	return newSchemaID, nil
+}
+
+// SearchTextResult is a single FTS hit from SearchText.
+type SearchTextResult struct {
+	RowID    int64
+	Score    float64 // BM25 score (higher = more relevant)
+	FilePath string
+}
+
+// SearchText performs full-text search on an AI-Lake table.
+// Uses the Tantivy FTS index when present (O(log N)); falls back to BM25
+// brute-force for legacy files.
+//
+// textColumns is the list of Parquet columns to search; defaults to
+// ["chunk_text"] when nil or empty.
+func SearchText(
+	catalog *HadoopCatalog,
+	namespace, table, queryText string,
+	textColumns []string,
+	topK int,
+) ([]SearchTextResult, error) {
+	if queryText == "" {
+		return nil, nil
+	}
+	bin, err := resolveBin()
+	if err != nil {
+		return nil, err
+	}
+
+	warehouse := catalog.Warehouse
+	if !filepath.IsAbs(warehouse) && !strings.Contains(warehouse, "://") {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
+	tableID := namespace + "." + table
+	cols := "chunk_text"
+	if len(textColumns) > 0 {
+		cols = strings.Join(textColumns, ",")
+	}
+	if topK <= 0 {
+		topK = 10
+	}
+
+	args := []string{
+		"--store", warehouse,
+		"search", tableID,
+		"--text", queryText,
+		"--text-columns", cols,
+		"--top-k", fmt.Sprintf("%d", topK),
+		"--format", "json",
+	}
+
+	out, err := exec.Command(bin, args...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("ailake search --text: %w", err)
+	}
+
+	// Parse JSON output: {"results":[{"rank":N,"row_id":N,"score":F,"file_path":"..."}]}
+	type hit struct {
+		RowID    int64   `json:"row_id"`
+		Score    float64 `json:"score"`
+		FilePath string  `json:"file_path"`
+	}
+	type resp struct {
+		Results []hit `json:"results"`
+	}
+
+	var r resp
+	outStr := strings.TrimSpace(string(out))
+	if err := json.Unmarshal([]byte(outStr), &r); err != nil {
+		return nil, fmt.Errorf("ailake search --text: parse response: %w", err)
+	}
+
+	results := make([]SearchTextResult, 0, len(r.Results))
+	for _, h := range r.Results {
+		results = append(results, SearchTextResult{
+			RowID:    h.RowID,
+			Score:    h.Score,
+			FilePath: h.FilePath,
+		})
+	}
+	return results, nil
 }
 
 // resolveBin returns the path to the `ailake` CLI binary.

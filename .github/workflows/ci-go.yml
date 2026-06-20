@@ -54,3 +54,11 @@ jobs:
         env:
           AILAKE_FIXTURE: ${{ github.workspace }}/compat-fixture
           AILAKE_BIN: ${{ github.workspace }}/target/release/ailake
+
+      - name: Phase T — FTS integration tests
+        working-directory: ailake-go
+        run: go test ./... -run TestSearchText -v -timeout 60s
+        env:
+          AILAKE_FIXTURE: ${{ github.workspace }}/compat-fixture
+          AILAKE_BIN: ${{ github.workspace }}/target/release/ailake
+          AILAKE_FTS_TABLE: fts_table

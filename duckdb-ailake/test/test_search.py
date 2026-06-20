@@ -250,6 +250,46 @@ def test_search_text_no_lib_returns_empty():
     require(rows[0] == 0, f"expected 0 rows without native lib, got {rows[0]}")
     print("PASS: ailake_search_text graceful degradation without native lib")
 
+
+def test_search_text_text_columns_named_param():
+    """text_columns LIST(VARCHAR) named param accepted; returns correct schema."""
+    conn = setup_connection()
+
+    # text_columns := ['chunk_text', 'title'] must parse and bind without error.
+    schema = conn.execute(f"""
+        DESCRIBE SELECT * FROM ailake_search_text(
+            '{table_path()}',
+            'vector search',
+            5,
+            text_columns := ['chunk_text', 'title']
+        )
+    """).fetchall()
+
+    col_names = [r[0] for r in schema]
+    require("row_id"    in col_names, f"ailake_search_text missing row_id, got {col_names}")
+    require("distance"  in col_names, f"ailake_search_text missing distance, got {col_names}")
+    require("file_path" in col_names, f"ailake_search_text missing file_path, got {col_names}")
+    print(f"PASS: ailake_search_text text_columns LIST named param accepted, schema={col_names}")
+
+
+def test_search_text_legacy_text_column_param():
+    """Legacy text_column VARCHAR named param still accepted (single-column fallback)."""
+    conn = setup_connection()
+
+    schema = conn.execute(f"""
+        DESCRIBE SELECT * FROM ailake_search_text(
+            '{table_path()}',
+            'vector search',
+            5,
+            text_column := 'document_text'
+        )
+    """).fetchall()
+
+    col_names = [r[0] for r in schema]
+    require("row_id" in col_names, f"ailake_search_text schema wrong: {col_names}")
+    print(f"PASS: ailake_search_text legacy text_column VARCHAR param accepted")
+
+
 if __name__ == "__main__":
     if not pathlib.Path(EXT_PATH).exists():
         print(f"SKIP: extension not found at {EXT_PATH} — build first with cmake")
@@ -265,5 +305,7 @@ if __name__ == "__main__":
     test_search_hybrid_named_params()
     test_search_text_schema()
     test_search_text_no_lib_returns_empty()
+    test_search_text_text_columns_named_param()
+    test_search_text_legacy_text_column_param()
 
     print("\nAll search tests passed.")

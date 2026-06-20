@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use ailake_catalog::{
     make_data_file_entry, make_data_file_entry_indexing, CatalogProvider, DataFileEntry,
@@ -124,6 +124,8 @@ pub struct CompactionExecutor {
     store: Arc<dyn Store>,
     policy: VectorStoragePolicy,
     index_strategy: CompactionIndexStrategy,
+    /// When set, rebuilds and embeds a Tantivy FTS index in the compacted output file.
+    fts_config: Option<ailake_fts::FtsConfig>,
 }
 
 impl CompactionExecutor {
@@ -132,12 +134,19 @@ impl CompactionExecutor {
             store,
             policy,
             index_strategy: CompactionIndexStrategy::Auto,
+            fts_config: None,
         }
     }
 
     /// Override the default (Auto) index strategy for this executor.
     pub fn with_index_strategy(mut self, strategy: CompactionIndexStrategy) -> Self {
         self.index_strategy = strategy;
+        self
+    }
+
+    /// Rebuild and embed a Tantivy FTS index in the compacted output file.
+    pub fn with_fts_config(mut self, cfg: ailake_fts::FtsConfig) -> Self {
+        self.fts_config = Some(cfg);
         self
     }
 
@@ -206,7 +215,7 @@ impl CompactionExecutor {
         // Write merged file with adaptive index selection.
         let writer = {
             let base = AilakeFileWriter::new(self.policy.clone());
-            match &self.index_strategy {
+            let base = match &self.index_strategy {
                 CompactionIndexStrategy::Auto => base.with_auto_index(),
                 CompactionIndexStrategy::ForceHnsw => base,
                 CompactionIndexStrategy::ForceIvfPq => {
@@ -216,6 +225,17 @@ impl CompactionExecutor {
                     );
                     base.with_ivf_pq(cfg)
                 }
+            };
+            if let Some(ref fts_cfg) = self.fts_config {
+                match ailake_fts::merge_fts_blobs(fts_cfg, &merged_batch) {
+                    Ok(blob) => base.with_prebuilt_fts_blob(blob),
+                    Err(e) => {
+                        warn!("ailake: FTS re-index during compaction failed: {e}");
+                        base
+                    }
+                }
+            } else {
+                base
             }
         };
         let file_bytes = writer.write(&merged_batch, &all_embeddings)?;

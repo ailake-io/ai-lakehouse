@@ -26,6 +26,9 @@ class AilakeWriteOperator(BaseOperator):
         template, e.g. ``{{ ti.xcom_pull(task_ids='generate') }}``.
     :param embeddings_column: Name of the embedding column in the source file.
     :param batch_id: Idempotency key.  Defaults to ``{{ run_id }}_{{ task_id }}``.
+    :param fts_columns: Text columns to index with Tantivy FTS (e.g. ``["chunk_text"]``).
+        Empty or ``None`` disables FTS (default).
+    :param fts_tokenizer: Tantivy tokenizer name (default ``"default"``).
     :param ailake_conn_id: Airflow connection id (conn_type="ailake").
     """
 
@@ -43,6 +46,8 @@ class AilakeWriteOperator(BaseOperator):
         partition_value: str | None = None,
         partition_fields: list[dict[str, Any]] | None = None,
         format_version: int = 2,
+        fts_columns: list[str] | None = None,
+        fts_tokenizer: str = "default",
         ailake_conn_id: str = AilakeHook.default_conn_name,
         **kwargs: Any,
     ) -> None:
@@ -55,6 +60,8 @@ class AilakeWriteOperator(BaseOperator):
         self.partition_value = partition_value
         self.partition_fields = partition_fields
         self.format_version = format_version
+        self.fts_columns = fts_columns or []
+        self.fts_tokenizer = fts_tokenizer
         self.ailake_conn_id = ailake_conn_id
 
     def execute(self, context: Context) -> None:
@@ -80,6 +87,10 @@ class AilakeWriteOperator(BaseOperator):
             extra_args += ["--partition-fields", json.dumps(self.partition_fields)]
         if self.format_version != 2:
             extra_args += ["--format-version", str(self.format_version)]
+        if self.fts_columns:
+            extra_args += ["--fts-columns", ",".join(self.fts_columns)]
+            if self.fts_tokenizer != "default":
+                extra_args += ["--fts-tokenizer", self.fts_tokenizer]
 
         result = hook.run_cli(
             "insert",
@@ -338,3 +349,70 @@ class AilakeEvolveSchemaOperator(BaseOperator):
         )
         context["ti"].xcom_push(key="schema_id", value=schema_id)
         return schema_id
+
+
+class AilakeFtsSearchOperator(BaseOperator):
+    """Run a full-text (BM25 / Tantivy) search on an AI-Lake table.
+
+    Uses the Tantivy per-file FTS index when present (O(log N)); falls back to
+    BM25 brute-force for legacy files.  Results are pushed to XCom under key
+    ``"fts_results"`` as a list of dicts::
+
+        [{"rank": 1, "row_id": 42, "score": 4.21, "file_path": "data/part-0.parquet"}, ...]
+
+    :param table: Fully-qualified table name (``namespace.table``).
+    :param query_text: Free-text query string.  Supports Jinja templating.
+    :param text_columns: Parquet columns to search (default ``["chunk_text"]``).
+    :param top_k: Maximum results to return (default 10).
+    :param partition_filter: Restrict search to files with this partition value.
+    :param ailake_conn_id: Airflow connection id.
+
+    Example::
+
+        AilakeFtsSearchOperator(
+            task_id="fts_search",
+            table="default.docs",
+            query_text="{{ dag_run.conf['query'] }}",
+            text_columns=["chunk_text", "document_title"],
+            top_k=20,
+        )
+    """
+
+    template_fields: Sequence[str] = ("table", "query_text")
+    ui_color = "#f0e4d4"
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        query_text: str,
+        text_columns: list[str] | None = None,
+        top_k: int = 10,
+        partition_filter: str | None = None,
+        ailake_conn_id: str = AilakeHook.default_conn_name,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.table = table
+        self.query_text = query_text
+        self.text_columns = text_columns or ["chunk_text"]
+        self.top_k = top_k
+        self.partition_filter = partition_filter
+        self.ailake_conn_id = ailake_conn_id
+
+    def execute(self, context: Context) -> list[dict[str, Any]]:
+        if not self.query_text:
+            self.log.info("fts_search: empty query_text — no-op")
+            return []
+
+        hook = AilakeHook(ailake_conn_id=self.ailake_conn_id)
+        results = hook.search_text(
+            self.table,
+            query_text=self.query_text,
+            text_columns=self.text_columns,
+            top_k=self.top_k,
+            partition_filter=self.partition_filter,
+        )
+        self.log.info("fts_search: table=%s returned %d results", self.table, len(results))
+        context["ti"].xcom_push(key="fts_results", value=results)
+        return results

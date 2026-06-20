@@ -190,6 +190,8 @@ class HadoopCatalog {
 public:
     explicit HadoopCatalog(std::string warehouse) : warehouse_(std::move(warehouse)) {}
 
+    const std::string& warehouse() const { return warehouse_; }
+
     std::string resolve_path(const std::string& ns, const std::string& tbl,
                               const std::string& rel) const {
         if (!rel.empty() && rel[0] == '/') return rel; // already absolute

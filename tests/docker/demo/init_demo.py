@@ -35,6 +35,8 @@ PARTITIONED_V3_PATH = str(pathlib.Path(TABLE_PATH).parent / "ailake_partitioned_
 DELETE_DEMO_PATH    = str(pathlib.Path(TABLE_PATH).parent / "ailake_delete_demo")
 SCHEMA_EVO_PATH     = str(pathlib.Path(TABLE_PATH).parent / "ailake_schema_evo")
 BM25_PATH           = str(pathlib.Path(TABLE_PATH).parent / "ailake_bm25")
+FTS_PATH            = os.environ.get("DEMO_FTS_PATH",
+                          str(pathlib.Path(TABLE_PATH).parent / "ailake_fts"))
 DIM                 = int(os.environ.get("DEMO_DIM", "32"))
 IMAGE_DIM           = 16   # synthetic "CLIP-like" image embeddings (half the text dim)
 N_DOCS              = 500
@@ -214,6 +216,27 @@ def _write_bm25(texts: list[str], embeddings: list[list[float]]) -> None:
     print(f"[BM25]     Committed snapshot_id={snap_id}  rows=200  bm25_col=text")
 
 
+def _write_fts(texts: list[str], embeddings: list[list[float]]) -> None:
+    """Phase T — Tantivy per-file FTS table.
+
+    Embeds an inverted Tantivy index in every Parquet file's AILK_FTS section.
+    search_text() uses Tantivy O(log N) fast path when the blob is present;
+    legacy files fall back to BM25 O(N) scan automatically.
+    """
+    from ailake import TableWriter
+    os.makedirs(FTS_PATH, exist_ok=True)
+    w = TableWriter(
+        FTS_PATH,
+        dim=DIM,
+        metric=METRIC,
+        fts_text_columns=["text"],
+        fts_tokenizer="default",
+    )
+    w.write_batch(texts[:200], embeddings[:200])
+    snap_id = w.commit()
+    print(f"[FTS]      Committed snapshot_id={snap_id}  rows=200  fts_col=text  tokenizer=default")
+
+
 def _write_partitioned_v3(texts: list[str], embeddings: list[list[float]]) -> None:
     """Iceberg format_version=3 + partition_fields demo (Phase L).
 
@@ -288,6 +311,7 @@ def _save_query_payload(embeddings: list[list[float]], texts: list[str]) -> None
             "multimodal":       MULTIMODAL_PATH,
             "agent":            AGENT_PATH,
             "bm25":             BM25_PATH,
+            "fts":              FTS_PATH,
             "partitioned_v3":   PARTITIONED_V3_PATH,
             "delete_demo":      DELETE_DEMO_PATH,
             "schema_evo":       SCHEMA_EVO_PATH,
@@ -328,6 +352,7 @@ def main() -> None:
     _write_multimodal(texts, embeddings)
     _write_agent_memory(texts, embeddings)
     _write_bm25(texts, embeddings)
+    _write_fts(texts, embeddings)
     _write_partitioned_v3(texts, embeddings)
     _write_delete_demo(texts, embeddings)
     _write_schema_evo(texts, embeddings)

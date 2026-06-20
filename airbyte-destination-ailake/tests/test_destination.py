@@ -561,3 +561,46 @@ class TestDestinationCheck:
         dest = AilakeDestination()
         result = dest.check(MagicMock(), {"embed_mode": "cmd"})
         assert result.status.value == "FAILED"
+
+
+# ---------------------------------------------------------------------------
+# Phase T: AilakeDestinationConfig FTS fields
+# ---------------------------------------------------------------------------
+
+
+class TestAilakeDestinationConfigFts:
+    def _base(self):
+        return {"table_base_path": "s3://bucket/prefix", "embed_mode": "cmd", "embed_cmd": "echo []"}
+
+    def test_fts_columns_default_is_empty(self):
+        cfg = AilakeDestinationConfig.from_dict(self._base())
+        assert cfg.fts_columns == []
+
+    def test_fts_tokenizer_default_is_default(self):
+        cfg = AilakeDestinationConfig.from_dict(self._base())
+        assert cfg.fts_tokenizer == "default"
+
+    def test_fts_columns_parsed_from_dict(self):
+        raw = {**self._base(), "fts_columns": ["chunk_text", "document_title"]}
+        cfg = AilakeDestinationConfig.from_dict(raw)
+        assert cfg.fts_columns == ["chunk_text", "document_title"]
+
+    def test_fts_tokenizer_parsed_from_dict(self):
+        raw = {**self._base(), "fts_columns": ["chunk_text"], "fts_tokenizer": "en_stem"}
+        cfg = AilakeDestinationConfig.from_dict(raw)
+        assert cfg.fts_tokenizer == "en_stem"
+
+    def test_fts_columns_empty_list_is_valid(self):
+        raw = {**self._base(), "fts_columns": []}
+        cfg = AilakeDestinationConfig.from_dict(raw)
+        assert cfg.fts_columns == []
+
+    def test_fts_columns_and_tokenizer_roundtrip(self):
+        raw = {
+            **self._base(),
+            "fts_columns": ["chunk_text", "title"],
+            "fts_tokenizer": "whitespace",
+        }
+        cfg = AilakeDestinationConfig.from_dict(raw)
+        assert cfg.fts_columns == ["chunk_text", "title"]
+        assert cfg.fts_tokenizer == "whitespace"

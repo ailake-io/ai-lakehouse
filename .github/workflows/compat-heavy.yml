@@ -317,7 +317,7 @@ jobs:
       - name: Build fixture
         run: cargo run --example write_fixture -p ailake-query
 
-      - name: Validate C-ABI (Flink/Spark/Trino JNA bridge)
+      - name: Validate C-ABI (Flink/Spark/Trino JNA bridge + Phase T FTS)
         run: |
           AILAKE_NATIVE_LIB=$(pwd)/target/release/libailake_jni.so \
           AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/spark-trino-fixture \
@@ -345,6 +345,38 @@ jobs:
           AILAKE_LIB_PATH=$(pwd)/target/release \
           AILAKE_WRITE_DIR=/tmp/ailake-write-test \
             gradle -p trino-plugin test --no-daemon --no-configuration-cache
+
+  compat-fts:
+    name: compat-fts (Phase T — Tantivy write + search via C-ABI)
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build ailake-jni + ailake-cli
+        run: cargo build --release -p ailake-jni -p ailake-cli
+
+      - name: Generate fixture with FTS table
+        run: |
+          python3 tests/fixtures/write_fixture.py ./compat-fts-fixture
+        env:
+          AILAKE_LIB: target/release/libailake_jni.so
+
+      - name: Validate FTS C-ABI (write_batch + search_text via JNA)
+        run: |
+          AILAKE_NATIVE_LIB=$(pwd)/target/release/libailake_jni.so \
+            python3 tests/compat/check_jni_cabi.py
+
+      - name: Validate ailake-py FTS (Python SDK round-trip)
+        run: |
+          rm -rf /tmp/ailake-fts-heavy-venv
+          python3 -m venv /tmp/ailake-fts-heavy-venv
+          /tmp/ailake-fts-heavy-venv/bin/pip install maturin
+          cd ailake-py && /tmp/ailake-fts-heavy-venv/bin/maturin build --release --out dist --interpreter python3
+          cd ..
+          /tmp/ailake-fts-heavy-venv/bin/pip install ailake-py/dist/*.whl
+          /tmp/ailake-fts-heavy-venv/bin/python3 tests/compat/check_ailake_py.py
 
   compat-bigquery:
     name: compat-bigquery

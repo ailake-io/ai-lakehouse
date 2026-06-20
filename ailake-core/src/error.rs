@@ -58,6 +58,9 @@ pub enum AilakeError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("FTS error: {0}")]
+    Fts(String),
 }
 
 pub type AilakeResult<T> = Result<T, AilakeError>;

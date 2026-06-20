@@ -191,6 +191,23 @@
         "enum": [2, 3],
         "default": 2,
         "order": 22
+      },
+      "fts_columns": {
+        "type": "array",
+        "title": "Full-Text Search Columns",
+        "description": "Text columns to index with Tantivy FTS (Phase T). Enables fast keyword search alongside vector similarity. Empty = no FTS index built (zero overhead, default). Example: [\"chunk_text\", \"document_title\"].",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "order": 23
+      },
+      "fts_tokenizer": {
+        "type": "string",
+        "title": "FTS Tokenizer",
+        "description": "Tantivy tokenizer name used when fts_columns is non-empty. 'default' = whitespace + lowercase (suitable for most Latin-script text).",
+        "default": "default",
+        "order": 24
       }
     }
   }

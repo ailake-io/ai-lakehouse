@@ -18,6 +18,7 @@ ailake-store   = { path = "../ailake-store", version = "0.0.19", features = ["st
 ailake-catalog = { path = "../ailake-catalog", version = "0.0.19" }
 ailake-parquet = { path = "../ailake-parquet", version = "0.0.19" }
 ailake-query   = { path = "../ailake-query", version = "0.0.19" }
+ailake-fts     = { workspace = true }
 bytes          = { workspace = true }
 clap           = { workspace = true }
 tokio          = { workspace = true }

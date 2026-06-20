@@ -10,6 +10,7 @@ categories  = ["database", "algorithms"]
 
 [dependencies]
 ailake-core    = { path = "../ailake-core", version = "0.0.19" }
+ailake-fts     = { workspace = true }
 ailake-file    = { path = "../ailake-file", version = "0.0.19" }
 ailake-catalog = { path = "../ailake-catalog", version = "0.0.19" }
 ailake-store   = { path = "../ailake-store", version = "0.0.19" }

@@ -49,6 +49,9 @@ object AilakeNative {
         /** Schema evolution. Returns `{"ok":true,"new_schema_id":N}`. Caller must free. */
         fun ailake_evolve_schema_json(requestJson: String): Pointer?
 
+        /** Full-text search (Tantivy or BM25 fallback). Returns `{"ok":true,"results":[...]}`. Caller must free. */
+        fun ailake_search_text_json(requestJson: String): Pointer?
+
         fun ailake_free_string(ptr: Pointer)
     }
 
@@ -73,6 +76,8 @@ object AilakeNative {
      *
      * @param partitionFields  multi-column partition spec (Phase K); empty = single-value partition_by/partition_value
      * @param formatVersion    Iceberg format version; 2 (default) or 3
+     * @param ftsColumns       text columns to embed as Tantivy FTS index; empty = no FTS (default)
+     * @param ftsTokenizer     Tantivy tokenizer name; default "default"
      */
     fun writeBatch(
         tableUri: String,
@@ -89,6 +94,8 @@ object AilakeNative {
         partitionValue: String? = null,
         partitionFields: List<PartitionFieldDef> = emptyList(),
         formatVersion: Int = 2,
+        ftsColumns: List<String> = emptyList(),
+        ftsTokenizer: String = "default",
     ): Long? {
         val native = lib ?: return null
         if (ids.isEmpty()) return null
@@ -112,6 +119,10 @@ object AilakeNative {
             payload["partition_fields"] = partitionFields.map { pf ->
                 mapOf("column" to pf.column, "transform" to pf.transform, "column_type" to pf.columnType)
             }
+        }
+        if (ftsColumns.isNotEmpty()) {
+            payload["fts_columns"]   = ftsColumns
+            payload["fts_tokenizer"] = ftsTokenizer
         }
         val requestJson = mapper.writeValueAsString(payload)
 
@@ -232,6 +243,63 @@ object AilakeNative {
         } catch (e: Exception) {
             log.error("[ailake] Failed to parse evolveSchema response for table={}: {}", tableName, e.message, e)
             -1
+        } finally {
+            runCatching { native.ailake_free_string(ptr) }
+        }
+    }
+
+    /**
+     * Full-text search via Tantivy (fast path when AILK_FTS present) or BM25 brute-force.
+     * Returns empty on library absence or error.
+     *
+     * @param textColumns  columns to search; defaults to ["chunk_text"]
+     * @param topK         number of results to return
+     */
+    fun searchText(
+        tableUri: String,
+        namespace: String,
+        tableName: String,
+        queryText: String,
+        textColumns: List<String> = listOf("chunk_text"),
+        topK: Int = 10,
+        partitionFilter: String? = null,
+    ): List<SearchRow> {
+        val native = lib ?: return emptyList()
+        if (queryText.isEmpty()) return emptyList()
+
+        val payload = mutableMapOf<String, Any>(
+            "warehouse"    to tableUri,
+            "namespace"    to namespace,
+            "table"        to tableName,
+            "query_text"   to queryText,
+            "text_columns" to textColumns,
+            "top_k"        to topK,
+        )
+        if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        val requestJson = mapper.writeValueAsString(payload)
+
+        val ptr = native.ailake_search_text_json(requestJson) ?: run {
+            log.warn("[ailake] ailake_search_text_json returned null for tableUri={}", tableUri)
+            return emptyList()
+        }
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) {
+                log.warn("[ailake] searchText ok=false for tableUri={}: {}", tableUri, resp["error"])
+                return emptyList()
+            }
+            @Suppress("UNCHECKED_CAST")
+            (resp["results"] as? List<Map<String, Any>> ?: emptyList()).map { m ->
+                SearchRow(
+                    rowId    = (m["row_id"] as Number).toLong(),
+                    distance = (m["distance"] as Number).toFloat(),
+                    filePath = m["file_path"] as String,
+                )
+            }
+        } catch (e: Exception) {
+            log.error("[ailake] Failed to parse searchText response for tableUri={}: {}", tableUri, e.message, e)
+            emptyList()
         } finally {
             runCatching { native.ailake_free_string(ptr) }
         }

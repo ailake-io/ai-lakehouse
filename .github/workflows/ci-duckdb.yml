@@ -96,3 +96,17 @@ jobs:
           AILAKE_LIB:    target/release/libailake_jni.so
           AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_TMPDIR: /tmp/ailake_duck_evolve
+
+      - name: Phase T — Run FTS write tests
+        run: python duckdb-ailake/test/test_write.py -k fts
+        env:
+          AILAKE_LIB:    target/release/libailake_jni.so
+          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_TMPDIR: /tmp/ailake_duck_fts_write
+
+      - name: Phase T — Run FTS search tests
+        run: python duckdb-ailake/test/test_search.py -k fts
+        env:
+          AILAKE_LIB:     target/release/libailake_jni.so
+          AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_FIXTURE: ./compat-fixture
