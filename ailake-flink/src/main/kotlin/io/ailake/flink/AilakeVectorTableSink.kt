@@ -38,6 +38,8 @@ class AilakeVectorTableSink(
     private val embeddingModel: String? = null,
     private val partitionFields: List<PartitionFieldDef> = emptyList(),
     private val formatVersion: Int = 2,
+    private val ftsColumns: List<String> = emptyList(),
+    private val ftsTokenizer: String = "default",
 ) : DynamicTableSink {
 
     companion object {
@@ -69,6 +71,8 @@ class AilakeVectorTableSink(
                         embeddingModel  = embeddingModel,
                         partitionFields = partitionFields,
                         formatVersion   = formatVersion,
+                        ftsColumns      = ftsColumns,
+                        ftsTokenizer    = ftsTokenizer,
                     )
                 )
             }
@@ -76,7 +80,8 @@ class AilakeVectorTableSink(
     }
 
     override fun copy(): DynamicTableSink = AilakeVectorTableSink(
-        warehouse, namespace, tableName, vecCol, dim, metric, precision, schema, embeddingModel, partitionFields, formatVersion
+        warehouse, namespace, tableName, vecCol, dim, metric, precision, schema,
+        embeddingModel, partitionFields, formatVersion, ftsColumns, ftsTokenizer
     )
 
     override fun asSummaryString(): String = "AI-Lake-Sink[$namespace.$tableName]"
@@ -95,6 +100,8 @@ class AilakeSinkFunction(
     private val embeddingModel: String? = null,
     private val partitionFields: List<PartitionFieldDef> = emptyList(),
     private val formatVersion: Int = 2,
+    private val ftsColumns: List<String> = emptyList(),
+    private val ftsTokenizer: String = "default",
 ) : RichSinkFunction<RowData>() {
 
     private val idsBuffer = mutableListOf<Long>()
@@ -128,6 +135,8 @@ class AilakeSinkFunction(
             embeddingModel  = embeddingModel,
             partitionFields = partitionFields,
             formatVersion   = formatVersion,
+            ftsColumns      = ftsColumns,
+            ftsTokenizer    = ftsTokenizer,
         )
         idsBuffer.clear()
         embeddingsBuffer.clear()

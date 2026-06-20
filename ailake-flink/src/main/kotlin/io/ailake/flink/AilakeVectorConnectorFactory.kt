@@ -55,6 +55,9 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
         val EMBEDDING_MODEL   = ConfigOptions.key("embedding.model").stringType().noDefaultValue()
         val PARTITION_FIELDS  = ConfigOptions.key("partition.fields").stringType().defaultValue("[]")
         val FORMAT_VERSION    = ConfigOptions.key("format.version").intType().defaultValue(2)
+        /** Comma-separated text columns to index with Tantivy FTS. Empty = no FTS. */
+        val FTS_COLUMNS       = ConfigOptions.key("fts.columns").stringType().defaultValue("")
+        val FTS_TOKENIZER     = ConfigOptions.key("fts.tokenizer").stringType().defaultValue("default")
     }
 
     override fun factoryIdentifier(): String = IDENTIFIER
@@ -62,7 +65,7 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
     override fun requiredOptions(): Set<ConfigOption<*>> = setOf(WAREHOUSE, TABLE_NAME, VEC_DIM)
 
     override fun optionalOptions(): Set<ConfigOption<*>> =
-        setOf(NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF, EMBEDDING_MODEL, PARTITION_FIELDS, FORMAT_VERSION)
+        setOf(NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF, EMBEDDING_MODEL, PARTITION_FIELDS, FORMAT_VERSION, FTS_COLUMNS, FTS_TOKENIZER)
 
     override fun createDynamicTableSource(context: DynamicTableFactory.Context): DynamicTableSource {
         val helper = FactoryUtil.createTableFactoryHelper(this, context)
@@ -94,6 +97,9 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
                 PartitionFieldDef(n.get("column").asText(), n.get("transform").asText(), n.get("column_type").asText())
             }
         }
+        val ftsColsRaw = opts.get(FTS_COLUMNS)
+        val ftsColumns = if (ftsColsRaw.isBlank()) emptyList()
+                         else ftsColsRaw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         return AilakeVectorTableSink(
             warehouse       = opts.get(WAREHOUSE),
             namespace       = opts.get(NAMESPACE),
@@ -106,6 +112,8 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
             embeddingModel  = embeddingModel,
             partitionFields = partitionFields,
             formatVersion   = opts.get(FORMAT_VERSION),
+            ftsColumns      = ftsColumns,
+            ftsTokenizer    = opts.get(FTS_TOKENIZER),
         )
     }
 }
