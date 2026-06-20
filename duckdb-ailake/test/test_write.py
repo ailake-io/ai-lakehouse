@@ -251,6 +251,74 @@ def test_write_with_partition_by_and_value():
     require(row[0] != -1, f"arity-8 write_batch returned -1 (error); table_dir={table_dir}")
     print(f"PASS: arity-8 write_batch (partition_by + partition_value='agent-A') snap_id={row[0]}")
 
+def test_write_with_fts_columns():
+    """Arity-11: (table_path, ids, embeddings, vec_col, metric, precision,
+    partition_by, partition_value, partition_fields_json, format_version, fts_columns_json)."""
+    conn = setup_connection()
+    table_dir = make_table_dir()
+    n, dim = 3, 4
+    embs = small_embeddings(n, dim)
+
+    ids_sql = "[" + ", ".join(str(i) for i in range(n)) + "]::BIGINT[]"
+    emb_sql = "[" + ", ".join(
+        "[" + ", ".join(str(f) for f in row) + "]::FLOAT[]"
+        for row in embs
+    ) + "]"
+
+    row = conn.execute(f"""
+        SELECT ailake_write_batch(
+            'file://{table_dir}',
+            {ids_sql},
+            {emb_sql},
+            'embedding',
+            'cosine',
+            'f16',
+            '',
+            '',
+            '',
+            2,
+            '["chunk_text"]'
+        )
+    """).fetchone()
+    require(row is not None, "arity-11 write_batch returned NULL")
+    require(row[0] != -1, f"arity-11 write_batch (fts_columns) returned -1; table_dir={table_dir}")
+    print(f"PASS: arity-11 write_batch (fts_columns_json) snap_id={row[0]}")
+
+
+def test_write_with_fts_columns_and_tokenizer():
+    """Arity-12: adds fts_tokenizer VARCHAR as the 12th argument."""
+    conn = setup_connection()
+    table_dir = make_table_dir()
+    n, dim = 3, 4
+    embs = small_embeddings(n, dim)
+
+    ids_sql = "[" + ", ".join(str(i) for i in range(n)) + "]::BIGINT[]"
+    emb_sql = "[" + ", ".join(
+        "[" + ", ".join(str(f) for f in row) + "]::FLOAT[]"
+        for row in embs
+    ) + "]"
+
+    row = conn.execute(f"""
+        SELECT ailake_write_batch(
+            'file://{table_dir}',
+            {ids_sql},
+            {emb_sql},
+            'embedding',
+            'cosine',
+            'f16',
+            '',
+            '',
+            '',
+            2,
+            '["chunk_text"]',
+            'default'
+        )
+    """).fetchone()
+    require(row is not None, "arity-12 write_batch returned NULL")
+    require(row[0] != -1, f"arity-12 write_batch (fts_tokenizer) returned -1; table_dir={table_dir}")
+    print(f"PASS: arity-12 write_batch (fts_columns + fts_tokenizer) snap_id={row[0]}")
+
+
 if __name__ == "__main__":
     if not pathlib.Path(EXT_PATH).exists():
         print(f"SKIP: extension not found at {EXT_PATH} — build first with cmake")
@@ -263,5 +331,7 @@ if __name__ == "__main__":
     test_write_empty_returns_minus_one()
     test_write_with_partition_by()
     test_write_with_partition_by_and_value()
+    test_write_with_fts_columns()
+    test_write_with_fts_columns_and_tokenizer()
 
     print("\nAll write tests passed.")
