@@ -422,6 +422,13 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         /// Iceberg format version: 2 (default, V2) or 3 (V3 opt-in).
         #[serde(default = "default_format_version")]
         format_version: u8,
+        /// Text columns to embed as Tantivy FTS index in the AILK_FTS section.
+        /// Empty = no FTS (default, zero overhead).
+        #[serde(default)]
+        fts_columns: Vec<String>,
+        /// Tantivy tokenizer for FTS (default: "default").
+        #[serde(default = "default_fts_tokenizer")]
+        fts_tokenizer: String,
         ids: Vec<i64>,
         embeddings: Vec<Vec<f32>>,
     }
@@ -433,6 +440,9 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     }
     fn default_format_version() -> u8 {
         2
+    }
+    fn default_fts_tokenizer() -> String {
+        "default".into()
     }
 
     if request_json.is_null() {
@@ -523,9 +533,19 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
             Err(e) => return cstr_err_json(e),
         };
 
+    let fts_cfg: Option<ailake_fts::FtsConfig> = if req.fts_columns.is_empty() {
+        None
+    } else {
+        Some(ailake_fts::FtsConfig {
+            text_columns: req.fts_columns,
+            tokenizer: req.fts_tokenizer,
+            writer_heap_bytes: 50 * 1024 * 1024,
+        })
+    };
+
     let result = rt().block_on(async {
-        let mut writer =
-            TableWriter::create_or_open(catalog, store, policy, table, format_version).await?;
+        let base = TableWriter::create_or_open(catalog, store, policy, table, format_version).await?;
+        let mut writer = if let Some(cfg) = fts_cfg { base.with_fts_config(cfg) } else { base };
         writer.write_batch_auto(&batch, &req.embeddings).await?;
         writer.commit().await
     });
@@ -602,8 +622,12 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
         query_text: String,
         #[serde(default = "default_topk_st")]
         top_k: u32,
+        /// Legacy single-column field. Ignored when `text_columns` is non-empty.
         #[serde(default = "default_text_col_st")]
         text_column: String,
+        /// Multi-column text search (preferred). Falls back to `text_column` when empty.
+        #[serde(default)]
+        text_columns: Vec<String>,
         #[serde(default)]
         partition_filter: Option<String>,
     }
@@ -645,10 +669,17 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
     let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
     let table = TableIdent::new(&req.namespace, &req.table);
     let pf = req.partition_filter.as_deref();
+    // Prefer multi-column spec; fall back to legacy single-column field.
+    let cols_owned: Vec<String> = if req.text_columns.is_empty() {
+        vec![req.text_column]
+    } else {
+        req.text_columns
+    };
+    let cols_refs: Vec<&str> = cols_owned.iter().map(String::as_str).collect();
     let results = match rt().block_on(rs_search_text(
         &table,
         &req.query_text,
-        &[req.text_column.as_str()],
+        &cols_refs,
         req.top_k as usize,
         catalog,
         store,
