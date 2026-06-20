@@ -273,6 +273,7 @@ with tempfile.TemporaryDirectory() as tmp:
         "embeddings": embeddings_fts,
         "fts_columns": ["text"],
         "fts_tokenizer": "default",
+        "columns": {"text": texts_fts},
     })
     assert resp.get("ok"), f"FAIL: write with fts_columns failed: {resp}"
     print(f"PASS (fts write): snapshot_id={resp['snapshot_id']}")

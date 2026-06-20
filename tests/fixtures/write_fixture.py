@@ -143,6 +143,7 @@ resp_fts = _call_write({
     "embeddings": fts_embeddings,
     "fts_columns": ["text"],
     "fts_tokenizer": "default",
+    "columns": {"text": FTS_TEXTS},
 })
 assert resp_fts.get("ok"), f"FTS write_batch failed: {resp_fts}"
 print(f"fts_table committed: snapshot_id={resp_fts['snapshot_id']}  rows={len(FTS_TEXTS)}  fts_col=text")

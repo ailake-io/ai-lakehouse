@@ -429,6 +429,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         /// Tantivy tokenizer for FTS (default: "default").
         #[serde(default = "default_fts_tokenizer")]
         fts_tokenizer: String,
+        /// Extra string columns included in the Parquet batch (required for FTS).
+        /// JSON: `{"text": ["row0 text", "row1 text", ...], "title": [...]}`
+        #[serde(default)]
+        columns: std::collections::HashMap<String, Vec<String>>,
         ids: Vec<i64>,
         embeddings: Vec<Vec<f32>>,
     }
@@ -526,12 +530,21 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         std::sync::Arc::new(LocalStore::new(&req.warehouse));
     let catalog = std::sync::Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
 
-    let schema = std::sync::Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-    let batch =
-        match RecordBatch::try_new(schema, vec![std::sync::Arc::new(Int64Array::from(req.ids))]) {
-            Ok(b) => b,
-            Err(e) => return cstr_err_json(e),
-        };
+    use arrow_array::StringArray;
+    let mut fields = vec![Field::new("id", DataType::Int64, false)];
+    let mut arrays: Vec<std::sync::Arc<dyn arrow_array::Array>> =
+        vec![std::sync::Arc::new(Int64Array::from(req.ids))];
+    let mut ordered_cols: Vec<(String, Vec<String>)> = req.columns.into_iter().collect();
+    ordered_cols.sort_by(|a, b| a.0.cmp(&b.0));
+    for (col_name, values) in ordered_cols {
+        fields.push(Field::new(&col_name, DataType::Utf8, true));
+        arrays.push(std::sync::Arc::new(StringArray::from(values)));
+    }
+    let schema = std::sync::Arc::new(Schema::new(fields));
+    let batch = match RecordBatch::try_new(schema, arrays) {
+        Ok(b) => b,
+        Err(e) => return cstr_err_json(e),
+    };
 
     let fts_cfg: Option<ailake_fts::FtsConfig> = if req.fts_columns.is_empty() {
         None
