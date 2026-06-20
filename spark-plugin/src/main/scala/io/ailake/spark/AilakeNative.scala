@@ -44,6 +44,9 @@ object AilakeNative {
     /** Schema evolution. Returns `{"ok":true,"new_schema_id":N}`. Caller must free. */
     def ailake_evolve_schema_json(requestJson: String): Pointer
 
+    /** Full-text search (Tantivy or BM25 fallback). Returns `{"ok":true,"results":[...]}`. Caller must free. */
+    def ailake_search_text_json(requestJson: String): Pointer
+
     def ailake_free_string(ptr: Pointer): Unit
   }
 
@@ -70,6 +73,8 @@ object AilakeNative {
    *
    * @param partitionFields  multi-column partition spec (Phase K); empty = single-value partition_by/partition_value
    * @param formatVersion    Iceberg format version; 2 (default) or 3
+   * @param ftsColumns       text columns to embed as Tantivy FTS index; empty = no FTS (default)
+   * @param ftsTokenizer     Tantivy tokenizer name; default "default"
    */
   def writeBatch(
     tableUri:        String,
@@ -86,6 +91,8 @@ object AilakeNative {
     partitionValue:  Option[String] = None,
     partitionFields: Seq[PartitionFieldDef] = Seq.empty,
     formatVersion:   Int = 2,
+    ftsColumns:      Seq[String] = Seq.empty,
+    ftsTokenizer:    String = "default",
   ): Option[Long] = {
     if (ids.isEmpty) return None
     lib match {
@@ -102,12 +109,16 @@ object AilakeNative {
           ).mkString("[", ",", "]")
           s""","partition_fields":$arr"""
         } else ""
-        val fvJson = s""","format_version":$formatVersion"""
+        val fvJson  = s""","format_version":$formatVersion"""
+        val ftsJson = if (ftsColumns.nonEmpty) {
+          val arr = ftsColumns.map(c => jsonStr(c)).mkString("[", ",", "]")
+          s""","fts_columns":$arr,"fts_tokenizer":${jsonStr(ftsTokenizer)}"""
+        } else ""
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
           s""""table":${jsonStr(tableName)},"vec_col":${jsonStr(vectorColumn)},""" +
           s""""dim":$dim,"metric":${jsonStr(metric)},"precision":${jsonStr(precision)},""" +
-          s""""ids":$idsJson,"embeddings":$embJson$modelJson$partByJson$partValJson$pfJson$fvJson}"""
+          s""""ids":$idsJson,"embeddings":$embJson$modelJson$partByJson$partValJson$pfJson$fvJson$ftsJson}"""
         val ptr = native.ailake_write_batch_json(requestJson)
         if (ptr == null) {
           log.warn(s"[ailake] ailake_write_batch_json returned null for table=$tableName")
@@ -260,6 +271,49 @@ object AilakeNative {
         } catch {
           case e: Exception =>
             log.error(s"[ailake] Exception reading search result from native library: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            Seq.empty
+        }
+    }
+  }
+
+  /**
+   * Full-text search via Tantivy (fast path when AILK_FTS present) or BM25 brute-force.
+   * Returns empty on library absence or error.
+   *
+   * @param textColumns  columns to search; defaults to ["chunk_text"]
+   */
+  def searchText(
+    tableUri:        String,
+    namespace:       String,
+    tableName:       String,
+    queryText:       String,
+    textColumns:     Seq[String] = Seq("chunk_text"),
+    topK:            Int = 10,
+    partitionFilter: Option[String] = None,
+  ): Seq[SearchRow] = {
+    if (queryText.isEmpty) return Seq.empty
+    lib match {
+      case None => Seq.empty
+      case Some(native) =>
+        val colsJson  = textColumns.map(c => jsonStr(c)).mkString("[", ",", "]")
+        val partJson  = partitionFilter.map(v => s""","partition_filter":${jsonStr(v)}""").getOrElse("")
+        val requestJson =
+          s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
+          s""""table":${jsonStr(tableName)},"query_text":${jsonStr(queryText)},""" +
+          s""""text_columns":$colsJson,"top_k":$topK$partJson}"""
+        val ptr = native.ailake_search_text_json(requestJson)
+        if (ptr == null) {
+          log.warn("[ailake] ailake_search_text_json returned null for tableUri={}", tableUri)
+          return Seq.empty
+        }
+        try {
+          val json = ptr.getString(0)
+          native.ailake_free_string(ptr)
+          parseResponse(json, tableUri)
+        } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Exception in searchText: ${e.getMessage}", e)
             Try(native.ailake_free_string(ptr))
             Seq.empty
         }
