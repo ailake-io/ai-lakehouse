@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.20] — 2026-06-20
+
+### Added
+
 ### Added
 
 - **Phase T — Tantivy per-file FTS index (`ailake-fts`)** — opt-in inverted index embedded in each AI-Lake file as a separate `AILK_FTS` section, enabling `search_text()` O(log N) fast path vs. O(N) BM25 brute-force. New crate `ailake-fts` with `builder.rs` (`build_fts_blob_from_batch`, `merge_fts_blobs`, `FtsConfig`), `blob.rs` (zstd-compressed Tantivy `ManagedDirectory` round-trip serialization), and `searcher.rs` (`FtsSearcher::from_blob`, `search()`). Section layout: `AFTS`(4 bytes magic) | version(2 LE) | reserved(2) | blob_len(8 LE) | blob; located after vector AILK sections, referenced via `ailake.fts_offset` Parquet KV. **Write**: `AilakeFileWriter::with_fts(FtsConfig)` / `with_prebuilt_fts_blob(Vec<u8>)` — builds and embeds AILK_FTS on `write_multi()`; `TableWriter::with_fts_config(FtsConfig)` propagates to every file write. **Read**: `AilakeFileReader::load_fts_blob()` — returns `Bytes` of FTS blob keyed by `ailake.fts_offset`, or `Ok(None)` when not present. **Search**: `scanner::search_text()` now checks `load_fts_blob()` first; on hit, runs `FtsSearcher::search()` and skips O(N) BM25 fallback; files without AILK_FTS fall through to existing BM25. **Compaction**: `CompactionExecutor::with_fts_config(FtsConfig)` — rebuilds FTS via `merge_fts_blobs()` after merge, attaches via `with_prebuilt_fts_blob()`; graceful degradation on error. **CLI**: `ailake create --fts-columns <col1,col2> [--fts-tokenizer default]` stores FTS properties in Iceberg metadata; `ailake insert --fts-columns` embeds AILK_FTS section in every written file; `ailake search --text <query> [--text-columns <cols>]` routes to `search_text()` (Tantivy fast path when available). **Python**: `TableWriter(fts_text_columns=["chunk_text"], fts_tokenizer="default")` wires `with_fts_config()`. Zero overhead by default — AILK_FTS section only written when FTS is configured.
@@ -143,11 +149,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`docs/guides/DBT_INTEGRATION.md`** — complete dbt integration guide covering: project layout; global vars (`ailake_vec_col`, `ailake_dim`, `ailake_metric`, `ailake_precision`); `ailake_write_batch` adapter macro (Spark / Trino / DuckDB); `ailake_compact` operation macro; full model chain `stg_documents → int_chunks → ailake_embeddings` (incremental append); three embedding generation patterns (Spark UDF, pre-computed table, Python dbt model); dbt recall assertion test via `ailake_search()`; Spark cluster configuration; Trino plugin deployment; known limitations table.
 - **`docs/architecture/WORKSPACE.md`** — dbt guide marked delivered; DuckLake deferred with rationale (C++ dep + `HadoopCatalog` coverage).
 
----
-
-## [0.0.20] — 2026-06-18
-
-### Added
 
 - **Flink `ailake_search_text_json` binding** — `AilakeNativeLib.kt` now declares `ailake_search_text_json` JNA function. `AilakeNativeLoader.kt` adds `searchText(warehouse, namespace, table, queryText, topK, textColumn, partitionFilter)` Kotlin wrapper. Mirrors the C-ABI function added to `ailake-jni`. AilakeVectorTableSource unaffected (vector-only Flink source remains unchanged).
 

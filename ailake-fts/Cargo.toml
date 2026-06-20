@@ -1,13 +1,13 @@
 [package]
 name        = "ailake-fts"
-version     = "0.0.19"
+version     = "0.0.20"
 edition     = "2021"
 description = "Tantivy per-file FTS index embedded in the AILK_FTS section"
 license     = "MIT OR Apache-2.0"
 repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 
 [dependencies]
-ailake-core = { path = "../ailake-core", version = "0.0.19" }
+ailake-core = { path = "../ailake-core", version = "0.0.20" }
 tantivy     = { workspace = true }
 zstd        = { workspace = true }
 arrow-array  = { workspace = true }
