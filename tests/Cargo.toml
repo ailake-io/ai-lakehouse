@@ -11,6 +11,7 @@ ailake-core    = { path = "../ailake-core" }
 ailake-query   = { path = "../ailake-query" }
 ailake-store   = { path = "../ailake-store" }
 ailake-file    = { path = "../ailake-file" }
+ailake-fts     = { workspace = true }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
 tokio          = { workspace = true, features = ["full"] }
