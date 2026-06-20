@@ -8,7 +8,7 @@ use bytes::Bytes;
 
 use crate::footer::{
     parquet_footer_start, AilakeHeader, AilakeTrailer, DistanceMetric, FLAG_INDEX_IVF_PQ,
-    HEADER_SIZE, TRAILER_SIZE,
+    AILK_FTS_HEADER_SIZE, AILK_FTS_MAGIC, HEADER_SIZE, KV_FTS_OFFSET, TRAILER_SIZE,
 };
 
 pub struct AilakeFileReader {
@@ -217,6 +217,40 @@ impl AilakeFileReader {
     pub fn read_parquet(&self) -> AilakeResult<(RecordBatch, Vec<Vec<f32>>)> {
         let reader = ParquetVectorReader::new(self.bytes.clone(), &self.vector_column);
         reader.read_all()
+    }
+
+    /// Load the raw FTS blob from the AILK_FTS section, if present.
+    ///
+    /// Returns `Ok(None)` when the file has no FTS section (opt-in feature).
+    /// The returned bytes can be passed directly to `ailake_fts::FtsSearcher::from_blob`.
+    pub fn load_fts_blob(&self) -> AilakeResult<Option<Bytes>> {
+        let pq_reader = ParquetVectorReader::new(self.bytes.clone(), &self.vector_column);
+        let fts_offset_str = match pq_reader.kv_metadata(KV_FTS_OFFSET)? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let fts_abs: usize = fts_offset_str
+            .parse::<u64>()
+            .map_err(|_| AilakeError::NotAnAilakeFile)? as usize;
+
+        // Read AILK_FTS header: magic(4) | version(2) | reserved(2) | blob_len(8)
+        if fts_abs + AILK_FTS_HEADER_SIZE > self.bytes.len() {
+            return Err(AilakeError::Fts("AILK_FTS header out of bounds".into()));
+        }
+        let hdr = &self.bytes[fts_abs..fts_abs + AILK_FTS_HEADER_SIZE];
+        if hdr[0..4] != AILK_FTS_MAGIC {
+            return Err(AilakeError::Fts(format!(
+                "bad AILK_FTS magic: {:?}",
+                &hdr[0..4]
+            )));
+        }
+        let blob_len = u64::from_le_bytes(hdr[8..16].try_into().unwrap()) as usize;
+        let blob_start = fts_abs + AILK_FTS_HEADER_SIZE;
+        let blob_end = blob_start + blob_len;
+        if blob_end > self.bytes.len() {
+            return Err(AilakeError::Fts("AILK_FTS blob out of bounds".into()));
+        }
+        Ok(Some(self.bytes.slice(blob_start..blob_end)))
     }
 
     /// Verify the positional invariant: Parquet record_count == HNSW node_count.

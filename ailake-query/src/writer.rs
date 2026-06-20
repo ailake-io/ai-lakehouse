@@ -74,6 +74,8 @@ pub struct TableWriter {
     /// Per-file Bloom filters built during write_batch when bm25_text_column is set.
     /// Flushed to NewSnapshot::bloom_filters on commit (Phase F Puffin stats).
     pending_blooms: Vec<(String, Vec<u8>)>,
+    /// When set, a Tantivy FTS index is embedded in each written file (AILK_FTS section).
+    fts_config: Option<ailake_fts::FtsConfig>,
 }
 
 impl TableWriter {
@@ -97,6 +99,7 @@ impl TableWriter {
             deferred_ivf_codebook: Arc::new(tokio::sync::OnceCell::new()),
             bm25_text_column: None,
             pending_blooms: Vec::new(),
+            fts_config: None,
         }
     }
 
@@ -109,6 +112,15 @@ impl TableWriter {
     /// Typical usage: `TableWriter::new(...).with_bm25("chunk_text")`.
     pub fn with_bm25(mut self, text_column: impl Into<String>) -> Self {
         self.bm25_text_column = Some(text_column.into());
+        self
+    }
+
+    /// Embed a Tantivy FTS index in every file written by this writer.
+    ///
+    /// Enables the `search_text()` fast path (O(log N) per file via Tantivy)
+    /// instead of the O(N) BM25 brute-force fallback for files without an FTS section.
+    pub fn with_fts_config(mut self, cfg: ailake_fts::FtsConfig) -> Self {
+        self.fts_config = Some(cfg);
         self
     }
 
@@ -329,7 +341,10 @@ impl TableWriter {
         let file_path = format!("data/part-{:05}.parquet", part_num);
 
         // Write AI-Lake file
-        let file_writer = AilakeFileWriter::new(self.policy.clone());
+        let mut file_writer = AilakeFileWriter::new(self.policy.clone());
+        if let Some(ref fts_cfg) = self.fts_config {
+            file_writer = file_writer.with_fts(fts_cfg.clone());
+        }
         let file_bytes: Bytes = file_writer.write(batch, embeddings)?;
         let file_size = file_bytes.len() as u64;
 
@@ -546,7 +561,10 @@ impl TableWriter {
             .collect();
 
         let primary_policy = &columns[0].policy;
-        let file_writer = AilakeFileWriter::new(primary_policy.clone());
+        let mut file_writer = AilakeFileWriter::new(primary_policy.clone());
+        if let Some(ref fts_cfg) = self.fts_config {
+            file_writer = file_writer.with_fts(fts_cfg.clone());
+        }
         let file_bytes: Bytes = file_writer.write_multi(batch, &col_batches)?;
         let file_size = file_bytes.len() as u64;
 
@@ -829,6 +847,17 @@ impl TableWriter {
         // Store secondary column dims/metrics as table-level properties so
         // search_multimodal can discover them without reading Parquet files.
         let mut extra_properties = std::collections::HashMap::new();
+        if let Some(ref fts_cfg) = self.fts_config {
+            extra_properties.insert("ailake.fts.enabled".to_string(), "true".to_string());
+            extra_properties.insert(
+                "ailake.fts.text-columns".to_string(),
+                fts_cfg.text_columns.join(","),
+            );
+            extra_properties.insert(
+                "ailake.fts.tokenizer".to_string(),
+                fts_cfg.tokenizer.clone(),
+            );
+        }
         for ep in &self.extra_vec_policies {
             extra_properties.insert(format!("ailake.dim-{}", ep.column_name), ep.dim.to_string());
             extra_properties.insert(
