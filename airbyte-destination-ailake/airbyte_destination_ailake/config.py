@@ -90,6 +90,14 @@ class AilakeDestinationConfig:
     """Iceberg format version.  ``2`` (default, full compatibility) or ``3``
     (V3 tables: deletion vectors, row lineage, variant type)."""
 
+    # --- Tantivy FTS (Phase T) ---
+    fts_columns: list[str] = field(default_factory=list)
+    """Text columns to index with Tantivy FTS. Empty = no FTS (zero overhead).
+    Example: ``["chunk_text", "document_title"]``."""
+
+    fts_tokenizer: str = "default"
+    """Tantivy tokenizer name.  ``"default"`` (whitespace + lowercase) in most cases."""
+
     @classmethod
     def from_dict(cls, raw: dict) -> "AilakeDestinationConfig":
         embed_mode = raw.get("embed_mode", "cmd")
@@ -122,6 +130,8 @@ class AilakeDestinationConfig:
             partition_by=raw.get("partition_by", ""),
             partition_fields=raw.get("partition_fields", []),
             format_version=int(raw.get("format_version", 2)),
+            fts_columns=raw.get("fts_columns", []),
+            fts_tokenizer=raw.get("fts_tokenizer", "default"),
         )
 
     def validate(self) -> list[str]:
