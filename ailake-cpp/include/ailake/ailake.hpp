@@ -27,6 +27,8 @@
 #include "rocm/blas.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdio>
 #include <fstream>
 #include <map>
 #include <stdexcept>
@@ -372,6 +374,122 @@ search_multimodal(HadoopCatalog& catalog,
             return a.rrf_score > b.rrf_score; });
     if ((int)results.size() > opts.top_k)
         results.resize((size_t)opts.top_k);
+    return results;
+}
+
+// ---------------------------------------------------------------------------
+// Full-text search — delegates to `ailake` CLI binary (Tantivy/BM25 via Rust)
+// ---------------------------------------------------------------------------
+
+struct FtsResult {
+    int64_t     row_id;
+    double      score;      // BM25 score (higher = more relevant)
+    std::string file_path;
+};
+
+// search_text executes `ailake search <table> --text <query>` via the CLI
+// and parses the JSON output.
+//
+// Binary resolution order:
+//   1. AILAKE_BIN environment variable
+//   2. `ailake` found on PATH
+//
+// Throws std::runtime_error when no binary is found or the CLI returns an error.
+inline std::vector<FtsResult>
+search_text(HadoopCatalog& catalog,
+            const std::string& ns, const std::string& tbl,
+            const std::string& query_text,
+            const std::vector<std::string>& text_columns = {"chunk_text"},
+            int top_k = 10)
+{
+    if (query_text.empty()) return {};
+
+    // Resolve binary
+    const char* bin_env = std::getenv("AILAKE_BIN");
+    std::string bin = bin_env ? bin_env : "ailake";
+
+    // Build comma-separated columns arg
+    std::string cols;
+    for (size_t i = 0; i < text_columns.size(); ++i) {
+        if (i) cols += ',';
+        cols += text_columns[i];
+    }
+    if (cols.empty()) cols = "chunk_text";
+
+    // Escape shell args (single-quote wrap; double any internal single-quotes)
+    auto sq = [](const std::string& s) {
+        std::string r = "'";
+        for (char c : s) { if (c == '\'') r += "'\\''"; else r += c; }
+        return r + "'";
+    };
+
+    std::string cmd = bin
+        + " --store " + sq(catalog.warehouse())
+        + " search " + sq(ns + "." + tbl)
+        + " --text "          + sq(query_text)
+        + " --text-columns "  + sq(cols)
+        + " --top-k "         + std::to_string(top_k)
+        + " --format json";
+
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) throw std::runtime_error("ailake::search_text: popen failed");
+    std::string out;
+    std::array<char, 256> buf{};
+    while (fgets(buf.data(), (int)buf.size(), pipe)) out += buf.data();
+    int rc = pclose(pipe);
+    if (rc != 0)
+        throw std::runtime_error("ailake::search_text: CLI exited with code " + std::to_string(rc) + "\n" + out);
+
+    // Minimal JSON parse: extract array under "results" key.
+    // Format: {"results":[{"row_id":N,"score":F,"file_path":"..."},...]}
+    std::vector<FtsResult> results;
+    auto pos = out.find("\"results\"");
+    if (pos == std::string::npos) return results;
+    auto arr_start = out.find('[', pos);
+    auto arr_end   = out.rfind(']');
+    if (arr_start == std::string::npos || arr_end == std::string::npos) return results;
+
+    std::string arr = out.substr(arr_start + 1, arr_end - arr_start - 1);
+    // Iterate objects  { ... }
+    size_t p = 0;
+    while (p < arr.size()) {
+        auto ob = arr.find('{', p);
+        if (ob == std::string::npos) break;
+        auto cb = arr.find('}', ob);
+        if (cb == std::string::npos) break;
+        std::string obj = arr.substr(ob + 1, cb - ob - 1);
+
+        FtsResult r{};
+        auto extract_int = [&](const std::string& key) -> long long {
+            auto k = obj.find('"' + key + '"');
+            if (k == std::string::npos) return 0;
+            auto colon = obj.find(':', k);
+            if (colon == std::string::npos) return 0;
+            return std::stoll(obj.substr(colon + 1));
+        };
+        auto extract_double = [&](const std::string& key) -> double {
+            auto k = obj.find('"' + key + '"');
+            if (k == std::string::npos) return 0.0;
+            auto colon = obj.find(':', k);
+            if (colon == std::string::npos) return 0.0;
+            return std::stod(obj.substr(colon + 1));
+        };
+        auto extract_str = [&](const std::string& key) -> std::string {
+            auto k = obj.find('"' + key + '"');
+            if (k == std::string::npos) return {};
+            auto q1 = obj.find('"', k + key.size() + 2);
+            if (q1 == std::string::npos) return {};
+            auto q2 = obj.find('"', q1 + 1);
+            if (q2 == std::string::npos) return {};
+            return obj.substr(q1 + 1, q2 - q1 - 1);
+        };
+
+        r.row_id    = (int64_t)extract_int("row_id");
+        r.score     = extract_double("score");
+        r.file_path = extract_str("file_path");
+        results.push_back(r);
+        p = cb + 1;
+    }
     return results;
 }
 
