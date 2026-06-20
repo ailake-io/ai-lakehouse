@@ -184,7 +184,7 @@ async fn search_text_uses_tantivy_when_fts_blob_present() {
         .filter(|r| r.row_id.as_u64() == 0 || r.row_id.as_u64() == 2)
         .collect();
     assert!(
-        rust_hits.len() >= 1,
+        !rust_hits.is_empty(),
         "expected at least one rust-related result"
     );
     // Tantivy distances: negated score, so negative = relevant
