@@ -6,6 +6,7 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use std::sync::Arc;
 
+#[allow(dead_code)]
 pub fn generate_batch(rows: usize, dim: usize) -> (RecordBatch, Vec<Vec<f32>>) {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

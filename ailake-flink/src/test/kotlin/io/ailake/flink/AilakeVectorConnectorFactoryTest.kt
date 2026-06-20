@@ -31,4 +31,16 @@ class AilakeVectorConnectorFactoryTest {
         val keys = AilakeVectorConnectorFactory().optionalOptions().map { it.key() }
         assert("embedding.model" in keys) { "embedding.model missing from optionalOptions: $keys" }
     }
+
+    @Test
+    fun optionalOptionsIncludesFtsColumns() {
+        val keys = AilakeVectorConnectorFactory().optionalOptions().map { it.key() }
+        assert("fts.columns" in keys) { "fts.columns missing from optionalOptions: $keys" }
+    }
+
+    @Test
+    fun optionalOptionsIncludesFtsTokenizer() {
+        val keys = AilakeVectorConnectorFactory().optionalOptions().map { it.key() }
+        assert("fts.tokenizer" in keys) { "fts.tokenizer missing from optionalOptions: $keys" }
+    }
 }

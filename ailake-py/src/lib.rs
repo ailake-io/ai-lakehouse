@@ -140,7 +140,7 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, partition_column_type=None, partition_fields=None, partition_values=None, bm25_text_column=None, format_version=2))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, partition_column_type=None, partition_fields=None, partition_values=None, bm25_text_column=None, format_version=2, fts_text_columns=None, fts_tokenizer="default"))]
     fn new(
         py: Python<'_>,
         path: &str,
@@ -168,6 +168,8 @@ impl TableWriter {
         partition_values: Option<std::collections::HashMap<String, String>>,
         bm25_text_column: Option<String>,
         format_version: u8,
+        fts_text_columns: Option<Vec<String>>,
+        fts_tokenizer: &str,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
@@ -235,6 +237,14 @@ impl TableWriter {
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         if let Some(col) = bm25_text_column {
             writer = writer.with_bm25(col);
+        }
+        if let Some(cols) = fts_text_columns {
+            let cfg = ailake_fts::FtsConfig {
+                text_columns: cols,
+                tokenizer: fts_tokenizer.to_string(),
+                writer_heap_bytes: 50 * 1024 * 1024,
+            };
+            writer = writer.with_fts_config(cfg);
         }
 
         Ok(Self {

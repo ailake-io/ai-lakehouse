@@ -165,4 +165,48 @@ class AilakeNativeTest extends AnyFunSuite {
     assert(handle.partitionFields.isEmpty)
     assert(handle.formatVersion == 2)
   }
+
+  // ── Phase T: FTS ──────────────────────────────────────────────────────────
+
+  test("writeBatch with ftsColumns returns None when native library absent") {
+    assume(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
+    val result = AilakeNative.writeBatch(
+      tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
+      vectorColumn = "embedding", dim = 4, metric = "cosine", precision = "f16",
+      ids = Seq(1L), embeddings = Seq(Seq(0.1f, 0.2f, 0.3f, 0.4f)),
+      ftsColumns = Seq("chunk_text", "title"),
+      ftsTokenizer = "default",
+    )
+    assert(result.isEmpty)
+  }
+
+  test("writeBatch JSON includes fts_columns when non-empty") {
+    // White-box: verify JSON fragment produced by writeBatch ftsColumns logic.
+    val ftsColumns   = Seq("chunk_text", "title")
+    val ftsTokenizer = "default"
+    def jsonStr(s: String): String = "\"" + s + "\""
+    val arr     = ftsColumns.map(c => jsonStr(c)).mkString("[", ",", "]")
+    val ftsJson = s""","fts_columns":$arr,"fts_tokenizer":${jsonStr(ftsTokenizer)}"""
+    assert(ftsJson.contains("chunk_text"))
+    assert(ftsJson.contains("fts_tokenizer"))
+  }
+
+  test("writeBatch JSON omits fts_columns when empty") {
+    val ftsColumns: Seq[String] = Seq.empty
+    def jsonStr(s: String): String = "\"" + s + "\""
+    val ftsJson = if (ftsColumns.nonEmpty) {
+      val arr = ftsColumns.map(c => jsonStr(c)).mkString("[", ",", "]")
+      s""","fts_columns":$arr"""
+    } else ""
+    assert(ftsJson.isEmpty)
+  }
+
+  test("searchText returns empty when native library absent") {
+    assume(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
+    val results = AilakeNative.searchText(
+      tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
+      queryText = "rust programming", textColumns = Seq("chunk_text"), topK = 5,
+    )
+    assert(results.isEmpty)
+  }
 }

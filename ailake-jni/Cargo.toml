@@ -14,6 +14,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 ailake-query   = { path = "../ailake-query", version = "0.0.20" }
+ailake-fts     = { workspace = true }
 ailake-catalog = { path = "../ailake-catalog", version = "0.0.20" }
 ailake-store   = { path = "../ailake-store", version = "0.0.20" }
 ailake-core    = { path = "../ailake-core", version = "0.0.20" }

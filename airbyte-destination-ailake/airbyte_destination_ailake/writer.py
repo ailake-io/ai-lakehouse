@@ -66,6 +66,9 @@ class StreamWriter:
                 kwargs["partition_fields"] = self._cfg.partition_fields
             if self._cfg.format_version != 2:
                 kwargs["format_version"] = self._cfg.format_version
+            if self._cfg.fts_columns:
+                kwargs["fts_text_columns"] = self._cfg.fts_columns
+                kwargs["fts_tokenizer"] = self._cfg.fts_tokenizer
             self._table = ailake.open_table(self._table_path, **kwargs)
         return self._table
 

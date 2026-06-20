@@ -63,6 +63,9 @@ ignore = [
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki wildcard name constraint bug, transitive via sqlx 0.7; fix: upgrade sqlx to 0.8" },
     { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL panic, transitive via sqlx 0.7; fix: upgrade sqlx to 0.8" },
 
+    # instant 0.1.13 — unmaintained, via measure_time → tantivy 0.22; no tantivy release drops this dep yet
+    { id = "RUSTSEC-2024-0384", reason = "instant unmaintained, transitive via tantivy 0.22/measure_time; no fix available upstream" },
+
 ]
 
 # ---------------------------------------------------------------------------

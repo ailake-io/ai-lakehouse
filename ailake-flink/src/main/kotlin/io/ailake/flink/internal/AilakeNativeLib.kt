@@ -56,6 +56,9 @@ interface AilakeNativeLib : Library {
      *   partition_fields  (Array?)    optional — multi-column partition spec (Phase K);
      *                                 each entry: {column, transform, column_type}
      *   format_version    (Int?)      optional — Iceberg format version, default 2
+     *   fts_columns       (String[]?) optional — text columns to embed as Tantivy FTS index;
+     *                                 empty/absent = no FTS (zero overhead)
+     *   fts_tokenizer     (String?)   optional — Tantivy tokenizer, default "default"
      *
      * Response JSON: `{"ok":true,"snapshot_id":N}` or `{"ok":false,"error":"..."}`
      */
@@ -94,10 +97,11 @@ interface AilakeNativeLib : Library {
      *   warehouse         (String)  warehouse root path
      *   namespace         (String)  Iceberg namespace, default "default"
      *   table             (String)  table name
-     *   query_text        (String)  text query to score against
-     *   top_k             (Int)     default 10
-     *   text_column       (String?) Parquet column for BM25, default "chunk_text"
-     *   partition_filter  (String?) optional — restrict to files matching partition value
+     *   query_text        (String)   text query to score against
+     *   top_k             (Int)      default 10
+     *   text_columns      (String[]) preferred — Parquet columns to search (multi-column)
+     *   text_column       (String?)  legacy single-column fallback, default "chunk_text"
+     *   partition_filter  (String?)  optional — restrict to files matching partition value
      *
      * Response JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
      * where distance = negated BM25 score (lower = more relevant).

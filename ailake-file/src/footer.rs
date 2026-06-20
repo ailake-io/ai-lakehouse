@@ -12,6 +12,13 @@ pub const HEADER_SIZE: usize = 64;
 /// `flags` bit 0 = 1: IVF-PQ index. Default (flags = 0): HNSW index.
 pub const FLAG_INDEX_IVF_PQ: u16 = 0x0001;
 
+/// Magic for the AILK_FTS section (separate from the vector AILK section).
+pub const AILK_FTS_MAGIC: [u8; 4] = *b"AFTS";
+/// AILK_FTS section header size: magic(4) + version(2) + reserved(2) + blob_len(8) = 16 bytes.
+pub const AILK_FTS_HEADER_SIZE: usize = 16;
+/// Parquet KV key storing the absolute byte offset of the AILK_FTS section.
+pub const KV_FTS_OFFSET: &str = "ailake.fts_offset";
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Precision {

@@ -801,5 +801,53 @@ with tempfile.TemporaryDirectory() as tmp:
     print("PASS (delete_where noop): empty values list accepted")
 
 
+# ── 21. Phase T — Tantivy per-file FTS ─────────────────────────────────────
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = str(pathlib.Path(tmp) / "fts_test")
+
+    texts_fts = [
+        "rust programming ownership memory safety",
+        "python machine learning numpy pandas",
+        "rust async tokio concurrency futures",
+        "database sql query optimization btree",
+        "vector search approximate nearest neighbor hnsw",
+    ]
+    embs_fts = [make_embedding(i) for i in range(len(texts_fts))]
+
+    writer = ailake.TableWriter(
+        path,
+        dim=DIM,
+        metric="cosine",
+        fts_text_columns=["text"],
+        fts_tokenizer="default",
+    )
+    writer.write_batch(texts_fts, embs_fts)
+    snap_id = writer.commit()
+    assert snap_id >= 0, f"FAIL: FTS write returned {snap_id}"
+    print(f"PASS (fts write): snapshot_id={snap_id}  fts_col=text")
+
+    # Tantivy fast path — hits rows with 'rust' (row_id 0 and 2)
+    results = ailake.search_text(path, "rust", top_k=5, text_column="text")
+    assert isinstance(results, list), f"FAIL: search_text returned {type(results)}"
+    assert len(results) > 0, "FAIL: search_text returned no results for 'rust'"
+    hit_ids = {r["row_id"] for r in results}
+    assert hit_ids & {0, 2}, \
+        f"FAIL: expected rust rows (0 or 2) in results, got row_ids={hit_ids}"
+    print(f"PASS (fts search_text): {len(results)} hit(s) for 'rust', row_ids={sorted(hit_ids)}")
+
+    # Empty query must return empty list without error
+    results_empty = ailake.search_text(path, "", top_k=5, text_column="text")
+    assert isinstance(results_empty, list), \
+        f"FAIL: empty query returned {type(results_empty)}"
+    print(f"PASS (fts empty query): returned {len(results_empty)} results (expected 0)")
+
+    # Multi-term query — only 'sql' row (row_id=3) should appear
+    results_sql = ailake.search_text(path, "sql optimization", top_k=5, text_column="text")
+    assert any(r["row_id"] == 3 for r in results_sql), \
+        f"FAIL: 'sql optimization' did not return row_id=3; got {[r['row_id'] for r in results_sql]}"
+    print(f"PASS (fts multi-term): row_id=3 in top-{len(results_sql)} for 'sql optimization'")
+
+
 print()
 print("PASS: ailake Python SDK — all checks passed.")

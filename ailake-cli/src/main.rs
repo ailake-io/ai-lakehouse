@@ -87,6 +87,15 @@ enum Commands {
         /// Append/update workloads fully supported; equality deletes not implemented.
         #[arg(long, default_value = "2")]
         format_version: u8,
+        /// Comma-separated text columns to index with Tantivy FTS.
+        /// When set, every inserted file embeds a per-file inverted index (AILK_FTS section).
+        /// Enables the search_text() fast path (O(log N) vs O(N) brute-force BM25).
+        /// Example: --fts-columns "chunk_text,document_title"
+        #[arg(long)]
+        fts_columns: Option<String>,
+        /// Tantivy tokenizer for FTS. Default: "default" (standard English tokenizer).
+        #[arg(long, default_value = "default")]
+        fts_tokenizer: String,
     },
     /// Insert a Parquet file (with an embedding column) into a table
     Insert {
@@ -105,17 +114,32 @@ enum Commands {
         /// Idempotency key — no-op if this batch_id was already committed (safe for Airflow retries)
         #[arg(long)]
         batch_id: Option<String>,
+        /// Comma-separated text columns to index with Tantivy FTS.
+        /// Embeds a per-file inverted index (AILK_FTS section) enabling fast full-text search.
+        #[arg(long)]
+        fts_columns: Option<String>,
+        /// Tantivy tokenizer for FTS (default: "default").
+        #[arg(long, default_value = "default")]
+        fts_tokenizer: String,
     },
-    /// Search a table by vector similarity
+    /// Search a table by vector similarity or full-text (mutually exclusive)
     Search {
         /// Table name
         table: String,
         /// Query vector as comma-separated floats (e.g. "0.1,0.2,0.3")
-        #[arg(long, conflicts_with = "query_file")]
+        #[arg(long, conflicts_with_all = &["query_file", "text"])]
         query: Option<String>,
         /// Path to a binary file containing the query vector (little-endian f32 array)
-        #[arg(long, conflicts_with = "query")]
+        #[arg(long, conflicts_with_all = &["query", "text"])]
         query_file: Option<String>,
+        /// Full-text query (uses Tantivy FTS if available, else BM25 brute-force).
+        /// Exclusive with --query / --query-file.
+        #[arg(long, conflicts_with_all = &["query", "query_file"])]
+        text: Option<String>,
+        /// Comma-separated text columns to search when using --text.
+        /// Falls back to "chunk_text" if not specified.
+        #[arg(long)]
+        text_columns: Option<String>,
         /// Number of results to return
         #[arg(long, default_value = "10")]
         top_k: usize,
@@ -384,6 +408,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             ivf_residual,
             modality,
             format_version,
+            fts_columns,
+            fts_tokenizer,
         } => {
             let ident = parse_table_ident(&table);
             let policy = VectorStoragePolicy {
@@ -405,12 +431,19 @@ async fn run(cli: Cli) -> Result<(), String> {
                 partition_fields: vec![],
             };
 
+            let mut extra = std::collections::HashMap::new();
+            if let Some(ref cols) = fts_columns {
+                extra.insert("ailake.fts.enabled".to_string(), "true".to_string());
+                extra.insert("ailake.fts.text-columns".to_string(), cols.clone());
+                extra.insert("ailake.fts.tokenizer".to_string(), fts_tokenizer);
+            }
+
             catalog
                 .create_table(
                     &ident,
                     &TableProperties {
                         policy,
-                        extra: std::collections::HashMap::new(),
+                        extra,
                         format_version,
                         partition_column_type: None,
                     },
@@ -428,8 +461,16 @@ async fn run(cli: Cli) -> Result<(), String> {
             embeddings,
             vector_cols,
             batch_id,
+            fts_columns,
+            fts_tokenizer,
         } => {
             let ident = parse_table_ident(&table);
+            let fts_cfg: Option<ailake_fts::FtsConfig> =
+                fts_columns.map(|cols| ailake_fts::FtsConfig {
+                    text_columns: cols.split(',').map(str::trim).map(String::from).collect(),
+                    tokenizer: fts_tokenizer,
+                    writer_heap_bytes: 50 * 1024 * 1024,
+                });
 
             // Read source Parquet from local disk.
             let raw = std::fs::read(&file).map_err(|e| format!("failed to read {file}: {e}"))?;
@@ -498,15 +539,22 @@ async fn run(cli: Cli) -> Result<(), String> {
 
                 // Use first policy as the table-level policy for create_or_open.
                 let table_policy = mv_owned[0].0.clone();
-                let mut writer = TableWriter::create_or_open(
-                    catalog,
-                    Arc::clone(&store),
-                    table_policy,
-                    ident,
-                    2,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
+                let mut writer = {
+                    let w = TableWriter::create_or_open(
+                        catalog,
+                        Arc::clone(&store),
+                        table_policy,
+                        ident,
+                        2,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    if let Some(cfg) = fts_cfg {
+                        w.with_fts_config(cfg)
+                    } else {
+                        w
+                    }
+                };
 
                 let batches: Vec<MultiVectorBatch<'_>> = mv_owned
                     .iter()
@@ -587,10 +635,17 @@ async fn run(cli: Cli) -> Result<(), String> {
                     },
                 };
 
-                let mut writer =
-                    TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident, 2)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                let mut writer = {
+                    let w =
+                        TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident, 2)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                    if let Some(cfg) = fts_cfg {
+                        w.with_fts_config(cfg)
+                    } else {
+                        w
+                    }
+                };
 
                 let rows = embs.len();
                 match batch_id {
@@ -614,11 +669,68 @@ async fn run(cli: Cli) -> Result<(), String> {
             table,
             query,
             query_file,
+            text,
+            text_columns,
             top_k,
             pruning_threshold,
             format,
         } => {
             let ident = parse_table_ident(&table);
+
+            // Full-text search path
+            if let Some(ref txt) = text {
+                let cols_str = text_columns.as_deref().unwrap_or("chunk_text");
+                let cols: Vec<&str> = cols_str.split(',').map(str::trim).collect();
+                let results = ailake_query::search_text(
+                    &ident,
+                    txt,
+                    &cols,
+                    top_k,
+                    catalog as Arc<dyn CatalogProvider>,
+                    store,
+                    None,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                match format {
+                    OutputFormat::Json => {
+                        let json_results: Vec<serde_json::Value> = results
+                            .iter()
+                            .enumerate()
+                            .map(|(i, r)| {
+                                serde_json::json!({
+                                    "rank": i + 1,
+                                    "row_id": r.row_id.0,
+                                    "score": -r.distance,
+                                    "file_path": r.file_path,
+                                })
+                            })
+                            .collect();
+                        println!(
+                            "{}",
+                            serde_json::to_string(&serde_json::json!({ "results": json_results }))
+                                .map_err(|e| e.to_string())?
+                        );
+                    }
+                    OutputFormat::Text => {
+                        if results.is_empty() {
+                            println!("no results");
+                        } else {
+                            for (i, r) in results.iter().enumerate() {
+                                println!(
+                                    "{}: row_id={} score={:.4} file={}",
+                                    i + 1,
+                                    r.row_id.0,
+                                    -r.distance,
+                                    r.file_path
+                                );
+                            }
+                        }
+                    }
+                }
+                return Ok(());
+            }
 
             let query_vec: Vec<f32> = if let Some(file) = query_file {
                 let raw = std::fs::read(&file)
@@ -637,7 +749,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     .map(|s| s.trim().parse::<f32>().map_err(|e| e.to_string()))
                     .collect::<Result<_, _>>()?
             } else {
-                return Err("either --query or --query-file is required".into());
+                return Err("either --query, --query-file, or --text is required".into());
             };
 
             let dim = query_vec.len() as u32;

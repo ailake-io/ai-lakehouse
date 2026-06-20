@@ -119,16 +119,16 @@ object AilakeNativeLoader {
         table: String,
         queryText: String,
         topK: Int = 10,
-        textColumn: String = "chunk_text",
+        textColumns: List<String> = listOf("chunk_text"),
         partitionFilter: String? = null,
     ): List<SearchResultItem> {
         val payload = mutableMapOf<String, Any>(
-            "warehouse"   to warehouse,
-            "namespace"   to namespace,
-            "table"       to table,
-            "query_text"  to queryText,
-            "top_k"       to topK,
-            "text_column" to textColumn,
+            "warehouse"    to warehouse,
+            "namespace"    to namespace,
+            "table"        to table,
+            "query_text"   to queryText,
+            "top_k"        to topK,
+            "text_columns" to textColumns,
         )
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
         val req = mapper.writeValueAsString(payload)
@@ -235,6 +235,8 @@ object AilakeNativeLoader {
      *
      * @param partitionFields  multi-column partition spec (Phase K); empty = single-value partition_by/partition_value
      * @param formatVersion    Iceberg format version; 2 (default) or 3
+     * @param ftsColumns       text columns to embed as Tantivy FTS index; empty = no FTS (default)
+     * @param ftsTokenizer     Tantivy tokenizer name; default "default"
      */
     fun writeBatch(
         warehouse: String,
@@ -251,6 +253,8 @@ object AilakeNativeLoader {
         partitionValue: String? = null,
         partitionFields: List<PartitionFieldDef> = emptyList(),
         formatVersion: Int = 2,
+        ftsColumns: List<String> = emptyList(),
+        ftsTokenizer: String = "default",
     ): Long {
         require(ids.size == embeddings.size) { "ids.size != embeddings.size" }
         val payload = mutableMapOf<String, Any>(
@@ -272,6 +276,10 @@ object AilakeNativeLoader {
             payload["partition_fields"] = partitionFields.map { pf ->
                 mapOf("column" to pf.column, "transform" to pf.transform, "column_type" to pf.columnType)
             }
+        }
+        if (ftsColumns.isNotEmpty()) {
+            payload["fts_columns"]   = ftsColumns
+            payload["fts_tokenizer"] = ftsTokenizer
         }
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_write_batch_json(req)

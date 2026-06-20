@@ -86,6 +86,7 @@ services:
       DEMO_TABLE_PATH: /data/ailake_demo
       DEMO_MULTIMODAL_PATH: /data/ailake_multimodal
       DEMO_AGENT_PATH: /data/ailake_agent
+      DEMO_FTS_PATH: /data/ailake_fts
       DEMO_DIM: "32"
       # Engine endpoints — consumed by notebooks 04/05 when engines profile is active.
       # Values match container names so they also work without the profile
@@ -172,6 +173,7 @@ services:
       DEMO_TABLE_PATH: /data/ailake_demo
       DEMO_MULTIMODAL_PATH: /data/ailake_multimodal
       DEMO_AGENT_PATH: /data/ailake_agent
+      DEMO_FTS_PATH: /data/ailake_fts
       DEMO_DIM: "32"
       TRINO_HOST: trino
       TRINO_PORT: "8080"

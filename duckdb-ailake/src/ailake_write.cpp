@@ -137,8 +137,9 @@ static void AilakeWriteExecFull(
     std::string metric       = metric_v.IsNull()     ? "cosine"    : StringValue::Get(metric_v);
     std::string precision    = precision_v.IsNull()  ? "f16"       : StringValue::Get(precision_v);
 
-    // Optional partition args (arity 7+)
+    // Optional partition + FTS args (arity 7+)
     std::string partition_by, partition_value, partition_fields_json;
+    std::string fts_columns_json, fts_tokenizer;
     int format_version = 2;
     if ((idx_t)args.data.size() > 6 && !args.data[6].GetValue(0).IsNull())
         partition_by          = StringValue::Get(args.data[6].GetValue(0));
@@ -148,6 +149,12 @@ static void AilakeWriteExecFull(
         partition_fields_json = StringValue::Get(args.data[8].GetValue(0));
     if ((idx_t)args.data.size() > 9 && !args.data[9].GetValue(0).IsNull())
         format_version        = IntegerValue::Get(args.data[9].GetValue(0));
+    // arity 11: fts_columns_json VARCHAR — e.g. '["chunk_text","title"]'
+    if ((idx_t)args.data.size() > 10 && !args.data[10].GetValue(0).IsNull())
+        fts_columns_json      = StringValue::Get(args.data[10].GetValue(0));
+    // arity 12: fts_tokenizer VARCHAR
+    if ((idx_t)args.data.size() > 11 && !args.data[11].GetValue(0).IsNull())
+        fts_tokenizer         = StringValue::Get(args.data[11].GetValue(0));
 
     auto ids        = extract_bigint_list(ids_v);
     auto embeddings = extract_float_list_list(emb_v);
@@ -177,7 +184,9 @@ static void AilakeWriteExecFull(
         partition_by,
         partition_value,
         partition_fields_json,
-        format_version
+        format_version,
+        fts_columns_json,
+        fts_tokenizer
     );
     result.SetValue(0, Value::BIGINT(snap));
 }
@@ -263,6 +272,42 @@ void RegisterAilakeWrite(duckdb::ExtensionLoader &loader) {
          LogicalType::VARCHAR,
          LogicalType::VARCHAR,
          LogicalType::INTEGER},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 11: + fts_columns_json VARCHAR (JSON array of text column names)
+    // e.g. '["chunk_text","document_title"]'
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::VARCHAR},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 12: + fts_tokenizer VARCHAR
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
         LogicalType::BIGINT,
         AilakeWriteExecFull
     ));

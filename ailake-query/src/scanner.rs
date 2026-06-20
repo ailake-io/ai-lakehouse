@@ -1153,8 +1153,46 @@ pub async fn search_text(
     for file_entry in &files {
         let file_bytes = store.get(&file_entry.path).await?;
         // Use dim=0 — we only read the Parquet columns, not the HNSW.
-        let reader = AilakeFileReader::new(file_bytes, "", 0);
-        let (raw_batch, _) = reader.read_parquet()?;
+        let reader = AilakeFileReader::new(file_bytes.clone(), "", 0);
+
+        // Fast path: per-file Tantivy index (O(log N) via inverted index).
+        // Falls back to BM25 O(N) brute-force for files without an FTS section.
+        if let Ok(Some(fts_blob)) = reader.load_fts_blob() {
+            match ailake_fts::FtsSearcher::from_blob(&fts_blob) {
+                Ok(fts) => {
+                    let hits = fts.search(query_text, top_k * 3).unwrap_or_default();
+                    if !hits.is_empty() {
+                        // Load batch only for equality delete checking (not for scoring).
+                        let reader2 = AilakeFileReader::new(file_bytes, "", 0);
+                        let (raw_batch, _) = reader2.read_parquet()?;
+                        let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
+                        for hit in hits {
+                            let row_idx = hit.row_id as usize;
+                            if row_idx >= batch.num_rows() {
+                                continue;
+                            }
+                            if eq_del_filter.should_delete_row(&batch, row_idx) {
+                                continue;
+                            }
+                            results.push(SearchResult {
+                                row_id: RowId::new(hit.row_id),
+                                distance: -hit.score,
+                                file_path: file_entry.path.clone(),
+                            });
+                        }
+                    }
+                    continue; // skip O(N) BM25 fallback
+                }
+                Err(e) => {
+                    warn!("ailake: FTS blob corrupt for '{}': {e}", file_entry.path);
+                    // fall through to BM25 brute-force
+                }
+            }
+        }
+
+        // Fallback: O(N) BM25 brute-force — unchanged from pre-Phase-T behaviour.
+        let reader_fb = AilakeFileReader::new(file_bytes, "", 0);
+        let (raw_batch, _) = reader_fb.read_parquet()?;
         // Phase G: fill missing columns for old files before BM25 text extraction.
         let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
 

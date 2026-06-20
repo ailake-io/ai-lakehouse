@@ -11,7 +11,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::footer::{
     parquet_footer_start, AilakeHeader, AilakeTrailer, DistanceMetric, Precision,
-    AILAKE_FORMAT_VERSION, FLAG_INDEX_IVF_PQ, HEADER_SIZE, TRAILER_SIZE,
+    AILAKE_FORMAT_VERSION, AILK_FTS_HEADER_SIZE, AILK_FTS_MAGIC, FLAG_INDEX_IVF_PQ, HEADER_SIZE,
+    KV_FTS_OFFSET, TRAILER_SIZE,
 };
 
 /// Which index algorithm to embed in the AILK section.
@@ -45,6 +46,10 @@ pub struct AilakeFileWriter {
     index_type: IndexType,
     /// Pre-trained shared codebook. When set, skips k-means for IVF-PQ builds.
     shared_codebook: Option<std::sync::Arc<IvfPqCodebook>>,
+    /// When set, builds and embeds a Tantivy FTS index in the AILK_FTS section.
+    fts_config: Option<ailake_fts::FtsConfig>,
+    /// Pre-built FTS blob (e.g., from compaction). Takes priority over `fts_config`.
+    prebuilt_fts_blob: Option<Vec<u8>>,
 }
 
 impl AilakeFileWriter {
@@ -53,7 +58,21 @@ impl AilakeFileWriter {
             policy,
             index_type: IndexType::default(),
             shared_codebook: None,
+            fts_config: None,
+            prebuilt_fts_blob: None,
         }
+    }
+
+    /// Attach a Tantivy FTS config. An `AILK_FTS` section will be built and embedded.
+    pub fn with_fts(mut self, config: ailake_fts::FtsConfig) -> Self {
+        self.fts_config = Some(config);
+        self
+    }
+
+    /// Supply a pre-built FTS blob (e.g., from compaction). Takes priority over `with_fts`.
+    pub fn with_prebuilt_fts_blob(mut self, blob: Vec<u8>) -> Self {
+        self.prebuilt_fts_blob = Some(blob);
+        self
     }
 
     /// Use a pre-trained IVF-PQ codebook instead of running k-means.
@@ -306,6 +325,31 @@ impl AilakeFileWriter {
             ailk_sections.push(section);
         }
 
+        // Build optional AILK_FTS section.
+        // Pre-built blob takes priority; otherwise build from batch if fts_config is set.
+        let fts_blob: Option<Vec<u8>> = self.prebuilt_fts_blob.clone().or_else(|| {
+            self.fts_config
+                .as_ref()
+                .and_then(|cfg| ailake_fts::build_fts_blob_from_batch(cfg, batch).ok())
+        });
+        let fts_section: Option<Bytes> = fts_blob.map(|blob| {
+            // AILK_FTS header: magic(4) | version(2 LE) | reserved(2) | blob_len(8 LE)
+            let blob_len = blob.len() as u64;
+            let mut sec = BytesMut::with_capacity(AILK_FTS_HEADER_SIZE + blob.len());
+            sec.put_slice(&AILK_FTS_MAGIC);
+            sec.put_slice(&1u16.to_le_bytes()); // version
+            sec.put_slice(&0u16.to_le_bytes()); // reserved
+            sec.put_slice(&blob_len.to_le_bytes());
+            sec.put_slice(&blob);
+            sec.freeze()
+        });
+
+        if let Some(ref sec) = fts_section {
+            let fts_abs_offset = current_offset; // right after all vector AILK sections
+            kv_owned.push((KV_FTS_OFFSET.to_string(), fts_abs_offset.to_string()));
+            let _ = sec; // current_offset update not needed; no more sections after FTS
+        }
+
         // Pass 2 — write Parquet with all AILK offset KVs embedded.
         // Only the Parquet footer changes between pass 1 and pass 2 (KV metadata
         // is stored in the footer thrift, not in row groups). Row group offsets and
@@ -323,16 +367,19 @@ impl AilakeFileWriter {
             "footer_start must be stable across KV injection (row groups unchanged)"
         );
 
-        // Splice: [PAR1 + row groups from v1] + [AILK sections] + [Parquet footer+PAR1 from v2]
-        // Using v1's row groups here lets us release v2's large row group allocation sooner.
-        let total_ailk: usize = ailk_sections.iter().map(|s| s.len()).sum();
+        // Splice: [row groups from v1] + [vector AILK sections] + [AILK_FTS section] + [footer from v2]
+        let total_vector_ailk: usize = ailk_sections.iter().map(|s| s.len()).sum();
+        let total_fts: usize = fts_section.as_ref().map_or(0, |s| s.len());
         let footer_len_v2 = parquet_v2.len() - footer_start_v2;
-        let total = footer_start + total_ailk + footer_len_v2;
+        let total = footer_start + total_vector_ailk + total_fts + footer_len_v2;
         let mut out = BytesMut::with_capacity(total);
         out.put_slice(&parquet_v1[..footer_start]);
-        drop(parquet_v1); // row groups copied; free the v1 allocation
+        drop(parquet_v1);
         for section in ailk_sections {
             out.put(section);
+        }
+        if let Some(fts_sec) = fts_section {
+            out.put(fts_sec);
         }
         out.put_slice(&parquet_v2[footer_start_v2..]);
 
