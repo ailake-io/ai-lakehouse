@@ -19,6 +19,7 @@ from airflow_providers_ailake.operators.ailake import (
     AilakeCompactOperator,
     AilakeDeleteWhereOperator,
     AilakeEvolveSchemaOperator,
+    AilakeFtsSearchOperator,
     AilakeSearchOperator,
     AilakeWriteOperator,
 )
@@ -602,3 +603,127 @@ class TestAilakeEvolveSchemaOperator:
             with patch.object(hook, "evolve_schema", return_value=9):
                 op.execute(context={"ti": ti})
         ti.xcom_push.assert_called_once_with(key="schema_id", value=9)
+
+
+# ---------------------------------------------------------------------------
+# Phase T: AilakeFtsSearchOperator + AilakeWriteOperator(fts_columns)
+# ---------------------------------------------------------------------------
+
+
+class TestAilakeFtsSearchOperator:
+    def _op(self, **kwargs):
+        return AilakeFtsSearchOperator(
+            task_id="fts_search",
+            table="default.docs",
+            query_text="rust programming",
+            **kwargs,
+        )
+
+    def test_execute_calls_hook_search_text(self):
+        op = self._op(text_columns=["chunk_text", "title"], top_k=5)
+        hook = _make_hook()
+        results = [{"row_id": 0, "score": 0.9, "file_path": "a.parquet"}]
+        ti = MagicMock()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "search_text", return_value=results) as mock_st:
+                returned = op.execute(context={"ti": ti})
+
+        mock_st.assert_called_once_with(
+            "default.docs",
+            query_text="rust programming",
+            text_columns=["chunk_text", "title"],
+            top_k=5,
+            partition_filter=None,
+        )
+        assert returned == results
+
+    def test_execute_pushes_results_to_xcom(self):
+        op = self._op()
+        hook = _make_hook()
+        ti = MagicMock()
+        results = [{"row_id": 1, "score": 0.5, "file_path": "b.parquet"}]
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "search_text", return_value=results):
+                op.execute(context={"ti": ti})
+        ti.xcom_push.assert_called_once_with(key="fts_results", value=results)
+
+    def test_execute_empty_query_returns_empty_no_xcom(self):
+        op = AilakeFtsSearchOperator(
+            task_id="fts_search",
+            table="default.docs",
+            query_text="",
+        )
+        hook = _make_hook()
+        ti = MagicMock()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "search_text") as mock_st:
+                result = op.execute(context={"ti": ti})
+
+        mock_st.assert_not_called()
+        assert result == []
+
+    def test_execute_with_partition_filter(self):
+        op = self._op(partition_filter="agent-X")
+        hook = _make_hook()
+        ti = MagicMock()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "search_text", return_value=[]) as mock_st:
+                op.execute(context={"ti": ti})
+        _, kw = mock_st.call_args
+        assert kw.get("partition_filter") == "agent-X"
+
+    def test_default_text_columns_is_chunk_text(self):
+        op = self._op()
+        assert op.text_columns == ["chunk_text"]
+
+    def test_hook_search_text_passes_fts_columns_to_cli(self):
+        hook = _make_hook()
+        payload = json.dumps({"results": [{"row_id": 0, "score": 0.5, "file_path": "a.parquet"}]})
+        with patch.object(hook, "run_cli", return_value=_completed(stdout=payload)) as mock_cli:
+            hook.search_text("default.docs", "rust", text_columns=["chunk_text", "title"], top_k=5)
+        args = mock_cli.call_args[0]
+        assert "--text-columns" in args
+        idx = list(args).index("--text-columns") + 1
+        assert "chunk_text,title" == args[idx]
+
+
+class TestAilakeWriteOperatorFts:
+    def _op(self, **kwargs):
+        return AilakeWriteOperator(
+            task_id="write",
+            table="default.docs",
+            source_file="/tmp/data.parquet",
+            **kwargs,
+        )
+
+    def test_fts_columns_passed_to_cli(self):
+        op = self._op(fts_columns=["chunk_text", "title"])
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                    op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--fts-columns" in args, f"--fts-columns missing from CLI args: {args}"
+
+    def test_fts_tokenizer_passed_to_cli_when_set(self):
+        op = self._op(fts_columns=["chunk_text"], fts_tokenizer="en_stem")
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                    op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--fts-tokenizer" in args
+        idx = list(args).index("--fts-tokenizer") + 1
+        assert args[idx] == "en_stem"
+
+    def test_fts_columns_absent_when_none(self):
+        op = self._op()
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                    op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--fts-columns" not in args
