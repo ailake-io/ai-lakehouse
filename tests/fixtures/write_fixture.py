@@ -60,6 +60,8 @@ if lib is None:
 
 lib.ailake_write_batch_json.argtypes = [ctypes.c_char_p]
 lib.ailake_write_batch_json.restype = ctypes.c_void_p
+lib.ailake_search_text_json.argtypes = [ctypes.c_char_p]
+lib.ailake_search_text_json.restype = ctypes.c_void_p
 lib.ailake_free_string.argtypes = [ctypes.c_void_p]
 lib.ailake_free_string.restype = None
 
@@ -107,6 +109,60 @@ resp = _call_write({
 
 assert resp.get("ok"), f"write_batch failed: {resp}"
 print(f"committed: snapshot_id={resp['snapshot_id']}")
+
+# ── Phase T: FTS fixture (table="fts_table") — for Go + DuckDB FTS integration ──
+
+FTS_TEXTS = [
+    "rust programming ownership memory safety systems",
+    "python machine learning data science numpy pandas",
+    "rust async tokio concurrency futures channels",
+    "database sql query optimization index btree",
+    "vector search approximate nearest neighbor hnsw embeddings",
+    "distributed computing apache spark hadoop mapreduce",
+    "rust cargo crates dependencies ecosystem toolchain",
+    "deep learning neural network transformer attention mechanism",
+]
+fts_embeddings = [make_embedding(i) for i in range(len(FTS_TEXTS))]
+
+def _call_search_text(req: dict) -> dict:
+    ptr = lib.ailake_search_text_json(json.dumps(req).encode())
+    try:
+        return json.loads(ctypes.string_at(ptr).decode())
+    finally:
+        lib.ailake_free_string(ptr)
+
+resp_fts = _call_write({
+    "warehouse": warehouse,
+    "namespace": namespace,
+    "table": "fts_table",
+    "vec_col": "embedding",
+    "dim": DIM,
+    "metric": "cosine",
+    "precision": "f16",
+    "ids": list(range(len(FTS_TEXTS))),
+    "embeddings": fts_embeddings,
+    "fts_columns": ["text"],
+    "fts_tokenizer": "default",
+})
+assert resp_fts.get("ok"), f"FTS write_batch failed: {resp_fts}"
+print(f"fts_table committed: snapshot_id={resp_fts['snapshot_id']}  rows={len(FTS_TEXTS)}  fts_col=text")
+
+# Smoke-check FTS search so the fixture is guaranteed searchable
+resp_txt = _call_search_text({
+    "warehouse": warehouse,
+    "namespace": namespace,
+    "table": "fts_table",
+    "query_text": "rust",
+    "text_columns": ["text"],
+    "top_k": 5,
+})
+assert resp_txt.get("ok"), f"FTS smoke-search failed: {resp_txt}"
+fts_hits = resp_txt.get("results", [])
+assert any(r["row_id"] in (0, 2, 6) for r in fts_hits), \
+    f"FTS smoke-search: expected rust rows (0,2,6), got {[r['row_id'] for r in fts_hits]}"
+print(f"fts_table smoke-search: {len(fts_hits)} hit(s) for 'rust'  row_ids={[r['row_id'] for r in fts_hits]}")
+
+(out_dir / "fixture_fts_rows.txt").write_text(str(len(FTS_TEXTS)))
 
 # ── fixture_query.bin — query vector for test_search.py ───────────────────────
 

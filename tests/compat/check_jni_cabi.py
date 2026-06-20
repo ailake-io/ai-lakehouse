@@ -80,6 +80,9 @@ lib.ailake_delete_where_json.restype = ctypes.c_void_p
 lib.ailake_evolve_schema_json.argtypes = [ctypes.c_char_p]
 lib.ailake_evolve_schema_json.restype = ctypes.c_void_p
 
+lib.ailake_search_text_json.argtypes = [ctypes.c_char_p]
+lib.ailake_search_text_json.restype = ctypes.c_void_p
+
 lib.ailake_free_string.argtypes = [ctypes.c_void_p]
 lib.ailake_free_string.restype = None
 
@@ -247,6 +250,68 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # ── Optional: write Spark/Trino fixture (table="table") ───────────────────────
 
+# ── ailake_write_batch_json with fts_columns (Phase T) ───────────────────────
+
+with tempfile.TemporaryDirectory() as tmp:
+    texts_fts = [
+        "rust programming ownership memory safety",
+        "python machine learning numpy pandas",
+        "rust async tokio concurrency futures",
+        "database sql query optimization btree",
+    ]
+    embeddings_fts = [make_embedding(i) for i in range(len(texts_fts))]
+
+    resp = _call(lib.ailake_write_batch_json, {
+        "warehouse": tmp,
+        "namespace": "default",
+        "table": "fts_test",
+        "vec_col": "embedding",
+        "dim": DIM,
+        "metric": "cosine",
+        "precision": "f16",
+        "ids": list(range(len(texts_fts))),
+        "embeddings": embeddings_fts,
+        "fts_columns": ["text"],
+        "fts_tokenizer": "default",
+    })
+    assert resp.get("ok"), f"FAIL: write with fts_columns failed: {resp}"
+    print(f"PASS (fts write): snapshot_id={resp['snapshot_id']}")
+
+    # search_text_json — Tantivy fast path when AILK_FTS blob present
+    resp_txt = _call(lib.ailake_search_text_json, {
+        "warehouse": tmp,
+        "namespace": "default",
+        "table": "fts_test",
+        "query_text": "rust",
+        "text_columns": ["text"],
+        "top_k": 5,
+    })
+    assert resp_txt.get("ok"), f"FAIL: search_text_json failed: {resp_txt}"
+    results = resp_txt.get("results", [])
+    assert len(results) > 0, f"FAIL: search_text_json returned 0 results for 'rust'"
+    hit_ids = {r["row_id"] for r in results}
+    assert hit_ids & {0, 2}, \
+        f"FAIL: expected rust rows (0 or 2) in results, got row_ids={sorted(hit_ids)}"
+    print(f"PASS (fts search_text_json): {len(results)} hit(s) for 'rust', row_ids={sorted(hit_ids)}")
+
+    # Empty fts_columns — write succeeds, no FTS blob embedded
+    resp_nofts = _call(lib.ailake_write_batch_json, {
+        "warehouse": tmp,
+        "namespace": "default",
+        "table": "fts_nofts",
+        "vec_col": "embedding",
+        "dim": DIM,
+        "metric": "cosine",
+        "precision": "f16",
+        "ids": list(range(len(texts_fts))),
+        "embeddings": embeddings_fts,
+        "fts_columns": [],
+    })
+    assert resp_nofts.get("ok"), f"FAIL: write with empty fts_columns failed: {resp_nofts}"
+    print(f"PASS (fts empty fts_columns no-op): snapshot_id={resp_nofts['snapshot_id']}")
+
+# ── Optional: write Spark/Trino fixture (table="table") ───────────────────────
+
 spark_trino_fixture = os.environ.get("AILAKE_SPARK_TRINO_FIXTURE")
 if spark_trino_fixture:
     pathlib.Path(spark_trino_fixture).mkdir(parents=True, exist_ok=True)
@@ -254,4 +319,4 @@ if spark_trino_fixture:
     print(f"PASS (spark/trino fixture): written to {spark_trino_fixture}/default/table")
 
 print()
-print("PASS: ailake-jni C-ABI (write + search + search_multimodal + delete_where + evolve_schema) — JNA bridge interface validated.")
+print("PASS: ailake-jni C-ABI (write + search + search_multimodal + delete_where + evolve_schema + fts) — JNA bridge interface validated.")

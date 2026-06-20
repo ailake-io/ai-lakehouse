@@ -207,6 +207,26 @@ jobs:
             --ignore-missing-imports --no-strict-optional
           /tmp/ailake-py-venv/bin/python3 tests/compat/check_ailake_py.py
 
+  fts-e2e:
+    name: fts-e2e (Phase T Tantivy)
+    runs-on: [self-hosted, Linux]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build ailake-py wheel
+        run: |
+          rm -rf /tmp/ailake-fts-venv
+          python3 -m venv /tmp/ailake-fts-venv
+          /tmp/ailake-fts-venv/bin/pip install maturin
+          cd ailake-py && /tmp/ailake-fts-venv/bin/maturin build --release --out dist --interpreter python3
+          cd ..
+          /tmp/ailake-fts-venv/bin/pip install ailake-py/dist/*.whl
+      - name: Run Phase T FTS compat checks
+        run: /tmp/ailake-fts-venv/bin/python3 tests/compat/check_ailake_py.py
+
   test-jvm:
     name: test-jvm (trino + spark plugins)
     runs-on: [self-hosted, Linux]
