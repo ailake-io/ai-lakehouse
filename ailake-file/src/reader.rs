@@ -7,8 +7,8 @@ use arrow_array::RecordBatch;
 use bytes::Bytes;
 
 use crate::footer::{
-    parquet_footer_start, AilakeHeader, AilakeTrailer, DistanceMetric, FLAG_INDEX_IVF_PQ,
-    AILK_FTS_HEADER_SIZE, AILK_FTS_MAGIC, HEADER_SIZE, KV_FTS_OFFSET, TRAILER_SIZE,
+    parquet_footer_start, AilakeHeader, AilakeTrailer, DistanceMetric, AILK_FTS_HEADER_SIZE,
+    AILK_FTS_MAGIC, FLAG_INDEX_IVF_PQ, HEADER_SIZE, KV_FTS_OFFSET, TRAILER_SIZE,
 };
 
 pub struct AilakeFileReader {

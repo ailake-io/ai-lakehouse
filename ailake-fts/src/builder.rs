@@ -35,10 +35,7 @@ impl Default for FtsConfig {
 /// Build an FTS index for one write batch and return the serialized blob.
 ///
 /// Sync; safe to call from both sync and async contexts (no blocking executor).
-pub fn build_fts_blob_from_batch(
-    config: &FtsConfig,
-    batch: &RecordBatch,
-) -> AilakeResult<Vec<u8>> {
+pub fn build_fts_blob_from_batch(config: &FtsConfig, batch: &RecordBatch) -> AilakeResult<Vec<u8>> {
     use arrow_array::cast::AsArray;
     use tantivy::{doc, Index};
 
@@ -64,10 +61,7 @@ pub fn build_fts_blob_from_batch(
                 batch
                     .column_by_name(col)
                     .and_then(|a| a.as_string_opt::<i32>())
-                    .and_then(|sa| {
-                        sa.is_valid(row_idx)
-                            .then(|| sa.value(row_idx).to_string())
-                    })
+                    .and_then(|sa| sa.is_valid(row_idx).then(|| sa.value(row_idx).to_string()))
             })
             .collect::<Vec<_>>()
             .join(" ");

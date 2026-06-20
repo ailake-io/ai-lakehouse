@@ -6,8 +6,8 @@
 //!   | [file_table: (name_len(4) name_bytes offset(8 LE) length(8 LE))*]
 //!   | zstd_compressed_payload
 
-use std::path::PathBuf;
 use ailake_core::{AilakeError, AilakeResult};
+use std::path::PathBuf;
 use tantivy::Directory;
 
 pub const BLOB_MAGIC: [u8; 4] = *b"AFTS";
@@ -71,7 +71,10 @@ pub fn blob_to_ram_dir(blob: &[u8]) -> AilakeResult<tantivy::directory::RamDirec
         return Err(AilakeError::Fts("FTS blob too small".into()));
     }
     if blob[0..4] != BLOB_MAGIC {
-        return Err(AilakeError::Fts(format!("bad FTS magic: {:?}", &blob[0..4])));
+        return Err(AilakeError::Fts(format!(
+            "bad FTS magic: {:?}",
+            &blob[0..4]
+        )));
     }
     let _version = u16::from_le_bytes([blob[4], blob[5]]);
     let flags = u16::from_le_bytes([blob[6], blob[7]]);

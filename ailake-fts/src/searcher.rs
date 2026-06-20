@@ -24,8 +24,8 @@ impl FtsSearcher {
     /// Deserialize a blob (produced by `build_fts_blob_from_batch`) and open it for search.
     pub fn from_blob(blob: &[u8]) -> AilakeResult<Self> {
         let dir = crate::blob::blob_to_ram_dir(blob)?;
-        let index = tantivy::Index::open(dir)
-            .map_err(|e| AilakeError::Fts(format!("open index: {e}")))?;
+        let index =
+            tantivy::Index::open(dir).map_err(|e| AilakeError::Fts(format!("open index: {e}")))?;
         let reader = index
             .reader()
             .map_err(|e| AilakeError::Fts(format!("reader: {e}")))?;
@@ -51,40 +51,43 @@ impl FtsSearcher {
         use tantivy::query::QueryParser;
 
         let searcher = self.reader.searcher();
-        let query_parser =
-            QueryParser::for_index(&self.index, vec![self.text_field]);
+        let query_parser = QueryParser::for_index(&self.index, vec![self.text_field]);
 
         // Try full query parser; fall back to stripping special chars; then to
         // quoting each word individually (handles reserved words AND/OR/NOT as literals).
-        let query = query_parser.parse_query(query_text).or_else(|_| {
-            let safe: String = query_text
-                .chars()
-                .map(|c| {
-                    if "+-&&||!(){}[]^\"~*?:\\/".contains(c) {
-                        ' '
-                    } else {
-                        c
-                    }
-                })
-                .collect();
-            query_parser.parse_query(safe.trim())
-        }).or_else(|_| {
-            // Last resort: wrap every word in quotes (phrase query per word = literal match).
-            let words: Vec<String> = query_text
-                .split_whitespace()
-                .filter(|w| !w.is_empty())
-                .map(|w| {
-                    let escaped = w.replace('\\', "\\\\").replace('"', "\\\"");
-                    format!("\"{escaped}\"")
-                })
-                .collect();
-            let fallback = words.join(" ");
-            if fallback.is_empty() {
-                query_parser.parse_query("")
-            } else {
-                query_parser.parse_query(&fallback)
-            }
-        }).map_err(|e| AilakeError::Fts(format!("parse query: {e}")))?;
+        let query = query_parser
+            .parse_query(query_text)
+            .or_else(|_| {
+                let safe: String = query_text
+                    .chars()
+                    .map(|c| {
+                        if "+-&&||!(){}[]^\"~*?:\\/".contains(c) {
+                            ' '
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
+                query_parser.parse_query(safe.trim())
+            })
+            .or_else(|_| {
+                // Last resort: wrap every word in quotes (phrase query per word = literal match).
+                let words: Vec<String> = query_text
+                    .split_whitespace()
+                    .filter(|w| !w.is_empty())
+                    .map(|w| {
+                        let escaped = w.replace('\\', "\\\\").replace('"', "\\\"");
+                        format!("\"{escaped}\"")
+                    })
+                    .collect();
+                let fallback = words.join(" ");
+                if fallback.is_empty() {
+                    query_parser.parse_query("")
+                } else {
+                    query_parser.parse_query(&fallback)
+                }
+            })
+            .map_err(|e| AilakeError::Fts(format!("parse query: {e}")))?;
 
         let top_docs = searcher
             .search(&query, &TopDocs::with_limit(top_k))

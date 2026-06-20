@@ -74,7 +74,9 @@ fn load_fts_blob_returns_none_for_legacy_file() {
         None, // no FTS
     );
     let reader = AilakeFileReader::new(bytes, "embedding", 4);
-    let blob = reader.load_fts_blob().expect("load_fts_blob must not error");
+    let blob = reader
+        .load_fts_blob()
+        .expect("load_fts_blob must not error");
     assert!(blob.is_none(), "legacy file should have no FTS section");
 }
 
@@ -105,10 +107,7 @@ fn fts_section_tantivy_search_roundtrip() {
 fn fts_blob_has_afts_magic() {
     let bytes = write_file(&["hello world"], Some(fts_cfg(&["chunk_text"])));
     let reader = AilakeFileReader::new(bytes, "embedding", 4);
-    let blob = reader
-        .load_fts_blob()
-        .unwrap()
-        .expect("expected FTS blob");
+    let blob = reader.load_fts_blob().unwrap().expect("expected FTS blob");
 
     assert_eq!(&blob[..4], b"AFTS", "FTS blob must start with AFTS magic");
 }
@@ -137,7 +136,10 @@ fn fts_multi_column_finds_term_in_second_column() {
         vec![
             Arc::new(Int64Array::from(vec![0i64, 1])),
             Arc::new(StringArray::from(vec!["generic content", "other content"])),
-            Arc::new(StringArray::from(vec!["introduction to rust", "python basics"])),
+            Arc::new(StringArray::from(vec![
+                "introduction to rust",
+                "python basics",
+            ])),
         ],
     )
     .unwrap();

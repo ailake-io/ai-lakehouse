@@ -465,11 +465,12 @@ async fn run(cli: Cli) -> Result<(), String> {
             fts_tokenizer,
         } => {
             let ident = parse_table_ident(&table);
-            let fts_cfg: Option<ailake_fts::FtsConfig> = fts_columns.map(|cols| ailake_fts::FtsConfig {
-                text_columns: cols.split(',').map(str::trim).map(String::from).collect(),
-                tokenizer: fts_tokenizer,
-                writer_heap_bytes: 50 * 1024 * 1024,
-            });
+            let fts_cfg: Option<ailake_fts::FtsConfig> =
+                fts_columns.map(|cols| ailake_fts::FtsConfig {
+                    text_columns: cols.split(',').map(str::trim).map(String::from).collect(),
+                    tokenizer: fts_tokenizer,
+                    writer_heap_bytes: 50 * 1024 * 1024,
+                });
 
             // Read source Parquet from local disk.
             let raw = std::fs::read(&file).map_err(|e| format!("failed to read {file}: {e}"))?;
@@ -548,7 +549,11 @@ async fn run(cli: Cli) -> Result<(), String> {
                     )
                     .await
                     .map_err(|e| e.to_string())?;
-                    if let Some(cfg) = fts_cfg { w.with_fts_config(cfg) } else { w }
+                    if let Some(cfg) = fts_cfg {
+                        w.with_fts_config(cfg)
+                    } else {
+                        w
+                    }
                 };
 
                 let batches: Vec<MultiVectorBatch<'_>> = mv_owned
@@ -631,10 +636,15 @@ async fn run(cli: Cli) -> Result<(), String> {
                 };
 
                 let mut writer = {
-                    let w = TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident, 2)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    if let Some(cfg) = fts_cfg { w.with_fts_config(cfg) } else { w }
+                    let w =
+                        TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident, 2)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                    if let Some(cfg) = fts_cfg {
+                        w.with_fts_config(cfg)
+                    } else {
+                        w
+                    }
                 };
 
                 let rows = embs.len();

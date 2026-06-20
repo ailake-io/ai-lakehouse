@@ -1165,8 +1165,7 @@ pub async fn search_text(
                         // Load batch only for equality delete checking (not for scoring).
                         let reader2 = AilakeFileReader::new(file_bytes, "", 0);
                         let (raw_batch, _) = reader2.read_parquet()?;
-                        let batch =
-                            SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
+                        let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
                         for hit in hits {
                             let row_idx = hit.row_id as usize;
                             if row_idx >= batch.num_rows() {

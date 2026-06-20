@@ -57,7 +57,9 @@ mod tests {
 
     #[test]
     fn blob_is_compressed() {
-        let texts: Vec<&str> = (0..100).map(|_| "rust programming language fast safe").collect();
+        let texts: Vec<&str> = (0..100)
+            .map(|_| "rust programming language fast safe")
+            .collect();
         let batch = make_batch(&texts);
         let cfg = FtsConfig {
             text_columns: vec!["body".to_string()],
@@ -93,7 +95,10 @@ mod tests {
         assert_eq!(hits_rust[0].row_id, 0);
 
         let hits_python = searcher.search("python", 5).unwrap();
-        assert!(!hits_python.is_empty(), "expected hit for 'python' from doc 1");
+        assert!(
+            !hits_python.is_empty(),
+            "expected hit for 'python' from doc 1"
+        );
         assert_eq!(hits_python[0].row_id, 1);
     }
 
@@ -111,8 +116,14 @@ mod tests {
         let batch = RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(StringArray::from(vec!["generic content only", "other text"])),
-                Arc::new(StringArray::from(vec!["introduction to rust", "python basics"])),
+                Arc::new(StringArray::from(vec![
+                    "generic content only",
+                    "other text",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "introduction to rust",
+                    "python basics",
+                ])),
             ],
         )
         .unwrap();
@@ -127,7 +138,10 @@ mod tests {
 
         // "rust" only in title[0]
         let hits = searcher.search("rust", 5).unwrap();
-        assert!(!hits.is_empty(), "expected hit for 'rust' from title column");
+        assert!(
+            !hits.is_empty(),
+            "expected hit for 'rust' from title column"
+        );
         assert_eq!(hits[0].row_id, 0);
     }
 
@@ -148,7 +162,11 @@ mod tests {
         assert!(r1.is_ok(), "query with parens should not error: {:?}", r1);
 
         let r2 = searcher.search("go AND OR", 5);
-        assert!(r2.is_ok(), "query with only operators should not error: {:?}", r2);
+        assert!(
+            r2.is_ok(),
+            "query with only operators should not error: {:?}",
+            r2
+        );
 
         let r3 = searcher.search("c++ templates", 5);
         assert!(r3.is_ok(), "query with '+' should not error: {:?}", r3);

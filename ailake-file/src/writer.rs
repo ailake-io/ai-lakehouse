@@ -327,14 +327,11 @@ impl AilakeFileWriter {
 
         // Build optional AILK_FTS section.
         // Pre-built blob takes priority; otherwise build from batch if fts_config is set.
-        let fts_blob: Option<Vec<u8>> = self
-            .prebuilt_fts_blob
-            .clone()
-            .or_else(|| {
-                self.fts_config.as_ref().and_then(|cfg| {
-                    ailake_fts::build_fts_blob_from_batch(cfg, batch).ok()
-                })
-            });
+        let fts_blob: Option<Vec<u8>> = self.prebuilt_fts_blob.clone().or_else(|| {
+            self.fts_config
+                .as_ref()
+                .and_then(|cfg| ailake_fts::build_fts_blob_from_batch(cfg, batch).ok())
+        });
         let fts_section: Option<Bytes> = fts_blob.map(|blob| {
             // AILK_FTS header: magic(4) | version(2 LE) | reserved(2) | blob_len(8 LE)
             let blob_len = blob.len() as u64;

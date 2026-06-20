@@ -544,8 +544,13 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     };
 
     let result = rt().block_on(async {
-        let base = TableWriter::create_or_open(catalog, store, policy, table, format_version).await?;
-        let mut writer = if let Some(cfg) = fts_cfg { base.with_fts_config(cfg) } else { base };
+        let base =
+            TableWriter::create_or_open(catalog, store, policy, table, format_version).await?;
+        let mut writer = if let Some(cfg) = fts_cfg {
+            base.with_fts_config(cfg)
+        } else {
+            base
+        };
         writer.write_batch_auto(&batch, &req.embeddings).await?;
         writer.commit().await
     });
