@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **FTS capability preservation on compaction** (`ailake-fts`, `ailake-query`) — `CompactionExecutor::run()` now auto-detects `FtsConfig` from Iceberg table properties (`ailake.fts.enabled`, `ailake.fts.text-columns`, `ailake.fts.tokenizer`) when the caller did not explicitly call `with_fts_config()`. Prevents silent FTS index loss when compacting tables that were created with FTS enabled. `compact_incremental()` now also rebuilds FTS on the merged batch (previously the incremental path never embedded FTS regardless of config). `compact_deferred()` remains FTS-free by design (Parquet-only immediate write). `FtsConfig::from_table_props()` added as public API for catalog-driven config reconstruction. 4 unit tests in `ailake-fts`.
+
 ---
 
 ## [0.0.20] — 2026-06-20
