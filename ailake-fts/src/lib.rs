@@ -7,9 +7,13 @@
 pub mod blob;
 pub mod builder;
 pub mod searcher;
+pub mod tokenizers;
 
 pub use builder::{build_fts_blob_from_batch, merge_fts_blobs, FtsConfig};
 pub use searcher::{FtsHit, FtsSearcher};
+pub use tokenizers::register_cjk_ngram;
+#[cfg(feature = "fts-stemmer-langs")]
+pub use tokenizers::register_stemmer_langs;
 
 #[cfg(test)]
 mod tests {
@@ -141,6 +145,59 @@ mod tests {
         assert!(
             !hits.is_empty(),
             "expected hit for 'rust' from title column"
+        );
+        assert_eq!(hits[0].row_id, 0);
+    }
+
+    /// `cjk_ngram` tokenizer: CJK text must produce hits via bigram overlap.
+    #[test]
+    fn cjk_ngram_finds_japanese_substring() {
+        // "人工知能" = artificial intelligence; "機械学習" = machine learning
+        let batch = make_batch(&["人工知能システム", "機械学習アルゴリズム", "rust programming"]);
+        let cfg = FtsConfig {
+            text_columns: vec!["body".to_string()],
+            tokenizer: "cjk_ngram".to_string(),
+            writer_heap_bytes: 16 * 1024 * 1024,
+        };
+        let blob = build_fts_blob_from_batch(&cfg, &batch).unwrap();
+        let searcher = FtsSearcher::from_blob(&blob).unwrap();
+
+        // Query "知能" must hit doc 0 (contains bigram 知能)
+        let hits = searcher.search("知能", 5).unwrap();
+        assert!(!hits.is_empty(), "cjk_ngram: expected hit for 知能");
+        assert_eq!(hits[0].row_id, 0, "知能 must rank doc 0 highest");
+
+        // "機械" must hit doc 1
+        let hits2 = searcher.search("機械", 5).unwrap();
+        assert!(!hits2.is_empty(), "cjk_ngram: expected hit for 機械");
+        assert_eq!(hits2[0].row_id, 1, "機械 must rank doc 1 highest");
+
+        // Latin "rust" must still work (falls back to character n-grams)
+        let hits3 = searcher.search("rust", 5).unwrap();
+        assert!(!hits3.is_empty(), "cjk_ngram: latin term 'rust' must match");
+    }
+
+    /// `fr_stem` tokenizer: French stemming must normalize plural → stem.
+    #[cfg(feature = "fts-stemmer-langs")]
+    #[test]
+    fn fr_stem_normalizes_french_words() {
+        let batch = make_batch(&[
+            "les ordinateurs sont rapides",  // computers are fast
+            "le chien aboie dans la rue",    // the dog barks in the street
+        ]);
+        let cfg = FtsConfig {
+            text_columns: vec!["body".to_string()],
+            tokenizer: "fr_stem".to_string(),
+            writer_heap_bytes: 16 * 1024 * 1024,
+        };
+        let blob = build_fts_blob_from_batch(&cfg, &batch).unwrap();
+        let searcher = FtsSearcher::from_blob(&blob).unwrap();
+
+        // "ordinateur" (singular) should match "ordinateurs" (plural) via French stem
+        let hits = searcher.search("ordinateur", 5).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "fr_stem: singular 'ordinateur' must match plural 'ordinateurs'"
         );
         assert_eq!(hits[0].row_id, 0);
     }

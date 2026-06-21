@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`fts-stemmer-langs` Cargo feature** (`ailake-fts`) — opt-in registration of 17 Snowball language stemmers in every Tantivy index build: `ar_stem`, `da_stem`, `nl_stem`, `fi_stem`, `fr_stem`, `de_stem`, `el_stem`, `hu_stem`, `it_stem`, `no_stem`, `pt_stem`, `ro_stem`, `ru_stem`, `es_stem`, `sv_stem`, `ta_stem`, `tr_stem`. Uses `rust_stemmers` already compiled into Tantivy — no added binary weight; feature only controls registration (user-visible tokenizer names). Enable with `ailake-fts = { features = ["fts-stemmer-langs"] }`. Use via `FtsConfig { tokenizer: "fr_stem", .. }`.
+- **`cjk_ngram` tokenizer** (`ailake-fts`) — always registered, zero extra deps. `NgramTokenizer(min=1, max=2, prefix_only=false)` + `LowerCaser`. Tokenizes CJK text into unigrams and bigrams so BM25 matches sub-word characters (unigram "知" and bigram "知能"). ~85% recall vs. dictionary-based segmenters (Lindera/jieba). For production CJK, register a custom tokenizer and pass its name as `FtsConfig::tokenizer`. Documented in `ailake-fts/src/tokenizers.rs` with limitations (Thai/Khmer, false-positive unigrams, compound recall gap).
+- **FTS text field upgraded to `WithFreqsAndPositions`** (`ailake-fts`) — previously `WithFreqs`; positions required for NgramTokenizer phrase queries and user phrase search (e.g. `"quick brown fox"`). ~25-40% larger uncompressed term postings; negligible after zstd. **Breaks blobs written by prior releases when phrase queries are used** — point queries unaffected; rewrite blobs to regain phrase-query support.
+
 ### Fixed
 
 - **FTS capability preservation on compaction** (`ailake-fts`, `ailake-query`) — `CompactionExecutor::run()` now auto-detects `FtsConfig` from Iceberg table properties (`ailake.fts.enabled`, `ailake.fts.text-columns`, `ailake.fts.tokenizer`) when the caller did not explicitly call `with_fts_config()`. Prevents silent FTS index loss when compacting tables that were created with FTS enabled. `compact_incremental()` now also rebuilds FTS on the merged batch (previously the incremental path never embedded FTS regardless of config). `compact_deferred()` remains FTS-free by design (Parquet-only immediate write). `FtsConfig::from_table_props()` added as public API for catalog-driven config reconstruction. 4 unit tests in `ailake-fts`.

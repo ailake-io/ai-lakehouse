@@ -11,6 +11,11 @@ use ailake_core::{AilakeError, AilakeResult};
 use arrow_array::{Array, RecordBatch};
 use tantivy::schema::{IndexRecordOption, TextFieldIndexing, TextOptions, FAST, STORED};
 
+// `WithFreqsAndPositions` is required for:
+//   - NgramTokenizer (multi-token per input term → QueryParser emits phrase queries)
+//   - Phrase search by users (e.g. "quick brown fox")
+// Overhead vs `WithFreqs`: ~25-40% larger before zstd; acceptable for per-file blobs.
+
 /// Configuration for per-file FTS index construction.
 #[derive(Debug, Clone)]
 pub struct FtsConfig {
@@ -71,12 +76,19 @@ pub fn build_fts_blob_from_batch(config: &FtsConfig, batch: &RecordBatch) -> Ail
     let row_id_field = schema_builder.add_u64_field("row_id", FAST | STORED);
     let text_indexing = TextFieldIndexing::default()
         .set_tokenizer(&config.tokenizer)
-        .set_index_option(IndexRecordOption::WithFreqs);
+        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
     let text_opts = TextOptions::default().set_indexing_options(text_indexing);
     let text_field = schema_builder.add_text_field("text", text_opts);
     let schema = schema_builder.build();
 
     let index = Index::create_in_ram(schema);
+
+    // Register custom tokenizers. `cjk_ngram` is always available;
+    // language stemmers require the `fts-stemmer-langs` feature.
+    crate::tokenizers::register_cjk_ngram(&index)?;
+    #[cfg(feature = "fts-stemmer-langs")]
+    crate::tokenizers::register_stemmer_langs(&index);
+
     let mut writer = index
         .writer(config.writer_heap_bytes)
         .map_err(|e| AilakeError::Fts(format!("writer init: {e}")))?;
