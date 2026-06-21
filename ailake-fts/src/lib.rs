@@ -182,8 +182,8 @@ mod tests {
     #[test]
     fn fr_stem_normalizes_french_words() {
         let batch = make_batch(&[
-            "les ordinateurs sont rapides",  // computers are fast
-            "le chien aboie dans la rue",    // the dog barks in the street
+            "les ordinateurs sont rapides",
+            "le chien aboie dans la rue",
         ]);
         let cfg = FtsConfig {
             text_columns: vec!["body".to_string()],
@@ -192,14 +192,70 @@ mod tests {
         };
         let blob = build_fts_blob_from_batch(&cfg, &batch).unwrap();
         let searcher = FtsSearcher::from_blob(&blob).unwrap();
-
-        // "ordinateur" (singular) should match "ordinateurs" (plural) via French stem
         let hits = searcher.search("ordinateur", 5).unwrap();
+        assert!(!hits.is_empty(), "fr_stem: singular must match plural via stem");
+        assert_eq!(hits[0].row_id, 0);
+    }
+
+    /// `pt_br`: stemming + stop words — plurals must match, stop words must not rank.
+    #[cfg(feature = "fts-stemmer-langs")]
+    #[test]
+    fn pt_br_stems_and_filters_stopwords() {
+        let batch = make_batch(&[
+            "os computadores modernos são rápidos e eficientes",
+            "o cachorro late na rua de manhã",
+        ]);
+        let cfg = FtsConfig {
+            text_columns: vec!["body".to_string()],
+            tokenizer: "pt_br".to_string(),
+            writer_heap_bytes: 16 * 1024 * 1024,
+        };
+        let blob = build_fts_blob_from_batch(&cfg, &batch).unwrap();
+        let searcher = FtsSearcher::from_blob(&blob).unwrap();
+
+        // "computador" (singular) must match "computadores" (plural) via PT Snowball stem
+        let hits = searcher.search("computador", 5).unwrap();
         assert!(
             !hits.is_empty(),
-            "fr_stem: singular 'ordinateur' must match plural 'ordinateurs'"
+            "pt_br: singular 'computador' must match plural 'computadores'"
         );
         assert_eq!(hits[0].row_id, 0);
+
+        // "cachorro" must rank doc 1
+        let hits2 = searcher.search("cachorro", 5).unwrap();
+        assert!(!hits2.is_empty(), "pt_br: 'cachorro' must match doc 1");
+        assert_eq!(hits2[0].row_id, 1);
+    }
+
+    /// `en_stop`: English stop words removed — query on stop word alone must produce no hit.
+    #[cfg(feature = "fts-stemmer-langs")]
+    #[test]
+    fn en_stop_filters_english_stopwords() {
+        let batch = make_batch(&[
+            "the quick brown fox jumps over the lazy dog",
+            "rust programming language memory safety",
+        ]);
+        let cfg = FtsConfig {
+            text_columns: vec!["body".to_string()],
+            tokenizer: "en_stop".to_string(),
+            writer_heap_bytes: 16 * 1024 * 1024,
+        };
+        let blob = build_fts_blob_from_batch(&cfg, &batch).unwrap();
+        let searcher = FtsSearcher::from_blob(&blob).unwrap();
+
+        // "the" is a stop word — must not be indexed → no hits
+        let stop_hits = searcher.search("the", 5).unwrap();
+        assert!(stop_hits.is_empty(), "en_stop: 'the' is stop word, must return no hits");
+
+        // "fox" must still match doc 0
+        let hits = searcher.search("fox", 5).unwrap();
+        assert!(!hits.is_empty(), "en_stop: 'fox' must still match");
+        assert_eq!(hits[0].row_id, 0);
+
+        // Stemming: "programming" → "program" → must match "rust programming"
+        let hits2 = searcher.search("program", 5).unwrap();
+        assert!(!hits2.is_empty(), "en_stop: 'program' stem must match 'programming'");
+        assert_eq!(hits2[0].row_id, 1);
     }
 
     /// Query with Tantivy special chars must not panic — escape fallback.
