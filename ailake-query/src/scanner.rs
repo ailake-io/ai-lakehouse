@@ -776,6 +776,7 @@ fn parse_metric(s: &str) -> VectorMetric {
     match s {
         "euclidean" => VectorMetric::Euclidean,
         "dotproduct" | "dot_product" | "dot" => VectorMetric::DotProduct,
+        "normalized_cosine" | "normalizedcosine" => VectorMetric::NormalizedCosine,
         _ => VectorMetric::Cosine,
     }
 }

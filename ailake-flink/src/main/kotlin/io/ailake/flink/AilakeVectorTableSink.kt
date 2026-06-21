@@ -122,24 +122,27 @@ class AilakeSinkFunction(
     }
 
     private fun flush() {
-        AilakeNativeLoader.writeBatch(
-            warehouse       = warehouse,
-            namespace       = namespace,
-            table           = tableName,
-            vecCol          = vecCol,
-            dim             = dim,
-            metric          = metric,
-            precision       = precision,
-            ids             = idsBuffer.toLongArray(),
-            embeddings      = embeddingsBuffer.toTypedArray(),
-            embeddingModel  = embeddingModel,
-            partitionFields = partitionFields,
-            formatVersion   = formatVersion,
-            ftsColumns      = ftsColumns,
-            ftsTokenizer    = ftsTokenizer,
-        )
-        idsBuffer.clear()
-        embeddingsBuffer.clear()
+        try {
+            AilakeNativeLoader.writeBatch(
+                warehouse       = warehouse,
+                namespace       = namespace,
+                table           = tableName,
+                vecCol          = vecCol,
+                dim             = dim,
+                metric          = metric,
+                precision       = precision,
+                ids             = idsBuffer.toLongArray(),
+                embeddings      = embeddingsBuffer.toTypedArray(),
+                embeddingModel  = embeddingModel,
+                partitionFields = partitionFields,
+                formatVersion   = formatVersion,
+                ftsColumns      = ftsColumns,
+                ftsTokenizer    = ftsTokenizer,
+            )
+        } finally {
+            idsBuffer.clear()
+            embeddingsBuffer.clear()
+        }
     }
 
     // org.apache.flink.table.data.ArrayData does not have a toFloatArray() extension —

@@ -74,10 +74,14 @@ object AilakeNative {
      * Write a batch of rows to an AI-Lake table via the native library.
      * Returns the snapshot_id on success, null on failure.
      *
-     * @param partitionFields  multi-column partition spec (Phase K); empty = single-value partition_by/partition_value
-     * @param formatVersion    Iceberg format version; 2 (default) or 3
-     * @param ftsColumns       text columns to embed as Tantivy FTS index; empty = no FTS (default)
-     * @param ftsTokenizer     Tantivy tokenizer name; default "default"
+     * @param partitionFields      multi-column partition spec (Phase K); empty = single-value partition_by/partition_value
+     * @param formatVersion        Iceberg format version; 2 (default) or 3
+     * @param ftsColumns           text columns to embed as Tantivy FTS index; empty = no FTS (default)
+     * @param ftsTokenizer         Tantivy tokenizer name; default "default"
+     * @param hnswM                HNSW graph connectivity (M). null = use table default.
+     * @param hnswEfConstruction   HNSW ef_construction. null = use table default.
+     * @param preNormalize         Normalize vectors to unit L2 at write time (recommended for cosine).
+     * @param deferred             Build index asynchronously. Parquet committed immediately.
      */
     fun writeBatch(
         tableUri: String,
@@ -96,6 +100,10 @@ object AilakeNative {
         formatVersion: Int = 2,
         ftsColumns: List<String> = emptyList(),
         ftsTokenizer: String = "default",
+        hnswM: Int? = null,
+        hnswEfConstruction: Int? = null,
+        preNormalize: Boolean = false,
+        deferred: Boolean = false,
     ): Long? {
         val native = lib ?: return null
         if (ids.isEmpty()) return null
@@ -124,6 +132,10 @@ object AilakeNative {
             payload["fts_columns"]   = ftsColumns
             payload["fts_tokenizer"] = ftsTokenizer
         }
+        if (hnswM != null)              payload["hnsw_m"]              = hnswM
+        if (hnswEfConstruction != null) payload["hnsw_ef_construction"] = hnswEfConstruction
+        if (preNormalize)               payload["pre_normalize"]        = true
+        if (deferred)                   payload["deferred"]             = true
         val requestJson = mapper.writeValueAsString(payload)
 
         val ptr = native.ailake_write_batch_json(requestJson) ?: run {
@@ -319,17 +331,20 @@ object AilakeNative {
         queries: List<Triple<String, List<Float>, Float>>,
         topK: Int,
         partitionFilter: String? = null,
+        namespace: String = "default",
+        tableName: String = "",
     ): List<MultimodalSearchRow> {
         val native = lib ?: return emptyList()
         if (queries.isEmpty()) return emptyList()
 
+        val effectiveTable = tableName.ifBlank { tableUri.trimEnd('/').substringAfterLast('/') }
         val queriesJson = queries.joinToString(",", "[", "]") { (col, q, w) ->
             val qArr = q.joinToString(",", "[", "]")
             """{"col":${mapper.writeValueAsString(col)},"query":$qArr,"weight":$w,"dim":0}"""
         }
         val partJson = if (partitionFilter != null) ""","partition_filter":${mapper.writeValueAsString(partitionFilter)}""" else ""
         val requestJson = mapper.writeValueAsString(
-            mapOf("warehouse" to tableUri, "namespace" to "default", "table" to "table",
+            mapOf("warehouse" to tableUri, "namespace" to namespace, "table" to effectiveTable,
                   "top_k" to topK)
         ).dropLast(1) + ""","queries":$queriesJson$partJson}"""
 
@@ -363,14 +378,28 @@ object AilakeNative {
     /**
      * Run a vector search via the native library.
      *
-     * @param tableUri    path/URI of the AI-Lake table root
-     * @param queryBytes  Base64-encoded little-endian f32 array
-     * @param topK        number of nearest neighbors
+     * @param tableUri       path/URI of the AI-Lake table root
+     * @param queryBytes     Base64-encoded little-endian f32 array
+     * @param topK           number of nearest neighbors
+     * @param hybridText     when non-null, enables hybrid BM25+vector RRF fusion
+     * @param textColumn     Parquet column for BM25 scoring (default "chunk_text")
+     * @param bm25Weight     BM25 weight in RRF (0.0 = pure vector, 1.0 = pure BM25)
      */
-    fun search(tableUri: String, queryBytes: String, topK: Int, partitionFilter: String? = null): List<SearchRow> {
+    fun search(
+        tableUri: String,
+        queryBytes: String,
+        topK: Int,
+        partitionFilter: String? = null,
+        hybridText: String? = null,
+        textColumn: String = "chunk_text",
+        bm25Weight: Float = 0.5f,
+        namespace: String = "default",
+        tableName: String = "",
+    ): List<SearchRow> {
         val native = lib ?: return emptyList()
         if (queryBytes.isBlank()) return emptyList()
 
+        val effectiveTable = tableName.ifBlank { tableUri.trimEnd('/').substringAfterLast('/') }
         val floats = runCatching {
             val bytes = Base64.getDecoder().decode(queryBytes)
             val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
@@ -383,13 +412,18 @@ object AilakeNative {
 
         val payload = mutableMapOf<String, Any>(
             "warehouse" to tableUri,
-            "namespace" to "default",
-            "table" to "table",
+            "namespace" to namespace,
+            "table" to effectiveTable,
             "query" to floats,
             "dim" to floats.size,
             "top_k" to topK,
         )
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        if (hybridText != null) {
+            payload["hybrid_text"]  = hybridText
+            payload["text_column"]  = textColumn
+            payload["bm25_weight"]  = bm25Weight
+        }
         val requestJson = mapper.writeValueAsString(payload)
 
         val ptr = native.ailake_search_json(requestJson) ?: run {

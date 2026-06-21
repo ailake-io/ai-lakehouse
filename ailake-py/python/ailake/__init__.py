@@ -844,13 +844,13 @@ class Agent:
 
         now = int(time.time())
         col_names = batch.schema.names
-        has_chunk_text = "chunk_text" in col_names
-        has_distance = "distance" in col_names
+        has_chunk_text = "text" in col_names
+        has_distance = "_distance" in col_names
 
         scored: list[dict] = []
         for i in range(batch.num_rows):
-            dist = float(batch.column("distance")[i].as_py()) if has_distance else 1.0
-            raw_text = str(batch.column("chunk_text")[i].as_py()) if has_chunk_text else ""
+            dist = float(batch.column("_distance")[i].as_py()) if has_distance else 1.0
+            raw_text = str(batch.column("text")[i].as_py()) if has_chunk_text else ""
             text, meta = _unpack_agent_meta(raw_text)
 
             last_accessed = meta.get("last_accessed_at", now)

@@ -69,6 +69,10 @@ class StreamWriter:
             if self._cfg.fts_columns:
                 kwargs["fts_text_columns"] = self._cfg.fts_columns
                 kwargs["fts_tokenizer"] = self._cfg.fts_tokenizer
+            if self._cfg.hnsw_m is not None:
+                kwargs["hnsw_m"] = self._cfg.hnsw_m
+            if self._cfg.hnsw_ef_construction is not None:
+                kwargs["hnsw_ef_construction"] = self._cfg.hnsw_ef_construction
             self._table = ailake.open_table(self._table_path, **kwargs)
         return self._table
 
@@ -80,14 +84,14 @@ class StreamWriter:
     def _flush(self) -> None:
         if not self._buffer:
             return
-        records = self._buffer
-        self._buffer = []
+        records = self._buffer[:]
 
         texts = [_extract_text(r, self._cfg.text_field) for r in records]
         embeddings: np.ndarray = self._embedder.embed(texts)
 
         table = self._get_table()
         table.insert(texts, embeddings.tolist())
+        del self._buffer[: len(records)]
         logger.info(
             "stream=%s flushed batch size=%d path=%s",
             self._stream_name,
