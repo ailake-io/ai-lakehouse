@@ -136,6 +136,22 @@ interface AilakeNativeLib : Library {
      */
     fun ailake_evolve_schema_json(requestJson: String): Pointer?
 
+    /**
+     * Compact small files in an AI-Lake table into a larger merged file.
+     *
+     * Request JSON fields:
+     *   warehouse          (String)  warehouse root path
+     *   namespace          (String)  Iceberg namespace, default "default"
+     *   table              (String)  table name
+     *   min_files          (Int?)    minimum eligible files to trigger compaction, default 4
+     *   target_size_bytes  (Long?)   files smaller than this are candidates, default 128 MiB
+     *   max_files_per_pass (Int?)    max files merged per run, default 20
+     *   deferred           (Bool?)   build index in background when true, default false
+     *
+     * Response JSON: `{"ok":true,"files_compacted":N}` or `{"ok":false,"error":"..."}`
+     */
+    fun ailake_compact_json(requestJson: String): Pointer?
+
     /** Free a string pointer returned by any ailake_* function. */
     fun ailake_free_string(ptr: Pointer?)
 }

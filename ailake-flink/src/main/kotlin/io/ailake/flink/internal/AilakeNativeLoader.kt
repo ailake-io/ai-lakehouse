@@ -244,6 +244,8 @@ object AilakeNativeLoader {
      * @param hnswEfConstruction   HNSW ef_construction. null = use table default.
      * @param preNormalize         Normalize vectors to unit L2 at write time (recommended for cosine).
      * @param deferred             Build index asynchronously. Parquet committed immediately.
+     * @param columns              Extra string columns sent with the batch for FTS indexing.
+     *                             Map from column name to per-row string values.
      */
     fun writeBatch(
         warehouse: String,
@@ -266,6 +268,7 @@ object AilakeNativeLoader {
         hnswEfConstruction: Int? = null,
         preNormalize: Boolean = false,
         deferred: Boolean = false,
+        columns: Map<String, List<String>> = emptyMap(),
     ): Long {
         require(ids.size == embeddings.size) { "ids.size != embeddings.size" }
         val payload = mutableMapOf<String, Any>(
@@ -296,6 +299,7 @@ object AilakeNativeLoader {
         if (hnswEfConstruction != null) payload["hnsw_ef_construction"] = hnswEfConstruction
         if (preNormalize)               payload["pre_normalize"]        = true
         if (deferred)                   payload["deferred"]             = true
+        if (columns.isNotEmpty())       payload["columns"]              = columns
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_write_batch_json(req)
             ?: throw RuntimeException("ailake_write_batch_json returned null for table=$namespace.$table")
@@ -388,6 +392,53 @@ object AilakeNativeLoader {
             }
             log.info("[ailake] evolveSchema OK table={}.{} new_schema_id={}", namespace, table, resp.new_schema_id)
             resp.new_schema_id
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    /**
+     * Compact small files in an AI-Lake table.
+     *
+     * @param minFiles          minimum eligible files to trigger compaction (default 4)
+     * @param targetSizeBytes   files smaller than this are candidates (default 128 MiB)
+     * @param maxFilesPerPass   max files merged per run (default 20)
+     * @param deferred          build index in background when true (default false)
+     * @return number of files compacted (0 when nothing to compact)
+     */
+    fun compact(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        minFiles: Int = 4,
+        targetSizeBytes: Long = 128L * 1024 * 1024,
+        maxFilesPerPass: Int = 20,
+        deferred: Boolean = false,
+    ): Int {
+        val payload = mutableMapOf<String, Any>(
+            "warehouse"    to warehouse,
+            "namespace"    to namespace,
+            "table"        to table,
+            "min_files"    to minFiles,
+            "target_size_bytes"  to targetSizeBytes,
+            "max_files_per_pass" to maxFilesPerPass,
+        )
+        if (deferred) payload["deferred"] = true
+        val req = mapper.writeValueAsString(payload)
+
+        val ptr = lib.ailake_compact_json(req)
+            ?: throw RuntimeException("ailake_compact_json returned null for table=$namespace.$table")
+        return try {
+            val json = ptr.getString(0)
+            @Suppress("UNCHECKED_CAST")
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) {
+                log.error("[ailake] compact failed for table={}.{}: {}", namespace, table, resp["error"])
+                throw RuntimeException("ailake_compact_json error: ${resp["error"]}")
+            }
+            val n = (resp["files_compacted"] as? Number)?.toInt() ?: 0
+            log.info("[ailake] compact OK table={}.{} files_compacted={}", namespace, table, n)
+            n
         } finally {
             lib.ailake_free_string(ptr)
         }

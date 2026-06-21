@@ -47,6 +47,9 @@ object AilakeNative {
     /** Full-text search (Tantivy or BM25 fallback). Returns `{"ok":true,"results":[...]}`. Caller must free. */
     def ailake_search_text_json(requestJson: String): Pointer
 
+    /** Compact small files. Returns `{"ok":true,"files_compacted":N}`. Caller must free. */
+    def ailake_compact_json(requestJson: String): Pointer
+
     def ailake_free_string(ptr: Pointer): Unit
   }
 
@@ -79,6 +82,8 @@ object AilakeNative {
    * @param hnswEfConstruction   HNSW ef_construction. None = use table default.
    * @param preNormalize         Normalize vectors to unit L2 at write time (recommended for cosine).
    * @param deferred             Build index asynchronously (write_batch_auto_deferred). Parquet committed immediately.
+   * @param columns              Extra string columns sent with the batch (required for FTS to index text content).
+   *                             Map from column name to per-row string values, e.g. Map("chunk_text" -> Seq("row0", "row1", ...)).
    */
   def writeBatch(
     tableUri:           String,
@@ -101,6 +106,7 @@ object AilakeNative {
     hnswEfConstruction: Option[Int] = None,
     preNormalize:       Boolean = false,
     deferred:           Boolean = false,
+    columns:            Map[String, Seq[String]] = Map.empty,
   ): Option[Long] = {
     if (ids.isEmpty) return None
     lib match {
@@ -126,11 +132,18 @@ object AilakeNative {
         val hnswEfJson             = hnswEfConstruction.map(v => s""","hnsw_ef_construction":$v""").getOrElse("")
         val preNormalizeJson       = if (preNormalize) ""","pre_normalize":true""" else ""
         val deferredJson           = if (deferred) ""","deferred":true""" else ""
+        val colsJson = if (columns.nonEmpty) {
+          val inner = columns.map { case (col, vals) =>
+            val arr = vals.map(v => jsonStr(v)).mkString("[", ",", "]")
+            s"""${jsonStr(col)}:$arr"""
+          }.mkString("{", ",", "}")
+          s""","columns":$inner"""
+        } else ""
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
           s""""table":${jsonStr(tableName)},"vec_col":${jsonStr(vectorColumn)},""" +
           s""""dim":$dim,"metric":${jsonStr(metric)},"precision":${jsonStr(precision)},""" +
-          s""""ids":$idsJson,"embeddings":$embJson$modelJson$partByJson$partValJson$pfJson$fvJson$ftsJson$hnswMJson$hnswEfJson$preNormalizeJson$deferredJson}"""
+          s""""ids":$idsJson,"embeddings":$embJson$modelJson$partByJson$partValJson$pfJson$fvJson$ftsJson$hnswMJson$hnswEfJson$preNormalizeJson$deferredJson$colsJson}"""
         val ptr = native.ailake_write_batch_json(requestJson)
         if (ptr == null) {
           log.warn(s"[ailake] ailake_write_batch_json returned null for table=$tableName")
@@ -414,6 +427,59 @@ object AilakeNative {
         log.error(s"[ailake] Failed to parse multimodal response: ${e.getMessage}", e)
         Seq.empty
     }.getOrElse(Seq.empty)
+  }
+
+  /**
+   * Compact small files in an AI-Lake table.
+   *
+   * @param minFiles          minimum eligible files to trigger compaction (default 4)
+   * @param targetSizeBytes   files smaller than this are candidates (default 128 MiB)
+   * @param maxFilesPerPass   max files merged per run (default 20)
+   * @param deferred          build index in background when true (default false)
+   * @return Some(filesCompacted) on success, None when library absent or error
+   */
+  def compact(
+    tableUri:        String,
+    namespace:       String,
+    tableName:       String,
+    minFiles:        Int  = 4,
+    targetSizeBytes: Long = 128L * 1024 * 1024,
+    maxFilesPerPass: Int  = 20,
+    deferred:        Boolean = false,
+  ): Option[Int] = {
+    lib match {
+      case None => None
+      case Some(native) =>
+        val deferredJson = if (deferred) ""","deferred":true""" else ""
+        val requestJson =
+          s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
+          s""""table":${jsonStr(tableName)},""" +
+          s""""min_files":$minFiles,"target_size_bytes":$targetSizeBytes,""" +
+          s""""max_files_per_pass":$maxFilesPerPass$deferredJson}"""
+        val ptr = native.ailake_compact_json(requestJson)
+        if (ptr == null) {
+          log.warn(s"[ailake] ailake_compact_json returned null for table=$tableName")
+          return None
+        }
+        try {
+          val json = ptr.getString(0)
+          native.ailake_free_string(ptr)
+          val root = mapper.readTree(json)
+          if (!root.path("ok").asBoolean(false)) {
+            log.warn(s"[ailake] compact ok=false for table=$tableName: ${root.path("error").asText()}")
+            None
+          } else {
+            val n = root.path("files_compacted").asInt(0)
+            log.info(s"[ailake] compact OK table=$namespace.$tableName files_compacted=$n")
+            Some(n)
+          }
+        } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to parse compact response for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            None
+        }
+    }
   }
 
   private def jsonStr(s: String): String =

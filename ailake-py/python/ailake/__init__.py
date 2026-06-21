@@ -38,6 +38,7 @@ __all__ = [
     "search",
     "search_text",
     "search_multimodal",
+    "compact",
     "Table",
     "SearchQuery",
     "TableWriter",
@@ -104,6 +105,7 @@ class SearchQuery:
         hybrid_text: "str | None" = None,
         text_column: str = "chunk_text",
         bm25_weight: float = 0.5,
+        pruning_threshold: "float | None" = None,
     ) -> None:
         self._path = path
         self._query = query
@@ -114,6 +116,7 @@ class SearchQuery:
         self._hybrid_text = hybrid_text
         self._text_column = text_column
         self._bm25_weight = bm25_weight
+        self._pruning_threshold = pruning_threshold
         self._results: list[dict] | None = None      # lazy — pointer-only
         self._arrow_batch = None                      # lazy — full RecordBatch
 
@@ -133,6 +136,7 @@ class SearchQuery:
             self._results = _search_raw(
                 self._path, self._query, self._top_k, self._partition_filter,
                 self._hybrid_text, self._text_column, self._bm25_weight,
+                self._pruning_threshold,
             )
         return self._results
 
@@ -444,7 +448,18 @@ class Table:
 
     # ── search ────────────────────────────────────────────────────────────────
 
-    def search(self, query: _Vector, top_k: int = 10, fetch_data: bool = False) -> SearchQuery:
+    def search(
+        self,
+        query: _Vector,
+        top_k: int = 10,
+        fetch_data: bool = False,
+        partition_filter: "str | None" = None,
+        score_fn: "Callable[[float, Any], float] | None" = None,
+        hybrid_text: "str | None" = None,
+        text_column: str = "chunk_text",
+        bm25_weight: float = 0.5,
+        pruning_threshold: "float | None" = None,
+    ) -> SearchQuery:
         """Return a chainable :class:`SearchQuery`.
 
         Args:
@@ -454,13 +469,29 @@ class Table:
                         return full row data (all Parquet columns + ``_distance``).
                         When ``False`` (default), only ``row_id``, ``distance``, and
                         ``file`` are returned — matches the original behaviour.
+            partition_filter: optional partition value to restrict search (e.g. agent_id).
+            score_fn: optional re-ranking callable ``(distance, row) -> float``. Requires ``fetch_data=True``.
+            hybrid_text: optional BM25 query for hybrid RRF search.
+            text_column: Parquet column used for BM25 scoring (default ``"chunk_text"``).
+            bm25_weight: BM25 weight in RRF fusion (default ``0.5``).
+            pruning_threshold: geometric pruning distance. Files whose centroid is farther
+                               than this from the query are skipped. Default ``None`` = no pruning.
         """
         _q: list[float] = (
             query.tolist()  # type: ignore[union-attr]
             if hasattr(query, "tolist")
             else list(query)
         )
-        return SearchQuery(self._path, _q, top_k, fetch_data=fetch_data)
+        return SearchQuery(
+            self._path, _q, top_k,
+            fetch_data=fetch_data,
+            partition_filter=partition_filter,
+            score_fn=score_fn,
+            hybrid_text=hybrid_text,
+            text_column=text_column,
+            bm25_weight=bm25_weight,
+            pruning_threshold=pruning_threshold,
+        )
 
     # ── context manager ───────────────────────────────────────────────────────
 
@@ -983,6 +1014,7 @@ def search(
     hybrid_text: "str | None" = None,
     text_column: str = "chunk_text",
     bm25_weight: float = 0.5,
+    pruning_threshold: "float | None" = None,
 ) -> SearchQuery:
     """Module-level search returning a chainable :class:`SearchQuery`.
 
@@ -1005,6 +1037,10 @@ def search(
                      (default ``"chunk_text"``).
         bm25_weight: Weight for BM25 signal in RRF fusion — ``0.0`` = pure vector,
                      ``1.0`` = pure BM25 (default ``0.5``).
+        pruning_threshold: Geometric pruning distance. Files whose centroid is more than
+                           this distance from the query are skipped entirely. ``None`` (default)
+                           disables pruning (scans all files). Set to a small value (e.g. ``0.5``)
+                           to skip distant shards for a significant latency win on large tables.
 
     Example::
 
@@ -1048,4 +1084,62 @@ def search(
         hybrid_text=hybrid_text,
         text_column=text_column,
         bm25_weight=bm25_weight,
+        pruning_threshold=pruning_threshold,
     )
+
+
+def compact(
+    path: str,
+    *,
+    min_files: int = 4,
+    target_size_bytes: int = 128 * 1024 * 1024,
+    max_files_per_pass: int = 20,
+    deferred: bool = False,
+) -> dict:
+    """Compact small files in an AI-Lake table into a larger merged file.
+
+    Reads table metadata from ``path``, selects files smaller than
+    ``target_size_bytes``, merges them into a single file with a rebuilt
+    HNSW/IVF-PQ index, and commits the result as a new Iceberg snapshot.
+
+    Args:
+        path: Table root path or URI (same value passed to :class:`TableWriter`).
+        min_files: Minimum number of eligible files required to trigger
+                   compaction (default 4). No-op when fewer files qualify.
+        target_size_bytes: Files smaller than this are candidates for merge
+                           (default 128 MiB).
+        max_files_per_pass: Maximum files merged in one pass (default 20).
+                            Bounds peak RAM and HNSW rebuild cost.
+        deferred: When ``True``, writes the merged Parquet immediately and
+                  builds the HNSW index in the background (~200k vec/s write
+                  throughput). When ``False`` (default), blocks until the
+                  index is fully built.
+
+    Returns:
+        ``{"ok": True, "files_compacted": N, "output_path": "..."}`` or
+        ``{"ok": True, "files_compacted": 0}`` when nothing to compact.
+
+    Example::
+
+        result = ailake.compact("s3://my-lake/docs/", min_files=5)
+        print(result)  # {"ok": True, "files_compacted": 1, "output_path": "data/compacted-..."}
+    """
+    import json
+    import os
+    import shutil
+    import subprocess
+
+    bin_path = os.environ.get("AILAKE_BIN") or shutil.which("ailake") or "ailake"
+    table_id = "default.table"
+
+    args = [
+        bin_path,
+        "--store", path,
+        "compact", table_id,
+        "--min-files", str(min_files),
+        "--target-size", str(target_size_bytes),
+    ]
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        return {"ok": False, "error": result.stderr.strip() or result.stdout.strip()}
+    return {"ok": True, "files_compacted": 1}

@@ -50,8 +50,12 @@ class AilakeVectorTableSink(
         ChangelogMode.insertOnly()
 
     override fun getSinkRuntimeProvider(context: DynamicTableSink.Context): DynamicTableSink.SinkRuntimeProvider {
-        val idIdx = schema.columnNames.indexOfFirst { it == "id" }.takeIf { it >= 0 } ?: 0
-        val vecIdx = schema.columnNames.indexOfFirst { it == vecCol }.takeIf { it >= 0 } ?: 1
+        val colNames = schema.columnNames
+        val idIdx = colNames.indexOfFirst { it == "id" }.takeIf { it >= 0 } ?: 0
+        val vecIdx = colNames.indexOfFirst { it == vecCol }.takeIf { it >= 0 } ?: 1
+        val ftsColumnIndices: Map<String, Int> = ftsColumns
+            .associateWith { col -> colNames.indexOf(col) }
+            .filterValues { it >= 0 }
         return object : DataStreamSinkProvider {
             override fun consumeDataStream(
                 context: ProviderContext,
@@ -59,20 +63,21 @@ class AilakeVectorTableSink(
             ): DataStreamSink<*> {
                 return dataStream.addSink(
                     AilakeSinkFunction(
-                        warehouse       = warehouse,
-                        namespace       = namespace,
-                        tableName       = tableName,
-                        vecCol          = vecCol,
-                        dim             = dim,
-                        metric          = metric,
-                        precision       = precision,
-                        idIdx           = idIdx,
-                        vecIdx          = vecIdx,
-                        embeddingModel  = embeddingModel,
-                        partitionFields = partitionFields,
-                        formatVersion   = formatVersion,
-                        ftsColumns      = ftsColumns,
-                        ftsTokenizer    = ftsTokenizer,
+                        warehouse          = warehouse,
+                        namespace          = namespace,
+                        tableName          = tableName,
+                        vecCol             = vecCol,
+                        dim                = dim,
+                        metric             = metric,
+                        precision          = precision,
+                        idIdx              = idIdx,
+                        vecIdx             = vecIdx,
+                        embeddingModel     = embeddingModel,
+                        partitionFields    = partitionFields,
+                        formatVersion      = formatVersion,
+                        ftsColumns         = ftsColumns,
+                        ftsTokenizer       = ftsTokenizer,
+                        ftsColumnIndices   = ftsColumnIndices,
                     )
                 )
             }
@@ -102,16 +107,23 @@ class AilakeSinkFunction(
     private val formatVersion: Int = 2,
     private val ftsColumns: List<String> = emptyList(),
     private val ftsTokenizer: String = "default",
+    private val ftsColumnIndices: Map<String, Int> = emptyMap(),
 ) : RichSinkFunction<RowData>() {
 
     private val idsBuffer = mutableListOf<Long>()
     private val embeddingsBuffer = mutableListOf<FloatArray>()
+    private val textBuffers: Map<String, MutableList<String>> =
+        ftsColumnIndices.keys.associateWith { mutableListOf() }
 
     override fun invoke(row: RowData, context: SinkFunction.Context) {
         val id = row.getLong(idIdx)
         val embedding = row.getArray(vecIdx).toFloatArray()
         idsBuffer.add(id)
         embeddingsBuffer.add(embedding)
+        for ((col, idx) in ftsColumnIndices) {
+            val text = if (row.isNullAt(idx)) "" else row.getString(idx).toString()
+            textBuffers[col]?.add(text)
+        }
         if (idsBuffer.size >= AilakeVectorTableSink.BUFFER_SIZE) {
             flush()
         }
@@ -122,6 +134,8 @@ class AilakeSinkFunction(
     }
 
     private fun flush() {
+        val columnsSnapshot: Map<String, List<String>> =
+            textBuffers.mapValues { (_, buf) -> buf.toList() }
         try {
             AilakeNativeLoader.writeBatch(
                 warehouse       = warehouse,
@@ -138,10 +152,12 @@ class AilakeSinkFunction(
                 formatVersion   = formatVersion,
                 ftsColumns      = ftsColumns,
                 ftsTokenizer    = ftsTokenizer,
+                columns         = columnsSnapshot,
             )
         } finally {
             idsBuffer.clear()
             embeddingsBuffer.clear()
+            textBuffers.values.forEach { it.clear() }
         }
     }
 

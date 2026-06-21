@@ -208,6 +208,25 @@
         "description": "Tantivy tokenizer name used when fts_columns is non-empty. 'default' = whitespace + lowercase (suitable for most Latin-script text).",
         "default": "default",
         "order": 24
+      },
+      "hnsw_m": {
+        "type": "integer",
+        "title": "HNSW M",
+        "description": "HNSW graph connectivity. Higher = better recall, larger index. Typical values: 16 (fast), 32 (balanced), 64 (high recall). Omit to use table default.",
+        "order": 25
+      },
+      "hnsw_ef_construction": {
+        "type": "integer",
+        "title": "HNSW ef_construction",
+        "description": "HNSW build-time search depth. Higher = better recall at index build cost. Typical values: 100–400. Omit to use table default.",
+        "order": 26
+      },
+      "deferred": {
+        "type": "boolean",
+        "title": "Deferred Index Build",
+        "description": "Build HNSW/IVF-PQ index asynchronously (~200k vec/s for Parquet write, index attached in background). Recommended for large batch ingestion. IndexStatus transitions Indexing → Ready.",
+        "default": false,
+        "order": 27
       }
     }
   }

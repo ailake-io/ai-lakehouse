@@ -150,6 +150,10 @@ public:
     // partition_fields_json: JSON array like [{"column":"x","transform":"identity","column_type":"string"}]
     // fts_columns_json: JSON array like ["chunk_text","title"] — empty = no FTS
     // format_version: 2 (default) or 3
+    // hnsw_m: HNSW M parameter (-1 = use table default)
+    // hnsw_ef_construction: HNSW ef_construction (-1 = use table default)
+    // pre_normalize: normalize vectors to unit L2 at write time
+    // deferred: build index asynchronously (write_batch_auto_deferred)
     int64_t write_batch(
         const std::string              &warehouse,
         const std::string              &ns,
@@ -165,7 +169,11 @@ public:
         const std::string              &partition_fields_json = "",
         int                             format_version        = 2,
         const std::string              &fts_columns_json      = "",
-        const std::string              &fts_tokenizer         = ""
+        const std::string              &fts_tokenizer         = "",
+        int                             hnsw_m                = -1,
+        int                             hnsw_ef_construction  = -1,
+        bool                            pre_normalize         = false,
+        bool                            deferred              = false
     ) const;
 
     // Execute ailake_delete_where_json. Returns true on success.

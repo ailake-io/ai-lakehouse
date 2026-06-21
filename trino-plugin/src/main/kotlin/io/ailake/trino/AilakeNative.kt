@@ -52,6 +52,9 @@ object AilakeNative {
         /** Full-text search (Tantivy or BM25 fallback). Returns `{"ok":true,"results":[...]}`. Caller must free. */
         fun ailake_search_text_json(requestJson: String): Pointer?
 
+        /** Compact small files. Returns `{"ok":true,"files_compacted":N}`. Caller must free. */
+        fun ailake_compact_json(requestJson: String): Pointer?
+
         fun ailake_free_string(ptr: Pointer)
     }
 
@@ -82,6 +85,8 @@ object AilakeNative {
      * @param hnswEfConstruction   HNSW ef_construction. null = use table default.
      * @param preNormalize         Normalize vectors to unit L2 at write time (recommended for cosine).
      * @param deferred             Build index asynchronously. Parquet committed immediately.
+     * @param columns              Extra string columns sent with the batch for FTS indexing.
+     *                             Map from column name to per-row string values.
      */
     fun writeBatch(
         tableUri: String,
@@ -104,6 +109,7 @@ object AilakeNative {
         hnswEfConstruction: Int? = null,
         preNormalize: Boolean = false,
         deferred: Boolean = false,
+        columns: Map<String, List<String>> = emptyMap(),
     ): Long? {
         val native = lib ?: return null
         if (ids.isEmpty()) return null
@@ -136,6 +142,7 @@ object AilakeNative {
         if (hnswEfConstruction != null) payload["hnsw_ef_construction"] = hnswEfConstruction
         if (preNormalize)               payload["pre_normalize"]        = true
         if (deferred)                   payload["deferred"]             = true
+        if (columns.isNotEmpty())       payload["columns"]              = columns
         val requestJson = mapper.writeValueAsString(payload)
 
         val ptr = native.ailake_write_batch_json(requestJson) ?: run {
@@ -449,6 +456,54 @@ object AilakeNative {
         } catch (e: Exception) {
             log.error("[ailake] Failed to parse native search response for tableUri={}: {}", tableUri, e.message, e)
             emptyList()
+        } finally {
+            runCatching { native.ailake_free_string(ptr) }
+        }
+    }
+
+    /**
+     * Compact small files in an AI-Lake table.
+     *
+     * @return number of files compacted (0 = nothing to compact), or null when the library is absent.
+     */
+    fun compact(
+        tableUri: String,
+        namespace: String,
+        tableName: String,
+        minFiles: Int = 4,
+        targetSizeBytes: Long = 128L * 1024 * 1024,
+        maxFilesPerPass: Int = 20,
+        deferred: Boolean = false,
+    ): Int? {
+        val native = lib ?: return null
+        val payload = mutableMapOf<String, Any>(
+            "warehouse"          to tableUri,
+            "namespace"          to namespace,
+            "table"              to tableName,
+            "min_files"          to minFiles,
+            "target_size_bytes"  to targetSizeBytes,
+            "max_files_per_pass" to maxFilesPerPass,
+        )
+        if (deferred) payload["deferred"] = true
+        val requestJson = mapper.writeValueAsString(payload)
+
+        val ptr = native.ailake_compact_json(requestJson) ?: run {
+            log.warn("[ailake] ailake_compact_json returned null for table={}.{}", namespace, tableName)
+            return null
+        }
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) {
+                log.warn("[ailake] compact ok=false for table={}.{}: {}", namespace, tableName, resp["error"])
+                return null
+            }
+            val n = (resp["files_compacted"] as? Number)?.toInt() ?: 0
+            log.info("[ailake] compact OK table={}.{} files_compacted={}", namespace, tableName, n)
+            n
+        } catch (e: Exception) {
+            log.error("[ailake] Failed to parse compact response for table={}.{}: {}", namespace, tableName, e.message, e)
+            null
         } finally {
             runCatching { native.ailake_free_string(ptr) }
         }
