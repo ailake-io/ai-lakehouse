@@ -235,9 +235,13 @@ std::vector<SearchRow> AilakeLib::search_text(
         if (!j.value("ok", false)) return {};
         std::vector<SearchRow> rows;
         for (auto &r : j["results"]) {
+            // FTS results carry "score" (higher = more relevant); vector search uses "distance".
+            float dist = r.contains("score")
+                ? r["score"].get<float>()
+                : r.value("distance", 0.0f);
             rows.push_back({
                 r["row_id"].get<int64_t>(),
-                r["distance"].get<float>(),
+                dist,
                 r["file_path"].get<std::string>()
             });
         }
@@ -262,7 +266,11 @@ int64_t AilakeLib::write_batch(
     const std::string              &partition_fields_json,
     int                             format_version,
     const std::string              &fts_columns_json,
-    const std::string              &fts_tokenizer
+    const std::string              &fts_tokenizer,
+    int                             hnsw_m,
+    int                             hnsw_ef_construction,
+    bool                            pre_normalize,
+    bool                            deferred
 ) const {
     if (!write_fn_ || !free_fn_ || ids.empty()) return -1;
 
@@ -308,6 +316,14 @@ int64_t AilakeLib::write_batch(
         req += ",\"fts_columns\":"      + fts_columns_json;
     if (!fts_tokenizer.empty())
         req += ",\"fts_tokenizer\":"    + json_escape(fts_tokenizer);
+    if (hnsw_m > 0)
+        req += ",\"hnsw_m\":"           + std::to_string(hnsw_m);
+    if (hnsw_ef_construction > 0)
+        req += ",\"hnsw_ef_construction\":" + std::to_string(hnsw_ef_construction);
+    if (pre_normalize)
+        req += ",\"pre_normalize\":true";
+    if (deferred)
+        req += ",\"deferred\":true";
     req += "}";
 
     char *raw = write_fn_(req.c_str());

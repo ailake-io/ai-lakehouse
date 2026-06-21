@@ -97,6 +97,7 @@ object AilakeNativeLoader {
         }
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_json(req)
+            ?: throw RuntimeException("ailake_search_json returned null for table=$namespace.$table")
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<SearchResponse>(json)
@@ -133,6 +134,7 @@ object AilakeNativeLoader {
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_text_json(req)
+            ?: throw RuntimeException("ailake_search_text_json returned null for table=$namespace.$table")
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<SearchResponse>(json)
@@ -189,6 +191,7 @@ object AilakeNativeLoader {
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_multimodal_json(req)
+            ?: throw RuntimeException("ailake_search_multimodal_json returned null for table=$namespace.$table")
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<MultimodalSearchResponse>(json)
@@ -233,10 +236,14 @@ object AilakeNativeLoader {
     /**
      * Write a batch of records to an AI-Lake table.
      *
-     * @param partitionFields  multi-column partition spec (Phase K); empty = single-value partition_by/partition_value
-     * @param formatVersion    Iceberg format version; 2 (default) or 3
-     * @param ftsColumns       text columns to embed as Tantivy FTS index; empty = no FTS (default)
-     * @param ftsTokenizer     Tantivy tokenizer name; default "default"
+     * @param partitionFields      multi-column partition spec (Phase K); empty = single-value partition_by/partition_value
+     * @param formatVersion        Iceberg format version; 2 (default) or 3
+     * @param ftsColumns           text columns to embed as Tantivy FTS index; empty = no FTS (default)
+     * @param ftsTokenizer         Tantivy tokenizer name; default "default"
+     * @param hnswM                HNSW graph connectivity (M). null = use table default.
+     * @param hnswEfConstruction   HNSW ef_construction. null = use table default.
+     * @param preNormalize         Normalize vectors to unit L2 at write time (recommended for cosine).
+     * @param deferred             Build index asynchronously. Parquet committed immediately.
      */
     fun writeBatch(
         warehouse: String,
@@ -255,6 +262,10 @@ object AilakeNativeLoader {
         formatVersion: Int = 2,
         ftsColumns: List<String> = emptyList(),
         ftsTokenizer: String = "default",
+        hnswM: Int? = null,
+        hnswEfConstruction: Int? = null,
+        preNormalize: Boolean = false,
+        deferred: Boolean = false,
     ): Long {
         require(ids.size == embeddings.size) { "ids.size != embeddings.size" }
         val payload = mutableMapOf<String, Any>(
@@ -281,8 +292,13 @@ object AilakeNativeLoader {
             payload["fts_columns"]   = ftsColumns
             payload["fts_tokenizer"] = ftsTokenizer
         }
+        if (hnswM != null)              payload["hnsw_m"]              = hnswM
+        if (hnswEfConstruction != null) payload["hnsw_ef_construction"] = hnswEfConstruction
+        if (preNormalize)               payload["pre_normalize"]        = true
+        if (deferred)                   payload["deferred"]             = true
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_write_batch_json(req)
+            ?: throw RuntimeException("ailake_write_batch_json returned null for table=$namespace.$table")
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<WriteResponse>(json)
@@ -318,6 +334,7 @@ object AilakeNativeLoader {
         )
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_delete_where_json(req)
+            ?: throw RuntimeException("ailake_delete_where_json returned null for table=$namespace.$table")
         try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<DeleteWhereResponse>(json)
@@ -361,6 +378,7 @@ object AilakeNativeLoader {
         val req = "$baseJson,\"add_columns\":$addJson,\"rename_columns\":$renJson}"
 
         val ptr = lib.ailake_evolve_schema_json(req)
+            ?: throw RuntimeException("ailake_evolve_schema_json returned null for table=$namespace.$table")
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<EvolveSchemaResponse>(json)

@@ -98,10 +98,18 @@ static void AilakeWriteExec(
         return;
     }
 
+    // Derive table name from last path segment (mirrors AilakeDataSource / ConnectorFactory).
+    std::string tbl = warehouse;
+    {
+        auto slash = tbl.find_last_of("/\\");
+        if (slash != std::string::npos) tbl = tbl.substr(slash + 1);
+        if (tbl.empty()) tbl = "table";
+    }
+
     int64_t snap = lib.write_batch(
         warehouse,
         "default",
-        "table",
+        tbl,
         "embedding",
         dim,
         "cosine",
@@ -155,6 +163,22 @@ static void AilakeWriteExecFull(
     // arity 12: fts_tokenizer VARCHAR
     if ((idx_t)args.data.size() > 11 && !args.data[11].GetValue(0).IsNull())
         fts_tokenizer         = StringValue::Get(args.data[11].GetValue(0));
+    // arity 13: hnsw_m INTEGER (-1 = use default)
+    int hnsw_m = -1;
+    if ((idx_t)args.data.size() > 12 && !args.data[12].GetValue(0).IsNull())
+        hnsw_m                = IntegerValue::Get(args.data[12].GetValue(0));
+    // arity 14: hnsw_ef_construction INTEGER (-1 = use default)
+    int hnsw_ef_construction = -1;
+    if ((idx_t)args.data.size() > 13 && !args.data[13].GetValue(0).IsNull())
+        hnsw_ef_construction  = IntegerValue::Get(args.data[13].GetValue(0));
+    // arity 15: pre_normalize BOOLEAN
+    bool pre_normalize = false;
+    if ((idx_t)args.data.size() > 14 && !args.data[14].GetValue(0).IsNull())
+        pre_normalize         = BooleanValue::Get(args.data[14].GetValue(0));
+    // arity 16: deferred BOOLEAN
+    bool deferred = false;
+    if ((idx_t)args.data.size() > 15 && !args.data[15].GetValue(0).IsNull())
+        deferred              = BooleanValue::Get(args.data[15].GetValue(0));
 
     auto ids        = extract_bigint_list(ids_v);
     auto embeddings = extract_float_list_list(emb_v);
@@ -171,10 +195,19 @@ static void AilakeWriteExecFull(
         return;
     }
 
+    // Derive table name from last path segment when not explicitly set.
+    std::string tbl_name;
+    {
+        tbl_name = warehouse;
+        auto slash = tbl_name.find_last_of("/\\");
+        if (slash != std::string::npos) tbl_name = tbl_name.substr(slash + 1);
+        if (tbl_name.empty()) tbl_name = "table";
+    }
+
     int64_t snap = lib.write_batch(
         warehouse,
         "default",
-        "table",
+        tbl_name,
         vec_col,
         dim,
         metric,
@@ -186,7 +219,11 @@ static void AilakeWriteExecFull(
         partition_fields_json,
         format_version,
         fts_columns_json,
-        fts_tokenizer
+        fts_tokenizer,
+        hnsw_m,
+        hnsw_ef_construction,
+        pre_normalize,
+        deferred
     );
     result.SetValue(0, Value::BIGINT(snap));
 }
@@ -308,6 +345,88 @@ void RegisterAilakeWrite(duckdb::ExtensionLoader &loader) {
          LogicalType::INTEGER,
          LogicalType::VARCHAR,
          LogicalType::VARCHAR},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 13: + hnsw_m INTEGER (-1 = use table default)
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 14: + hnsw_ef_construction INTEGER (-1 = use table default)
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::INTEGER},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 15: + pre_normalize BOOLEAN
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::INTEGER,
+         LogicalType::BOOLEAN},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 16: + deferred BOOLEAN
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::INTEGER,
+         LogicalType::BOOLEAN,
+         LogicalType::BOOLEAN},
         LogicalType::BIGINT,
         AilakeWriteExecFull
     ));

@@ -172,7 +172,12 @@ fn cstr_empty_json() -> *mut c_char {
 
 fn cstr_err_json(msg: impl std::fmt::Display) -> *mut c_char {
     let s = serde_json::json!({"ok": false, "error": msg.to_string()}).to_string();
-    CString::new(s).unwrap_or_default().into_raw()
+    CString::new(s)
+        .unwrap_or_else(|_| {
+            CString::new(r#"{"ok":false,"error":"internal: error message contained null byte"}"#)
+                .unwrap()
+        })
+        .into_raw()
 }
 
 /// ailake-jni version string. Static — do NOT free.
@@ -429,6 +434,19 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         /// Tantivy tokenizer for FTS (default: "default").
         #[serde(default = "default_fts_tokenizer")]
         fts_tokenizer: String,
+        /// Per-table HNSW M parameter (graph connectivity). None = use default from HnswConfig.
+        #[serde(default)]
+        hnsw_m: Option<u32>,
+        /// Per-table HNSW ef_construction parameter. None = use default from HnswConfig.
+        #[serde(default)]
+        hnsw_ef_construction: Option<u32>,
+        /// Normalize vectors to unit L2 at write time (recommended for cosine).
+        #[serde(default)]
+        pre_normalize: bool,
+        /// Build index in a background Tokio task (write_batch_auto_deferred).
+        /// Parquet is committed immediately; index is appended asynchronously.
+        #[serde(default)]
+        deferred: bool,
         /// Extra string columns included in the Parquet batch (required for FTS).
         /// JSON: `{"text": ["row0 text", "row1 text", ...], "title": [...]}`
         #[serde(default)]
@@ -512,9 +530,9 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         precision,
         pq: None,
         keep_raw_for_reranking: true,
-        pre_normalize: false,
-        hnsw_m: None,
-        hnsw_ef_construction: None,
+        pre_normalize: req.pre_normalize,
+        hnsw_m: req.hnsw_m,
+        hnsw_ef_construction: req.hnsw_ef_construction,
         ivf_residual: req.ivf_residual,
         embedding_model,
         modality: None,
@@ -556,6 +574,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         })
     };
 
+    let deferred = req.deferred;
     let result = rt().block_on(async {
         let base =
             TableWriter::create_or_open(catalog, store, policy, table, format_version).await?;
@@ -564,7 +583,11 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         } else {
             base
         };
-        writer.write_batch_auto(&batch, &req.embeddings).await?;
+        if deferred {
+            writer.write_batch_auto_deferred(&batch, &req.embeddings).await?;
+        } else {
+            writer.write_batch_auto(&batch, &req.embeddings).await?;
+        }
         writer.commit().await
     });
 
@@ -679,7 +702,7 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
         req.warehouse,
         req.namespace,
         req.table,
-        &req.query_text[..req.query_text.len().min(60)],
+        req.query_text.chars().take(60).collect::<String>(),
         req.top_k
     );
 
@@ -1516,6 +1539,34 @@ mod tests {
         assert!(!ptr.is_null());
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         assert!(json.contains("error") || json.contains("null"));
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    #[test]
+    fn write_batch_json_new_params_parse() {
+        // hnsw_m, hnsw_ef_construction, pre_normalize, deferred must parse without panic.
+        let req = r#"{
+            "warehouse": "/nonexistent/path",
+            "namespace": "default",
+            "table": "test",
+            "dim": 4,
+            "hnsw_m": 32,
+            "hnsw_ef_construction": 200,
+            "pre_normalize": true,
+            "deferred": true,
+            "ids": [1],
+            "embeddings": [[0.1, 0.2, 0.3, 0.4]]
+        }"#;
+        let c = std::ffi::CString::new(req).unwrap();
+        let ptr = unsafe { ailake_write_batch_json(c.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        assert!(json.contains("error"), "expected error json, got: {}", json);
+        assert!(
+            !json.contains("JSON parse"),
+            "unexpected JSON parse error: {}",
+            json
+        );
         unsafe { ailake_free_string(ptr) };
     }
 

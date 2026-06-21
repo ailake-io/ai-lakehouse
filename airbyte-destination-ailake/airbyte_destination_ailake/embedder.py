@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import urllib.error
 import urllib.request
@@ -30,8 +31,8 @@ class CmdEmbedder:
 
     def embed(self, texts: list[str]) -> np.ndarray:
         proc = subprocess.run(
-            self._cmd,
-            shell=True,
+            shlex.split(self._cmd),
+            shell=False,
             input=json.dumps(texts).encode(),
             capture_output=True,
             timeout=300,

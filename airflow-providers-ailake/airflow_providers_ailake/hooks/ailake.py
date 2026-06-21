@@ -128,9 +128,14 @@ class AilakeHook(BaseHook):
     # ------------------------------------------------------------------
 
     def get_table_info(self, table: str) -> dict[str, Any]:
-        """Return table metadata as a dict (uses ``ailake info --format json``)."""
-        result = self.run_cli("info", table, "--format", "json")
-        return json.loads(result.stdout)
+        """Return table metadata as a dict, or {} if the table does not yet exist."""
+        result = self.run_cli("info", table, "--format", "json", check=False)
+        if result.returncode != 0:
+            return {}
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {}
 
     def get_current_snapshot_id(self, table: str) -> int | None:
         """Return the current snapshot_id for a table, or None if no snapshot exists."""
@@ -144,12 +149,17 @@ class AilakeHook(BaseHook):
         top_k: int = 10,
         pruning_threshold: float = 0.8,
         partition_filter: str | None = None,
+        hybrid_text: str | None = None,
+        text_column: str = "chunk_text",
+        bm25_weight: float = 0.5,
     ) -> list[dict[str, Any]]:
         """Run vector search and return results as a list of dicts."""
         query_csv = ",".join(str(v) for v in query)
         extra: list[str] = []
         if partition_filter:
             extra += ["--partition-filter", partition_filter]
+        if hybrid_text:
+            extra += ["--hybrid-text", hybrid_text, "--text-column", text_column, "--bm25-weight", str(bm25_weight)]
         result = self.run_cli(
             "search",
             table,
@@ -227,7 +237,7 @@ class AilakeHook(BaseHook):
         extra: list[str] = []
         for ac in (add_columns or []):
             extra += ["--add", f"{ac['name']}:{ac['type']}"]
-            if ac.get("initial_default"):
+            if ac.get("initial_default") is not None:
                 extra += ["--initial-default", str(ac["initial_default"])]
         for rc in (rename_columns or []):
             extra += ["--rename", f"{rc['from']}:{rc['to']}"]

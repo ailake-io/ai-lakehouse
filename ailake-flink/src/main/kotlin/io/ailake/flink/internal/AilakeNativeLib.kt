@@ -36,7 +36,7 @@ interface AilakeNativeLib : Library {
      *
      * Response JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
      */
-    fun ailake_search_json(requestJson: String): Pointer
+    fun ailake_search_json(requestJson: String): Pointer?
 
     /**
      * Write a batch of records to an AI-Lake table.
@@ -62,7 +62,7 @@ interface AilakeNativeLib : Library {
      *
      * Response JSON: `{"ok":true,"snapshot_id":N}` or `{"ok":false,"error":"..."}`
      */
-    fun ailake_write_batch_json(requestJson: String): Pointer
+    fun ailake_write_batch_json(requestJson: String): Pointer?
 
     /**
      * Cross-modal RRF search across multiple vector columns.
@@ -77,7 +77,7 @@ interface AilakeNativeLib : Library {
      *
      * Response JSON: `{"ok":true,"results":[{"row_id":N,"rrf_score":F,"file_path":"..."}]}`
      */
-    fun ailake_search_multimodal_json(requestJson: String): Pointer
+    fun ailake_search_multimodal_json(requestJson: String): Pointer?
 
     /**
      * Low-level search: f32 pointer + length variant.  Prefer [ailake_search_json] for
@@ -88,7 +88,7 @@ interface AilakeNativeLib : Library {
         queryPtr: Pointer,
         queryLen: Int,
         topK: Int,
-    ): Pointer
+    ): Pointer?
 
     /**
      * Pure BM25 full-text search (no embedding required).
@@ -106,7 +106,7 @@ interface AilakeNativeLib : Library {
      * Response JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
      * where distance = negated BM25 score (lower = more relevant).
      */
-    fun ailake_search_text_json(requestJson: String): Pointer
+    fun ailake_search_text_json(requestJson: String): Pointer?
 
     /**
      * Logically delete rows matching a column equality predicate.
@@ -120,7 +120,7 @@ interface AilakeNativeLib : Library {
      *
      * Response JSON: `{"ok":true}` or `{"ok":false,"error":"..."}`
      */
-    fun ailake_delete_where_json(requestJson: String): Pointer
+    fun ailake_delete_where_json(requestJson: String): Pointer?
 
     /**
      * Apply a metadata-only schema evolution to the table.
@@ -134,8 +134,8 @@ interface AilakeNativeLib : Library {
      *
      * Response JSON: `{"ok":true,"new_schema_id":N}` or `{"ok":false,"error":"..."}`
      */
-    fun ailake_evolve_schema_json(requestJson: String): Pointer
+    fun ailake_evolve_schema_json(requestJson: String): Pointer?
 
     /** Free a string pointer returned by any ailake_* function. */
-    fun ailake_free_string(ptr: Pointer)
+    fun ailake_free_string(ptr: Pointer?)
 }
