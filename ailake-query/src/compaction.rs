@@ -120,6 +120,7 @@ impl CompactionPlanner {
 /// For large tables use `compact_deferred` / `run_deferred`: the merged Parquet
 /// is persisted immediately and the HNSW build runs in a background Tokio task,
 /// decoupling I/O cost from CPU cost.
+#[derive(Clone)]
 pub struct CompactionExecutor {
     store: Arc<dyn Store>,
     policy: VectorStoragePolicy,
@@ -148,6 +149,29 @@ impl CompactionExecutor {
     pub fn with_fts_config(mut self, cfg: ailake_fts::FtsConfig) -> Self {
         self.fts_config = Some(cfg);
         self
+    }
+
+    /// Return a clone of this executor whose `fts_config` is filled from table properties
+    /// when the caller did not explicitly call `with_fts_config`.
+    ///
+    /// This is the auto-detect path: if `ailake.fts.enabled=true` is present in the table
+    /// metadata but the operator forgot (or never knew to) set an FTS config, compaction
+    /// would silently drop the FTS index. This method prevents that loss.
+    fn with_effective_fts(
+        &self,
+        table_props: &std::collections::HashMap<String, String>,
+    ) -> std::borrow::Cow<'_, Self> {
+        if self.fts_config.is_some() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        match ailake_fts::FtsConfig::from_table_props(table_props) {
+            Some(cfg) => {
+                let mut cloned = self.clone();
+                cloned.fts_config = Some(cfg);
+                std::borrow::Cow::Owned(cloned)
+            }
+            None => std::borrow::Cow::Borrowed(self),
+        }
     }
 
     /// Read all input files in parallel, returning ordered (batch, embeddings) pairs.
@@ -426,7 +450,21 @@ impl CompactionExecutor {
         all_embeddings.extend(other_vecs);
 
         // Write the merged file using the pre-built index (no rebuild).
-        let writer = AilakeFileWriter::new(self.policy.clone());
+        // Attach FTS blob when configured — data is already in merged_batch so cost is tokenization only.
+        let writer = {
+            let base = AilakeFileWriter::new(self.policy.clone());
+            if let Some(ref fts_cfg) = self.fts_config {
+                match ailake_fts::merge_fts_blobs(fts_cfg, &merged_batch) {
+                    Ok(blob) => base.with_prebuilt_fts_blob(blob),
+                    Err(e) => {
+                        warn!("ailake: FTS re-index during incremental compaction failed: {e}");
+                        base
+                    }
+                }
+            } else {
+                base
+            }
+        };
         let file_bytes = writer.write_with_prebuilt_hnsw(&merged_batch, &all_embeddings, &hnsw)?;
         let file_size = file_bytes.len() as u64;
         self.store.put(output_path, file_bytes.clone()).await?;
@@ -556,6 +594,15 @@ impl CompactionExecutor {
             return Ok(None);
         }
 
+        // Auto-detect FTS from table metadata so compaction never silently drops an FTS index
+        // that was present in the source files. Uses ailake.fts.* properties written at write time.
+        let meta_props = catalog
+            .load_table(table)
+            .await
+            .map(|m| m.properties)
+            .unwrap_or_default();
+        let executor = self.with_effective_fts(&meta_props);
+
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_else(|e| e.duration())
@@ -563,7 +610,7 @@ impl CompactionExecutor {
         let output_path = format!("{output_prefix}/compacted-{ts}.parquet");
 
         // Use incremental merge when a dominant file exists (falls back to full rebuild automatically).
-        let merged = self.compact_incremental(&to_compact, &output_path).await?;
+        let merged = executor.compact_incremental(&to_compact, &output_path).await?;
 
         // Commit: add merged file, remove input files (via Replace snapshot)
         let snapshot = NewSnapshot {
@@ -593,6 +640,11 @@ impl CompactionExecutor {
     /// Parquet immediately, commit as `Indexing`, spawn background index build.
     ///
     /// Use for large tables where inline HNSW rebuild blocks too long.
+    ///
+    /// Note: FTS index is **not** rebuilt in deferred mode — `compact_deferred` writes
+    /// Parquet-only immediately and the background task (`build_and_patch_index`) only
+    /// builds the HNSW/IVF-PQ index. Use `run` (synchronous) when FTS preservation
+    /// on compaction is required.
     pub async fn run_deferred(
         &self,
         planner: &CompactionPlanner,
