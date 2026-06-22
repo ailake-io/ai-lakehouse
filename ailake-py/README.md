@@ -146,7 +146,7 @@ Opens or creates an AI-Lake table at `path`.
 | `insert(texts, embeddings=None) → Table` | Buffer a batch. `embeddings`: `list[list[float]]` or numpy array. When `embed_fn` was set on `open_table()`, `embeddings` may be omitted — the callable is invoked automatically. |
 | `write_batch_auto_deferred(texts, embeddings=None) → Table` | Deferred write — Parquet persisted immediately (~200k vec/s); index (HNSW or IVF-PQ, auto-selected) built in a background thread. Shard served via flat scan until index ready. |
 | `commit() → int` | Persist as a new Iceberg snapshot; returns snapshot ID. |
-| `search(query, top_k=10, fetch_data=False) → SearchQuery` | Lazy, chainable search. `query`: `list[float]` or numpy array. Set `fetch_data=True` to return full row data. Raises `ModelMismatch` if query dim ≠ table dim. |
+| `search(query, top_k=10, fetch_data=False, partition_filter=None, score_fn=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None) → SearchQuery` | Lazy, chainable search. `query`: `list[float]` or numpy array. `fetch_data=True` returns all Parquet columns + `_distance`. `hybrid_text` enables BM25+vector RRF fusion. `pruning_threshold` skips files whose centroid is farther than this from the query. `ef_search` overrides the HNSW search pool size. Raises `ModelMismatch` if query dim ≠ table dim. |
 | `insert_async(...)` | Async variant of `insert`. |
 | `write_batch_auto_deferred_async(...)` | Async variant of `write_batch_auto_deferred`. |
 | `commit_async() → int` | Async variant of `commit`. |
@@ -191,9 +191,15 @@ df = table.search(query, top_k=10, fetch_data=True).to_pandas()
 
 `fetch_data=True` reads each matching Parquet file once and uses `arrow_select::take` to extract only the matched rows — no full table scan.
 
-### `search(path, query, top_k=10, fetch_data=False, partition_filter=None) → SearchQuery`
+### `search(path, query, top_k=10, fetch_data=False, partition_filter=None, score_fn=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None) → SearchQuery`
 
-Module-level search returning the same chainable `SearchQuery`. Pass `partition_filter` to restrict results to files written with a specific `partition_value` — pruning happens at the manifest level before any HNSW I/O.
+Module-level search returning the same chainable `SearchQuery`.
+
+- `partition_filter` — restrict to files with matching `partition_value`; pruning at manifest level before HNSW I/O.
+- `hybrid_text` — BM25 query string; when set, retrieves `10×top_k` HNSW candidates and fuses via RRF with `bm25_weight`.
+- `pruning_threshold` — geometric pruning distance; files whose centroid distance exceeds this are skipped. Default `None` = no pruning.
+- `ef_search` — HNSW search pool size. Larger = higher recall, slower. Default `None` = table default (50).
+- `score_fn` — re-ranking callable `(distance: float, row: Any) -> float`. Requires `fetch_data=True`.
 
 ### `VectorColSpec(column, dim, metric="cosine", modality=None)`
 
@@ -396,6 +402,39 @@ info = ailake.hardware_info()
 ```
 
 Call before `write_batch_auto_deferred` to understand what index type will be selected.
+
+### `compact(path, *, min_files=4, target_size_bytes=134217728, max_files_per_pass=20, deferred=False) → dict`
+
+Merges small files into a larger file and rebuilds the HNSW index. Returns `{"ok": True, "files_compacted": N}`. No-op when fewer than `min_files` qualify.
+
+```python
+result = ailake.compact("s3://my-lake/docs/", min_files=5)
+# {"ok": True, "files_compacted": 1, "output_path": "data/compacted-..."}
+```
+
+### `evolve_schema(path, *, add_columns=None, rename_columns=None) → int`
+
+Applies schema evolution in a single metadata-only call (no data files rewritten). Combines `add_column` + `rename_column` in order. Returns final `schema_id`.
+
+```python
+ailake.evolve_schema(
+    "s3://my-lake/docs/",
+    add_columns=[{"name": "score", "type": "float", "initial_default": 0.0}],
+    rename_columns=[{"from": "old_text", "to": "chunk_text"}],
+)
+```
+
+### `now_ns() → int`
+
+Returns current Unix epoch time in nanoseconds. Use to populate `created_at` / `last_accessed_at` columns (Arrow `Timestamp(ns, UTC)`).
+
+```python
+ts = ailake.now_ns()   # e.g. 1750000000000000000
+```
+
+### `delete_rows(path, file_path, row_ids) → None`
+
+Low-level Rust binding: physically removes rows from a specific Parquet file within the table, rebuilding the HNSW index. For logical Iceberg deletes (no file rewrite), use `delete_where` instead.
 
 ### `assemble_context(chunks, max_tokens=4096, dedup_threshold=0.05) → str`
 

@@ -8,7 +8,7 @@ Reference guide for the two JVM query-engine plugins that expose AI-Lake vector 
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Query Engine (Trino / Spark)                                   │
+│  Query Engine (Trino / Spark / Flink)                           │
 │                                                                 │
 │  SQL: SELECT * FROM ailake.default.search ORDER BY distance     │
 │  Scala: spark.ailakeSearch(uri, query, topK)                    │
@@ -17,22 +17,29 @@ Reference guide for the two JVM query-engine plugins that expose AI-Lake vector 
 │         │  JVM Plugin (Kotlin / Scala)      │                   │
 │         │  VectorScanConnector (Trino)       │                   │
 │         │  VectorScanStrategy  (Spark)       │                   │
+│         │  AilakeNativeLoader  (Flink)       │                   │
 │         │  AilakeNative — JNA bridge         │                   │
 │         └───────────────┬──────────────────┘                   │
 └─────────────────────────┼───────────────────────────────────────┘
                           │  JNA (System.loadLibrary)
                           ▼
-             ┌────────────────────────┐
-             │  libailake_jni.so      │
-             │  (Rust cdylib)         │
-             │                        │
-             │  ailake_search_json()         ← C-ABI (JSON in/out)
-             │  ailake_write_batch_json()    ← C-ABI (JSON in/out)
-             │  ailake_free_string()         ← C-ABI
-             │         │              │
-             │  do_search()  ←  ailake-query │
-             │  HNSW + pruning              │
-             └────────────────────────┘
+             ┌────────────────────────────────────────┐
+             │  libailake_jni.so  (Rust cdylib)        │
+             │                                         │
+             │  ailake_search_json()        ← search   │
+             │  ailake_write_batch_json()   ← write    │
+             │  ailake_delete_where_json()  ← delete   │
+             │  ailake_evolve_schema_json() ← schema   │
+             │  ailake_compact_json()       ← compact  │
+             │  ailake_scan_json()          ← full-read│
+             │  ailake_search_text_json()   ← BM25 FTS │
+             │  ailake_search_multimodal_json() ← RRF  │
+             │  ailake_version()            ← version  │
+             │  ailake_free_string()        ← free ptr │
+             │          │                              │
+             │  do_search() ← ailake-query             │
+             │  HNSW + pruning                         │
+             └────────────────────────────────────────┘
 ```
 
 **Key invariant**: the search logic lives entirely in Rust (`ailake-jni` → `ailake-query` → `ailake-index`). The JVM plugins are thin adapters that translate engine-specific SPI calls into native library calls and parse the JSON response.

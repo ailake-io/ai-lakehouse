@@ -248,6 +248,109 @@ type ScanRow struct {
 }
 ```
 
+## Write and mutation operations
+
+CLI-delegated operations — require the `ailake` binary on `PATH` or `AILAKE_BIN` env. Return `ErrNoBinary` when neither is available.
+
+### `WriteBatch`
+
+```go
+func WriteBatch(
+    catalog     *HadoopCatalog,
+    namespace   string,
+    table       string,
+    parquetFile string,  // local path to Parquet file
+    opts        WriteBatchOptions,
+) error
+```
+
+Writes a batch of rows from a local Parquet file into an AI-Lake table (`ailake insert` CLI). `opts.VecCol` identifies the embedding column (default `"embedding"`).
+
+```go
+type WriteBatchOptions struct {
+    VecCol             string
+    Metric             string   // "cosine" | "euclidean" | "dot"
+    Precision          string   // "f32" | "f16" | "i8"
+    EmbeddingModel     string
+    PartitionBy        string
+    PartitionValue     string
+    FormatVersion      int      // 0 | 2 | 3; 0 means omit (uses table default)
+    FtsColumns         []string // Tantivy FTS columns
+    FtsTokenizer       string
+    HnswM              int      // 0 = table default
+    HnswEfConstruction int      // 0 = table default
+    PreNormalize       bool
+    Deferred           bool
+}
+```
+
+### `DeleteWhere`
+
+```go
+func DeleteWhere(
+    catalog   *HadoopCatalog,
+    namespace, table, column string,
+    values    []string,
+) error
+```
+
+Commits an Iceberg equality delete (`ailake delete-where` CLI). No data files are rewritten; deleted rows masked at scan time. Empty `values` is a no-op.
+
+### `EvolveSchema`
+
+```go
+func EvolveSchema(
+    catalog    *HadoopCatalog,
+    namespace  string,
+    table      string,
+    addCols    []AddColumnReq,
+    renameCols []RenameColumnReq,
+) (int, error)  // returns new schema_id or -1 for no-op
+```
+
+Applies metadata-only schema evolution (`ailake evolve` CLI). No data files rewritten. Empty slices are no-ops.
+
+```go
+type AddColumnReq struct {
+    Name           string // Iceberg column name
+    Type           string // "string" | "int" | "long" | "float" | "double" | "boolean"
+    InitialDefault string // JSON literal (e.g. "null", "0", "\"unknown\""); empty = null
+}
+type RenameColumnReq struct{ From, To string }
+```
+
+### `SearchHybrid`
+
+```go
+func SearchHybrid(
+    catalog    *HadoopCatalog,
+    namespace  string,
+    table      string,
+    query      []float32,
+    text       string,
+    topK       int,
+    bm25Weight float64,
+    textColumn string,
+) ([]SearchHybridResult, error)
+```
+
+BM25+vector RRF search (`ailake search --hybrid-text` CLI). Returns `[]SearchHybridResult{RowID, Distance, FilePath}`. `bm25Weight` controls BM25 contribution in RRF (0.0 = pure vector, 1.0 = pure BM25).
+
+### `SearchText`
+
+```go
+func SearchText(
+    catalog     *HadoopCatalog,
+    namespace   string,
+    table       string,
+    queryText   string,
+    textColumns []string,
+    topK        int,
+) ([]SearchTextResult, error)
+```
+
+Full-text search (`ailake search --text` CLI). Uses Tantivy FTS O(log N) when available; falls back to BM25 brute-force for legacy files. Returns `[]SearchTextResult{RowID, Score, FilePath}` (higher `Score` = more relevant).
+
 ## Index formats
 
 Both HNSW and IVF-PQ indexes are supported transparently — the reader detects the index type from the AILK footer header flags.

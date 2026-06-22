@@ -119,6 +119,30 @@ results.orderBy("distance").show(10)
 
 See `SETUP.md §16` for a complete walkthrough including demo table generation and cluster submission.
 
+### Hybrid search and full-text search (Spark)
+
+```scala
+import io.ailake.spark.implicits._
+
+// Hybrid BM25+vector
+val hybrid = spark.ailakeSearch(
+    tableUri    = "s3://my-lake/docs/",
+    queryVector = myEmbedding,
+    topK        = 100,
+    hybridText  = Some("rust programming"),
+    bm25Weight  = 0.5f,
+    textColumn  = "chunk_text",
+)
+
+// Full-text search only (no vector)
+val textResults = spark.ailakeSearchText(
+    tableUri    = "s3://my-lake/docs/",
+    queryText   = "rust programming async",
+    topK        = 20,
+)
+// returns DataFrame: row_id, score (BM25, higher=more relevant), file_path
+```
+
 ### Structured Streaming (ingest)
 
 AI-Lake tables accept streaming writes via Iceberg's standard streaming sink. The HNSW index is built on compaction (separate job), not inline during streaming:
@@ -478,6 +502,37 @@ Or set `ailake.native.lib` system property or `AILAKE_NATIVE_LIB` env var to poi
 | `partition.by` | | `` | Iceberg identity partition column (e.g. `agent_id`). Enables manifest-level per-agent pruning (Phase 9). |
 | `partition.value` | | `` | Partition value for this table source/sink instance. |
 | `search.partition-filter` | | `` | Restrict search to files with this partition_value (Phase 9). |
+| `fts.columns` | | `` | Comma-separated text columns to build Tantivy FTS index (Phase T). E.g. `chunk_text,document_title`. |
+| `fts.tokenizer` | | `simple` | Tantivy tokenizer for FTS index. |
+| `search.hybrid-text` | | `` | Query text for BM25 hybrid RRF fusion (Phase 9). |
+| `search.bm25-weight` | | `0.5` | BM25 weight in RRF fusion. |
+
+### FTS and hybrid search (Flink)
+
+```kotlin
+// Full-text search via AilakeNativeLoader
+val hits = AilakeNativeLoader.searchText(
+    warehouse = "s3://my-lake/",
+    namespace = "default",
+    table     = "docs",
+    queryText = "rust programming async",
+    topK      = 20,
+)
+// hits: List<SearchTextResult>(rowId, score, filePath)
+```
+
+```scala
+// Hybrid BM25+vector search via AilakeNative (Scala)
+val results = AilakeNative.search(
+    tableUri  = "s3://my-lake/docs/",
+    query     = floatArray,
+    topK      = 100,
+    hybridText   = Some("rust async"),
+    bm25Weight   = 0.5f,
+    textColumn   = "chunk_text",
+    tableName    = "table",
+)
+```
 
 ---
 
@@ -489,9 +544,10 @@ Or set `ailake.native.lib` system property or `AILAKE_NATIVE_LIB` env var to poi
 
 | Function | Signature | Description |
 |---|---|---|
-| `ailake_search` | `(table_path VARCHAR, query FLOAT[], top_k INTEGER [, vec_col VARCHAR, ef_search INTEGER, partition_filter VARCHAR]) → TABLE(row_id BIGINT, distance FLOAT, file_path VARCHAR)` | Vector nearest-neighbor search |
+| `ailake_search` | `(table_path VARCHAR, query FLOAT[], top_k INTEGER [, vec_col VARCHAR, ef_search INTEGER, partition_filter VARCHAR, hybrid_text VARCHAR, text_column VARCHAR, bm25_weight FLOAT]) → TABLE(row_id BIGINT, distance FLOAT, file_path VARCHAR)` | Vector nearest-neighbor search (with optional BM25 hybrid) |
 | `ailake_search_multimodal` | `(table_path VARCHAR, queries LIST(STRUCT(...)), top_k INTEGER [, partition_filter VARCHAR]) → TABLE(row_id BIGINT, rrf_score FLOAT, file_path VARCHAR)` | Cross-modal RRF search |
-| `ailake_write_batch` | `(table_path VARCHAR, ids BIGINT[], embeddings FLOAT[][] [, vec_col, metric, precision, partition_by, partition_value, partition_fields, format_version]) → BIGINT` | Write a batch; returns snapshot ID or -1 on error |
+| `ailake_search_text` | `(table_path VARCHAR, query_text VARCHAR, top_k INTEGER [, text_column VARCHAR, partition_filter VARCHAR]) → TABLE(row_id BIGINT, score FLOAT, file_path VARCHAR)` | Pure BM25 full-text search (Tantivy O(log N) when FTS index present; brute-force fallback) |
+| `ailake_write_batch` | `(table_path VARCHAR, ids BIGINT[], embeddings FLOAT[][] [, vec_col, metric, precision, partition_by, partition_value, partition_fields, format_version, fts_columns]) → BIGINT` | Write a batch; returns snapshot ID or -1 on error |
 
 `partition_filter` (search) and `partition_by`/`partition_value` (write, single-column identity) are optional named parameters for per-agent/per-tenant file pruning (Phase 9). `partition_fields` accepts a JSON array (`[{"column":"topic_id","transform":"identity","column_type":"int"}]`) for multi-column Iceberg partition specs with any transform (identity, bucket, truncate, year, month, day, hour) — Phase L/R. `format_version` (default 2) enables Iceberg v3 when set to `3`. All functions degrade gracefully when `libailake_jni.so` is not loaded.
 
@@ -541,6 +597,28 @@ snap_id = conn.execute("""
         [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
     )
 """).fetchone()[0]
+```
+
+### Full-text search and hybrid search (DuckDB)
+
+```sql
+-- Pure BM25 full-text search
+SELECT row_id, score, file_path
+FROM ailake_search_text(
+    '/path/to/table',
+    'rust programming async',
+    10
+)
+ORDER BY score DESC;
+
+-- Hybrid BM25+vector via named params on ailake_search
+SELECT * FROM ailake_search(
+    '/path/to/table',
+    [0.021, -0.043, 0.118]::FLOAT[],
+    10,
+    hybrid_text='rust async programming',
+    bm25_weight=0.5
+);
 ```
 
 ### Named parameters

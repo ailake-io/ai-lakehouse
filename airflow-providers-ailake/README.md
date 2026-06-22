@@ -108,6 +108,26 @@ search_op = AilakeSearchOperator(
 
 `AilakeSnapshotSensor` — waits until a new Iceberg snapshot appears on the table (useful for triggering downstream DAGs after a write).
 
+`AilakeIndexStatusSensor` — polls `ailake info <table> --json` until `index_status == "ready"`. Use after a deferred write to gate downstream tasks on the index being fully built.
+
+```python
+from airflow_providers_ailake.sensors.ailake import AilakeIndexStatusSensor
+
+wait_for_index = AilakeIndexStatusSensor(
+    task_id="wait_for_hnsw_index",
+    conn_id="ailake_default",
+    table_path="s3://my-lake/docs/",
+    poke_interval=30,
+    timeout=600,
+)
+```
+
+### Additional hook methods
+
+`AilakeHook.compact(table_path, *, min_files=4, target_size_bytes=None, max_files_per_pass=20) → int` — runs compaction on the table via CLI; returns number of files compacted.
+
+`AilakeHook.decay_memories(table_path, *, decay_lambda=0.1) → int` — applies exponential recency decay (`exp(-λ × days_since_access)`) to the `recency_weight` column; returns number of files updated.
+
 ## Requirements
 
 - Apache Airflow >= 2.6
