@@ -126,6 +126,7 @@ jobs:
           sleep 30
           pub ailake-vec
           pub ailake-store
+          pub ailake-fts
           sleep 30
           pub ailake-parquet
           pub ailake-index
