@@ -209,7 +209,7 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     top_k: u32,
 ) -> *mut c_char {
     if table_uri.is_null() || query_ptr.is_null() {
-        return cstr_err_json("null table_uri or query_ptr");
+        return cstr_empty_json();
     }
     let uri = match CStr::from_ptr(table_uri).to_str() {
         Ok(s) => s.to_string(),
