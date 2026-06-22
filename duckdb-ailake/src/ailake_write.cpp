@@ -98,13 +98,7 @@ static void AilakeWriteExec(
         return;
     }
 
-    // Derive table name from last path segment (mirrors AilakeDataSource / ConnectorFactory).
-    std::string tbl = warehouse;
-    {
-        auto slash = tbl.find_last_of("/\\");
-        if (slash != std::string::npos) tbl = tbl.substr(slash + 1);
-        if (tbl.empty()) tbl = "table";
-    }
+    std::string tbl = "table";
 
     int64_t snap = lib.write_batch(
         warehouse,
@@ -195,14 +189,7 @@ static void AilakeWriteExecFull(
         return;
     }
 
-    // Derive table name from last path segment when not explicitly set.
-    std::string tbl_name;
-    {
-        tbl_name = warehouse;
-        auto slash = tbl_name.find_last_of("/\\");
-        if (slash != std::string::npos) tbl_name = tbl_name.substr(slash + 1);
-        if (tbl_name.empty()) tbl_name = "table";
-    }
+    std::string tbl_name = "table";
 
     int64_t snap = lib.write_batch(
         warehouse,
