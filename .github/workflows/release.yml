@@ -46,6 +46,15 @@ jobs:
           find . -name "Cargo.toml" -not -path "*/target/*" \
             -exec sed -i "s/\"$OLD_VERSION\"/\"$NEW_VERSION\"/g" {} \;
 
+          # Fix internal workspace dep versions regardless of stale value.
+          # The sed above only replaces the exact OLD_VERSION; if a workspace dep
+          # was added/merged with an outdated version it would be missed.
+          for INTERNAL in ailake-core ailake-vec ailake-store ailake-fts ailake-parquet \
+                          ailake-index ailake-catalog ailake-file ailake-query ailake-jni \
+                          ailake-cli ailake-py; do
+            sed -i -E "s/(${INTERNAL}[[:space:]]*=[[:space:]]*\{[^}]*version[[:space:]]*=[[:space:]]*\")[^\"]*/\1${NEW_VERSION}/" Cargo.toml
+          done
+
           git add $(find . -name "Cargo.toml" -not -path "*/target/*")
           git diff --cached --quiet || \
             git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
