@@ -42,9 +42,7 @@
 //! `FtsConfig::tokenizer`. `cjk_ngram` is the built-in zero-overhead baseline.
 
 use ailake_core::{AilakeError, AilakeResult};
-use tantivy::tokenizer::{
-    LowerCaser, NgramTokenizer, RemoveLongFilter, SimpleTokenizer, TextAnalyzer,
-};
+use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
 use tantivy::Index;
 
 /// Register `cjk_ngram` on every index — always, no feature gate.
@@ -91,7 +89,9 @@ pub fn register_cjk_ngram(index: &Index) -> AilakeResult<()> {
 /// Enabled by the `fts-stemmer-langs` Cargo feature (which also enables `tantivy/stopwords`).
 #[cfg(feature = "fts-stemmer-langs")]
 pub fn register_stemmer_langs(index: &Index) {
-    use tantivy::tokenizer::{Language, Stemmer, StopWordFilter};
+    use tantivy::tokenizer::{
+        Language, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter,
+    };
 
     // ── Bare stemmers ──────────────────────────────────────────────────────────
     let langs: &[(&str, Language)] = &[
