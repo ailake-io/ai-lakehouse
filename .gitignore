@@ -1,11 +1,27 @@
+# Rust
 /target/
 Cargo.lock
+
+# C/C++ build artifacts
+*.o
+*.a
+build/
+
+# Gradle
+.gradle/
+
+# Python
 *.pyd
 *.so
 *.dylib
 dist/
 *.egg-info/
 __pycache__/
+
+# Accidental S3-path directories (created by misconfigured CLI)
+s3:/
+
+# Project-specific
 .env
 data/
 compat-fixture/
