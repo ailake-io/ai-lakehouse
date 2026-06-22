@@ -480,22 +480,28 @@ pub async fn search(
         let stats = bm25_stats.as_ref().unwrap_or(&empty_stats);
         let scorer = crate::bm25::BM25Scorer::new(stats);
 
-        // Compute BM25 score for each candidate.
-        let bm25_scores: Vec<f32> = raw_candidates
+        // Compute BM25 scores before sorting so they stay positionally aligned.
+        let bm25_scores_pre: Vec<f32> = raw_candidates
             .iter()
             .map(|(_, _, _, text)| scorer.score(&h.query_text, text))
             .collect();
 
-        // Rank by vector distance (already sorted within each file, but merge globally).
-        raw_candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
-        let vec_ranks: Vec<usize> = (0..raw_candidates.len()).collect();
+        // Zip BM25 scores into candidates so they sort together — avoids index mismatch
+        // when raw_candidates is reordered by distance below.
+        let mut candidates_with_bm25: Vec<((RowId, f32, String, String), f32)> =
+            raw_candidates.into_iter().zip(bm25_scores_pre).collect();
+        candidates_with_bm25.sort_by(|a, b| a.0 .1.total_cmp(&b.0 .1));
+        let n = candidates_with_bm25.len();
 
-        // Rank by BM25 score descending (higher BM25 = better).
-        let mut bm25_indexed: Vec<(usize, f32)> = bm25_scores.iter().copied().enumerate().collect();
+        let vec_ranks: Vec<usize> = (0..n).collect();
+
+        // Rank by BM25 score descending using post-sort aligned scores.
+        let mut bm25_indexed: Vec<(usize, f32)> =
+            candidates_with_bm25.iter().map(|(_, b)| *b).enumerate().collect();
         bm25_indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let mut bm25_rank_of = vec![0usize; raw_candidates.len()];
-        for (rank, (orig_idx, _)) in bm25_indexed.iter().enumerate() {
-            bm25_rank_of[*orig_idx] = rank;
+        let mut bm25_rank_of = vec![0usize; n];
+        for (rank, (idx, _)) in bm25_indexed.iter().enumerate() {
+            bm25_rank_of[*idx] = rank;
         }
 
         use crate::bm25::{linear_score, rrf_score, HybridFusion};
@@ -507,38 +513,30 @@ pub async fn search(
                 .map(|(i, &vr)| rrf_score(vr, bm25_rank_of[i], h.bm25_weight))
                 .collect(),
             HybridFusion::Linear => {
-                let min_d = raw_candidates
+                let min_d = candidates_with_bm25
                     .iter()
-                    .map(|r| r.1)
+                    .map(|(r, _)| r.1)
                     .fold(f32::INFINITY, f32::min);
-                let max_d = raw_candidates
+                let max_d = candidates_with_bm25
                     .iter()
-                    .map(|r| r.1)
+                    .map(|(r, _)| r.1)
                     .fold(f32::NEG_INFINITY, f32::max);
-                let min_b = bm25_scores.iter().copied().fold(f32::INFINITY, f32::min);
-                let max_b = bm25_scores
+                let min_b = candidates_with_bm25
                     .iter()
-                    .copied()
+                    .map(|(_, b)| *b)
+                    .fold(f32::INFINITY, f32::min);
+                let max_b = candidates_with_bm25
+                    .iter()
+                    .map(|(_, b)| *b)
                     .fold(f32::NEG_INFINITY, f32::max);
-                raw_candidates
+                candidates_with_bm25
                     .iter()
-                    .enumerate()
-                    .map(|(i, r)| {
-                        linear_score(
-                            r.1,
-                            min_d,
-                            max_d,
-                            bm25_scores[i],
-                            min_b,
-                            max_b,
-                            h.bm25_weight,
-                        )
-                    })
+                    .map(|(r, b)| linear_score(r.1, min_d, max_d, *b, min_b, max_b, h.bm25_weight))
                     .collect()
             }
         };
 
-        for (i, (row_id, _, file_path, _)) in raw_candidates.into_iter().enumerate() {
+        for (i, ((row_id, _, file_path, _), _)) in candidates_with_bm25.into_iter().enumerate() {
             all_results.push(SearchResult {
                 row_id,
                 distance: fused[i],

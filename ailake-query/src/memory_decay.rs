@@ -15,10 +15,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 use ailake_catalog::{
-    new_snapshot_id, CatalogProvider, NewSnapshot, SnapshotOperation, TableIdent,
+    make_multi_column_data_file_entry, new_snapshot_id, CatalogProvider, ExtraVectorIndex,
+    NewSnapshot, SnapshotOperation, TableIdent, VectorIndexInfo,
 };
 use ailake_core::{AilakeError, AilakeResult, VectorStoragePolicy};
-use ailake_file::{AilakeFileReader, AilakeFileWriter};
+use ailake_file::{AilakeFileReader, AilakeFileWriter, VectorColumnBatch};
 use ailake_store::Store;
 use ailake_vec::compute_centroid_and_radius;
 use arrow_array::{
@@ -84,6 +85,8 @@ impl MemoryDecayJob {
 
         for file_entry in &files {
             let file_bytes = self.store.get(&file_entry.path).await?;
+            // Clone before moving into the primary reader so extra columns can reuse the bytes.
+            let orig_bytes = file_bytes.clone();
             let reader =
                 AilakeFileReader::new(file_bytes, &self.policy.column_name, self.policy.dim);
 
@@ -113,10 +116,58 @@ impl MemoryDecayJob {
 
             let updated_batch = apply_decay(&batch, today_day, self.decay_lambda)?;
 
-            // Rewrite file with updated recency_weight column.
+            // Read extra column embeddings from original bytes before rewriting.
+            let extra_embeddings: Vec<(String, u32, Vec<Vec<f32>>)> = file_entry
+                .extra_vector_indexes
+                .iter()
+                .filter_map(|xi| {
+                    let r = AilakeFileReader::new(orig_bytes.clone(), &xi.column, xi.dim);
+                    r.read_parquet()
+                        .ok()
+                        .map(|(_, embs)| (xi.column.clone(), xi.dim, embs))
+                })
+                .collect();
+
+            // Rewrite file with updated recency_weight column, preserving all HNSW sections.
             let file_writer = AilakeFileWriter::new(self.policy.clone());
-            let new_bytes = file_writer.write(&updated_batch, &embeddings)?;
+            let new_bytes = if extra_embeddings.is_empty() {
+                file_writer.write(&updated_batch, &embeddings)?
+            } else {
+                // Build minimal policies for secondary columns (metric/precision from primary).
+                let extra_policies: Vec<VectorStoragePolicy> = extra_embeddings
+                    .iter()
+                    .map(|(col, dim, _)| VectorStoragePolicy {
+                        column_name: col.clone(),
+                        dim: *dim,
+                        metric: self.policy.metric,
+                        precision: self.policy.precision,
+                        pq: None,
+                        keep_raw_for_reranking: false,
+                        pre_normalize: false,
+                        hnsw_m: None,
+                        hnsw_ef_construction: None,
+                        ivf_residual: false,
+                        embedding_model: None,
+                        modality: None,
+                        partition_by: None,
+                        partition_value: None,
+                        partition_column_type: None,
+                        partition_fields: vec![],
+                    })
+                    .collect();
+                let primary_col = VectorColumnBatch {
+                    policy: &self.policy,
+                    embeddings: &embeddings,
+                };
+                let mut col_batches: Vec<VectorColumnBatch<'_>> = vec![primary_col];
+                for (policy, (_, _, embs)) in extra_policies.iter().zip(extra_embeddings.iter()) {
+                    col_batches.push(VectorColumnBatch { policy, embeddings: embs });
+                }
+                file_writer.write_multi(&updated_batch, &col_batches)?
+            };
             let new_size = new_bytes.len() as u64;
+            // Clone before moving into the primary reader used for header parsing.
+            let new_bytes_ref = new_bytes.clone();
             self.store.put(&file_entry.path, new_bytes.clone()).await?;
 
             let centroid = compute_centroid_and_radius(&embeddings, self.policy.metric);
@@ -125,17 +176,36 @@ impl MemoryDecayJob {
             let header = new_reader.read_header()?;
             let ailk_start = new_reader.ailk_offset()?;
 
-            let new_entry = ailake_catalog::make_data_file_entry(
+            // Rebuild ExtraVectorIndex entries from the new file's headers.
+            let new_extra: Vec<ExtraVectorIndex> = extra_embeddings
+                .iter()
+                .filter_map(|(col, dim, _)| {
+                    let xr = AilakeFileReader::new(new_bytes_ref.clone(), col, *dim);
+                    let xailk = xr.ailk_offset_for_column(col).ok()?;
+                    let xhdr = xr.read_header_for_column(col).ok()?;
+                    Some(ExtraVectorIndex {
+                        column: col.clone(),
+                        dim: *dim,
+                        hnsw_offset: xailk + xhdr.hnsw_offset,
+                        hnsw_len: xhdr.hnsw_len,
+                        centroid_b64: None,
+                        radius: None,
+                    })
+                })
+                .collect();
+
+            let new_entry = make_multi_column_data_file_entry(
                 &file_entry.path,
                 updated_batch.num_rows() as u64,
                 new_size,
                 &centroid,
-                ailake_catalog::VectorIndexInfo {
+                VectorIndexInfo {
                     column: &self.policy.column_name,
                     dim: self.policy.dim,
                     hnsw_offset: ailk_start + header.hnsw_offset,
                     hnsw_len: header.hnsw_len,
                 },
+                &new_extra,
             );
             new_entries.push(new_entry);
             updated += 1;

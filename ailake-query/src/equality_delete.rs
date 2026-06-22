@@ -61,23 +61,25 @@ impl EqualityDeleteFilter {
         self.filters.is_empty()
     }
 
-    /// Check whether a single row (by its physical index in `batch`) matches any delete predicate.
+    /// Check whether a single row (by its physical index in `batch`) matches the delete predicate.
     ///
     /// Returns `true` if the row should be logically deleted.
-    /// Used in the per-row HNSW result loop where materializing a filtered batch
-    /// would misalign row indices.
+    /// Iceberg equality delete semantics: a row is deleted only when ALL columns in the
+    /// delete predicate match (AND, not OR). Used in the per-row HNSW result loop.
     pub fn should_delete_row(&self, batch: &RecordBatch, row_idx: usize) -> bool {
         if self.filters.is_empty() {
             return false;
         }
+        let mut any_column_found = false;
         for (col_name, delete_values) in &self.filters {
             let col_idx = match batch.schema().index_of(col_name.as_str()) {
                 Ok(i) => i,
-                Err(_) => continue,
+                Err(_) => continue, // column absent — skip (schema evolution)
             };
+            any_column_found = true;
             let array = batch.column(col_idx);
             if array.is_null(row_idx) {
-                continue;
+                return false; // null never matches — AND tuple fails
             }
             let val_str: Option<String> = match array.data_type() {
                 DataType::Utf8 => array
@@ -106,101 +108,28 @@ impl EqualityDeleteFilter {
                     .map(|a| a.value(row_idx).to_string()),
                 _ => None,
             };
-            if let Some(s) = val_str {
-                if delete_values.contains(&s) {
-                    return true;
-                }
+            match val_str {
+                Some(s) if delete_values.contains(&s) => {} // column matches, continue AND check
+                Some(_) => return false,                    // column mismatch — AND tuple fails
+                None => {}                                  // unknown type — skip column
             }
         }
-        false
+        any_column_found // true only when all checked columns matched
     }
 
     /// Apply the filter to `batch`, returning a new batch with matching rows removed.
     ///
-    /// A row is removed when, for every column tracked by this filter that exists in
-    /// the batch, the row's value appears in the delete set for that column.
-    /// Columns absent from the batch are ignored (no false deletes for schema-evolved files).
+    /// Iceberg equality delete semantics: a row is removed only when ALL columns in the
+    /// delete predicate match (AND). Columns absent from the batch are ignored.
     pub fn apply(&self, batch: RecordBatch) -> AilakeResult<RecordBatch> {
         if self.filters.is_empty() {
             return Ok(batch);
         }
-
         let n = batch.num_rows();
-        // keep[i] = true means row i is NOT deleted
-        let mut keep = vec![true; n];
-
-        for (col_name, delete_values) in &self.filters {
-            let col_idx = match batch.schema().index_of(col_name.as_str()) {
-                Ok(i) => i,
-                Err(_) => continue, // column not in this file — skip, do not delete
-            };
-            let array = batch.column(col_idx);
-            let dtype = array.data_type();
-
-            for (i, keep_slot) in keep.iter_mut().enumerate().take(n) {
-                if !*keep_slot {
-                    continue;
-                }
-                if array.is_null(i) {
-                    continue; // null never matches a delete predicate
-                }
-                let val_str: Option<String> = match dtype {
-                    DataType::Utf8 => Some(
-                        array
-                            .as_any()
-                            .downcast_ref::<StringArray>()
-                            .map(|a| a.value(i).to_string())
-                            .unwrap_or_default(),
-                    ),
-                    DataType::LargeUtf8 => Some(
-                        array
-                            .as_any()
-                            .downcast_ref::<arrow_array::LargeStringArray>()
-                            .map(|a| a.value(i).to_string())
-                            .unwrap_or_default(),
-                    ),
-                    DataType::Int32 => Some(
-                        array
-                            .as_any()
-                            .downcast_ref::<Int32Array>()
-                            .map(|a| a.value(i).to_string())
-                            .unwrap_or_default(),
-                    ),
-                    DataType::Int64 => Some(
-                        array
-                            .as_any()
-                            .downcast_ref::<Int64Array>()
-                            .map(|a| a.value(i).to_string())
-                            .unwrap_or_default(),
-                    ),
-                    DataType::Float32 => Some(
-                        array
-                            .as_any()
-                            .downcast_ref::<Float32Array>()
-                            .map(|a| a.value(i).to_string())
-                            .unwrap_or_default(),
-                    ),
-                    DataType::Float64 => Some(
-                        array
-                            .as_any()
-                            .downcast_ref::<Float64Array>()
-                            .map(|a| a.value(i).to_string())
-                            .unwrap_or_default(),
-                    ),
-                    _ => None,
-                };
-                if let Some(s) = val_str {
-                    if delete_values.contains(&s) {
-                        *keep_slot = false;
-                    }
-                }
-            }
-        }
-
+        let keep: Vec<bool> = (0..n).map(|i| !self.should_delete_row(&batch, i)).collect();
         let mask = BooleanArray::from(keep);
-        let filtered = arrow_select::filter::filter_record_batch(&batch, &mask)
-            .map_err(|e| AilakeError::Arrow(e.to_string()))?;
-        Ok(filtered)
+        arrow_select::filter::filter_record_batch(&batch, &mask)
+            .map_err(|e| AilakeError::Arrow(e.to_string()))
     }
 }
 
