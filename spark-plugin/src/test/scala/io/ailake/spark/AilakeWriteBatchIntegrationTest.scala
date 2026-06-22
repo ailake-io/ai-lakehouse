@@ -82,7 +82,7 @@ class AilakeWriteBatchIntegrationTest extends AnyFunSuite {
     val norm  = sqrt(qRaw.map(x => x * x).sum.toDouble).toFloat
     val qNorm = qRaw.map(_ / norm)
 
-    val results = AilakeNative.search(tableUri, qNorm, topK = 3)
+    val results = AilakeNative.search(tableUri, qNorm, topK = 3, tableName = "table")
     assert(results.nonEmpty, "search after write returned empty results")
     val best = results.minBy(_.distance)
     assert(

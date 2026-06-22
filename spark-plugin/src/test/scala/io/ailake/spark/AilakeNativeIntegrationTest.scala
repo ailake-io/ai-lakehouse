@@ -36,7 +36,7 @@ class AilakeNativeIntegrationTest extends AnyFunSuite {
     val norm = math.sqrt(v.map(x => x.toDouble * x).sum).toFloat
     val query = v.map(_ / norm)
 
-    val results = AilakeNative.search(fixturePath.get, query, topK = 5)
+    val results = AilakeNative.search(fixturePath.get, query, topK = 5, tableName = "table")
     assert(results.nonEmpty, "search returned empty results — check fixture and native lib")
 
     val best = results.minBy(_.distance)
