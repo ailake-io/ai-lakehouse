@@ -14,15 +14,20 @@ from ailake._ailake import (  # type: ignore[import]
     add_column,
     assemble_context,
     decay_memories,
+    delete_rows,
     delete_where,
     hardware_info,
     migrate_embeddings,
+    now_ns,
     rename_column,
     search as _search_raw,
     search_multimodal,
     search_text,
     search_with_data as _search_with_data,
 )
+
+# Expose search_with_data for callers that need raw IPC bytes (advanced use).
+search_with_data = _search_with_data
 
 if TYPE_CHECKING:
     import numpy as np
@@ -38,6 +43,7 @@ __all__ = [
     "search",
     "search_text",
     "search_multimodal",
+    "search_with_data",
     "compact",
     "Table",
     "SearchQuery",
@@ -49,8 +55,11 @@ __all__ = [
     "migrate_embeddings",
     "decay_memories",
     "delete_where",
+    "delete_rows",
+    "evolve_schema",
     "add_column",
     "rename_column",
+    "now_ns",
     "hardware_info",
 ]
 
@@ -106,6 +115,7 @@ class SearchQuery:
         text_column: str = "chunk_text",
         bm25_weight: float = 0.5,
         pruning_threshold: "float | None" = None,
+        ef_search: "int | None" = None,
     ) -> None:
         self._path = path
         self._query = query
@@ -117,6 +127,7 @@ class SearchQuery:
         self._text_column = text_column
         self._bm25_weight = bm25_weight
         self._pruning_threshold = pruning_threshold
+        self._ef_search = ef_search
         self._results: list[dict] | None = None      # lazy — pointer-only
         self._arrow_batch = None                      # lazy — full RecordBatch
 
@@ -136,7 +147,7 @@ class SearchQuery:
             self._results = _search_raw(
                 self._path, self._query, self._top_k, self._partition_filter,
                 self._hybrid_text, self._text_column, self._bm25_weight,
-                self._pruning_threshold,
+                self._pruning_threshold, self._ef_search,
             )
         return self._results
 
@@ -459,6 +470,7 @@ class Table:
         text_column: str = "chunk_text",
         bm25_weight: float = 0.5,
         pruning_threshold: "float | None" = None,
+        ef_search: "int | None" = None,
     ) -> SearchQuery:
         """Return a chainable :class:`SearchQuery`.
 
@@ -491,6 +503,7 @@ class Table:
             text_column=text_column,
             bm25_weight=bm25_weight,
             pruning_threshold=pruning_threshold,
+            ef_search=ef_search,
         )
 
     # ── context manager ───────────────────────────────────────────────────────
@@ -1004,6 +1017,55 @@ class Agent:
 
 # ── module-level helpers ──────────────────────────────────────────────────────
 
+def evolve_schema(
+    path: str,
+    *,
+    add_columns: "list[dict] | None" = None,
+    rename_columns: "list[dict] | None" = None,
+) -> int:
+    """Apply schema evolution to an AI-Lake table without rewriting data files.
+
+    Combines :func:`add_column` and :func:`rename_column` into a single call.
+    Each operation is applied in order; the final schema-id is returned.
+
+    Args:
+        path: Table root path or URI.
+        add_columns: Columns to add.  Each entry must have ``"name"`` and
+            ``"type"`` keys (Iceberg type string: ``"string"``, ``"int"``,
+            ``"long"``, ``"float"``, ``"double"``, ``"boolean"``).
+            Optional keys: ``"initial_default"`` (Python scalar — ``None``,
+            ``0``, ``0.0``, ``"unknown"``), ``"doc"`` (string).
+        rename_columns: Columns to rename.  Each entry must have ``"from"``
+            and ``"to"`` keys.
+
+    Returns:
+        New schema-id (int), or ``0`` when both lists are empty (no-op).
+        Returns ``-1`` when the operation could not be parsed from the output.
+
+    Example::
+
+        ailake.evolve_schema(
+            "s3://my-lake/docs/",
+            add_columns=[{"name": "score", "type": "float", "initial_default": 0.0}],
+            rename_columns=[{"from": "old_text", "to": "chunk_text"}],
+        )
+    """
+    schema_id = 0
+    for ac in (add_columns or []):
+        schema_id = add_column(
+            path,
+            ac["name"],
+            ac["type"],
+            ac.get("required", False),
+            ac.get("initial_default"),
+            ac.get("write_default"),
+            ac.get("doc"),
+        )
+    for rc in (rename_columns or []):
+        schema_id = rename_column(path, rc["from"], rc["to"])
+    return schema_id
+
+
 def search(
     path: str,
     query: _Vector,
@@ -1015,6 +1077,7 @@ def search(
     text_column: str = "chunk_text",
     bm25_weight: float = 0.5,
     pruning_threshold: "float | None" = None,
+    ef_search: "int | None" = None,
 ) -> SearchQuery:
     """Module-level search returning a chainable :class:`SearchQuery`.
 
@@ -1085,6 +1148,7 @@ def search(
         text_column=text_column,
         bm25_weight=bm25_weight,
         pruning_threshold=pruning_threshold,
+        ef_search=ef_search,
     )
 
 

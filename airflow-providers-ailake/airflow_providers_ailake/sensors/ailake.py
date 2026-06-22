@@ -120,3 +120,72 @@ class AilakeSnapshotSensor(BaseSensorOperator):
             current_snapshot_id,
         )
         return False
+
+
+class AilakeIndexStatusSensor(BaseSensorOperator):
+    """Wait until an AI-Lake table's index status reaches ``"ready"``.
+
+    Useful after a deferred write (``deferred=True``) to block downstream
+    tasks until the HNSW/IVF-PQ index has been fully built in the background.
+
+    **How it works**
+
+    On each poke the sensor calls ``ailake info <table> --format json`` and
+    reads the ``index_status`` field.  When the value is ``"ready"`` the
+    sensor succeeds.  Any other value (``"indexing"``, absent) keeps the
+    sensor waiting.
+
+    :param table: Fully-qualified table name (``namespace.table`` or ``table``).
+    :param ailake_conn_id: Airflow connection id.
+
+    Example DAG::
+
+        write = AilakeWriteOperator(
+            task_id="write", table="default.docs", deferred=True, ...
+        )
+
+        wait_ready = AilakeIndexStatusSensor(
+            task_id="wait_index_ready",
+            table="default.docs",
+            mode="reschedule",
+            poke_interval=60,
+            timeout=7200,
+        )
+
+        search = AilakeSearchOperator(task_id="search", table="default.docs", ...)
+
+        write >> wait_ready >> search
+    """
+
+    template_fields: Sequence[str] = ("table",)
+    ui_color = "#d4e8f0"
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        ailake_conn_id: str = AilakeHook.default_conn_name,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.table = table
+        self.ailake_conn_id = ailake_conn_id
+
+    def poke(self, context: Context) -> bool:
+        hook = AilakeHook(ailake_conn_id=self.ailake_conn_id)
+        info = hook.get_table_info(self.table)
+        status = info.get("index_status", "")
+
+        if status == "ready":
+            self.log.info(
+                "AilakeIndexStatusSensor: table %s index_status=ready — releasing",
+                self.table,
+            )
+            return True
+
+        self.log.info(
+            "AilakeIndexStatusSensor: table %s index_status=%r — waiting",
+            self.table,
+            status or "<absent>",
+        )
+        return False

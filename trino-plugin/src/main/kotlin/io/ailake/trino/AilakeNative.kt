@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.trino
 
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.sun.jna.Library
@@ -34,6 +35,9 @@ object AilakeNative {
     data class RenameColReq(val from: String, val to: String)
 
     private interface Lib : Library {
+        /** Returns ailake-jni version string. Static — do NOT free this pointer. */
+        fun ailake_version(): String
+
         /** JSON-envelope search. Returns `{"ok":true,"results":[...]}`. Caller must free. */
         fun ailake_search_json(requestJson: String): Pointer?
 
@@ -58,9 +62,21 @@ object AilakeNative {
         fun ailake_free_string(ptr: Pointer)
     }
 
+    private const val AILAKE_EXPECTED_MAJOR = "0"
+
     private val lib: Lib? by lazy {
         runCatching { Native.load("ailake_jni", Lib::class.java) as Lib }
-            .onSuccess { log.info("[ailake] Native library libailake_jni loaded successfully") }
+            .onSuccess { loaded ->
+                val version = loaded.ailake_version()
+                val major = version.substringBefore('.')
+                if (major != AILAKE_EXPECTED_MAJOR)
+                    log.warn(
+                        "[ailake] Version mismatch: loaded ailake-jni {} but expected major {}. " +
+                        "Search results may be incorrect.", version, AILAKE_EXPECTED_MAJOR
+                    )
+                else
+                    log.info("[ailake] Native library libailake_jni {} loaded successfully", version)
+            }
             .onFailure {
                 log.warn(
                     "[ailake] Native library libailake_jni not found — vector search disabled. " +
@@ -226,26 +242,33 @@ object AilakeNative {
         if (addCols.isEmpty() && renameCols.isEmpty()) return 0
         val native = lib ?: return -1
 
-        val addArr = addCols.map { ac ->
-            buildMap<String, Any> {
-                put("name", ac.name)
-                put("type", ac.colType)
-                if (ac.initialDefault != null) put("initial_default_raw", ac.initialDefault)
-            }
-        }
-        val renArr = renameCols.map { rc -> mapOf("from" to rc.from, "to" to rc.to) }
+        val rootNode = mapper.createObjectNode()
+        rootNode.put("warehouse", tableUri)
+        rootNode.put("namespace", namespace)
+        rootNode.put("table", tableName)
 
-        // Build JSON manually for add_columns so initial_default is embedded as a raw JSON
-        // literal (not re-quoted by Jackson).
-        val addJson = addCols.joinToString(",", "[", "]") { ac ->
-            val defPart = if (ac.initialDefault != null) ""","initial_default":${ac.initialDefault}""" else ""
-            """{"name":${mapper.writeValueAsString(ac.name)},"type":${mapper.writeValueAsString(ac.colType)}$defPart}"""
+        val addArray = mapper.createArrayNode()
+        for (ac in addCols) {
+            val colNode = mapper.createObjectNode()
+            colNode.put("name", ac.name)
+            colNode.put("type", ac.colType)
+            if (ac.initialDefault != null) {
+                // parse as raw JSON so null/0/0.0/"string" embed correctly without re-quoting
+                colNode.set<JsonNode>("initial_default", mapper.readTree(ac.initialDefault))
+            }
+            addArray.add(colNode)
         }
-        val renJson = mapper.writeValueAsString(renArr)
-        val baseJson = mapper.writeValueAsString(
-            mapOf("warehouse" to tableUri, "namespace" to namespace, "table" to tableName)
-        ).dropLast(1)
-        val requestJson = "$baseJson,\"add_columns\":$addJson,\"rename_columns\":$renJson}"
+        rootNode.set<JsonNode>("add_columns", addArray)
+
+        val renArray = mapper.createArrayNode()
+        for (rc in renameCols) {
+            val renNode = mapper.createObjectNode()
+            renNode.put("from", rc.from)
+            renNode.put("to", rc.to)
+            renArray.add(renNode)
+        }
+        rootNode.set<JsonNode>("rename_columns", renArray)
+        val requestJson = mapper.writeValueAsString(rootNode)
 
         val ptr = native.ailake_evolve_schema_json(requestJson) ?: run {
             log.warn("[ailake] ailake_evolve_schema_json returned null pointer for table={}", tableName)

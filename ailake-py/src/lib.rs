@@ -511,7 +511,7 @@ impl TableWriter {
 /// Returns a list of dicts: [{"row_id": int, "distance": float, "file": str}, ...]
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None))]
+#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None))]
 fn search(
     py: Python<'_>,
     path: &str,
@@ -522,6 +522,7 @@ fn search(
     text_column: &str,
     bm25_weight: f32,
     pruning_threshold: Option<f32>,
+    ef_search: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
@@ -557,7 +558,7 @@ fn search(
 
     let config = SearchConfig {
         top_k,
-        ef_search: 50,
+        ef_search: ef_search.unwrap_or(50),
         pruning_threshold: pruning_threshold.unwrap_or(f32::INFINITY),
         rerank_factor: None,
         score_fn: None,

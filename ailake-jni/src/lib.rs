@@ -188,8 +188,10 @@ pub extern "C" fn ailake_version() -> *const c_char {
     V.as_ptr() as *const c_char
 }
 
-/// Search a local AI-Lake table. Returns a null-terminated JSON array:
-/// `[{"row_id":N,"distance":F,"file_path":"..."}]`
+/// Search a local AI-Lake table.
+///
+/// Returns `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}` on success,
+/// or `{"ok":false,"error":"..."}` on failure.
 ///
 /// # Parameters
 /// - `table_uri`  — null-terminated UTF-8 path to table root
@@ -207,16 +209,16 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     top_k: u32,
 ) -> *mut c_char {
     if table_uri.is_null() || query_ptr.is_null() {
-        return cstr_empty_json();
+        return cstr_err_json("null table_uri or query_ptr");
     }
     let uri = match CStr::from_ptr(table_uri).to_str() {
         Ok(s) => s.to_string(),
-        Err(_) => return cstr_empty_json(),
+        Err(e) => return cstr_err_json(format!("invalid UTF-8 in table_uri: {e}")),
     };
     let query = std::slice::from_raw_parts(query_ptr, query_len as usize).to_vec();
     let dim = query.len() as u32;
     let results: Vec<RowResultJson> = match do_search(
-        uri,
+        uri.clone(),
         "default",
         "table",
         "embedding",
@@ -231,11 +233,21 @@ pub unsafe extern "C" fn ailake_vector_search_json(
         f32::INFINITY,
     ) {
         Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
-        Err(e) => return cstr_err_json(e),
+        Err(e) => {
+            warn!("ailake_vector_search_json: search failed table_uri={}: {}", uri, e);
+            return cstr_err_json(e);
+        }
     };
-    let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
+    #[derive(serde::Serialize)]
+    struct Resp {
+        ok: bool,
+        results: Vec<RowResultJson>,
+    }
+    let body = Resp { ok: true, results };
+    let json = serde_json::to_string(&body)
+        .unwrap_or_else(|_| r#"{"ok":false,"error":"serialize"}"#.into());
     CString::new(json)
-        .unwrap_or_else(|_| CString::new("[]").unwrap())
+        .unwrap_or_else(|_| CString::new(r#"{"ok":false,"error":"null byte in output"}"#).unwrap())
         .into_raw()
 }
 
@@ -322,7 +334,7 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
     let text_column = req.text_column.clone();
     let pruning_threshold = req.pruning_threshold.unwrap_or(f32::INFINITY);
     let results = match do_search(
-        req.warehouse,
+        req.warehouse.clone(),
         &req.namespace,
         &req.table,
         &req.vec_col,
@@ -338,7 +350,10 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
     ) {
         Ok(v) => v,
         Err(e) => {
-            warn!("ailake_search_json: search failed: {}", e);
+            warn!(
+                "ailake_search_json: search failed warehouse={} table={}.{}: {}",
+                req.warehouse, req.namespace, req.table, e
+            );
             return cstr_err_json(e);
         }
     };
@@ -495,9 +510,12 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     };
     if req.ids.len() != req.embeddings.len() {
         warn!(
-            "ailake_write_batch_json: ids.len()={} != embeddings.len()={}",
+            "ailake_write_batch_json: ids.len()={} != embeddings.len()={} warehouse={} table={}.{}",
             req.ids.len(),
-            req.embeddings.len()
+            req.embeddings.len(),
+            req.warehouse,
+            req.namespace,
+            req.table,
         );
         return cstr_err_json("ids.len() != embeddings.len()");
     }

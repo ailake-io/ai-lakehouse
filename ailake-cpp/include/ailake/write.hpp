@@ -24,6 +24,7 @@
 #  define AILAKE_PCLOSE _pclose
 #else
 #  include <cstdio>
+#  include <sys/wait.h>
 #  define AILAKE_POPEN  popen
 #  define AILAKE_PCLOSE pclose
 #endif
@@ -62,7 +63,13 @@ inline std::string run_cmd(const std::string& cmd) {
     char buf[256];
     while (std::fgets(buf, sizeof(buf), pipe)) output += buf;
     int rc = AILAKE_PCLOSE(pipe);
-    if (rc != 0) throw std::runtime_error("ailake CLI failed (exit " + std::to_string(rc) + "):\n" + output);
+#ifndef _WIN32
+    // pclose() returns a wait-status on POSIX — extract actual exit code.
+    int exit_code = (WIFEXITED(rc)) ? WEXITSTATUS(rc) : rc;
+#else
+    int exit_code = rc;
+#endif
+    if (exit_code != 0) throw std::runtime_error("ailake CLI failed (exit " + std::to_string(exit_code) + "):\n" + output);
     return output;
 }
 

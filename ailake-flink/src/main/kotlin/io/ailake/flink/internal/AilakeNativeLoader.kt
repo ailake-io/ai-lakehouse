@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.flink.internal
 
+import com.fasterxml.jackson.databind.JsonNode
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -24,6 +25,8 @@ object AilakeNativeLoader {
     private val log = LoggerFactory.getLogger(AilakeNativeLoader::class.java)
     private val mapper = jacksonObjectMapper()
 
+    private const val AILAKE_EXPECTED_MAJOR = "0"
+
     val lib: AilakeNativeLib by lazy {
         val explicitPath =
             System.getProperty("ailake.native.lib")
@@ -35,9 +38,18 @@ object AilakeNativeLoader {
             } else {
                 Native.load("ailake_jni", AilakeNativeLib::class.java)
             }
-        }.onSuccess {
-            log.info("[ailake] Native library libailake_jni loaded (path={})",
-                explicitPath ?: "JNA default search path")
+        }.onSuccess { native ->
+            val v = native.ailake_version()
+            val major = v.substringBefore('.')
+            if (major != AILAKE_EXPECTED_MAJOR)
+                log.warn(
+                    "[ailake] Version mismatch: loaded ailake-jni {} but expected major {}. " +
+                    "Search results may be incorrect.",
+                    v, AILAKE_EXPECTED_MAJOR
+                )
+            else
+                log.info("[ailake] Native library libailake_jni {} loaded (path={})",
+                    v, explicitPath ?: "JNA default search path")
         }.onFailure {
             log.error(
                 "[ailake] Failed to load native library libailake_jni (path={}). " +
@@ -370,16 +382,33 @@ object AilakeNativeLoader {
         require(addCols.isNotEmpty() || renameCols.isNotEmpty()) {
             "at least one of addCols or renameCols must be non-empty"
         }
-        // Build JSON manually for add_columns so initial_default is embedded as raw JSON literal.
-        val addJson = addCols.joinToString(",", "[", "]") { ac ->
-            val defPart = if (ac.initialDefault != null) ""","initial_default":${ac.initialDefault}""" else ""
-            """{"name":${mapper.writeValueAsString(ac.name)},"type":${mapper.writeValueAsString(ac.colType)}$defPart}"""
+        val rootNode = mapper.createObjectNode()
+        rootNode.put("warehouse", warehouse)
+        rootNode.put("namespace", namespace)
+        rootNode.put("table", table)
+
+        val addArray = mapper.createArrayNode()
+        for (ac in addCols) {
+            val colNode = mapper.createObjectNode()
+            colNode.put("name", ac.name)
+            colNode.put("type", ac.colType)
+            if (ac.initialDefault != null) {
+                // parse as raw JSON so null/0/0.0/"string" embed correctly without re-quoting
+                colNode.set<JsonNode>("initial_default", mapper.readTree(ac.initialDefault))
+            }
+            addArray.add(colNode)
         }
-        val renJson = mapper.writeValueAsString(renameCols.map { rc -> mapOf("from" to rc.from, "to" to rc.to) })
-        val baseJson = mapper.writeValueAsString(
-            mapOf("warehouse" to warehouse, "namespace" to namespace, "table" to table)
-        ).dropLast(1)
-        val req = "$baseJson,\"add_columns\":$addJson,\"rename_columns\":$renJson}"
+        rootNode.set<JsonNode>("add_columns", addArray)
+
+        val renArray = mapper.createArrayNode()
+        for (rc in renameCols) {
+            val renNode = mapper.createObjectNode()
+            renNode.put("from", rc.from)
+            renNode.put("to", rc.to)
+            renArray.add(renNode)
+        }
+        rootNode.set<JsonNode>("rename_columns", renArray)
+        val req = mapper.writeValueAsString(rootNode)
 
         val ptr = lib.ailake_evolve_schema_json(req)
             ?: throw RuntimeException("ailake_evolve_schema_json returned null for table=$namespace.$table")

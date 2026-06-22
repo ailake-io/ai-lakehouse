@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -56,7 +57,7 @@ func DeleteWhere(
 	}
 
 	warehouse := catalog.Warehouse
-	if !filepath.IsAbs(warehouse) && !strings.Contains(warehouse, "://") {
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
 		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
 			warehouse = abs
 		}
@@ -81,7 +82,8 @@ func DeleteWhere(
 }
 
 // EvolveSchema applies a metadata-only schema evolution to the table.
-// Returns the new schema_id on success.
+// Returns the new schema_id on success, or -1 if the CLI did not emit
+// new_schema_id (e.g. a no-op evolution where nothing changed).
 //
 // addCols and renameCols may be empty if only one operation is desired.
 func EvolveSchema(
@@ -99,7 +101,7 @@ func EvolveSchema(
 	}
 
 	warehouse := catalog.Warehouse
-	if !filepath.IsAbs(warehouse) && !strings.Contains(warehouse, "://") {
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
 		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
 			warehouse = abs
 		}
@@ -187,7 +189,7 @@ func WriteBatch(
 	}
 
 	warehouse := catalog.Warehouse
-	if !filepath.IsAbs(warehouse) && !strings.Contains(warehouse, "://") {
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
 		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
 			warehouse = abs
 		}
@@ -278,7 +280,7 @@ func SearchHybrid(
 	}
 
 	warehouse := catalog.Warehouse
-	if !filepath.IsAbs(warehouse) && !strings.Contains(warehouse, "://") {
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
 		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
 			warehouse = abs
 		}
@@ -370,7 +372,7 @@ func SearchText(
 	}
 
 	warehouse := catalog.Warehouse
-	if !filepath.IsAbs(warehouse) && !strings.Contains(warehouse, "://") {
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
 		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
 			warehouse = abs
 		}
@@ -432,16 +434,27 @@ func SearchText(
 
 // resolveBin returns the path to the `ailake` CLI binary.
 // Checks AILAKE_BIN env first, then PATH.
+// On non-Windows systems it also verifies the binary is executable.
 func resolveBin() (string, error) {
 	if bin := os.Getenv("AILAKE_BIN"); bin != "" {
-		if _, err := os.Stat(bin); err == nil {
-			return bin, nil
+		info, err := os.Stat(bin)
+		if err != nil {
+			return "", fmt.Errorf("ailake: AILAKE_BIN=%q not found: %w", bin, ErrNoBinary)
 		}
-		return "", fmt.Errorf("ailake: AILAKE_BIN=%q not found: %w", bin, ErrNoBinary)
+		if runtime.GOOS != "windows" && info.Mode()&0111 == 0 {
+			return "", fmt.Errorf("ailake: AILAKE_BIN=%q exists but is not executable: %w", bin, ErrNoBinary)
+		}
+		return bin, nil
 	}
 	bin, err := exec.LookPath("ailake")
 	if err != nil {
 		return "", ErrNoBinary
 	}
 	return bin, nil
+}
+
+// isLocalPath reports whether warehouse is a local filesystem path
+// (not a URL like s3:// or az://) that needs to be resolved to absolute.
+func isLocalPath(warehouse string) bool {
+	return !strings.Contains(warehouse, "://") && !strings.HasPrefix(warehouse, `\\`)
 }

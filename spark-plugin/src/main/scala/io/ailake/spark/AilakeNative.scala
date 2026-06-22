@@ -29,6 +29,9 @@ object AilakeNative {
   case class RenameColReq(from: String, to: String)
 
   private trait Lib extends Library {
+    /** Returns ailake-jni version string. Static — do NOT free this pointer. */
+    def ailake_version(): String
+
     /** JSON-envelope search. Returns `{"ok":true,"results":[...]}`. Caller must free. */
     def ailake_search_json(requestJson: String): Pointer
 
@@ -53,10 +56,18 @@ object AilakeNative {
     def ailake_free_string(ptr: Pointer): Unit
   }
 
+  private val AILAKE_EXPECTED_MAJOR = "0"
+
   private lazy val lib: Option[Lib] =
     try {
       val loaded = Native.load("ailake_jni", classOf[Lib]).asInstanceOf[Lib]
-      log.info("[ailake] Native library libailake_jni loaded successfully")
+      val version = loaded.ailake_version()
+      val major = version.takeWhile(_ != '.')
+      if (major != AILAKE_EXPECTED_MAJOR)
+        log.warn("[ailake] Version mismatch: loaded ailake-jni {} but expected major version {}. " +
+          "Search results may be incorrect.", version, AILAKE_EXPECTED_MAJOR)
+      else
+        log.info("[ailake] Native library libailake_jni {} loaded successfully", version)
       Some(loaded)
     } catch {
       case e: Throwable =>
@@ -482,8 +493,7 @@ object AilakeNative {
     }
   }
 
-  private def jsonStr(s: String): String =
-    "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+  private def jsonStr(s: String): String = mapper.writeValueAsString(s)
 
   private def parseResponse(json: String, tableUri: String): Seq[SearchRow] = {
     Try {

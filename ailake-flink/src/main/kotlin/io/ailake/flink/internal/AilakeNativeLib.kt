@@ -21,18 +21,19 @@ interface AilakeNativeLib : Library {
      * Perform ANN vector search via a JSON request envelope.
      *
      * Request JSON fields:
-     *   warehouse         (String)  warehouse root path
-     *   namespace         (String)  Iceberg namespace, default "default"
-     *   table             (String)  table name
-     *   vec_col           (String)  vector column name, default "embedding"
-     *   dim               (Int)     vector dimensionality
-     *   query             (Float[]) query vector as JSON float array
-     *   top_k             (Int)     default 10
-     *   ef_search         (Int)     default 50
-     *   partition_filter  (String?) optional — restrict search to files where partition value matches
-     *   hybrid_text       (String?) optional — enables BM25+vector hybrid when non-empty
-     *   text_column       (String?) optional — Parquet column for BM25, default "chunk_text"
-     *   bm25_weight       (Float?)  optional — BM25 weight in RRF fusion, default 0.5
+     *   warehouse          (String)  warehouse root path
+     *   namespace          (String)  Iceberg namespace, default "default"
+     *   table              (String)  table name
+     *   vec_col            (String)  vector column name, default "embedding"
+     *   dim                (Int)     vector dimensionality
+     *   query              (Float[]) query vector as JSON float array
+     *   top_k              (Int)     default 10
+     *   ef_search          (Int)     HNSW ef_search beam width, default 50
+     *   pruning_threshold  (Float?)  optional — geometric file pruning threshold; omit to scan all files
+     *   partition_filter   (String?) optional — restrict search to files where partition value matches
+     *   hybrid_text        (String?) optional — enables BM25+vector hybrid when non-empty
+     *   text_column        (String?) optional — Parquet column for BM25, default "chunk_text"
+     *   bm25_weight        (Float?)  optional — BM25 weight in RRF fusion, default 0.5
      *
      * Response JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
      */
@@ -59,6 +60,11 @@ interface AilakeNativeLib : Library {
      *   fts_columns       (String[]?) optional — text columns to embed as Tantivy FTS index;
      *                                 empty/absent = no FTS (zero overhead)
      *   fts_tokenizer     (String?)   optional — Tantivy tokenizer, default "default"
+     *   columns           (Object?)   optional — actual text content for FTS indexing;
+     *                                 map from column name to per-row string values,
+     *                                 e.g. `{"chunk_text":["row0 text","row1 text",...]}`.
+     *                                 Required when fts_columns is non-empty, otherwise the
+     *                                 Tantivy index will be built with empty documents.
      *
      * Response JSON: `{"ok":true,"snapshot_id":N}` or `{"ok":false,"error":"..."}`
      */
@@ -81,7 +87,10 @@ interface AilakeNativeLib : Library {
 
     /**
      * Low-level search: f32 pointer + length variant.  Prefer [ailake_search_json] for
-     * JVM callers.  Returns JSON array `[{"row_id":N,"distance":F,"file_path":"..."}]`.
+     * JVM callers.
+     *
+     * Response JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
+     * or `{"ok":false,"error":"..."}` on failure.
      */
     fun ailake_vector_search_json(
         tableUri: String,

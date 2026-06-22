@@ -11,6 +11,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Sprint 4 DX improvements**:
+  - **`AilakeIndexStatusSensor`** (`airflow-providers-ailake`) — new sensor that polls `ailake info <table> --json` until `index_status == "ready"`; useful for gating downstream tasks on async IVF-PQ/HNSW deferred builds.
+  - **`AilakeHook.compact()` and `AilakeHook.decay_memories()`** (`airflow-providers-ailake`) — typed hook methods for running compaction and memory-decay jobs from Airflow DAGs; return file counts parsed from CLI output.
+  - **`evolve_schema()` Python wrapper** (`ailake-py`) — top-level convenience combining `add_column()` + `rename_column()` in one call; `add_columns=` / `rename_columns=` accept list-of-dicts.
+  - **`ef_search` in Python search** (`ailake-py`) — `search(…, ef_search=N)`, `Table.search(…, ef_search=N)`, and `SearchQuery` now accept `ef_search`; previously hardcoded to 50. Propagated through PyO3 Rust binding.
+  - **`delete_rows`, `now_ns`, `search_with_data`, `evolve_schema` added to `__all__`** (`ailake-py`) — previously exported from `_ailake` but not importable via `from ailake import *`.
+  - **JVM startup version check** — Spark, Trino, and Flink plugins call `ailake_version()` on native lib load and log a warning when major version does not match expected. `ailake_version()` added to `Lib`/`Lib`/`AilakeNativeLib` interfaces.
+  - **`ailake_version()` added to Trino `Lib` interface** (`trino-plugin`) — was missing; now used in startup version check.
+  - **`columns` field documented in `AilakeNativeLib.kt` KDoc** (`ailake-flink`) — `ailake_write_batch_json` docs now describe `columns` map for FTS content; `ailake_search_json` docs add `pruning_threshold` and `ef_search`; `ailake_vector_search_json` response format corrected to `{"ok":true,"results":[...]}`.
+  - **Go `EvolveSchema` `-1` return documented** (`ailake-go`) — doc comment now states that `-1` is returned when the CLI emits no `new_schema_id` (no-op evolution).
+
+### Fixed
+
+- **`jsonStr()` in Spark** (`spark-plugin`) — hand-rolled `jsonStr(s: String)` only escaped `\` and `"`, missing control characters. Fixed: delegates to `mapper.writeValueAsString(s)`.
+- **`evolveSchema` `dropLast(1)` JSON hack in Trino and Flink** — fragile string-concatenation JSON assembly replaced with proper Jackson `ObjectNode` + `mapper.readTree(ac.initialDefault)` to embed raw JSON literals without re-quoting.
+- **JNI warn/error logs missing context** (`ailake-jni`) — `ailake_search_json` and `ailake_write_batch_json` error logs now include `warehouse`, `namespace`, and `table` to identify failing table in multi-tenant deployments.
+- **`ailake_vector_search_json` bare array return** (`ailake-jni`) — on success returned `[...]` instead of `{"ok":true,"results":[...]}`, inconsistent with all other `*_json` functions. Fixed: wraps result in `{"ok":true,"results":[...]}`. Null/invalid input now returns `{"ok":false,"error":"..."}` instead of `"[]"`.
+- **Go `resolveBin()` no executable check** (`ailake-go`) — `os.Stat` verified file exists but not that it is executable. Fixed: on non-Windows, checks `info.Mode()&0111 != 0`.
+- **Go `isLocalPath()` missing Windows UNC guard** (`ailake-go`) — warehouse path guards checked `filepath.IsAbs` and `strings.Contains("://")` but not UNC paths (`\\server\share`), causing them to be passed to `filepath.Abs()` on Linux cross-builds. New `isLocalPath()` helper also checks `strings.HasPrefix("\\")`.
+- **C++ `pclose` exit code on POSIX** (`ailake-cpp`) — `pclose()` returns wait-status (not exit code) on POSIX; comparing to `!= 0` would flag signals/stops as errors with wrong code. Fixed: `WIFEXITED(rc) ? WEXITSTATUS(rc) : rc` under `#ifndef _WIN32`; `#include <sys/wait.h>` added.
+
+### Added
+
 - **`hnsw_m`, `hnsw_ef_construction`, `pre_normalize`, `deferred` in all write paths** — parameters previously tunable only via Rust CLI are now available in every plugin and integration:
   - **JNI C-ABI** (`ailake-jni`): added to `ailake_write_batch_json` Req struct; `pre_normalize` and `hnsw_m`/`hnsw_ef_construction` propagate to `VectorStoragePolicy`; `deferred=true` calls `write_batch_auto_deferred()` instead of `write_batch_auto()`.
   - **Spark** (`AilakeNative.scala`): `writeBatch()` gains `hnswM`, `hnswEfConstruction`, `preNormalize`, `deferred` params.

@@ -216,6 +216,75 @@ class AilakeHook(BaseHook):
         vals_csv = ",".join(values)
         self.run_cli("delete-where", table, "--col", column, "--vals", vals_csv)
 
+    def compact(
+        self,
+        table: str,
+        *,
+        target_size: int = 536_870_912,
+        min_files: int = 4,
+        deferred: bool = False,
+    ) -> int:
+        """Compact small files in an AI-Lake table.
+
+        Wraps ``ailake compact <table> --target-size <n> --min-files <n>``.
+
+        Args:
+            table: Fully-qualified table name (``namespace.table``).
+            target_size: Target output file size in bytes (default 512 MiB).
+            min_files: Minimum eligible files required to trigger compaction (default 4).
+            deferred: Build HNSW index in the background when ``True`` (default ``False``).
+
+        Returns:
+            Number of files compacted.  ``0`` when nothing qualified.
+        """
+        extra: list[str] = []
+        if deferred:
+            extra += ["--deferred"]
+        result = self.run_cli(
+            "compact",
+            table,
+            "--target-size", str(target_size),
+            "--min-files", str(min_files),
+            *extra,
+        )
+        for line in result.stdout.splitlines():
+            if "files_compacted:" in line:
+                try:
+                    return int(line.split("files_compacted:")[1].strip().split()[0])
+                except (ValueError, IndexError):
+                    pass
+        return 0
+
+    def decay_memories(
+        self,
+        table: str,
+        *,
+        decay_lambda: float = 0.1,
+    ) -> int:
+        """Recompute recency weights using exponential decay across all memory files.
+
+        Wraps ``ailake decay-memories <table> --lambda <λ>``.
+
+        Args:
+            table: Fully-qualified table name (``namespace.table``).
+            decay_lambda: Exponential decay rate λ (default 0.1, half-life ≈ 7 days).
+
+        Returns:
+            Number of files updated.  ``0`` when nothing changed.
+        """
+        result = self.run_cli(
+            "decay-memories",
+            table,
+            "--lambda", str(decay_lambda),
+        )
+        for line in result.stdout.splitlines():
+            if "files_updated:" in line:
+                try:
+                    return int(line.split("files_updated:")[1].strip().split()[0])
+                except (ValueError, IndexError):
+                    pass
+        return 0
+
     def evolve_schema(
         self,
         table: str,
