@@ -64,8 +64,7 @@ object AilakeNative {
       val version = loaded.ailake_version()
       val major = version.takeWhile(_ != '.')
       if (major != AILAKE_EXPECTED_MAJOR)
-        log.warn("[ailake] Version mismatch: loaded ailake-jni {} but expected major version {}. " +
-          "Search results may be incorrect.", version, AILAKE_EXPECTED_MAJOR)
+        log.warn(s"[ailake] Version mismatch: loaded ailake-jni $version but expected major version $AILAKE_EXPECTED_MAJOR. Search results may be incorrect.")
       else
         log.info("[ailake] Native library libailake_jni {} loaded successfully", version)
       Some(loaded)
