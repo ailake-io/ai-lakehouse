@@ -6,6 +6,14 @@ description = "Tantivy per-file FTS index embedded in the AILK_FTS section"
 license     = "MIT OR Apache-2.0"
 repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 
+[features]
+## Register Snowball stemmers for 17 non-English languages + stop-word-filtered pipelines.
+## Tokenizer names (bare stemmer): fr_stem de_stem es_stem pt_stem it_stem nl_stem ru_stem
+##   ar_stem sv_stem da_stem fi_stem no_stem el_stem hu_stem ro_stem ta_stem tr_stem.
+## Stop-word-filtered pipelines: pt_br (Portuguese + stop words — recommended for PT-BR).
+## Uses rust_stemmers already in Tantivy + enables tantivy/stopwords for stop word lists.
+fts-stemmer-langs = ["tantivy/stopwords"]
+
 [dependencies]
 ailake-core = { path = "../ailake-core", version = "0.0.20" }
 tantivy     = { workspace = true }

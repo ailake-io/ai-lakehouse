@@ -226,6 +226,87 @@ On error: `{"ok": false, "error": "..."}`.
 
 ---
 
+### `ailake_compact_json`
+
+```
+fn ailake_compact_json(request_json: *const c_char) -> *mut c_char
+```
+
+Triggers a compaction pass on a local AI-Lake table — merges small files into fewer larger files and rebuilds the HNSW index.
+
+**Request JSON:**
+
+```json
+{
+  "warehouse":         "/path/to/warehouse",
+  "namespace":         "default",
+  "table":             "my_table",
+  "min_files":         4,
+  "target_size_bytes": 536870912,
+  "max_files_per_pass": 20,
+  "deferred":          false
+}
+```
+
+Optional fields:
+- `min_files` (int, default `4`) — only compact when there are at least this many files.
+- `target_size_bytes` (int, default 512 MB) — target merged file size.
+- `max_files_per_pass` (int, default `20`) — maximum files to merge in one pass.
+- `deferred` (bool, default `false`) — when `true`, writes Parquet immediately and builds the HNSW index in a background task.
+
+**Response JSON:** `{"ok":true,"files_compacted":3,"snapshot_id":12}` or `{"ok":false,"error":"..."}`.
+
+---
+
+### `ailake_scan_json`
+
+```
+fn ailake_scan_json(request_json: *const c_char) -> *mut c_char
+```
+
+Full-read scan: performs nearest-neighbor search and returns complete Parquet row data (all columns) alongside search metadata. Equivalent to `search(…, fetch_data=True)` in Python.
+
+**Request JSON:**
+
+```json
+{
+  "warehouse":        "/path/to/warehouse",
+  "namespace":        "default",
+  "table":            "my_table",
+  "vec_col":          "embedding",
+  "dim":              1536,
+  "query":            [0.1, -0.2, "..."],
+  "top_k":            10,
+  "ef_search":        50,
+  "partition_filter": "agent-42"
+}
+```
+
+**Response JSON:** `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"...","columns":{...}}]}` where `columns` contains all Parquet columns for that row.
+
+---
+
+### `ailake_vector_search_json` (legacy binary API)
+
+```
+fn ailake_vector_search_json(
+    table_uri:  *const c_char,
+    query_ptr:  *const f32,
+    query_len:  u32,
+    top_k:      u32,
+) -> *mut c_char
+```
+
+Binary-parameter API — accepts a raw `f32` array pointer rather than a JSON-encoded query. Used by the DuckDB extension (which calls into C-ABI directly without JSON marshalling). Hardcodes namespace `"default"`, table `"table"`, `vec_col` `"embedding"`.
+
+- Null `table_uri` or `query_ptr` → returns `[]` (empty JSON array).
+- On error → `{"ok":false,"error":"..."}`.
+- On success → `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`.
+
+**Prefer `ailake_search_json` for new integrations.** This function exists for DuckDB's native binary call path.
+
+---
+
 ### `ailake_free_string`
 
 ```

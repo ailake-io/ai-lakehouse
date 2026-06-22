@@ -15,8 +15,8 @@ use ailake_catalog::{HadoopCatalog, TableIdent};
 use ailake_core::{EmbeddingModelInfo, VectorMetric};
 use ailake_query::{
     fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
-    Chunk, ContextAssembler, ContextAssemblerConfig, FusionMethod, ModalQuery, SearchConfig,
-    SearchResult,
+    Chunk, CompactionConfig, CompactionExecutor, CompactionPlanner, ContextAssembler,
+    ContextAssemblerConfig, FusionMethod, ModalQuery, SearchConfig, SearchResult,
 };
 use ailake_store::LocalStore;
 use serde::Serialize;
@@ -102,6 +102,7 @@ fn do_search(
     hybrid_text: Option<String>,
     text_column: &str,
     bm25_weight: f32,
+    pruning_threshold: f32,
 ) -> ailake_core::AilakeResult<Vec<SearchResult>> {
     let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&warehouse));
     let catalog = Arc::new(HadoopCatalog::new(store.clone(), &warehouse));
@@ -114,7 +115,7 @@ fn do_search(
     let config = SearchConfig {
         top_k: top_k as usize,
         ef_search: ef_search as usize,
-        pruning_threshold: f32::INFINITY,
+        pruning_threshold,
         rerank_factor: None,
         score_fn: None,
         partition_filter,
@@ -172,7 +173,12 @@ fn cstr_empty_json() -> *mut c_char {
 
 fn cstr_err_json(msg: impl std::fmt::Display) -> *mut c_char {
     let s = serde_json::json!({"ok": false, "error": msg.to_string()}).to_string();
-    CString::new(s).unwrap_or_default().into_raw()
+    CString::new(s)
+        .unwrap_or_else(|_| {
+            CString::new(r#"{"ok":false,"error":"internal: error message contained null byte"}"#)
+                .unwrap()
+        })
+        .into_raw()
 }
 
 /// ailake-jni version string. Static — do NOT free.
@@ -182,8 +188,10 @@ pub extern "C" fn ailake_version() -> *const c_char {
     V.as_ptr() as *const c_char
 }
 
-/// Search a local AI-Lake table. Returns a null-terminated JSON array:
-/// `[{"row_id":N,"distance":F,"file_path":"..."}]`
+/// Search a local AI-Lake table.
+///
+/// Returns `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}` on success,
+/// or `{"ok":false,"error":"..."}` on failure.
 ///
 /// # Parameters
 /// - `table_uri`  — null-terminated UTF-8 path to table root
@@ -205,12 +213,12 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     }
     let uri = match CStr::from_ptr(table_uri).to_str() {
         Ok(s) => s.to_string(),
-        Err(_) => return cstr_empty_json(),
+        Err(e) => return cstr_err_json(format!("invalid UTF-8 in table_uri: {e}")),
     };
     let query = std::slice::from_raw_parts(query_ptr, query_len as usize).to_vec();
     let dim = query.len() as u32;
     let results: Vec<RowResultJson> = match do_search(
-        uri,
+        uri.clone(),
         "default",
         "table",
         "embedding",
@@ -222,13 +230,27 @@ pub unsafe extern "C" fn ailake_vector_search_json(
         None,
         "chunk_text",
         0.5,
+        f32::INFINITY,
     ) {
         Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
-        Err(e) => return cstr_err_json(e),
+        Err(e) => {
+            warn!(
+                "ailake_vector_search_json: search failed table_uri={}: {}",
+                uri, e
+            );
+            return cstr_err_json(e);
+        }
     };
-    let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
+    #[derive(serde::Serialize)]
+    struct Resp {
+        ok: bool,
+        results: Vec<RowResultJson>,
+    }
+    let body = Resp { ok: true, results };
+    let json = serde_json::to_string(&body)
+        .unwrap_or_else(|_| r#"{"ok":false,"error":"serialize"}"#.into());
     CString::new(json)
-        .unwrap_or_else(|_| CString::new("[]").unwrap())
+        .unwrap_or_else(|_| CString::new(r#"{"ok":false,"error":"null byte in output"}"#).unwrap())
         .into_raw()
 }
 
@@ -266,6 +288,8 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         text_column: String,
         #[serde(default = "default_bm25_weight")]
         bm25_weight: f32,
+        #[serde(default)]
+        pruning_threshold: Option<f32>,
     }
     fn default_ns() -> String {
         "default".into()
@@ -311,8 +335,9 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
 
     let bm25_weight = req.bm25_weight;
     let text_column = req.text_column.clone();
+    let pruning_threshold = req.pruning_threshold.unwrap_or(f32::INFINITY);
     let results = match do_search(
-        req.warehouse,
+        req.warehouse.clone(),
         &req.namespace,
         &req.table,
         &req.vec_col,
@@ -324,10 +349,14 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         req.hybrid_text,
         &text_column,
         bm25_weight,
+        pruning_threshold,
     ) {
         Ok(v) => v,
         Err(e) => {
-            warn!("ailake_search_json: search failed: {}", e);
+            warn!(
+                "ailake_search_json: search failed warehouse={} table={}.{}: {}",
+                req.warehouse, req.namespace, req.table, e
+            );
             return cstr_err_json(e);
         }
     };
@@ -429,6 +458,19 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         /// Tantivy tokenizer for FTS (default: "default").
         #[serde(default = "default_fts_tokenizer")]
         fts_tokenizer: String,
+        /// Per-table HNSW M parameter (graph connectivity). None = use default from HnswConfig.
+        #[serde(default)]
+        hnsw_m: Option<u32>,
+        /// Per-table HNSW ef_construction parameter. None = use default from HnswConfig.
+        #[serde(default)]
+        hnsw_ef_construction: Option<u32>,
+        /// Normalize vectors to unit L2 at write time (recommended for cosine).
+        #[serde(default)]
+        pre_normalize: bool,
+        /// Build index in a background Tokio task (write_batch_auto_deferred).
+        /// Parquet is committed immediately; index is appended asynchronously.
+        #[serde(default)]
+        deferred: bool,
         /// Extra string columns included in the Parquet batch (required for FTS).
         /// JSON: `{"text": ["row0 text", "row1 text", ...], "title": [...]}`
         #[serde(default)]
@@ -471,9 +513,12 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     };
     if req.ids.len() != req.embeddings.len() {
         warn!(
-            "ailake_write_batch_json: ids.len()={} != embeddings.len()={}",
+            "ailake_write_batch_json: ids.len()={} != embeddings.len()={} warehouse={} table={}.{}",
             req.ids.len(),
-            req.embeddings.len()
+            req.embeddings.len(),
+            req.warehouse,
+            req.namespace,
+            req.table,
         );
         return cstr_err_json("ids.len() != embeddings.len()");
     }
@@ -512,9 +557,9 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         precision,
         pq: None,
         keep_raw_for_reranking: true,
-        pre_normalize: false,
-        hnsw_m: None,
-        hnsw_ef_construction: None,
+        pre_normalize: req.pre_normalize,
+        hnsw_m: req.hnsw_m,
+        hnsw_ef_construction: req.hnsw_ef_construction,
         ivf_residual: req.ivf_residual,
         embedding_model,
         modality: None,
@@ -556,6 +601,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         })
     };
 
+    let deferred = req.deferred;
     let result = rt().block_on(async {
         let base =
             TableWriter::create_or_open(catalog, store, policy, table, format_version).await?;
@@ -564,7 +610,13 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         } else {
             base
         };
-        writer.write_batch_auto(&batch, &req.embeddings).await?;
+        if deferred {
+            writer
+                .write_batch_auto_deferred(&batch, &req.embeddings)
+                .await?;
+        } else {
+            writer.write_batch_auto(&batch, &req.embeddings).await?;
+        }
         writer.commit().await
     });
 
@@ -679,7 +731,7 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
         req.warehouse,
         req.namespace,
         req.table,
-        &req.query_text[..req.query_text.len().min(60)],
+        req.query_text.chars().take(60).collect::<String>(),
         req.top_k
     );
 
@@ -1197,6 +1249,7 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         None,
         "",
         0.0,
+        f32::INFINITY,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -1463,6 +1516,171 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
     }
 }
 
+/// Compact small files in an AI-Lake table into a larger merged file.
+///
+/// `request_json` must be UTF-8 JSON:
+/// ```json
+/// {
+///   "warehouse": "/path/to/warehouse",
+///   "namespace": "default",
+///   "table": "my_table",
+///   "min_files": 4,
+///   "target_size_bytes": 134217728,
+///   "max_files_per_pass": 20,
+///   "deferred": false
+/// }
+/// ```
+///
+/// Returns `{"ok":true,"files_compacted":N,"output_path":"..."}` or
+/// `{"ok":true,"files_compacted":0}` when nothing to compact.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    struct Req {
+        warehouse: String,
+        #[serde(default = "compact_default_ns")]
+        namespace: String,
+        table: String,
+        #[serde(default)]
+        min_files: Option<usize>,
+        #[serde(default)]
+        target_size_bytes: Option<u64>,
+        #[serde(default)]
+        max_files_per_pass: Option<usize>,
+        #[serde(default)]
+        deferred: bool,
+    }
+    fn compact_default_ns() -> String {
+        "default".into()
+    }
+
+    if request_json.is_null() {
+        return cstr_err_json("null request_json");
+    }
+    let json_str = match CStr::from_ptr(request_json).to_str() {
+        Ok(s) => s,
+        Err(e) => return cstr_err_json(e),
+    };
+    let req: Req = match serde_json::from_str(json_str) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("ailake_compact_json: JSON parse error: {}", e);
+            return cstr_err_json(e);
+        }
+    };
+
+    debug!(
+        "ailake_compact_json: warehouse={} table={}.{} deferred={}",
+        req.warehouse, req.namespace, req.table, req.deferred
+    );
+
+    let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+    let catalog: Arc<dyn ailake_catalog::provider::CatalogProvider> =
+        Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+    let table = TableIdent::new(&req.namespace, &req.table);
+
+    let result = rt().block_on(async {
+        let meta = catalog.load_table(&table).await?;
+
+        let dim: u32 = meta
+            .properties
+            .get("ailake.vector-dim")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(128);
+        let vec_col = meta
+            .properties
+            .get("ailake.vector-column")
+            .cloned()
+            .unwrap_or_else(|| "embedding".into());
+        let metric = parse_metric(
+            meta.properties
+                .get("ailake.vector-metric")
+                .map(|s| s.as_str())
+                .unwrap_or("cosine"),
+        );
+
+        let policy = ailake_core::VectorStoragePolicy {
+            column_name: vec_col,
+            dim,
+            metric,
+            precision: ailake_core::VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
+
+        let config = CompactionConfig {
+            min_files_to_compact: req.min_files.unwrap_or(4),
+            target_file_size_bytes: req.target_size_bytes.unwrap_or(128 * 1024 * 1024),
+            index_strategy: ailake_query::compaction::CompactionIndexStrategy::Auto,
+            max_files_per_pass: req.max_files_per_pass.unwrap_or(20),
+        };
+        let planner = CompactionPlanner::new(config);
+        let executor = CompactionExecutor::new(store.clone(), policy);
+
+        let output_prefix = "data";
+        if req.deferred {
+            executor
+                .run_deferred(&planner, &table, catalog, output_prefix)
+                .await
+        } else {
+            executor.run(&planner, &table, catalog, output_prefix).await
+        }
+    });
+
+    #[derive(serde::Serialize)]
+    struct Resp {
+        ok: bool,
+        files_compacted: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_path: Option<String>,
+    }
+    match result {
+        Ok(Some(entry)) => {
+            info!(
+                "ailake_compact_json: compaction done table={}.{} output={}",
+                req.namespace, req.table, entry.path
+            );
+            let json = serde_json::to_string(&Resp {
+                ok: true,
+                files_compacted: 1,
+                output_path: Some(entry.path),
+            })
+            .unwrap_or_default();
+            CString::new(json).unwrap_or_default().into_raw()
+        }
+        Ok(None) => {
+            info!(
+                "ailake_compact_json: nothing to compact for table={}.{}",
+                req.namespace, req.table
+            );
+            let json = serde_json::to_string(&Resp {
+                ok: true,
+                files_compacted: 0,
+                output_path: None,
+            })
+            .unwrap_or_default();
+            CString::new(json).unwrap_or_default().into_raw()
+        }
+        Err(e) => {
+            warn!("ailake_compact_json: compaction failed: {}", e);
+            cstr_err_json(e)
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1516,6 +1734,34 @@ mod tests {
         assert!(!ptr.is_null());
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         assert!(json.contains("error") || json.contains("null"));
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    #[test]
+    fn write_batch_json_new_params_parse() {
+        // hnsw_m, hnsw_ef_construction, pre_normalize, deferred must parse without panic.
+        let req = r#"{
+            "warehouse": "/nonexistent/path",
+            "namespace": "default",
+            "table": "test",
+            "dim": 4,
+            "hnsw_m": 32,
+            "hnsw_ef_construction": 200,
+            "pre_normalize": true,
+            "deferred": true,
+            "ids": [1],
+            "embeddings": [[0.1, 0.2, 0.3, 0.4]]
+        }"#;
+        let c = std::ffi::CString::new(req).unwrap();
+        let ptr = unsafe { ailake_write_batch_json(c.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        assert!(json.contains("error"), "expected error json, got: {}", json);
+        assert!(
+            !json.contains("JSON parse"),
+            "unexpected JSON parse error: {}",
+            json
+        );
         unsafe { ailake_free_string(ptr) };
     }
 

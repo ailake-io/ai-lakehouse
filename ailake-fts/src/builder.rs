@@ -11,6 +11,11 @@ use ailake_core::{AilakeError, AilakeResult};
 use arrow_array::{Array, RecordBatch};
 use tantivy::schema::{IndexRecordOption, TextFieldIndexing, TextOptions, FAST, STORED};
 
+// `WithFreqsAndPositions` is required for:
+//   - NgramTokenizer (multi-token per input term → QueryParser emits phrase queries)
+//   - Phrase search by users (e.g. "quick brown fox")
+// Overhead vs `WithFreqs`: ~25-40% larger before zstd; acceptable for per-file blobs.
+
 /// Configuration for per-file FTS index construction.
 #[derive(Debug, Clone)]
 pub struct FtsConfig {
@@ -32,6 +37,32 @@ impl Default for FtsConfig {
     }
 }
 
+impl FtsConfig {
+    /// Reconstruct an `FtsConfig` from Iceberg table properties written by `TableWriter`.
+    ///
+    /// Returns `None` when `ailake.fts.enabled` is absent or not `"true"` — i.e. the
+    /// table was created without FTS and no auto-rebuild should happen.
+    pub fn from_table_props(props: &std::collections::HashMap<String, String>) -> Option<Self> {
+        if props.get("ailake.fts.enabled").map(|s| s.as_str()) != Some("true") {
+            return None;
+        }
+        let text_columns: Vec<String> = props
+            .get("ailake.fts.text-columns")
+            .filter(|s| !s.is_empty())
+            .map(|s| s.split(',').map(str::to_string).collect())
+            .unwrap_or_else(|| vec!["chunk_text".into()]);
+        let tokenizer = props
+            .get("ailake.fts.tokenizer")
+            .cloned()
+            .unwrap_or_else(|| "default".into());
+        Some(Self {
+            text_columns,
+            tokenizer,
+            writer_heap_bytes: Self::default().writer_heap_bytes,
+        })
+    }
+}
+
 /// Build an FTS index for one write batch and return the serialized blob.
 ///
 /// Sync; safe to call from both sync and async contexts (no blocking executor).
@@ -43,12 +74,19 @@ pub fn build_fts_blob_from_batch(config: &FtsConfig, batch: &RecordBatch) -> Ail
     let row_id_field = schema_builder.add_u64_field("row_id", FAST | STORED);
     let text_indexing = TextFieldIndexing::default()
         .set_tokenizer(&config.tokenizer)
-        .set_index_option(IndexRecordOption::WithFreqs);
+        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
     let text_opts = TextOptions::default().set_indexing_options(text_indexing);
     let text_field = schema_builder.add_text_field("text", text_opts);
     let schema = schema_builder.build();
 
     let index = Index::create_in_ram(schema);
+
+    // Register custom tokenizers. `cjk_ngram` is always available;
+    // language stemmers require the `fts-stemmer-langs` feature.
+    crate::tokenizers::register_cjk_ngram(&index)?;
+    #[cfg(feature = "fts-stemmer-langs")]
+    crate::tokenizers::register_stemmer_langs(&index);
+
     let mut writer = index
         .writer(config.writer_heap_bytes)
         .map_err(|e| AilakeError::Fts(format!("writer init: {e}")))?;
@@ -84,4 +122,43 @@ pub fn build_fts_blob_from_batch(config: &FtsConfig, batch: &RecordBatch) -> Ail
 /// Re-index a merged batch — used by `CompactionExecutor` to rebuild FTS after compaction.
 pub fn merge_fts_blobs(config: &FtsConfig, merged_batch: &RecordBatch) -> AilakeResult<Vec<u8>> {
     build_fts_blob_from_batch(config, merged_batch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn from_table_props_none_when_fts_disabled() {
+        let props: HashMap<String, String> = [("ailake.dim".into(), "128".into())].into();
+        assert!(FtsConfig::from_table_props(&props).is_none());
+    }
+
+    #[test]
+    fn from_table_props_none_when_not_true() {
+        let props: HashMap<String, String> = [("ailake.fts.enabled".into(), "false".into())].into();
+        assert!(FtsConfig::from_table_props(&props).is_none());
+    }
+
+    #[test]
+    fn from_table_props_parses_columns_and_tokenizer() {
+        let props: HashMap<String, String> = [
+            ("ailake.fts.enabled".into(), "true".into()),
+            ("ailake.fts.text-columns".into(), "body,title".into()),
+            ("ailake.fts.tokenizer".into(), "en_stem".into()),
+        ]
+        .into();
+        let cfg = FtsConfig::from_table_props(&props).expect("should parse");
+        assert_eq!(cfg.text_columns, vec!["body", "title"]);
+        assert_eq!(cfg.tokenizer, "en_stem");
+    }
+
+    #[test]
+    fn from_table_props_defaults_when_optional_keys_missing() {
+        let props: HashMap<String, String> = [("ailake.fts.enabled".into(), "true".into())].into();
+        let cfg = FtsConfig::from_table_props(&props).expect("should parse");
+        assert_eq!(cfg.text_columns, vec!["chunk_text"]);
+        assert_eq!(cfg.tokenizer, "default");
+    }
 }

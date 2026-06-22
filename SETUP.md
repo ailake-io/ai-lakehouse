@@ -495,6 +495,58 @@ ailake.delete_where("/tmp/ailake-test", "id", ["0", "1", "2"])
 ailake.delete_where("/tmp/ailake-test", "id", [])
 ```
 
+### `evolve_schema` (combined add + rename)
+
+```python
+# One call: add a column and rename another
+schema_id = ailake.evolve_schema(
+    "/tmp/ailake-test",
+    add_columns=[{"name": "score", "type": "float", "initial_default": 0.0}],
+    rename_columns=[{"from": "source_url", "to": "url"}],
+)
+```
+
+### Compaction
+
+```python
+# Merge small files, rebuild HNSW index
+result = ailake.compact(
+    "/tmp/ailake-test",
+    min_files=4,               # skip when fewer files qualify
+    target_size_bytes=512*1024*1024,  # 512 MB
+    max_files_per_pass=20,
+    deferred=False,            # True = background HNSW build
+)
+# result: {"ok": True, "files_compacted": 3, "output_path": "data/part-XXXX.parquet"}
+```
+
+### `now_ns` — UTC timestamp helper
+
+```python
+# Use to populate created_at / last_accessed_at columns
+import pyarrow as pa
+ts = ailake.now_ns()   # int, nanoseconds since Unix epoch
+arr = pa.array([ts], type=pa.timestamp("ns", tz="UTC"))
+```
+
+### Tantivy FTS index (Phase T)
+
+```python
+# Write table with per-file Tantivy FTS index alongside HNSW
+writer = ailake.TableWriter(
+    "/tmp/ailake-fts",
+    dim=64,
+    metric="cosine",
+    fts_text_columns=["chunk_text", "document_title"],  # columns to index
+)
+writer.write_batch(texts, embeddings, extra_columns={"document_title": titles})
+writer.commit()
+
+# Full-text search — Tantivy O(log N) when index present, BM25 brute-force fallback
+results = ailake.search_text("/tmp/ailake-fts", "rust async programming", top_k=10)
+# results: list of dicts with row_id, score (BM25), file_path
+```
+
 ### Hardware detection
 
 ```python

@@ -24,6 +24,7 @@
 #  define AILAKE_PCLOSE _pclose
 #else
 #  include <cstdio>
+#  include <sys/wait.h>
 #  define AILAKE_POPEN  popen
 #  define AILAKE_PCLOSE pclose
 #endif
@@ -62,7 +63,13 @@ inline std::string run_cmd(const std::string& cmd) {
     char buf[256];
     while (std::fgets(buf, sizeof(buf), pipe)) output += buf;
     int rc = AILAKE_PCLOSE(pipe);
-    if (rc != 0) throw std::runtime_error("ailake CLI failed (exit " + std::to_string(rc) + "):\n" + output);
+#ifndef _WIN32
+    // pclose() returns a wait-status on POSIX — extract actual exit code.
+    int exit_code = (WIFEXITED(rc)) ? WEXITSTATUS(rc) : rc;
+#else
+    int exit_code = rc;
+#endif
+    if (exit_code != 0) throw std::runtime_error("ailake CLI failed (exit " + std::to_string(exit_code) + "):\n" + output);
     return output;
 }
 
@@ -78,6 +85,79 @@ inline std::string shell_quote(const std::string& s) {
 }
 
 } // namespace detail
+
+// WriteBatchOptions controls optional parameters for write_batch.
+struct WriteBatchOptions {
+    std::string vec_col;              // embedding column name (default "embedding")
+    std::string metric;               // cosine | euclidean | dot (default "cosine")
+    std::string precision;            // f32 | f16 | i8 (default "f16")
+    std::string embedding_model;      // optional model label
+    std::string partition_by;         // single-column partition key
+    std::string partition_value;      // single-column partition value
+    int         format_version = 2;   // Iceberg format version (2 or 3)
+    std::vector<std::string> fts_columns;  // text columns for Tantivy FTS
+    std::string fts_tokenizer;        // Tantivy tokenizer (default "default")
+    int         hnsw_m = 0;           // HNSW M (0 = use table default)
+    int         hnsw_ef_construction = 0; // HNSW ef_construction (0 = use table default)
+    bool        pre_normalize = false;// normalize vectors to unit L2 at write time
+    bool        deferred = false;     // build index asynchronously
+};
+
+// write_batch inserts a Parquet file into an AI-Lake table via the `ailake` CLI.
+//
+// `parquet_file` must be a local path to a Parquet file whose column
+// `opts.vec_col` holds the embedding vectors. The table is created if it does
+// not exist (same behaviour as `ailake insert`).
+//
+// Throws std::runtime_error if the CLI binary is not found or exits non-zero.
+inline void write_batch(
+    const std::string&    warehouse,
+    const std::string&    table_id,      // "namespace.table"
+    const std::string&    parquet_file,
+    const WriteBatchOptions& opts = {})
+{
+    std::string bin = detail::resolve_bin();
+    std::string vec_col = opts.vec_col.empty() ? "embedding" : opts.vec_col;
+
+    std::string cmd = detail::shell_quote(bin)
+        + " --store " + detail::shell_quote(warehouse)
+        + " insert " + detail::shell_quote(table_id)
+        + " " + detail::shell_quote(parquet_file)
+        + " --embeddings " + detail::shell_quote(vec_col);
+
+    if (!opts.metric.empty())
+        cmd += " --metric " + detail::shell_quote(opts.metric);
+    if (!opts.precision.empty())
+        cmd += " --precision " + detail::shell_quote(opts.precision);
+    if (!opts.embedding_model.empty())
+        cmd += " --embedding-model " + detail::shell_quote(opts.embedding_model);
+    if (!opts.partition_by.empty())
+        cmd += " --partition-by " + detail::shell_quote(opts.partition_by);
+    if (!opts.partition_value.empty())
+        cmd += " --partition-value " + detail::shell_quote(opts.partition_value);
+    if (opts.format_version != 0 && opts.format_version != 2)
+        cmd += " --format-version " + std::to_string(opts.format_version);
+    if (!opts.fts_columns.empty()) {
+        std::string cols;
+        for (size_t i = 0; i < opts.fts_columns.size(); ++i) {
+            if (i > 0) cols += ',';
+            cols += opts.fts_columns[i];
+        }
+        cmd += " --fts-columns " + detail::shell_quote(cols);
+        if (!opts.fts_tokenizer.empty() && opts.fts_tokenizer != "default")
+            cmd += " --fts-tokenizer " + detail::shell_quote(opts.fts_tokenizer);
+    }
+    if (opts.hnsw_m > 0)
+        cmd += " --hnsw-m " + std::to_string(opts.hnsw_m);
+    if (opts.hnsw_ef_construction > 0)
+        cmd += " --hnsw-ef " + std::to_string(opts.hnsw_ef_construction);
+    if (opts.pre_normalize)
+        cmd += " --pre-normalize";
+    if (opts.deferred)
+        cmd += " --deferred";
+
+    detail::run_cmd(cmd);
+}
 
 // delete_where logically deletes all rows where `column` equals any value in
 // `values`. Writes an Iceberg equality delete file via the `ailake` CLI.

@@ -252,7 +252,8 @@ class TestAilakeSearchOperator:
 
         mock_search.assert_called_once_with(
             "default.docs", query=[0.1, 0.2, 0.3], top_k=5, pruning_threshold=0.8,
-            partition_filter=None,
+            partition_filter=None, hybrid_text=None, text_column="chunk_text",
+            bm25_weight=0.5,
         )
         assert returned == results
 
@@ -273,7 +274,8 @@ class TestAilakeSearchOperator:
                 op.execute(context=context)
         mock_search.assert_called_once_with(
             "default.docs", query=query, top_k=3, pruning_threshold=0.8,
-            partition_filter=None,
+            partition_filter=None, hybrid_text=None, text_column="chunk_text",
+            bm25_weight=0.5,
         )
 
     def test_execute_raises_without_query(self):
@@ -294,7 +296,8 @@ class TestAilakeSearchOperator:
                 op.execute(context={})
         mock_search.assert_called_once_with(
             "default.docs", query=[0.1, 0.2], top_k=10, pruning_threshold=0.8,
-            partition_filter="agent-A",
+            partition_filter="agent-A", hybrid_text=None, text_column="chunk_text",
+            bm25_weight=0.5,
         )
 
 

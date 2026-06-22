@@ -484,3 +484,19 @@ Delivered in Phase 9:
 - **Python `ailake.Agent`** — `Agent(table_path, embed_fn, agent_id)` with `remember()`, `recall()`, `log_tool_call()`, `assemble_context()`. High-level abstraction for LangChain/CrewAI/AutoGen.
 - **Demo** — `08_agents.ipynb` (26 cells), `09_hybrid_search.ipynb` (7 sections), `ailake_bm25` fixture in `init_demo.py`.
 - **Tests** — 6 BM25 integration tests in `tests/tests/hybrid_search.rs`; 4 `WorkingMemoryBuffer` unit tests; 4 `MemoryDecayJob` unit tests.
+
+### Phase T — Tantivy per-file FTS ✅
+
+Delivered in Phase T (branch `feature/phase-t-tantivy-fts`, 2026-06-20):
+
+- **`ailake-fts` crate** — new crate containing `FtsConfig`, `FtsBlob`, `build_fts_blob_from_batch()`, `search_blob()`. Wraps Tantivy `IndexRecordOption::WithFreqs` (no positions — storage-lean). Serialization: zstd-compressed Tantivy index, `blob_len` in AILK_FTS header. Typical footprint: ~3–4 MB per 50k docs (vs. ~15 MB HNSW) at ~200 bytes average text.
+- **`ailake-file` AILK_FTS section** — new optional section between the last AILK vector section and the Parquet footer. Header: `AFTS` magic (4 bytes) + version u16 + reserved u16 + `blob_len` u64 (16 bytes total). Absolute byte offset stored as `ailake.fts_offset` in Parquet KV. Flag `FLAG_HAS_FTS` (`0x0002`) in the primary AILK header `flags` field marks the file as FTS-capable (optional accelerator for readers).
+- **`ailake-query` fast path** — `search_text()` checks `ailake.fts_offset` KV; routes through Tantivy O(log N) when present. Falls back to BM25 brute-force O(N) for legacy files without FTS section — full backward compatibility.
+- **Python API** — `TableWriter(fts_text_columns=["chunk_text", "document_title"])`. `search_text(path, query, top_k)` uses Tantivy fast path automatically.
+- **JNI C-ABI** — `ailake_search_text_json` extended with `text_columns[]` array in request JSON; `ailake_write_batch_json` extended with `fts_columns[]` and `fts_tokenizer` fields.
+- **Spark / Trino / Flink** — DDL options `fts.columns` and `fts.tokenizer`; `searchText()` Kotlin method in `AilakeNativeLoader`.
+- **Go SDK** — `SearchText(catalog, ns, table, query, textColumns, topK)` → `[]SearchTextResult`.
+- **C++ SDK** — `ailake::search_text(catalog, ns, table, query, textColumns, topK)` → `std::vector<FtsResult>`.
+- **Compaction** — compaction rebuilds Tantivy index from merged Parquet; output files carry FTS section if any input file had `fts_columns` set.
+- **Airflow** — `AilakeWriteOperator(fts_columns=...)` + new `AilakeFtsSearchOperator`.
+- **Airbyte** — `fts_columns` field in `AilakeDestinationConfig` and `spec.json`.

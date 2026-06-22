@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -56,7 +57,7 @@ func DeleteWhere(
 	}
 
 	warehouse := catalog.Warehouse
-	if !filepath.IsAbs(warehouse) && !strings.Contains(warehouse, "://") {
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
 		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
 			warehouse = abs
 		}
@@ -81,7 +82,8 @@ func DeleteWhere(
 }
 
 // EvolveSchema applies a metadata-only schema evolution to the table.
-// Returns the new schema_id on success.
+// Returns the new schema_id on success, or -1 if the CLI did not emit
+// new_schema_id (e.g. a no-op evolution where nothing changed).
 //
 // addCols and renameCols may be empty if only one operation is desired.
 func EvolveSchema(
@@ -99,7 +101,7 @@ func EvolveSchema(
 	}
 
 	warehouse := catalog.Warehouse
-	if !filepath.IsAbs(warehouse) && !strings.Contains(warehouse, "://") {
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
 		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
 			warehouse = abs
 		}
@@ -140,6 +142,208 @@ func EvolveSchema(
 	return newSchemaID, nil
 }
 
+// WriteBatchOptions controls optional parameters for WriteBatch.
+type WriteBatchOptions struct {
+	// VecCol is the embedding column name (default "embedding").
+	VecCol string
+	// Metric is the distance metric: cosine | euclidean | dot (default "cosine").
+	Metric string
+	// Precision is the storage precision: f32 | f16 | i8 (default "f16").
+	Precision string
+	// EmbeddingModel is an optional label stored in Iceberg metadata.
+	EmbeddingModel string
+	// PartitionBy is a single partition column for simple partitioning.
+	PartitionBy string
+	// PartitionValue is the partition value when PartitionBy is set.
+	PartitionValue string
+	// FormatVersion is the Iceberg format version: 2 (default) or 3.
+	FormatVersion int
+	// FtsColumns are text columns to embed as Tantivy FTS index.
+	FtsColumns []string
+	// FtsTokenizer is the Tantivy tokenizer name (default "default").
+	FtsTokenizer string
+	// HnswM is the HNSW M parameter (0 = use table default).
+	HnswM int
+	// HnswEfConstruction is the HNSW ef_construction (0 = use table default).
+	HnswEfConstruction int
+	// PreNormalize normalizes vectors to unit L2 at write time.
+	PreNormalize bool
+	// Deferred builds the index asynchronously (Parquet committed immediately).
+	Deferred bool
+}
+
+// WriteBatch writes a batch of rows and their embeddings to an AI-Lake table
+// by delegating to the `ailake insert` CLI binary.
+//
+// parquetFile must be a local path to a Parquet file containing at least the
+// columns named in opts.VecCol (required). The embeddings column in the file
+// is used directly; opts.VecCol identifies which column holds the vectors.
+func WriteBatch(
+	catalog *HadoopCatalog,
+	namespace, table, parquetFile string,
+	opts WriteBatchOptions,
+) error {
+	bin, err := resolveBin()
+	if err != nil {
+		return err
+	}
+
+	warehouse := catalog.Warehouse
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
+	tableID := namespace + "." + table
+	if opts.VecCol == "" {
+		opts.VecCol = "embedding"
+	}
+
+	args := []string{
+		"--store", warehouse,
+		"insert", tableID, parquetFile,
+		"--embeddings", opts.VecCol,
+	}
+	if opts.Metric != "" {
+		args = append(args, "--metric", opts.Metric)
+	}
+	if opts.Precision != "" {
+		args = append(args, "--precision", opts.Precision)
+	}
+	if opts.EmbeddingModel != "" {
+		args = append(args, "--embedding-model", opts.EmbeddingModel)
+	}
+	if opts.PartitionBy != "" {
+		args = append(args, "--partition-by", opts.PartitionBy)
+	}
+	if opts.PartitionValue != "" {
+		args = append(args, "--partition-value", opts.PartitionValue)
+	}
+	if opts.FormatVersion != 0 && opts.FormatVersion != 2 {
+		args = append(args, "--format-version", fmt.Sprintf("%d", opts.FormatVersion))
+	}
+	if len(opts.FtsColumns) > 0 {
+		args = append(args, "--fts-columns", strings.Join(opts.FtsColumns, ","))
+		if opts.FtsTokenizer != "" && opts.FtsTokenizer != "default" {
+			args = append(args, "--fts-tokenizer", opts.FtsTokenizer)
+		}
+	}
+	if opts.HnswM > 0 {
+		args = append(args, "--hnsw-m", fmt.Sprintf("%d", opts.HnswM))
+	}
+	if opts.HnswEfConstruction > 0 {
+		args = append(args, "--hnsw-ef", fmt.Sprintf("%d", opts.HnswEfConstruction))
+	}
+	if opts.PreNormalize {
+		args = append(args, "--pre-normalize")
+	}
+	if opts.Deferred {
+		args = append(args, "--deferred")
+	}
+
+	cmd := exec.Command(bin, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ailake insert: %w", err)
+	}
+	return nil
+}
+
+// SearchHybridResult is a single hit from SearchHybrid (BM25+vector RRF fusion).
+type SearchHybridResult struct {
+	RowID    int64
+	Distance float64
+	FilePath string
+}
+
+// SearchHybrid runs a hybrid BM25+vector RRF search on an AI-Lake table.
+// query is the f32 embedding vector; text is the BM25 query string.
+// bm25Weight controls the BM25 weight in RRF (0.0 = pure vector, 1.0 = pure BM25).
+// textColumn is the Parquet column used for BM25 scoring (default "chunk_text").
+func SearchHybrid(
+	catalog *HadoopCatalog,
+	namespace, table string,
+	query []float32,
+	text string,
+	topK int,
+	bm25Weight float64,
+	textColumn string,
+) ([]SearchHybridResult, error) {
+	if len(query) == 0 || text == "" {
+		return nil, nil
+	}
+	bin, err := resolveBin()
+	if err != nil {
+		return nil, err
+	}
+
+	warehouse := catalog.Warehouse
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
+	tableID := namespace + "." + table
+	if topK <= 0 {
+		topK = 10
+	}
+	if textColumn == "" {
+		textColumn = "chunk_text"
+	}
+
+	floatStrs := make([]string, len(query))
+	for i, v := range query {
+		floatStrs[i] = fmt.Sprintf("%g", v)
+	}
+
+	args := []string{
+		"--store", warehouse,
+		"search", tableID,
+		"--query", strings.Join(floatStrs, ","),
+		"--hybrid-text", text,
+		"--text-column", textColumn,
+		"--bm25-weight", fmt.Sprintf("%g", bm25Weight),
+		"--top-k", fmt.Sprintf("%d", topK),
+		"--format", "json",
+	}
+
+	out, err := exec.Command(bin, args...).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return nil, fmt.Errorf("ailake search --hybrid-text: %w\nstderr: %s", err, exitErr.Stderr)
+		}
+		return nil, fmt.Errorf("ailake search --hybrid-text: %w", err)
+	}
+
+	type hit struct {
+		RowID    int64   `json:"row_id"`
+		Distance float64 `json:"distance"`
+		FilePath string  `json:"file_path"`
+	}
+	type resp struct {
+		Results []hit `json:"results"`
+	}
+
+	var r resp
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &r); err != nil {
+		return nil, fmt.Errorf("ailake search --hybrid-text: parse response: %w", err)
+	}
+
+	results := make([]SearchHybridResult, 0, len(r.Results))
+	for _, h := range r.Results {
+		results = append(results, SearchHybridResult{
+			RowID:    h.RowID,
+			Distance: h.Distance,
+			FilePath: h.FilePath,
+		})
+	}
+	return results, nil
+}
+
 // SearchTextResult is a single FTS hit from SearchText.
 type SearchTextResult struct {
 	RowID    int64
@@ -168,7 +372,7 @@ func SearchText(
 	}
 
 	warehouse := catalog.Warehouse
-	if !filepath.IsAbs(warehouse) && !strings.Contains(warehouse, "://") {
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
 		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
 			warehouse = abs
 		}
@@ -194,6 +398,10 @@ func SearchText(
 
 	out, err := exec.Command(bin, args...).Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return nil, fmt.Errorf("ailake search --text: %w\nstderr: %s", err, exitErr.Stderr)
+		}
 		return nil, fmt.Errorf("ailake search --text: %w", err)
 	}
 
@@ -226,16 +434,27 @@ func SearchText(
 
 // resolveBin returns the path to the `ailake` CLI binary.
 // Checks AILAKE_BIN env first, then PATH.
+// On non-Windows systems it also verifies the binary is executable.
 func resolveBin() (string, error) {
 	if bin := os.Getenv("AILAKE_BIN"); bin != "" {
-		if _, err := os.Stat(bin); err == nil {
-			return bin, nil
+		info, err := os.Stat(bin)
+		if err != nil {
+			return "", fmt.Errorf("ailake: AILAKE_BIN=%q not found: %w", bin, ErrNoBinary)
 		}
-		return "", fmt.Errorf("ailake: AILAKE_BIN=%q not found: %w", bin, ErrNoBinary)
+		if runtime.GOOS != "windows" && info.Mode()&0111 == 0 {
+			return "", fmt.Errorf("ailake: AILAKE_BIN=%q exists but is not executable: %w", bin, ErrNoBinary)
+		}
+		return bin, nil
 	}
 	bin, err := exec.LookPath("ailake")
 	if err != nil {
 		return "", ErrNoBinary
 	}
 	return bin, nil
+}
+
+// isLocalPath reports whether warehouse is a local filesystem path
+// (not a URL like s3:// or az://) that needs to be resolved to absolute.
+func isLocalPath(warehouse string) bool {
+	return !strings.Contains(warehouse, "://") && !strings.HasPrefix(warehouse, `\\`)
 }

@@ -310,7 +310,7 @@ class TestCmdEmbedder:
         assert vecs.dtype == np.float32
 
     def test_nonzero_exit_raises(self):
-        embedder = CmdEmbedder("exit 1")
+        embedder = CmdEmbedder("python3 -c 'import sys; sys.exit(1)'")
         with pytest.raises(RuntimeError, match="embed_cmd failed"):
             embedder.embed(["text"])
 

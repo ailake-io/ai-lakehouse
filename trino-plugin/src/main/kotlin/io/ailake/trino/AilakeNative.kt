@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.trino
 
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.sun.jna.Library
@@ -34,6 +35,9 @@ object AilakeNative {
     data class RenameColReq(val from: String, val to: String)
 
     private interface Lib : Library {
+        /** Returns ailake-jni version string. Static — do NOT free this pointer. */
+        fun ailake_version(): String
+
         /** JSON-envelope search. Returns `{"ok":true,"results":[...]}`. Caller must free. */
         fun ailake_search_json(requestJson: String): Pointer?
 
@@ -52,12 +56,27 @@ object AilakeNative {
         /** Full-text search (Tantivy or BM25 fallback). Returns `{"ok":true,"results":[...]}`. Caller must free. */
         fun ailake_search_text_json(requestJson: String): Pointer?
 
+        /** Compact small files. Returns `{"ok":true,"files_compacted":N}`. Caller must free. */
+        fun ailake_compact_json(requestJson: String): Pointer?
+
         fun ailake_free_string(ptr: Pointer)
     }
 
+    private const val AILAKE_EXPECTED_MAJOR = "0"
+
     private val lib: Lib? by lazy {
         runCatching { Native.load("ailake_jni", Lib::class.java) as Lib }
-            .onSuccess { log.info("[ailake] Native library libailake_jni loaded successfully") }
+            .onSuccess { loaded ->
+                val version = loaded.ailake_version()
+                val major = version.substringBefore('.')
+                if (major != AILAKE_EXPECTED_MAJOR)
+                    log.warn(
+                        "[ailake] Version mismatch: loaded ailake-jni {} but expected major {}. " +
+                        "Search results may be incorrect.", version, AILAKE_EXPECTED_MAJOR
+                    )
+                else
+                    log.info("[ailake] Native library libailake_jni {} loaded successfully", version)
+            }
             .onFailure {
                 log.warn(
                     "[ailake] Native library libailake_jni not found — vector search disabled. " +
@@ -74,10 +93,16 @@ object AilakeNative {
      * Write a batch of rows to an AI-Lake table via the native library.
      * Returns the snapshot_id on success, null on failure.
      *
-     * @param partitionFields  multi-column partition spec (Phase K); empty = single-value partition_by/partition_value
-     * @param formatVersion    Iceberg format version; 2 (default) or 3
-     * @param ftsColumns       text columns to embed as Tantivy FTS index; empty = no FTS (default)
-     * @param ftsTokenizer     Tantivy tokenizer name; default "default"
+     * @param partitionFields      multi-column partition spec (Phase K); empty = single-value partition_by/partition_value
+     * @param formatVersion        Iceberg format version; 2 (default) or 3
+     * @param ftsColumns           text columns to embed as Tantivy FTS index; empty = no FTS (default)
+     * @param ftsTokenizer         Tantivy tokenizer name; default "default"
+     * @param hnswM                HNSW graph connectivity (M). null = use table default.
+     * @param hnswEfConstruction   HNSW ef_construction. null = use table default.
+     * @param preNormalize         Normalize vectors to unit L2 at write time (recommended for cosine).
+     * @param deferred             Build index asynchronously. Parquet committed immediately.
+     * @param columns              Extra string columns sent with the batch for FTS indexing.
+     *                             Map from column name to per-row string values.
      */
     fun writeBatch(
         tableUri: String,
@@ -96,6 +121,11 @@ object AilakeNative {
         formatVersion: Int = 2,
         ftsColumns: List<String> = emptyList(),
         ftsTokenizer: String = "default",
+        hnswM: Int? = null,
+        hnswEfConstruction: Int? = null,
+        preNormalize: Boolean = false,
+        deferred: Boolean = false,
+        columns: Map<String, List<String>> = emptyMap(),
     ): Long? {
         val native = lib ?: return null
         if (ids.isEmpty()) return null
@@ -124,6 +154,11 @@ object AilakeNative {
             payload["fts_columns"]   = ftsColumns
             payload["fts_tokenizer"] = ftsTokenizer
         }
+        if (hnswM != null)              payload["hnsw_m"]              = hnswM
+        if (hnswEfConstruction != null) payload["hnsw_ef_construction"] = hnswEfConstruction
+        if (preNormalize)               payload["pre_normalize"]        = true
+        if (deferred)                   payload["deferred"]             = true
+        if (columns.isNotEmpty())       payload["columns"]              = columns
         val requestJson = mapper.writeValueAsString(payload)
 
         val ptr = native.ailake_write_batch_json(requestJson) ?: run {
@@ -207,26 +242,33 @@ object AilakeNative {
         if (addCols.isEmpty() && renameCols.isEmpty()) return 0
         val native = lib ?: return -1
 
-        val addArr = addCols.map { ac ->
-            buildMap<String, Any> {
-                put("name", ac.name)
-                put("type", ac.colType)
-                if (ac.initialDefault != null) put("initial_default_raw", ac.initialDefault)
-            }
-        }
-        val renArr = renameCols.map { rc -> mapOf("from" to rc.from, "to" to rc.to) }
+        val rootNode = mapper.createObjectNode()
+        rootNode.put("warehouse", tableUri)
+        rootNode.put("namespace", namespace)
+        rootNode.put("table", tableName)
 
-        // Build JSON manually for add_columns so initial_default is embedded as a raw JSON
-        // literal (not re-quoted by Jackson).
-        val addJson = addCols.joinToString(",", "[", "]") { ac ->
-            val defPart = if (ac.initialDefault != null) ""","initial_default":${ac.initialDefault}""" else ""
-            """{"name":${mapper.writeValueAsString(ac.name)},"type":${mapper.writeValueAsString(ac.colType)}$defPart}"""
+        val addArray = mapper.createArrayNode()
+        for (ac in addCols) {
+            val colNode = mapper.createObjectNode()
+            colNode.put("name", ac.name)
+            colNode.put("type", ac.colType)
+            if (ac.initialDefault != null) {
+                // parse as raw JSON so null/0/0.0/"string" embed correctly without re-quoting
+                colNode.set<JsonNode>("initial_default", mapper.readTree(ac.initialDefault))
+            }
+            addArray.add(colNode)
         }
-        val renJson = mapper.writeValueAsString(renArr)
-        val baseJson = mapper.writeValueAsString(
-            mapOf("warehouse" to tableUri, "namespace" to namespace, "table" to tableName)
-        ).dropLast(1)
-        val requestJson = "$baseJson,\"add_columns\":$addJson,\"rename_columns\":$renJson}"
+        rootNode.set<JsonNode>("add_columns", addArray)
+
+        val renArray = mapper.createArrayNode()
+        for (rc in renameCols) {
+            val renNode = mapper.createObjectNode()
+            renNode.put("from", rc.from)
+            renNode.put("to", rc.to)
+            renArray.add(renNode)
+        }
+        rootNode.set<JsonNode>("rename_columns", renArray)
+        val requestJson = mapper.writeValueAsString(rootNode)
 
         val ptr = native.ailake_evolve_schema_json(requestJson) ?: run {
             log.warn("[ailake] ailake_evolve_schema_json returned null pointer for table={}", tableName)
@@ -319,17 +361,20 @@ object AilakeNative {
         queries: List<Triple<String, List<Float>, Float>>,
         topK: Int,
         partitionFilter: String? = null,
+        namespace: String = "default",
+        tableName: String = "",
     ): List<MultimodalSearchRow> {
         val native = lib ?: return emptyList()
         if (queries.isEmpty()) return emptyList()
 
+        val effectiveTable = tableName.ifBlank { tableUri.trimEnd('/').substringAfterLast('/') }
         val queriesJson = queries.joinToString(",", "[", "]") { (col, q, w) ->
             val qArr = q.joinToString(",", "[", "]")
             """{"col":${mapper.writeValueAsString(col)},"query":$qArr,"weight":$w,"dim":0}"""
         }
         val partJson = if (partitionFilter != null) ""","partition_filter":${mapper.writeValueAsString(partitionFilter)}""" else ""
         val requestJson = mapper.writeValueAsString(
-            mapOf("warehouse" to tableUri, "namespace" to "default", "table" to "table",
+            mapOf("warehouse" to tableUri, "namespace" to namespace, "table" to effectiveTable,
                   "top_k" to topK)
         ).dropLast(1) + ""","queries":$queriesJson$partJson}"""
 
@@ -363,14 +408,28 @@ object AilakeNative {
     /**
      * Run a vector search via the native library.
      *
-     * @param tableUri    path/URI of the AI-Lake table root
-     * @param queryBytes  Base64-encoded little-endian f32 array
-     * @param topK        number of nearest neighbors
+     * @param tableUri       path/URI of the AI-Lake table root
+     * @param queryBytes     Base64-encoded little-endian f32 array
+     * @param topK           number of nearest neighbors
+     * @param hybridText     when non-null, enables hybrid BM25+vector RRF fusion
+     * @param textColumn     Parquet column for BM25 scoring (default "chunk_text")
+     * @param bm25Weight     BM25 weight in RRF (0.0 = pure vector, 1.0 = pure BM25)
      */
-    fun search(tableUri: String, queryBytes: String, topK: Int, partitionFilter: String? = null): List<SearchRow> {
+    fun search(
+        tableUri: String,
+        queryBytes: String,
+        topK: Int,
+        partitionFilter: String? = null,
+        hybridText: String? = null,
+        textColumn: String = "chunk_text",
+        bm25Weight: Float = 0.5f,
+        namespace: String = "default",
+        tableName: String = "",
+    ): List<SearchRow> {
         val native = lib ?: return emptyList()
         if (queryBytes.isBlank()) return emptyList()
 
+        val effectiveTable = tableName.ifBlank { tableUri.trimEnd('/').substringAfterLast('/') }
         val floats = runCatching {
             val bytes = Base64.getDecoder().decode(queryBytes)
             val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
@@ -383,13 +442,18 @@ object AilakeNative {
 
         val payload = mutableMapOf<String, Any>(
             "warehouse" to tableUri,
-            "namespace" to "default",
-            "table" to "table",
+            "namespace" to namespace,
+            "table" to effectiveTable,
             "query" to floats,
             "dim" to floats.size,
             "top_k" to topK,
         )
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        if (hybridText != null) {
+            payload["hybrid_text"]  = hybridText
+            payload["text_column"]  = textColumn
+            payload["bm25_weight"]  = bm25Weight
+        }
         val requestJson = mapper.writeValueAsString(payload)
 
         val ptr = native.ailake_search_json(requestJson) ?: run {
@@ -415,6 +479,54 @@ object AilakeNative {
         } catch (e: Exception) {
             log.error("[ailake] Failed to parse native search response for tableUri={}: {}", tableUri, e.message, e)
             emptyList()
+        } finally {
+            runCatching { native.ailake_free_string(ptr) }
+        }
+    }
+
+    /**
+     * Compact small files in an AI-Lake table.
+     *
+     * @return number of files compacted (0 = nothing to compact), or null when the library is absent.
+     */
+    fun compact(
+        tableUri: String,
+        namespace: String,
+        tableName: String,
+        minFiles: Int = 4,
+        targetSizeBytes: Long = 128L * 1024 * 1024,
+        maxFilesPerPass: Int = 20,
+        deferred: Boolean = false,
+    ): Int? {
+        val native = lib ?: return null
+        val payload = mutableMapOf<String, Any>(
+            "warehouse"          to tableUri,
+            "namespace"          to namespace,
+            "table"              to tableName,
+            "min_files"          to minFiles,
+            "target_size_bytes"  to targetSizeBytes,
+            "max_files_per_pass" to maxFilesPerPass,
+        )
+        if (deferred) payload["deferred"] = true
+        val requestJson = mapper.writeValueAsString(payload)
+
+        val ptr = native.ailake_compact_json(requestJson) ?: run {
+            log.warn("[ailake] ailake_compact_json returned null for table={}.{}", namespace, tableName)
+            return null
+        }
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) {
+                log.warn("[ailake] compact ok=false for table={}.{}: {}", namespace, tableName, resp["error"])
+                return null
+            }
+            val n = (resp["files_compacted"] as? Number)?.toInt() ?: 0
+            log.info("[ailake] compact OK table={}.{} files_compacted={}", namespace, tableName, n)
+            n
+        } catch (e: Exception) {
+            log.error("[ailake] Failed to parse compact response for table={}.{}: {}", namespace, tableName, e.message, e)
+            null
         } finally {
             runCatching { native.ailake_free_string(ptr) }
         }

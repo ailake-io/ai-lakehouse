@@ -83,7 +83,7 @@ class AilakeWriteBatchIntegrationTest {
             qRaw.joinToString(",") { (it / norm).toString() }
         )
 
-        val results = AilakeNative.search(tableUri, queryBytes, topK = 3)
+        val results = AilakeNative.search(tableUri, queryBytes, topK = 3, tableName = "table")
         check(results.isNotEmpty()) { "search after write returned empty results" }
         val best = results.minByOrNull { it.distance }!!
         check(best.rowId == queryIdx.toLong()) {

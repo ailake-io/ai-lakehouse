@@ -98,6 +98,18 @@ class AilakeDestinationConfig:
     fts_tokenizer: str = "default"
     """Tantivy tokenizer name.  ``"default"`` (whitespace + lowercase) in most cases."""
 
+    # --- HNSW tuning ---
+    hnsw_m: int | None = None
+    """HNSW M parameter (graph connectivity). ``None`` = use table default."""
+
+    hnsw_ef_construction: int | None = None
+    """HNSW ef_construction. ``None`` = use table default."""
+
+    # --- Async index build ---
+    deferred: bool = False
+    """Build HNSW/IVF-PQ index asynchronously. Parquet committed immediately (~200k vec/s);
+    index attached in background. ``IndexStatus`` transitions ``Indexing → Ready``."""
+
     @classmethod
     def from_dict(cls, raw: dict) -> "AilakeDestinationConfig":
         embed_mode = raw.get("embed_mode", "cmd")
@@ -132,6 +144,9 @@ class AilakeDestinationConfig:
             format_version=int(raw.get("format_version", 2)),
             fts_columns=raw.get("fts_columns", []),
             fts_tokenizer=raw.get("fts_tokenizer", "default"),
+            hnsw_m=int(raw["hnsw_m"]) if raw.get("hnsw_m") is not None else None,
+            hnsw_ef_construction=int(raw["hnsw_ef_construction"]) if raw.get("hnsw_ef_construction") is not None else None,
+            deferred=bool(raw.get("deferred", False)),
         )
 
     def validate(self) -> list[str]:

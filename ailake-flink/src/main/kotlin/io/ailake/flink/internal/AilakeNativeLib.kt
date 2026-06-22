@@ -21,22 +21,23 @@ interface AilakeNativeLib : Library {
      * Perform ANN vector search via a JSON request envelope.
      *
      * Request JSON fields:
-     *   warehouse         (String)  warehouse root path
-     *   namespace         (String)  Iceberg namespace, default "default"
-     *   table             (String)  table name
-     *   vec_col           (String)  vector column name, default "embedding"
-     *   dim               (Int)     vector dimensionality
-     *   query             (Float[]) query vector as JSON float array
-     *   top_k             (Int)     default 10
-     *   ef_search         (Int)     default 50
-     *   partition_filter  (String?) optional — restrict search to files where partition value matches
-     *   hybrid_text       (String?) optional — enables BM25+vector hybrid when non-empty
-     *   text_column       (String?) optional — Parquet column for BM25, default "chunk_text"
-     *   bm25_weight       (Float?)  optional — BM25 weight in RRF fusion, default 0.5
+     *   warehouse          (String)  warehouse root path
+     *   namespace          (String)  Iceberg namespace, default "default"
+     *   table              (String)  table name
+     *   vec_col            (String)  vector column name, default "embedding"
+     *   dim                (Int)     vector dimensionality
+     *   query              (Float[]) query vector as JSON float array
+     *   top_k              (Int)     default 10
+     *   ef_search          (Int)     HNSW ef_search beam width, default 50
+     *   pruning_threshold  (Float?)  optional — geometric file pruning threshold; omit to scan all files
+     *   partition_filter   (String?) optional — restrict search to files where partition value matches
+     *   hybrid_text        (String?) optional — enables BM25+vector hybrid when non-empty
+     *   text_column        (String?) optional — Parquet column for BM25, default "chunk_text"
+     *   bm25_weight        (Float?)  optional — BM25 weight in RRF fusion, default 0.5
      *
      * Response JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
      */
-    fun ailake_search_json(requestJson: String): Pointer
+    fun ailake_search_json(requestJson: String): Pointer?
 
     /**
      * Write a batch of records to an AI-Lake table.
@@ -59,10 +60,15 @@ interface AilakeNativeLib : Library {
      *   fts_columns       (String[]?) optional — text columns to embed as Tantivy FTS index;
      *                                 empty/absent = no FTS (zero overhead)
      *   fts_tokenizer     (String?)   optional — Tantivy tokenizer, default "default"
+     *   columns           (Object?)   optional — actual text content for FTS indexing;
+     *                                 map from column name to per-row string values,
+     *                                 e.g. `{"chunk_text":["row0 text","row1 text",...]}`.
+     *                                 Required when fts_columns is non-empty, otherwise the
+     *                                 Tantivy index will be built with empty documents.
      *
      * Response JSON: `{"ok":true,"snapshot_id":N}` or `{"ok":false,"error":"..."}`
      */
-    fun ailake_write_batch_json(requestJson: String): Pointer
+    fun ailake_write_batch_json(requestJson: String): Pointer?
 
     /**
      * Cross-modal RRF search across multiple vector columns.
@@ -77,18 +83,21 @@ interface AilakeNativeLib : Library {
      *
      * Response JSON: `{"ok":true,"results":[{"row_id":N,"rrf_score":F,"file_path":"..."}]}`
      */
-    fun ailake_search_multimodal_json(requestJson: String): Pointer
+    fun ailake_search_multimodal_json(requestJson: String): Pointer?
 
     /**
      * Low-level search: f32 pointer + length variant.  Prefer [ailake_search_json] for
-     * JVM callers.  Returns JSON array `[{"row_id":N,"distance":F,"file_path":"..."}]`.
+     * JVM callers.
+     *
+     * Response JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
+     * or `{"ok":false,"error":"..."}` on failure.
      */
     fun ailake_vector_search_json(
         tableUri: String,
         queryPtr: Pointer,
         queryLen: Int,
         topK: Int,
-    ): Pointer
+    ): Pointer?
 
     /**
      * Pure BM25 full-text search (no embedding required).
@@ -106,7 +115,7 @@ interface AilakeNativeLib : Library {
      * Response JSON: `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`
      * where distance = negated BM25 score (lower = more relevant).
      */
-    fun ailake_search_text_json(requestJson: String): Pointer
+    fun ailake_search_text_json(requestJson: String): Pointer?
 
     /**
      * Logically delete rows matching a column equality predicate.
@@ -120,7 +129,7 @@ interface AilakeNativeLib : Library {
      *
      * Response JSON: `{"ok":true}` or `{"ok":false,"error":"..."}`
      */
-    fun ailake_delete_where_json(requestJson: String): Pointer
+    fun ailake_delete_where_json(requestJson: String): Pointer?
 
     /**
      * Apply a metadata-only schema evolution to the table.
@@ -134,8 +143,24 @@ interface AilakeNativeLib : Library {
      *
      * Response JSON: `{"ok":true,"new_schema_id":N}` or `{"ok":false,"error":"..."}`
      */
-    fun ailake_evolve_schema_json(requestJson: String): Pointer
+    fun ailake_evolve_schema_json(requestJson: String): Pointer?
+
+    /**
+     * Compact small files in an AI-Lake table into a larger merged file.
+     *
+     * Request JSON fields:
+     *   warehouse          (String)  warehouse root path
+     *   namespace          (String)  Iceberg namespace, default "default"
+     *   table              (String)  table name
+     *   min_files          (Int?)    minimum eligible files to trigger compaction, default 4
+     *   target_size_bytes  (Long?)   files smaller than this are candidates, default 128 MiB
+     *   max_files_per_pass (Int?)    max files merged per run, default 20
+     *   deferred           (Bool?)   build index in background when true, default false
+     *
+     * Response JSON: `{"ok":true,"files_compacted":N}` or `{"ok":false,"error":"..."}`
+     */
+    fun ailake_compact_json(requestJson: String): Pointer?
 
     /** Free a string pointer returned by any ailake_* function. */
-    fun ailake_free_string(ptr: Pointer)
+    fun ailake_free_string(ptr: Pointer?)
 }

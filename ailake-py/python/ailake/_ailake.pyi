@@ -223,6 +223,8 @@ def search(
     hybrid_text: Optional[str] = None,
     text_column: str = "chunk_text",
     bm25_weight: float = 0.5,
+    pruning_threshold: Optional[float] = None,
+    ef_search: Optional[int] = None,
 ) -> list[dict[str, object]]:
     """Search a table for the top-*k* nearest vectors to *query*.
 
@@ -608,13 +610,16 @@ class Agent:
     def __exit__(self, *_: Any) -> None: ...
 
 def delete_where(path: str, column: str, values: list[str]) -> None: ...
+def delete_rows(table_path: str, file_path: str, row_ids: list[int]) -> None: ...
+def now_ns() -> int: ...
 def add_column(
     path: str,
     name: str,
     col_type: str,
-    *,
     required: bool = False,
-    initial_default: Optional[str] = None,
+    initial_default: Optional[object] = None,
+    write_default: Optional[object] = None,
+    doc: Optional[str] = None,
 ) -> int: ...
 def rename_column(path: str, old_name: str, new_name: str) -> int: ...
 def hardware_info() -> dict[str, str]: ...

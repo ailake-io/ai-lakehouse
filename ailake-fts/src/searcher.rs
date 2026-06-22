@@ -22,10 +22,20 @@ pub struct FtsSearcher {
 
 impl FtsSearcher {
     /// Deserialize a blob (produced by `build_fts_blob_from_batch`) and open it for search.
+    ///
+    /// The same custom tokenizers registered at write time (`cjk_ngram`, and language stemmers
+    /// when `fts-stemmer-langs` is enabled) are re-registered here so query parsing uses the
+    /// identical analyzer pipeline and term frequencies match.
     pub fn from_blob(blob: &[u8]) -> AilakeResult<Self> {
         let dir = crate::blob::blob_to_ram_dir(blob)?;
         let index =
             tantivy::Index::open(dir).map_err(|e| AilakeError::Fts(format!("open index: {e}")))?;
+
+        // Re-register custom tokenizers — query parser needs same pipeline as index time.
+        crate::tokenizers::register_cjk_ngram(&index)?;
+        #[cfg(feature = "fts-stemmer-langs")]
+        crate::tokenizers::register_stemmer_langs(&index);
+
         let reader = index
             .reader()
             .map_err(|e| AilakeError::Fts(format!("reader: {e}")))?;

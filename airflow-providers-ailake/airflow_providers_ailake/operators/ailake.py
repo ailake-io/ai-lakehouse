@@ -29,6 +29,10 @@ class AilakeWriteOperator(BaseOperator):
     :param fts_columns: Text columns to index with Tantivy FTS (e.g. ``["chunk_text"]``).
         Empty or ``None`` disables FTS (default).
     :param fts_tokenizer: Tantivy tokenizer name (default ``"default"``).
+    :param hnsw_m: HNSW graph connectivity (M). ``None`` = use table default.
+    :param hnsw_ef_construction: HNSW ef_construction. ``None`` = use table default.
+    :param pre_normalize: Normalize vectors to unit L2 at write time (recommended for cosine).
+    :param deferred: Build index asynchronously. Parquet committed immediately.
     :param ailake_conn_id: Airflow connection id (conn_type="ailake").
     """
 
@@ -48,6 +52,10 @@ class AilakeWriteOperator(BaseOperator):
         format_version: int = 2,
         fts_columns: list[str] | None = None,
         fts_tokenizer: str = "default",
+        hnsw_m: int | None = None,
+        hnsw_ef_construction: int | None = None,
+        pre_normalize: bool = False,
+        deferred: bool = False,
         ailake_conn_id: str = AilakeHook.default_conn_name,
         **kwargs: Any,
     ) -> None:
@@ -62,6 +70,10 @@ class AilakeWriteOperator(BaseOperator):
         self.format_version = format_version
         self.fts_columns = fts_columns or []
         self.fts_tokenizer = fts_tokenizer
+        self.hnsw_m = hnsw_m
+        self.hnsw_ef_construction = hnsw_ef_construction
+        self.pre_normalize = pre_normalize
+        self.deferred = deferred
         self.ailake_conn_id = ailake_conn_id
 
     def execute(self, context: Context) -> None:
@@ -91,6 +103,14 @@ class AilakeWriteOperator(BaseOperator):
             extra_args += ["--fts-columns", ",".join(self.fts_columns)]
             if self.fts_tokenizer != "default":
                 extra_args += ["--fts-tokenizer", self.fts_tokenizer]
+        if self.hnsw_m is not None:
+            extra_args += ["--hnsw-m", str(self.hnsw_m)]
+        if self.hnsw_ef_construction is not None:
+            extra_args += ["--hnsw-ef", str(self.hnsw_ef_construction)]
+        if self.pre_normalize:
+            extra_args += ["--pre-normalize"]
+        if self.deferred:
+            extra_args += ["--deferred"]
 
         result = hook.run_cli(
             "insert",
@@ -159,6 +179,10 @@ class AilakeSearchOperator(BaseOperator):
     :param query_xcom_key: XCom key (default ``"return_value"``).
     :param top_k: Number of nearest neighbours (default 10).
     :param pruning_threshold: Geometric pruning threshold 0–1 (default 0.8).
+    :param hybrid_text: When set, enables hybrid BM25+vector RRF fusion. The text is scored
+        against ``text_column`` with BM25 and fused with vector results via RRF.
+    :param text_column: Parquet column for BM25 scoring (default ``"chunk_text"``).
+    :param bm25_weight: BM25 weight in RRF (0.0 = pure vector, 1.0 = pure BM25, default 0.5).
     :param ailake_conn_id: Airflow connection id.
     """
 
@@ -175,6 +199,9 @@ class AilakeSearchOperator(BaseOperator):
         top_k: int = 10,
         pruning_threshold: float = 0.8,
         partition_filter: str | None = None,
+        hybrid_text: str | None = None,
+        text_column: str = "chunk_text",
+        bm25_weight: float = 0.5,
         ailake_conn_id: str = AilakeHook.default_conn_name,
         **kwargs: Any,
     ) -> None:
@@ -186,6 +213,9 @@ class AilakeSearchOperator(BaseOperator):
         self.top_k = top_k
         self.pruning_threshold = pruning_threshold
         self.partition_filter = partition_filter
+        self.hybrid_text = hybrid_text
+        self.text_column = text_column
+        self.bm25_weight = bm25_weight
         self.ailake_conn_id = ailake_conn_id
 
     def execute(self, context: Context) -> list[dict[str, Any]]:
@@ -211,6 +241,9 @@ class AilakeSearchOperator(BaseOperator):
             top_k=self.top_k,
             pruning_threshold=self.pruning_threshold,
             partition_filter=self.partition_filter,
+            hybrid_text=self.hybrid_text,
+            text_column=self.text_column,
+            bm25_weight=self.bm25_weight,
         )
         self.log.info("search returned %d results", len(results))
         return results

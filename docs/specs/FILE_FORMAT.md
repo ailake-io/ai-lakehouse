@@ -31,7 +31,8 @@ block-beta
   B["Parquet row groups\n(tabular columns + vector column as FIXED_LEN_BYTE_ARRAY)\n← Parquet footer row-group offsets point here"]
   C["AILK section — primary vector column\n  64-byte AILK header\n  centroid blob  (dim × 4 bytes F32 + 4-byte radius F32)\n  index blob  (HNSW via bincode  OR  IVF-PQ via bincode)\n  24-byte AILK trailer"]
   D["AILK section — secondary vector column (optional, repeating)\n  (same structure as above)"]
-  E["Parquet footer\n  KV: ailake.footer_offset = <primary AILK byte offset>\n  KV: ailake.<col>.footer_offset = <secondary AILK byte offset>\n  4-byte footer length (LE u32)\nPAR1 — Parquet magic (4 bytes)  ← EOF"]
+  F["AILK_FTS section (optional)\n  magic: AFTS (4 bytes)\n  version: 1 (2 bytes LE)\n  reserved (2 bytes)\n  blob_len (8 bytes LE)\n  Tantivy index blob (zstd, blob_len bytes)"]
+  E["Parquet footer\n  KV: ailake.footer_offset = <primary AILK byte offset>\n  KV: ailake.<col>.footer_offset = <secondary AILK byte offset>\n  KV: ailake.fts_offset = <AILK_FTS byte offset> (optional)\n  4-byte footer length (LE u32)\nPAR1 — Parquet magic (4 bytes)  ← EOF"]
 ```
 
 ```
@@ -54,11 +55,20 @@ Byte 0
 │  AILK section — secondary vector column (optional, repeating)   │
 │    (same structure as above)                                    │
 ├─────────────────────────────────────────────────────────────────┤
+│  AILK_FTS section (optional — present only when FTS enabled)    │
+│    4 bytes:  magic  "AFTS" (0x41 0x46 0x54 0x53)               │
+│    2 bytes:  version (LE u16) — must be 1                       │
+│    2 bytes:  reserved — must be 0                               │
+│    8 bytes:  blob_len (LE u64) — byte length of index blob      │
+│    N bytes:  Tantivy index blob (zstd-compressed)               │
+├─────────────────────────────────────────────────────────────────┤
 │  Parquet footer (schema, row-group metadata, KV metadata)       │
 │    KV entry:  ailake.footer_offset = <decimal byte offset of    │
 │               primary AILK section>                             │
 │    KV entry:  ailake.<col>.footer_offset = <decimal byte offset>│
 │               (one per secondary column)                        │
+│    KV entry:  ailake.fts_offset = <decimal byte offset of       │
+│               AILK_FTS section> (absent when no FTS)            │
 │  4-byte footer length (little-endian u32)                       │
 │  Parquet magic (4 bytes)  "PAR1"                                │
 └─────────────────────────────────────────────────────────────────┘
@@ -261,7 +271,46 @@ caller explicitly calls `writer.with_ivf_pq(IvfPqConfig)`).
 
 ---
 
-## 7. Vector Column Encoding (Parquet)
+## 7. AILK_FTS Section (optional, Phase T)
+
+Present when the writer was configured with `FtsConfig` (i.e. `with_fts_config()`
+in Rust or `fts_text_columns=` in Python). Absent in all legacy files — readers
+MUST check `ailake.fts_offset` KV before attempting to read this section.
+
+**Fallback**: files without an FTS section still support full-text search via
+BM25 brute-force O(N) scan. Tantivy O(log N) fast path requires this section.
+
+### AILK_FTS Header (16 bytes)
+
+Located at the absolute byte offset stored in Parquet KV `ailake.fts_offset`.
+
+| Offset | Size | Type  | Field       | Description |
+|--------|------|-------|-------------|-------------|
+| 0      | 4    | bytes | `magic`     | `AFTS` (0x41 0x46 0x54 0x53) |
+| 4      | 2    | u16   | `version`   | Must be `1` for this spec |
+| 6      | 2    | —     | reserved    | Must be `0` |
+| 8      | 8    | u64   | `blob_len`  | Byte length of Tantivy index blob immediately following |
+
+### AILK_FTS Blob
+
+Immediately follows the 16-byte header. `blob_len` bytes of a
+**zstd-compressed Tantivy index** serialized by `ailake-fts::FtsBlob`.
+
+Index options: `IndexRecordOption::WithFreqs` (term positions omitted to save
+storage — roughly 3–4 MB per 50 k docs at ~200 bytes average text). No stored
+fields (document text is not re-stored in the index; it lives in the Parquet
+column). Use the Parquet column for display after search.
+
+```rust
+// Reading (ailake-fts public API)
+let blob: &[u8] = &file_bytes[fts_abs + 16..fts_abs + 16 + blob_len as usize];
+let results = ailake_fts::search_blob(blob, "rust async", top_k)?;
+// results: Vec<FtsHit { row_id: u64, score: f32 }>
+```
+
+---
+
+## 8. Vector Column Encoding (Parquet)
 
 The vector column is stored as `FIXED_LEN_BYTE_ARRAY` in Parquet.
 
@@ -289,12 +338,13 @@ The Parquet column carries **field-level KV metadata**:
 | `ailake.format_version` | `1`        | Format version |
 | `ailake.footer_offset`  | `12582912` | Absolute byte offset of primary AILK section |
 | `ailake.<col>.footer_offset` | `...` | Offset for secondary column `<col>` |
+| `ailake.fts_offset`     | `14680064` | Absolute byte offset of AILK_FTS section (absent when no FTS) |
 
 All KV values are UTF-8 decimal strings (no quoting, no JSON encoding).
 
 ---
 
-## 8. Catalog Metadata (Iceberg)
+## 9. Catalog Metadata (Iceberg)
 
 AI-Lake tables are managed by an Iceberg Spec v2 catalog
 (`metadata/current.json` + per-snapshot manifests).

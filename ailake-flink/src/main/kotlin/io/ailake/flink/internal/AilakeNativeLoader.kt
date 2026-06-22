@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.flink.internal
 
+import com.fasterxml.jackson.databind.JsonNode
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -24,6 +25,8 @@ object AilakeNativeLoader {
     private val log = LoggerFactory.getLogger(AilakeNativeLoader::class.java)
     private val mapper = jacksonObjectMapper()
 
+    private const val AILAKE_EXPECTED_MAJOR = "0"
+
     val lib: AilakeNativeLib by lazy {
         val explicitPath =
             System.getProperty("ailake.native.lib")
@@ -35,9 +38,18 @@ object AilakeNativeLoader {
             } else {
                 Native.load("ailake_jni", AilakeNativeLib::class.java)
             }
-        }.onSuccess {
-            log.info("[ailake] Native library libailake_jni loaded (path={})",
-                explicitPath ?: "JNA default search path")
+        }.onSuccess { native ->
+            val v = native.ailake_version()
+            val major = v.substringBefore('.')
+            if (major != AILAKE_EXPECTED_MAJOR)
+                log.warn(
+                    "[ailake] Version mismatch: loaded ailake-jni {} but expected major {}. " +
+                    "Search results may be incorrect.",
+                    v, AILAKE_EXPECTED_MAJOR
+                )
+            else
+                log.info("[ailake] Native library libailake_jni {} loaded (path={})",
+                    v, explicitPath ?: "JNA default search path")
         }.onFailure {
             log.error(
                 "[ailake] Failed to load native library libailake_jni (path={}). " +
@@ -97,6 +109,7 @@ object AilakeNativeLoader {
         }
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_json(req)
+            ?: throw RuntimeException("ailake_search_json returned null for table=$namespace.$table")
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<SearchResponse>(json)
@@ -133,6 +146,7 @@ object AilakeNativeLoader {
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_text_json(req)
+            ?: throw RuntimeException("ailake_search_text_json returned null for table=$namespace.$table")
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<SearchResponse>(json)
@@ -189,6 +203,7 @@ object AilakeNativeLoader {
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_multimodal_json(req)
+            ?: throw RuntimeException("ailake_search_multimodal_json returned null for table=$namespace.$table")
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<MultimodalSearchResponse>(json)
@@ -233,10 +248,16 @@ object AilakeNativeLoader {
     /**
      * Write a batch of records to an AI-Lake table.
      *
-     * @param partitionFields  multi-column partition spec (Phase K); empty = single-value partition_by/partition_value
-     * @param formatVersion    Iceberg format version; 2 (default) or 3
-     * @param ftsColumns       text columns to embed as Tantivy FTS index; empty = no FTS (default)
-     * @param ftsTokenizer     Tantivy tokenizer name; default "default"
+     * @param partitionFields      multi-column partition spec (Phase K); empty = single-value partition_by/partition_value
+     * @param formatVersion        Iceberg format version; 2 (default) or 3
+     * @param ftsColumns           text columns to embed as Tantivy FTS index; empty = no FTS (default)
+     * @param ftsTokenizer         Tantivy tokenizer name; default "default"
+     * @param hnswM                HNSW graph connectivity (M). null = use table default.
+     * @param hnswEfConstruction   HNSW ef_construction. null = use table default.
+     * @param preNormalize         Normalize vectors to unit L2 at write time (recommended for cosine).
+     * @param deferred             Build index asynchronously. Parquet committed immediately.
+     * @param columns              Extra string columns sent with the batch for FTS indexing.
+     *                             Map from column name to per-row string values.
      */
     fun writeBatch(
         warehouse: String,
@@ -255,6 +276,11 @@ object AilakeNativeLoader {
         formatVersion: Int = 2,
         ftsColumns: List<String> = emptyList(),
         ftsTokenizer: String = "default",
+        hnswM: Int? = null,
+        hnswEfConstruction: Int? = null,
+        preNormalize: Boolean = false,
+        deferred: Boolean = false,
+        columns: Map<String, List<String>> = emptyMap(),
     ): Long {
         require(ids.size == embeddings.size) { "ids.size != embeddings.size" }
         val payload = mutableMapOf<String, Any>(
@@ -281,8 +307,14 @@ object AilakeNativeLoader {
             payload["fts_columns"]   = ftsColumns
             payload["fts_tokenizer"] = ftsTokenizer
         }
+        if (hnswM != null)              payload["hnsw_m"]              = hnswM
+        if (hnswEfConstruction != null) payload["hnsw_ef_construction"] = hnswEfConstruction
+        if (preNormalize)               payload["pre_normalize"]        = true
+        if (deferred)                   payload["deferred"]             = true
+        if (columns.isNotEmpty())       payload["columns"]              = columns
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_write_batch_json(req)
+            ?: throw RuntimeException("ailake_write_batch_json returned null for table=$namespace.$table")
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<WriteResponse>(json)
@@ -318,6 +350,7 @@ object AilakeNativeLoader {
         )
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_delete_where_json(req)
+            ?: throw RuntimeException("ailake_delete_where_json returned null for table=$namespace.$table")
         try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<DeleteWhereResponse>(json)
@@ -349,18 +382,36 @@ object AilakeNativeLoader {
         require(addCols.isNotEmpty() || renameCols.isNotEmpty()) {
             "at least one of addCols or renameCols must be non-empty"
         }
-        // Build JSON manually for add_columns so initial_default is embedded as raw JSON literal.
-        val addJson = addCols.joinToString(",", "[", "]") { ac ->
-            val defPart = if (ac.initialDefault != null) ""","initial_default":${ac.initialDefault}""" else ""
-            """{"name":${mapper.writeValueAsString(ac.name)},"type":${mapper.writeValueAsString(ac.colType)}$defPart}"""
+        val rootNode = mapper.createObjectNode()
+        rootNode.put("warehouse", warehouse)
+        rootNode.put("namespace", namespace)
+        rootNode.put("table", table)
+
+        val addArray = mapper.createArrayNode()
+        for (ac in addCols) {
+            val colNode = mapper.createObjectNode()
+            colNode.put("name", ac.name)
+            colNode.put("type", ac.colType)
+            if (ac.initialDefault != null) {
+                // parse as raw JSON so null/0/0.0/"string" embed correctly without re-quoting
+                colNode.set<JsonNode>("initial_default", mapper.readTree(ac.initialDefault))
+            }
+            addArray.add(colNode)
         }
-        val renJson = mapper.writeValueAsString(renameCols.map { rc -> mapOf("from" to rc.from, "to" to rc.to) })
-        val baseJson = mapper.writeValueAsString(
-            mapOf("warehouse" to warehouse, "namespace" to namespace, "table" to table)
-        ).dropLast(1)
-        val req = "$baseJson,\"add_columns\":$addJson,\"rename_columns\":$renJson}"
+        rootNode.set<JsonNode>("add_columns", addArray)
+
+        val renArray = mapper.createArrayNode()
+        for (rc in renameCols) {
+            val renNode = mapper.createObjectNode()
+            renNode.put("from", rc.from)
+            renNode.put("to", rc.to)
+            renArray.add(renNode)
+        }
+        rootNode.set<JsonNode>("rename_columns", renArray)
+        val req = mapper.writeValueAsString(rootNode)
 
         val ptr = lib.ailake_evolve_schema_json(req)
+            ?: throw RuntimeException("ailake_evolve_schema_json returned null for table=$namespace.$table")
         return try {
             val json = ptr.getString(0)
             val resp = mapper.readValue<EvolveSchemaResponse>(json)
@@ -370,6 +421,53 @@ object AilakeNativeLoader {
             }
             log.info("[ailake] evolveSchema OK table={}.{} new_schema_id={}", namespace, table, resp.new_schema_id)
             resp.new_schema_id
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    /**
+     * Compact small files in an AI-Lake table.
+     *
+     * @param minFiles          minimum eligible files to trigger compaction (default 4)
+     * @param targetSizeBytes   files smaller than this are candidates (default 128 MiB)
+     * @param maxFilesPerPass   max files merged per run (default 20)
+     * @param deferred          build index in background when true (default false)
+     * @return number of files compacted (0 when nothing to compact)
+     */
+    fun compact(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        minFiles: Int = 4,
+        targetSizeBytes: Long = 128L * 1024 * 1024,
+        maxFilesPerPass: Int = 20,
+        deferred: Boolean = false,
+    ): Int {
+        val payload = mutableMapOf<String, Any>(
+            "warehouse"    to warehouse,
+            "namespace"    to namespace,
+            "table"        to table,
+            "min_files"    to minFiles,
+            "target_size_bytes"  to targetSizeBytes,
+            "max_files_per_pass" to maxFilesPerPass,
+        )
+        if (deferred) payload["deferred"] = true
+        val req = mapper.writeValueAsString(payload)
+
+        val ptr = lib.ailake_compact_json(req)
+            ?: throw RuntimeException("ailake_compact_json returned null for table=$namespace.$table")
+        return try {
+            val json = ptr.getString(0)
+            @Suppress("UNCHECKED_CAST")
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) {
+                log.error("[ailake] compact failed for table={}.{}: {}", namespace, table, resp["error"])
+                throw RuntimeException("ailake_compact_json error: ${resp["error"]}")
+            }
+            val n = (resp["files_compacted"] as? Number)?.toInt() ?: 0
+            log.info("[ailake] compact OK table={}.{} files_compacted={}", namespace, table, n)
+            n
         } finally {
             lib.ailake_free_string(ptr)
         }

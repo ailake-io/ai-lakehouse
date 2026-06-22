@@ -299,6 +299,26 @@ ailake::evolve_schema(
 
 Both functions invoke the `ailake` binary via `resolve_bin()` (respects `AILAKE_BIN` env var) and parse the JSON response. An empty `values` list in `delete_where` is a no-op.
 
+### `ailake::search_text`
+
+```cpp
+#include <ailake/ailake.hpp>   // included via ailake.hpp umbrella
+
+// Full-text search (Tantivy O(log N) when FTS index present; BM25 brute-force fallback)
+std::vector<ailake::FtsResult> hits = ailake::search_text(
+    catalog,                        // HadoopCatalog
+    "default",                      // namespace
+    "my_table",                     // table
+    "rust programming async",       // query text
+    {"chunk_text", "document_title"}, // text columns (default: ["chunk_text"])
+    20                              // top_k (default: 10)
+);
+// FtsResult: { int64_t row_id; double score; std::string file_path; }
+// score is BM25 (higher = more relevant)
+```
+
+Binary resolution same as `delete_where` / `evolve_schema` — throws `std::runtime_error` when no binary is found.
+
 ## Low-level index access
 
 ### HNSW
