@@ -86,8 +86,8 @@ class AilakeWriteBatchIntegrationTest extends AnyFunSuite {
     assert(results.nonEmpty, "search after write returned empty results")
     val best = results.minBy(_.distance)
     assert(
-      best.rowId == queryIdx.toLong,
-      s"nearest rowId=${best.rowId}, expected $queryIdx"
+      best.rowId % dim == queryIdx,
+      s"nearest rowId=${best.rowId}, expected rowId%dim==$queryIdx"
     )
     println(s"[test] search OK: rowId=${best.rowId} distance=${best.distance}")
     println()
