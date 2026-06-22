@@ -161,7 +161,10 @@ impl MemoryDecayJob {
                 };
                 let mut col_batches: Vec<VectorColumnBatch<'_>> = vec![primary_col];
                 for (policy, (_, _, embs)) in extra_policies.iter().zip(extra_embeddings.iter()) {
-                    col_batches.push(VectorColumnBatch { policy, embeddings: embs });
+                    col_batches.push(VectorColumnBatch {
+                        policy,
+                        embeddings: embs,
+                    });
                 }
                 file_writer.write_multi(&updated_batch, &col_batches)?
             };

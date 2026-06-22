@@ -496,8 +496,11 @@ pub async fn search(
         let vec_ranks: Vec<usize> = (0..n).collect();
 
         // Rank by BM25 score descending using post-sort aligned scores.
-        let mut bm25_indexed: Vec<(usize, f32)> =
-            candidates_with_bm25.iter().map(|(_, b)| *b).enumerate().collect();
+        let mut bm25_indexed: Vec<(usize, f32)> = candidates_with_bm25
+            .iter()
+            .map(|(_, b)| *b)
+            .enumerate()
+            .collect();
         bm25_indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut bm25_rank_of = vec![0usize; n];
         for (rank, (idx, _)) in bm25_indexed.iter().enumerate() {

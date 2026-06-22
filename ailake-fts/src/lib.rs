@@ -153,7 +153,11 @@ mod tests {
     #[test]
     fn cjk_ngram_finds_japanese_substring() {
         // "人工知能" = artificial intelligence; "機械学習" = machine learning
-        let batch = make_batch(&["人工知能システム", "機械学習アルゴリズム", "rust programming"]);
+        let batch = make_batch(&[
+            "人工知能システム",
+            "機械学習アルゴリズム",
+            "rust programming",
+        ]);
         let cfg = FtsConfig {
             text_columns: vec!["body".to_string()],
             tokenizer: "cjk_ngram".to_string(),
@@ -181,10 +185,7 @@ mod tests {
     #[cfg(feature = "fts-stemmer-langs")]
     #[test]
     fn fr_stem_normalizes_french_words() {
-        let batch = make_batch(&[
-            "les ordinateurs sont rapides",
-            "le chien aboie dans la rue",
-        ]);
+        let batch = make_batch(&["les ordinateurs sont rapides", "le chien aboie dans la rue"]);
         let cfg = FtsConfig {
             text_columns: vec!["body".to_string()],
             tokenizer: "fr_stem".to_string(),
@@ -193,7 +194,10 @@ mod tests {
         let blob = build_fts_blob_from_batch(&cfg, &batch).unwrap();
         let searcher = FtsSearcher::from_blob(&blob).unwrap();
         let hits = searcher.search("ordinateur", 5).unwrap();
-        assert!(!hits.is_empty(), "fr_stem: singular must match plural via stem");
+        assert!(
+            !hits.is_empty(),
+            "fr_stem: singular must match plural via stem"
+        );
         assert_eq!(hits[0].row_id, 0);
     }
 
@@ -245,7 +249,10 @@ mod tests {
 
         // "the" is a stop word — must not be indexed → no hits
         let stop_hits = searcher.search("the", 5).unwrap();
-        assert!(stop_hits.is_empty(), "en_stop: 'the' is stop word, must return no hits");
+        assert!(
+            stop_hits.is_empty(),
+            "en_stop: 'the' is stop word, must return no hits"
+        );
 
         // "fox" must still match doc 0
         let hits = searcher.search("fox", 5).unwrap();
@@ -254,7 +261,10 @@ mod tests {
 
         // Stemming: "programming" → "program" → must match "rust programming"
         let hits2 = searcher.search("program", 5).unwrap();
-        assert!(!hits2.is_empty(), "en_stop: 'program' stem must match 'programming'");
+        assert!(
+            !hits2.is_empty(),
+            "en_stop: 'program' stem must match 'programming'"
+        );
         assert_eq!(hits2[0].row_id, 1);
     }
 

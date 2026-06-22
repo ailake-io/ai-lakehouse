@@ -234,7 +234,10 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     ) {
         Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
         Err(e) => {
-            warn!("ailake_vector_search_json: search failed table_uri={}: {}", uri, e);
+            warn!(
+                "ailake_vector_search_json: search failed table_uri={}: {}",
+                uri, e
+            );
             return cstr_err_json(e);
         }
     };
@@ -608,7 +611,9 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
             base
         };
         if deferred {
-            writer.write_batch_auto_deferred(&batch, &req.embeddings).await?;
+            writer
+                .write_batch_auto_deferred(&batch, &req.embeddings)
+                .await?;
         } else {
             writer.write_batch_auto(&batch, &req.embeddings).await?;
         }
@@ -1627,7 +1632,9 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
 
         let output_prefix = "data";
         if req.deferred {
-            executor.run_deferred(&planner, &table, catalog, output_prefix).await
+            executor
+                .run_deferred(&planner, &table, catalog, output_prefix)
+                .await
         } else {
             executor.run(&planner, &table, catalog, output_prefix).await
         }

@@ -42,9 +42,7 @@ impl FtsConfig {
     ///
     /// Returns `None` when `ailake.fts.enabled` is absent or not `"true"` — i.e. the
     /// table was created without FTS and no auto-rebuild should happen.
-    pub fn from_table_props(
-        props: &std::collections::HashMap<String, String>,
-    ) -> Option<Self> {
+    pub fn from_table_props(props: &std::collections::HashMap<String, String>) -> Option<Self> {
         if props.get("ailake.fts.enabled").map(|s| s.as_str()) != Some("true") {
             return None;
         }
@@ -158,8 +156,7 @@ mod tests {
 
     #[test]
     fn from_table_props_defaults_when_optional_keys_missing() {
-        let props: HashMap<String, String> =
-            [("ailake.fts.enabled".into(), "true".into())].into();
+        let props: HashMap<String, String> = [("ailake.fts.enabled".into(), "true".into())].into();
         let cfg = FtsConfig::from_table_props(&props).expect("should parse");
         assert_eq!(cfg.text_columns, vec!["chunk_text"]);
         assert_eq!(cfg.tokenizer, "default");

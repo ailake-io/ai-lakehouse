@@ -610,7 +610,9 @@ impl CompactionExecutor {
         let output_path = format!("{output_prefix}/compacted-{ts}.parquet");
 
         // Use incremental merge when a dominant file exists (falls back to full rebuild automatically).
-        let merged = executor.compact_incremental(&to_compact, &output_path).await?;
+        let merged = executor
+            .compact_incremental(&to_compact, &output_path)
+            .await?;
 
         // Commit: add merged file, remove input files (via Replace snapshot)
         let snapshot = NewSnapshot {
