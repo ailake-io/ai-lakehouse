@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (docs)
+
+- **Version strings** — all `0.0.20` references updated to `0.0.23` in `README.md`, `README.pt-BR.md`, and `ailake-py/README.md`.
+- **Repository layout** — `ailake-fts/` and `airbyte-destination-ailake/` added to layout sections in `README.md` and `README.pt-BR.md`.
+- **`docs/specs/FILE_FORMAT.md`** — §7 renamed from "Phase T" to "Phase 7 — Full-Text Search"; new §8.2 subsection documents `index_status` / `index_error` in `key_metadata` JSON with full status table and failure JSON example.
+- **`docs/specs/COMPACTION.md`** — new "Failed index recovery" subsection: explains `IndexStatus::Failed` lifecycle, flat-scan fallback, and automatic self-healing at next compaction run.
+- **`docs/architecture/DATA_FLOW.md`** — `IndexStatus` lifecycle updated to include `Failed` state, `patch_index_failed()` reference, and flat-scan fallback for both `Indexing` and `Failed` files.
+- **`ailake-py/README.md`** — added `search_text()` API doc (BM25 + Tantivy fast path); added `info()` API doc showing `index_status`/`index_error` per-file fields; added **Version: 0.0.23** to header.
+- **`ailake-go/README.md`** — `DataFileEntry.IndexStatus` comment updated to include `"failed"`; `IndexError string` field added.
+
 ### Changed (demo)
 
 - **Demo notebooks + init_demo.py updated to v0.0.23** — version strings updated from v0.0.20 in `01_ailake_demo.ipynb`, `09_hybrid_search.ipynb`, and `init_demo.py`.

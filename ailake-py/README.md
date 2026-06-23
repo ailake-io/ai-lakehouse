@@ -1,6 +1,6 @@
 # ailake — AI-Lake Format Python SDK
 
-Unified storage for tabular data, embeddings, and HNSW vector index in a single Parquet-compatible file. 100% Apache Iceberg Spec v2 compatible.
+**Version**: 0.0.23 — Unified storage for tabular data, embeddings, and HNSW vector index in a single Parquet-compatible file. 100% Apache Iceberg Spec v2 compatible.
 
 ## Install
 
@@ -435,6 +435,33 @@ ts = ailake.now_ns()   # e.g. 1750000000000000000
 ### `delete_rows(path, file_path, row_ids) → None`
 
 Low-level Rust binding: physically removes rows from a specific Parquet file within the table, rebuilding the HNSW index. For logical Iceberg deletes (no file rewrite), use `delete_where` instead.
+
+### `search_text(path, query_text, top_k=10, text_columns=None) → list[dict]`
+
+Pure BM25 full-text search — no HNSW required. O(N) brute-force scan; uses Tantivy O(log N) fast path for files that have a Tantivy FTS index embedded (written with `fts_text_columns=`).
+
+```python
+# BM25 search (no embedding needed)
+hits = ailake.search_text("s3://my-lake/docs/", "rust async programming", top_k=10)
+# Returns: [{"row_id": int, "score": float, "file": str}]  (score: higher = more relevant)
+
+# Restrict to specific text columns (default: ["chunk_text"])
+hits = ailake.search_text(path, "query", text_columns=["chunk_text", "document_title"])
+```
+
+### `info(path) → dict`
+
+Returns table metadata including per-file index status. Useful for monitoring deferred index builds.
+
+```python
+info = ailake.info("s3://my-lake/docs/")
+# {"files": [...], "ready_files": 5, "indexing_files": 1, "failed_files": 0}
+# Each entry in "files" has:
+#   {"path": "data/part-00000.parquet", "index_status": "ready"|"indexing"|"failed",
+#    "index_error": None|"k-means did not converge", "record_count": 50000}
+```
+
+When `index_status == "failed"`, the file is served via flat scan (O(N) brute-force). The next compaction run automatically rebuilds the index.
 
 ### `assemble_context(chunks, max_tokens=4096, dedup_threshold=0.05) → str`
 

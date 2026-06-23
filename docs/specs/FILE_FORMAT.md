@@ -271,7 +271,7 @@ caller explicitly calls `writer.with_ivf_pq(IvfPqConfig)`).
 
 ---
 
-## 7. AILK_FTS Section (optional, Phase T)
+## 7. AILK_FTS Section (optional, Phase 7 — Full-Text Search)
 
 Present when the writer was configured with `FtsConfig` (i.e. `with_fts_config()`
 in Rust or `fts_text_columns=` in Python). Absent in all legacy files — readers
@@ -387,6 +387,17 @@ Vector statistics live in `DataFile.custom_properties` (string→string map):
 | `ailake.<col>.hnsw_offset` | `"..."`     | AILK section offset for secondary column `<col>` |
 | `ailake.<col>.hnsw_len`  | `"..."`       | AILK section length for secondary column `<col>` |
 
+#### Index status (stored in `key_metadata` JSON, not `custom_properties`)
+
+`index_status` and `index_error` are serialized as JSON in Iceberg `DataFile.key_metadata` (a raw bytes field that AI-Lake repurposes as a JSON envelope):
+
+| JSON key         | Example value                    | Description |
+|------------------|----------------------------------|-------------|
+| `index_status`   | `"ready"`                        | `"ready"` — HNSW/IVF-PQ fully built; `"indexing"` — background build in progress (flat scan used); `"failed"` — build error (flat scan used; rebuilt at next compaction) |
+| `index_error`    | `"k-means did not converge"`     | Present only when `index_status == "failed"`; contains the error reason |
+
+Files with `index_status == "indexing"` or `"failed"` are served via **flat scan** (exact O(N) brute-force) rather than HNSW/IVF-PQ until the background task transitions them to `"ready"`. `patch_index_failed()` in `ailake-catalog` performs the `Failed` transition atomically via a `Replace` snapshot commit.
+
 All values are UTF-8 decimal or Base64 strings (no quoting, no JSON encoding).
 
 Standard Iceberg fields (`file_path`, `file_format`, `record_count`,
@@ -413,9 +424,15 @@ engines can perform predicate pushdown on non-vector columns.
       "ailake.vector_column": "embedding",
       "ailake.vector_dim": "1536",
       "ailake.index_type": "hnsw"
-    }
+    },
+    "key_metadata": "{\"index_status\":\"ready\",\"index_error\":null}"
   }
 }
+```
+
+When a background index build fails the `key_metadata` field contains:
+```json
+{"index_status": "failed", "index_error": "k-means did not converge after 300 iterations"}
 ```
 
 Actual on-disk encoding is Avro OCF binary (schema embedded in the file header)

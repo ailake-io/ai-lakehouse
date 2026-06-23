@@ -101,9 +101,9 @@ Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
 **Rust** (adicione ao `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.20"
-ailake-query = "0.0.20"   # search(), TableWriter, ContextAssembler, search_multimodal
-ailake-store = "0.0.20"   # backends S3 / GCS / Azure / local
+ailake-core  = "0.0.23"
+ailake-query = "0.0.23"   # search(), TableWriter, ContextAssembler, search_multimodal
+ailake-store = "0.0.23"   # backends S3 / GCS / Azure / local
 ```
 
 **Python**:
@@ -138,7 +138,7 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — baixe os JARs pré-compilados em [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.20
+VERSION=0.0.23
 
 # Plugin Spark
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
@@ -182,6 +182,8 @@ ailake/
 ├── spark-plugin/               # Plugin Spark em Scala (Gradle)
 ├── trino-plugin/               # Conector Trino em Kotlin (Gradle)
 ├── ailake-flink/               # Conector Flink em Kotlin (Gradle)
+├── ailake-fts/                 # Índice Tantivy FTS por arquivo (Phase 7 — Busca full-text)
+├── airbyte-destination-ailake/ # Destino Airbyte CDK (Python)
 ├── ailake-go/                  # SDK Go puro, sem CGo
 ├── ailake-cpp/                 # SDK C++17 header-only
 └── airflow-providers-ailake/   # Provider Apache Airflow 2.x/3.x

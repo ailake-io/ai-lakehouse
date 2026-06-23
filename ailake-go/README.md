@@ -174,7 +174,8 @@ type DataFileEntry struct {
     VectorColumn       string
     VectorDim          uint32
     ExtraVectorIndexes []ExtraVectorIndex // secondary columns (Phase 8)
-    IndexStatus        string             // "ready" | "indexing"
+    IndexStatus        string             // "ready" | "indexing" | "failed"
+    IndexError         string             // non-empty only when IndexStatus == "failed"
     BatchID            string
     EmbeddingModel     string // "<name>" or "<name>@<version>"; empty if not set
 }
