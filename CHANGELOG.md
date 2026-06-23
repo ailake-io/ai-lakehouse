@@ -11,6 +11,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.25] — 2026-06-23
+
+### Fixed
+
+- **Flink `AilakeJniIntegrationTest` always SKIPPED in CI** (`ailake-flink`, `.github/workflows/compat-heavy.yml`) — `-Dailake.native.lib=...` passed to Gradle sets a property in the Gradle daemon JVM but is not propagated to the test worker JVM, so `System.getProperty("ailake.native.lib")` always returned null and `assumeTrue` skipped all three tests (`writeAndSearch`, `deleteWhere`, `evolveSchema`). Fixed: CI now passes `AILAKE_NATIVE_LIB` as an environment variable (inherited by the test JVM automatically); `build.gradle.kts` `tasks.test` block also forwards the system property via `systemProperty()` for local dev (`gradle test -Dailake.native.lib=...`).
+
+### Added
+
+- **FTS `writeBatch` + `searchText` integration tests for Spark and Trino** (`spark-plugin`, `trino-plugin`) — `AilakeNativeTest` had `writeBatch(ftsColumns=[...])` and `searchText()` tests that correctly SKIP in CI when the native library is present (they test graceful degradation when absent), but there was no positive coverage of the FTS path when the library IS present. Added `writeBatchWithFtsColumnsAndSearchTextRoundtrip` to `AilakeWriteBatchIntegrationTest` in both plugins: writes 3 rows with `ftsColumns=["chunk_text"]` and `columns={"chunk_text": [...]}`, then calls `searchText("rust")` and asserts `rowId=0` is the top result.
+
+### Changed (CI)
+
+- **GPU CI consolidated** (`.github/workflows/`) — `ci-gpu-data.yml` deleted; its test (`cargo test -p ailake-index --test gpu_data`) was a strict subset of what `ci-gpu.yml` already runs (`cargo test -p ailake-index`). Single entry point: `ci-gpu.yml`. Linux GPU jobs (`index-gpu-linux-cuda`, `index-gpu-linux-rocm`) set to `if: false` — no Linux GPU runner registered; only Windows self-hosted GPU runner available.
+
+---
+
 ## [0.0.24] — 2026-06-23
 
 ### Fixed
