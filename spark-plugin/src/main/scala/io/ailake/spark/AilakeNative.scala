@@ -71,8 +71,7 @@ object AilakeNative {
       if (major != AILAKE_EXPECTED_MAJOR)
         log.warn(s"[ailake] Version mismatch: loaded ailake-jni $version but expected major version $AILAKE_EXPECTED_MAJOR. Search results may be incorrect.")
       else
-        log.info("[ailake] Native library libailake_jni {} loaded (path={})", version: AnyRef,
-          explicitPath.getOrElse("JNA default search path"): AnyRef)
+        log.info(s"[ailake] Native library libailake_jni $version loaded (path=${explicitPath.getOrElse("JNA default search path")})")
       Some(loaded)
     } catch {
       case e: Throwable =>
