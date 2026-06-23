@@ -182,7 +182,15 @@ impl TableWriter {
         let table = self.table.clone();
         let fp = file_path.clone();
         tokio::spawn(async move {
-            if let Err(e) = build_and_patch_index(store.clone(), catalog.clone(), policy, table.clone(), fp.clone()).await {
+            if let Err(e) = build_and_patch_index(
+                store.clone(),
+                catalog.clone(),
+                policy,
+                table.clone(),
+                fp.clone(),
+            )
+            .await
+            {
                 error!(
                     "ailake: deferred HNSW build failed for {fp}: {e}; \
                      marking IndexStatus::Failed — compaction will rebuild"
@@ -724,9 +732,15 @@ impl TableWriter {
         let table = self.table.clone();
         let fp = file_path.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                build_and_patch_multi_index(store, catalog.clone(), all_policies, table.clone(), fp.clone(), all_embeddings)
-                    .await
+            if let Err(e) = build_and_patch_multi_index(
+                store,
+                catalog.clone(),
+                all_policies,
+                table.clone(),
+                fp.clone(),
+                all_embeddings,
+            )
+            .await
             {
                 error!(
                     "ailake: deferred multi-column HNSW build failed for {fp}: {e}; \
@@ -1148,9 +1162,13 @@ async fn patch_index_failed(
     file_path: &str,
     reason: &str,
 ) {
-    let Ok(table_meta) = catalog.load_table(table).await else { return };
+    let Ok(table_meta) = catalog.load_table(table).await else {
+        return;
+    };
     let parent_snapshot_id = table_meta.current_snapshot_id;
-    let Ok(mut files) = catalog.list_files(table, None).await else { return };
+    let Ok(mut files) = catalog.list_files(table, None).await else {
+        return;
+    };
     for f in &mut files {
         if f.path == file_path {
             f.index_status = IndexStatus::Failed;

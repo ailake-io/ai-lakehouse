@@ -1331,7 +1331,10 @@ fn run_estimate(
     // HNSW index: each node stores ~M×2 neighbor IDs (u32 × 2 per layer).
     // Approximation: rows × hnsw_m × 2 × 4 bytes (two u32 per neighbor slot).
     // Real bincode overhead adds ~10-15%; use 18 bytes/neighbor as empirical factor.
-    let hnsw_bytes = rows.saturating_mul(hnsw_m as u64).saturating_mul(2).saturating_mul(9); // ≈ M×2 neighbors × 9 bytes avg
+    let hnsw_bytes = rows
+        .saturating_mul(hnsw_m as u64)
+        .saturating_mul(2)
+        .saturating_mul(9); // ≈ M×2 neighbors × 9 bytes avg
 
     // IVF-PQ codes: rows × pq_m bytes (1 byte per sub-quantizer code).
     // Codebook: negligible vs row data for any practical table size.

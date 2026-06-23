@@ -645,7 +645,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
                 snapshot_id: snap,
             })
             .map(cstr_json)
-            .unwrap_or_else(|e| cstr_err_json(e))
+            .unwrap_or_else(cstr_err_json)
         }
         Err(e) => {
             warn!("ailake_write_batch_json: write failed: {}", e);
@@ -1379,7 +1379,7 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
             );
             serde_json::to_string(&Resp { ok: true })
                 .map(cstr_json)
-                .unwrap_or_else(|e| cstr_err_json(e))
+                .unwrap_or_else(cstr_err_json)
         }
         Err(e) => {
             warn!("ailake_delete_where_json: failed: {}", e);
@@ -1513,7 +1513,7 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
                 new_schema_id: schema_id,
             })
             .map(cstr_json)
-            .unwrap_or_else(|e| cstr_err_json(e))
+            .unwrap_or_else(cstr_err_json)
         }
         Err(e) => {
             warn!("ailake_evolve_schema_json: failed: {}", e);
@@ -1665,7 +1665,7 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
                 output_path: Some(entry.path),
             })
             .map(cstr_json)
-            .unwrap_or_else(|e| cstr_err_json(e))
+            .unwrap_or_else(cstr_err_json)
         }
         Ok(None) => {
             info!(
@@ -1678,7 +1678,7 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
                 output_path: None,
             })
             .map(cstr_json)
-            .unwrap_or_else(|e| cstr_err_json(e))
+            .unwrap_or_else(cstr_err_json)
         }
         Err(e) => {
             warn!("ailake_compact_json: compaction failed: {}", e);

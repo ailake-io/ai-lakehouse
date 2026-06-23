@@ -23,7 +23,7 @@ from airflow_providers_ailake.operators.ailake import (
     AilakeSearchOperator,
     AilakeWriteOperator,
 )
-from airflow_providers_ailake.sensors.ailake import AilakeSnapshotSensor
+from airflow_providers_ailake.sensors.ailake import AilakeIndexStatusSensor, AilakeSnapshotSensor
 
 
 # ---------------------------------------------------------------------------
@@ -730,3 +730,58 @@ class TestAilakeWriteOperatorFts:
                     op.execute(context={})
         args = mock_cli.call_args[0]
         assert "--fts-columns" not in args
+
+
+# ---------------------------------------------------------------------------
+# AilakeIndexStatusSensor
+# ---------------------------------------------------------------------------
+
+
+class TestAilakeIndexStatusSensor:
+    def _sensor(self):
+        return AilakeIndexStatusSensor(
+            task_id="wait_index",
+            table="default.docs",
+            poke_interval=1,
+        )
+
+    def test_returns_true_when_ready(self):
+        sensor = self._sensor()
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.sensors.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={"index_status": "ready"}):
+                result = sensor.poke(context={})
+        assert result is True
+
+    def test_returns_false_when_indexing(self):
+        sensor = self._sensor()
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.sensors.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={"index_status": "indexing"}):
+                result = sensor.poke(context={})
+        assert result is False
+
+    def test_returns_false_when_status_absent(self):
+        sensor = self._sensor()
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.sensors.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={}):
+                result = sensor.poke(context={})
+        assert result is False
+
+    def test_raises_on_failed_status(self):
+        sensor = self._sensor()
+        hook = _make_hook()
+        info = {"index_status": "failed", "index_error": "k-means did not converge"}
+        with patch("airflow_providers_ailake.sensors.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value=info):
+                with pytest.raises(RuntimeError, match="k-means did not converge"):
+                    sensor.poke(context={})
+
+    def test_raises_on_failed_status_no_detail(self):
+        sensor = self._sensor()
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.sensors.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info", return_value={"index_status": "failed"}):
+                with pytest.raises(RuntimeError, match="<no detail>"):
+                    sensor.poke(context={})

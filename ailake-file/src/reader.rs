@@ -120,13 +120,12 @@ impl AilakeFileReader {
 
         let centroid_data = &self.bytes[centroid_start..centroid_end];
         let dim = header.dim as usize;
-        let expected_len = dim
-            .checked_mul(4)
-            .and_then(|v| v.checked_add(4))
-            .ok_or(AilakeError::InvalidCentroidLength {
+        let expected_len = dim.checked_mul(4).and_then(|v| v.checked_add(4)).ok_or(
+            AilakeError::InvalidCentroidLength {
                 expected_dim: header.dim,
                 actual: centroid_data.len(),
-            })?;
+            },
+        )?;
         if centroid_data.len() != expected_len {
             return Err(AilakeError::InvalidCentroidLength {
                 expected_dim: header.dim,
@@ -237,7 +236,11 @@ impl AilakeFileReader {
         };
         let fts_abs: usize = fts_offset_str
             .parse::<u64>()
-            .map_err(|e| AilakeError::Fts(format!("invalid FTS section offset '{fts_offset_str}': {e}")))?
+            .map_err(|e| {
+                AilakeError::Fts(format!(
+                    "invalid FTS section offset '{fts_offset_str}': {e}"
+                ))
+            })?
             .try_into()
             .map_err(|_| AilakeError::Fts("FTS section offset exceeds address space".into()))?;
 
