@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **ADR-017 — Arrow Flight rejected; Fase 10 Arrow IPC write_batch planned** (`docs/contributing/DECISIONS.md`, `CLAUDE.md`) — architectural decision record documenting evaluation of Apache Arrow Flight as unified interop layer; decision: not adopted. `ailake serve` (HTTP/JSON) already covers language-agnostic access; PyO3 and Go SDK are already zero-FFI; JVM FFI surface (JNA, 10 functions) is manageable post sprint-4 fixes; distributed Spark favors per-executor local search over centralised Flight server; Arrow Flight Java client would add 50MB+ to Spark classpath with version-conflict risk. Identified next incremental improvement: replace JSON embedding payload in `ailake_write_batch_json` with Arrow IPC bytes (12MB JSON → 3MB IPC binary per 1k×1536-dim batch) — Fase 10 in roadmap. Conditions that would reopen Flight: GPU co-location mandatory, >8 JVM plugins, multi-tenant shared inference cluster, or streaming >10k results.
+
 ### Changed (docs)
 
 - **Version strings** — all `0.0.20` references updated to `0.0.23` in `README.md`, `README.pt-BR.md`, and `ailake-py/README.md`.

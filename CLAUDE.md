@@ -481,6 +481,12 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] **`MemoryDecayJob`** — job assíncrono que recomputa `recency_weight = exp(-λ × days_since_access)` a partir da coluna `last_accessed_at` (ISO string), reescreve cada arquivo de dados, e commita novo snapshot via `SnapshotOperation::Overwrite`. Em `ailake-query/src/memory_decay.rs`. Python: `ailake.decay_memories(path, decay_lambda=0.1)` → retorna número de arquivos atualizados.
 - [x] **Python `Agent` helper** — `ailake.Agent(table_path, embed_fn, agent_id)` com métodos: `remember(text, importance=1.0)`, `recall(query, top_k)` (scoring híbrido automático), `log_tool_call(name, input, output)`, `assemble_context(query, max_tokens)`. Abstração de alto nível sobre `TableWriter` + `search` + `ContextAssembler` para uso em frameworks de agentes (LangChain, CrewAI, AutoGen).
 
+### Fase 10 — Redução de overhead FFI (Arrow IPC no write_batch JNI)
+
+> **ADR**: ADR-017 (docs/contributing/DECISIONS.md) — Arrow Flight rejeitado; melhoria incremental via Arrow IPC bytes no boundary JNI.
+
+- [ ] **Arrow IPC bytes em `ailake_write_batch_json`** — substituir o payload JSON de embeddings (`"embeddings": [[1.0, 2.0, ...]]`) por Arrow IPC serializado passado como `byte[]` via JNI. Elimina a única overhead real da fronteira JNI (~10ms/1k vecs, 12MB JSON → 3MB IPC binário). Protocolo: `ailake_write_batch_ipc(ipc_bytes: *const u8, ipc_len: usize, opts_json: *const c_char) -> *mut c_char` — separação entre dados colunares (IPC) e configuração (JSON pequeno). Expor via JNA em Spark/Trino/Flink; manter `ailake_write_batch_json` como fallback backward-compatible. Implementação: `arrow_ipc::reader::FileReader` no lado Rust; `org.apache.arrow.vector.ipc.ArrowFileReader` no lado JVM (já no classpath Spark/Trino). Esforço estimado: ~1 semana.
+
 ---
 
 ## 11. Stack Técnica — Rust
