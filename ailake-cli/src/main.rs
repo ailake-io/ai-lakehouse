@@ -989,6 +989,10 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .iter()
                 .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Ready)
                 .count();
+            let failed = files
+                .iter()
+                .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Failed)
+                .count();
 
             let location = meta
                 .properties
@@ -1026,6 +1030,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                             "vector_metric": vector_metric,
                             "files": file_count,
                             "indexed_files": ready,
+                            "failed_files": failed,
                             "rows": row_count,
                             "size_bytes": size_bytes,
                             "snapshot_id": meta.current_snapshot_id,
@@ -1039,7 +1044,11 @@ async fn run(cli: Cli) -> Result<(), String> {
                     println!(
                         "vector:      col={vector_column} dim={vector_dim} metric={vector_metric}"
                     );
-                    println!("files:       {file_count} ({ready} indexed)");
+                    if failed > 0 {
+                        println!("files:       {file_count} ({ready} indexed, {failed} failed — compaction will rebuild)");
+                    } else {
+                        println!("files:       {file_count} ({ready} indexed)");
+                    }
                     println!("rows:        {row_count}");
                     println!("size:        {}", format_bytes(size_bytes));
                     if let Some(snap_id) = meta.current_snapshot_id {

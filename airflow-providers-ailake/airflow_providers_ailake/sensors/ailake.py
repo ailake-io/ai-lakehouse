@@ -183,6 +183,13 @@ class AilakeIndexStatusSensor(BaseSensorOperator):
             )
             return True
 
+        if status == "failed":
+            error = info.get("index_error") or "<no detail>"
+            raise RuntimeError(
+                f"AilakeIndexStatusSensor: table {self.table} index build failed "
+                f"permanently — compaction will rebuild on next run. Reason: {error}"
+            )
+
         self.log.info(
             "AilakeIndexStatusSensor: table %s index_status=%r — waiting",
             self.table,

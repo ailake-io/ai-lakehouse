@@ -512,6 +512,7 @@ Secondary column HNSW info is also embedded in the Avro manifest entry's
   "vector_column": "embedding",
   "vector_dim": 1536,
   "index_status": "ready",
+  "index_error": null,
   "extra_vector_indexes": [
     {
       "column": "image_embedding",
@@ -524,6 +525,8 @@ Secondary column HNSW info is also embedded in the Avro manifest entry's
   ]
 }
 ```
+
+`index_status` values: `"ready"` (HNSW embedded), `"indexing"` (background build in progress — flat scan served), `"failed"` (build failed permanently — flat scan until next compaction). When `index_status == "failed"`, `index_error` contains a human-readable reason string; otherwise it is `null` or absent.
 
 `extra_vector_indexes` is an array — one entry per secondary column. Readers
 that only support single-column search MUST ignore unknown array elements.

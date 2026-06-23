@@ -135,6 +135,7 @@ struct InfoResponse {
     vector_metric: String,
     files: usize,
     indexed_files: usize,
+    failed_files: usize,
     rows: u64,
     size_bytes: u64,
     snapshot_id: Option<i64>,
@@ -344,6 +345,10 @@ async fn handle_info(State(state): State<Arc<AppState>>) -> ApiResult<impl IntoR
         .iter()
         .filter(|f| f.index_status == IndexStatus::Ready)
         .count();
+    let failed = files
+        .iter()
+        .filter(|f| f.index_status == IndexStatus::Failed)
+        .count();
 
     let resp = InfoResponse {
         table: format!("{}.{}", state.table.namespace, state.table.name),
@@ -369,6 +374,7 @@ async fn handle_info(State(state): State<Arc<AppState>>) -> ApiResult<impl IntoR
             .unwrap_or_else(|| "-".to_string()),
         files: file_count,
         indexed_files: ready,
+        failed_files: failed,
         rows: row_count,
         size_bytes,
         snapshot_id: meta.current_snapshot_id,
