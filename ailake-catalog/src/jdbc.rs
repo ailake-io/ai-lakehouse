@@ -360,11 +360,12 @@ mod tests {
                 modality: None,
                 partition_by: None,
                 partition_value: None,
+                partition_column_type: None,
+                partition_fields: vec![],
             },
             extra: HashMap::new(),
             format_version: 2,
             partition_column_type: None,
-            partition_fields: vec![],
         };
 
         // create
@@ -389,6 +390,7 @@ mod tests {
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready,
+                index_error: None,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
