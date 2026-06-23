@@ -60,8 +60,10 @@ jobs:
   # ── Linux self-hosted — NVIDIA (Docker + nvidia-container-toolkit) ─────────
   #
   # Runner label: gpu-nvidia
+  # Disabled: no Linux GPU runner available yet. Remove `if: false` when registered.
   index-gpu-data-linux-cuda:
     name: index — gpu data (Linux/CUDA Docker)
+    if: false
     runs-on: [self-hosted, Linux, X64, gpu-nvidia]
     steps:
       - uses: actions/checkout@v6
@@ -89,8 +91,10 @@ jobs:
   # ── Linux self-hosted — AMD (Docker + ROCm device passthrough) ────────────
   #
   # Runner label: gpu-amd
+  # Disabled: no Linux GPU runner available yet. Remove `if: false` when registered.
   index-gpu-data-linux-rocm:
     name: index — gpu data (Linux/ROCm Docker)
+    if: false
     runs-on: [self-hosted, Linux, X64, gpu-amd]
     steps:
       - uses: actions/checkout@v6

@@ -59,8 +59,11 @@ jobs:
   # Requirements:
   #   - Linux x86-64, NVIDIA GPU, nvidia-container-toolkit installed
   #   - Verify: docker run --gpus all --rm nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi
+  # Disabled: no Linux GPU runner available yet (only Windows self-hosted GPU runner exists).
+  # Re-enable by removing `if: false` when a runner with label gpu-nvidia is registered.
   index-gpu-linux-cuda:
     name: index — gpu (Linux/CUDA Docker)
+    if: false
     runs-on: [self-hosted, Linux, X64, gpu-nvidia]
     steps:
       - uses: actions/checkout@v6
@@ -92,8 +95,11 @@ jobs:
   #   - Linux x86-64, AMD GPU, amdgpu kernel module, /dev/kfd + /dev/dri accessible
   #   - Verify: docker run --device /dev/kfd --device /dev/dri \
   #               --group-add video --rm rocm/dev-ubuntu-22.04:6.2 rocm-smi
+  # Disabled: no Linux GPU runner available yet (only Windows self-hosted GPU runner exists).
+  # Re-enable by removing `if: false` when a runner with label gpu-amd is registered.
   index-gpu-linux-rocm:
     name: index — gpu (Linux/ROCm Docker)
+    if: false
     runs-on: [self-hosted, Linux, X64, gpu-amd]
     steps:
       - uses: actions/checkout@v6
