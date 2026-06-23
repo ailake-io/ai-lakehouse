@@ -140,3 +140,56 @@ pub fn blob_to_ram_dir(blob: &[u8]) -> AilakeResult<tantivy::directory::RamDirec
 
     Ok(dir)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_header(num_files: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&BLOB_MAGIC);
+        b.extend_from_slice(&BLOB_VERSION.to_le_bytes());
+        b.extend_from_slice(&FLAG_ZSTD.to_le_bytes());
+        b.extend_from_slice(&num_files.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn rejects_too_many_files() {
+        let mut blob = make_header(65_537);
+        blob.extend_from_slice(&[0u8; 64]);
+        let err = blob_to_ram_dir(&blob).unwrap_err();
+        assert!(
+            err.to_string().contains("65537"),
+            "error should mention count: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_blob() {
+        let blob = make_header(1); // claims 1 file but no file table follows
+        let err = blob_to_ram_dir(&blob).unwrap_err();
+        assert!(err.to_string().contains("truncated"));
+    }
+
+    #[test]
+    fn rejects_bad_magic() {
+        let mut blob = vec![0u8; 12];
+        blob[0..4].copy_from_slice(b"XXXX");
+        let err = blob_to_ram_dir(&blob).unwrap_err();
+        assert!(err.to_string().contains("magic"));
+    }
+
+    #[test]
+    fn rejects_filename_len_overflow() {
+        let mut blob = make_header(1);
+        // nl = u32::MAX — pos + nl overflows
+        blob.extend_from_slice(&u32::MAX.to_le_bytes());
+        blob.extend_from_slice(&[0u8; 64]); // dummy remainder
+        let err = blob_to_ram_dir(&blob).unwrap_err();
+        assert!(
+            err.to_string().contains("truncated") || err.to_string().contains("overflow"),
+            "expected truncated/overflow error: {err}"
+        );
+    }
+}

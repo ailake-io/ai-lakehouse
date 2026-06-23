@@ -725,14 +725,14 @@ impl TableWriter {
         let fp = file_path.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                build_and_patch_multi_index(store, catalog, all_policies, table, fp, all_embeddings)
+                build_and_patch_multi_index(store, catalog.clone(), all_policies, table.clone(), fp.clone(), all_embeddings)
                     .await
             {
                 error!(
-                    "ailake: deferred multi-column HNSW build failed — shard stays in flat-scan \
-                     mode until next compaction rebuilds the index: {}",
-                    e
+                    "ailake: deferred multi-column HNSW build failed for {fp}: {e}; \
+                     marking IndexStatus::Failed — compaction will rebuild"
                 );
+                patch_index_failed(catalog, &table, &fp, &e.to_string()).await;
             }
         });
 
