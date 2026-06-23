@@ -44,7 +44,7 @@ apache-avro = "0.16"
 
 # Full-text search
 tantivy     = { version = "0.22", default-features = false, features = ["mmap"] }
-ailake-fts  = { path = "ailake-fts", version = "0.0.24" }
+ailake-fts  = { path = "ailake-fts", version = "0.0.25" }
 
 # Vector index
 hnsw_rs     = "0.3"
