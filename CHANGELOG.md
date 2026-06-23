@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (docs)
+
+- **Version strings** — all `0.0.20` references updated to `0.0.23` in `README.md`, `README.pt-BR.md`, and `ailake-py/README.md`.
+- **Repository layout** — `ailake-fts/` and `airbyte-destination-ailake/` added to layout sections in `README.md` and `README.pt-BR.md`.
+- **`docs/specs/FILE_FORMAT.md`** — §7 renamed from "Phase T" to "Phase 7 — Full-Text Search"; new §8.2 subsection documents `index_status` / `index_error` in `key_metadata` JSON with full status table and failure JSON example.
+- **`docs/specs/COMPACTION.md`** — new "Failed index recovery" subsection: explains `IndexStatus::Failed` lifecycle, flat-scan fallback, and automatic self-healing at next compaction run.
+- **`docs/architecture/DATA_FLOW.md`** — `IndexStatus` lifecycle updated to include `Failed` state, `patch_index_failed()` reference, and flat-scan fallback for both `Indexing` and `Failed` files.
+- **`ailake-py/README.md`** — added `search_text()` API doc (BM25 + Tantivy fast path); added `info()` API doc showing `index_status`/`index_error` per-file fields; added **Version: 0.0.23** to header.
+- **`ailake-go/README.md`** — `DataFileEntry.IndexStatus` comment updated to include `"failed"`; `IndexError string` field added.
+
+### Changed (demo)
+
+- **Demo notebooks + init_demo.py updated to v0.0.23** — version strings updated from v0.0.20 in `01_ailake_demo.ipynb`, `09_hybrid_search.ipynb`, and `init_demo.py`.
+- **`01_ailake_demo.ipynb` — new feature demos**:
+  - §15 (HNSW tuning): added `ef_search` and `pruning_threshold` to markdown table and code cell — shows `search(..., ef_search=400)` and `search(..., pruning_threshold=0.7)`.
+  - §31 (new): `ailake.compact()` — merges small files and rebuilds index; post-compaction search verification.
+  - §30 (schema evolution): added `ailake.evolve_schema()` combined wrapper demo alongside `add_column` + `rename_column`.
+
 ### Fixed
 
 - **Hybrid BM25 fusion score misalignment** (`ailake-query`) — `bm25_scores` was computed from `raw_candidates` before `sort_by()` but indexed by position after the sort; the candidate order changed but the score array did not track the shuffle, so every hybrid search returned wrong RRF fusion scores. Fixed: BM25 scores zipped into `candidates_with_bm25` tuples before sorting so each score travels with its candidate.
@@ -87,6 +105,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`fts-stemmer-langs` Cargo feature** (`ailake-fts`) — opt-in registration of 17 Snowball language stemmers + stop-word-filtered pipelines in every Tantivy index build. Bare stemmers: `ar_stem`, `da_stem`, `nl_stem`, `fi_stem`, `fr_stem`, `de_stem`, `el_stem`, `hu_stem`, `it_stem`, `no_stem`, `pt_stem`, `ro_stem`, `ru_stem`, `es_stem`, `sv_stem`, `ta_stem`, `tr_stem`. Stop-word-filtered: `pt_br` (Portuguese Snowball + PT stop words — recommended for Brazilian Portuguese workloads; ~10-15% smaller blobs); `en_stop` (English Snowball + EN stop words — use `en_stem` for standard English; `en_stop` when index size matters). Feature also enables `tantivy/stopwords` for stop word lists. English: built-in `en_stem` (always available, no feature needed) is the standard; no action required for EN workloads. Enable with `ailake-fts = { features = ["fts-stemmer-langs"] }`. Use via `FtsConfig { tokenizer: "pt_br", .. }`.
 - **`cjk_ngram` tokenizer** (`ailake-fts`) — always registered, zero extra deps. `NgramTokenizer(min=1, max=2, prefix_only=false)` + `LowerCaser`. Tokenizes CJK text into unigrams and bigrams so BM25 matches sub-word characters (unigram "知" and bigram "知能"). ~85% recall vs. dictionary-based segmenters (Lindera/jieba). For production CJK, register a custom tokenizer and pass its name as `FtsConfig::tokenizer`. Documented in `ailake-fts/src/tokenizers.rs` with limitations (Thai/Khmer, false-positive unigrams, compound recall gap).
 - **FTS text field upgraded to `WithFreqsAndPositions`** (`ailake-fts`) — previously `WithFreqs`; positions required for NgramTokenizer phrase queries and user phrase search (e.g. `"quick brown fox"`). ~25-40% larger uncompressed term postings; negligible after zstd. **Breaks blobs written by prior releases when phrase queries are used** — point queries unaffected; rewrite blobs to regain phrase-query support.
+
+### Fixed (security/correctness follow-up — `fix/security-and-correctness`)
+
+- **`write_batch_multi_deferred` never called `patch_index_failed`** (`ailake-query`) — when multi-column HNSW background build failed, the catalog entry stayed `IndexStatus::Indexing` forever; compaction never retried. Fixed: spawn block clones `catalog`, `table`, `fp` and calls `patch_index_failed(catalog, &table, &fp, &e.to_string()).await` on error, consistent with single-column and IVF-PQ deferred variants.
+- **`DataFileEntry` missing `index_error` in 18 struct literals** (`ailake-catalog`, `ailake-query`) — workspace failed to compile after `index_error: Option<String>` was added to the struct but not propagated to test initializers in `avro_manifest.rs`, `hadoop.rs`, `snapshot.rs`, `compaction.rs`, `delete.rs`, and `pruner.rs`. Fixed: `index_error: None` added to all 18 literal sites; `index_failed_roundtrip` test added to verify full Avro round-trip.
+- **`ailake-fts` blob deserializer missing adversarial guards** (`ailake-fts`) — `blob_to_ram_dir` did not validate file count, magic bytes, or per-entry bounds; a crafted AILK_FTS blob could allocate unlimited memory. Added: `MAX_FTS_FILES = 65_536` check, magic `"AFTS"` guard, checked arithmetic for entry lengths, and 4 adversarial unit tests.
+- **`AilakeIndexStatusSensor` polled forever on `"failed"` status** (`airflow-providers-ailake`) — sensor only branched on `"ready"` (return `True`) and everything else (return `False`); a permanently-failed index caused infinite polling. Fixed: `"failed"` branch raises `RuntimeError` with `index_error` detail. 5 tests added covering `ready`, `indexing`, absent, `failed`-with-detail, and `failed`-without-detail.
+- **`redundant_closure` clippy errors in JNI** (`ailake-jni`) — 5 occurrences of `.unwrap_or_else(|e| cstr_err_json(e))` flagged by `cargo clippy -D warnings`; simplified to `.unwrap_or_else(cstr_err_json)`.
+- **`cargo fmt` failures** — long method chains in `ailake-cli/src/main.rs`, `ailake-file/src/reader.rs`, and `ailake-query/src/writer.rs` were not formatted per rustfmt style. `cargo fmt --all` applied.
 
 ### Fixed (Sprint 3 — P2)
 

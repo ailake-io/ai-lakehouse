@@ -117,7 +117,7 @@ pub struct NewSnapshot {
     pub files: Vec<DataFileEntry>,
     pub operation: SnapshotOperation,        // Append | Overwrite | Delete | Replace
     pub iceberg_schema: Option<IcebergSchemaUpdate>, // schema + name-mapping for metadata.json
-    pub index_status: IndexStatus,           // Ready | Indexing (for deferred HNSW builds)
+    pub index_status: IndexStatus,           // Ready | Indexing | Failed (for deferred HNSW builds)
 }
 
 pub struct IcebergSchemaUpdate {
@@ -193,6 +193,8 @@ impl HadoopCatalog {
 | `Overwrite` | Same as `Replace` |
 
 `Replace` is used by deferred HNSW/IVF-PQ background tasks to transition `IndexStatus::Indexing → Ready`. Since the new manifest already contains the complete file set, inheriting old manifests would create duplicate `DataFileEntry` records in `list_files` results — preventing the `ready >= num_shards` convergence check from working correctly.
+
+If the background index build fails permanently (e.g. k-means did not converge, OOM), `patch_index_failed` transitions `IndexStatus::Indexing → Failed` and stores the reason in `DataFileEntry::index_error`. Files in `Failed` state serve reads via flat scan until the next compaction run, which rebuilds their index and resets the status.
 
 ```rust
 // Local dev

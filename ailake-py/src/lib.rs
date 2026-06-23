@@ -430,7 +430,9 @@ impl TableWriter {
     /// Persists Parquet immediately and builds all N column HNSW indexes in a
     /// background task. During the build window, search is served via flat scan
     /// (exact, GPU-accelerated when available). Transitions to HNSW-indexed search
-    /// automatically when `IndexStatus::Ready`.
+    /// automatically when `IndexStatus::Ready`. On permanent build failure the file
+    /// is marked `IndexStatus::Failed` (visible via `ailake info`) and compaction
+    /// will rebuild the index on the next run.
     ///
     /// Use when ingest throughput matters more than immediate HNSW availability.
     ///

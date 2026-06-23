@@ -181,6 +181,15 @@ fn cstr_err_json(msg: impl std::fmt::Display) -> *mut c_char {
         .into_raw()
 }
 
+fn cstr_json(s: String) -> *mut c_char {
+    CString::new(s)
+        .unwrap_or_else(|_| {
+            CString::new(r#"{"ok":false,"error":"internal: JSON output contained null byte"}"#)
+                .unwrap()
+        })
+        .into_raw()
+}
+
 /// ailake-jni version string. Static — do NOT free.
 #[no_mangle]
 pub extern "C" fn ailake_version() -> *const c_char {
@@ -371,7 +380,7 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
     };
     let json = serde_json::to_string(&body)
         .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialize\"}".into());
-    CString::new(json).unwrap_or_default().into_raw()
+    cstr_json(json)
 }
 
 /// Write a batch of records to an AI-Lake table.
@@ -631,12 +640,12 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
                 "ailake_write_batch_json: committed snapshot_id={} table={}.{}",
                 snap, req.namespace, req.table
             );
-            let json = serde_json::to_string(&Resp {
+            serde_json::to_string(&Resp {
                 ok: true,
                 snapshot_id: snap,
             })
-            .unwrap_or_default();
-            CString::new(json).unwrap_or_default().into_raw()
+            .map(cstr_json)
+            .unwrap_or_else(cstr_err_json)
         }
         Err(e) => {
             warn!("ailake_write_batch_json: write failed: {}", e);
@@ -773,7 +782,7 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
     };
     let json = serde_json::to_string(&body)
         .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialize\"}".into());
-    CString::new(json).unwrap_or_default().into_raw()
+    cstr_json(json)
 }
 
 // ── ailake_search_multimodal_json — cross-modal RRF ──────────────────────────
@@ -920,7 +929,7 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
     };
     let json = serde_json::to_string(&body)
         .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialize\"}".into());
-    CString::new(json).unwrap_or_default().into_raw()
+    cstr_json(json)
 }
 
 // ── ailake_scan_json — search + fetch full rows ───────────────────────────────
@@ -1270,7 +1279,7 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
     };
 
     match record_batch_to_scan_json(&batch) {
-        Ok(json) => CString::new(json).unwrap_or_default().into_raw(),
+        Ok(json) => cstr_json(json),
         Err(e) => {
             warn!("ailake_scan_json: serialization failed: {}", e);
             cstr_err_json(e)
@@ -1368,9 +1377,9 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
                 req.namespace,
                 req.table
             );
-            CString::new(serde_json::to_string(&Resp { ok: true }).unwrap_or_default())
-                .unwrap_or_default()
-                .into_raw()
+            serde_json::to_string(&Resp { ok: true })
+                .map(cstr_json)
+                .unwrap_or_else(cstr_err_json)
         }
         Err(e) => {
             warn!("ailake_delete_where_json: failed: {}", e);
@@ -1499,15 +1508,12 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
                 "ailake_evolve_schema_json: schema evolved for {}.{} new_schema_id={}",
                 req.namespace, req.table, schema_id
             );
-            CString::new(
-                serde_json::to_string(&Resp {
-                    ok: true,
-                    new_schema_id: schema_id,
-                })
-                .unwrap_or_default(),
-            )
-            .unwrap_or_default()
-            .into_raw()
+            serde_json::to_string(&Resp {
+                ok: true,
+                new_schema_id: schema_id,
+            })
+            .map(cstr_json)
+            .unwrap_or_else(cstr_err_json)
         }
         Err(e) => {
             warn!("ailake_evolve_schema_json: failed: {}", e);
@@ -1653,26 +1659,26 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
                 "ailake_compact_json: compaction done table={}.{} output={}",
                 req.namespace, req.table, entry.path
             );
-            let json = serde_json::to_string(&Resp {
+            serde_json::to_string(&Resp {
                 ok: true,
                 files_compacted: 1,
                 output_path: Some(entry.path),
             })
-            .unwrap_or_default();
-            CString::new(json).unwrap_or_default().into_raw()
+            .map(cstr_json)
+            .unwrap_or_else(cstr_err_json)
         }
         Ok(None) => {
             info!(
                 "ailake_compact_json: nothing to compact for table={}.{}",
                 req.namespace, req.table
             );
-            let json = serde_json::to_string(&Resp {
+            serde_json::to_string(&Resp {
                 ok: true,
                 files_compacted: 0,
                 output_path: None,
             })
-            .unwrap_or_default();
-            CString::new(json).unwrap_or_default().into_raw()
+            .map(cstr_json)
+            .unwrap_or_else(cstr_err_json)
         }
         Err(e) => {
             warn!("ailake_compact_json: compaction failed: {}", e);

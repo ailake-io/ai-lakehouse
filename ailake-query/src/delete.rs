@@ -306,6 +306,7 @@ mod tests {
             vector_dim: Some(4),
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
+            index_error: None,
             batch_id: None,
             embedding_model: None,
             partition_value: None,

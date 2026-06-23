@@ -164,6 +164,7 @@ mod tests {
             vector_dim: None,
             extra_vector_indexes: vec![],
             index_status: ailake_catalog::IndexStatus::Ready,
+            index_error: None,
             batch_id: None,
             embedding_model: None,
             partition_value: None,

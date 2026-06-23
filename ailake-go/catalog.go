@@ -37,7 +37,8 @@ type DataFileEntry struct {
 	VectorColumn       string
 	VectorDim          uint32
 	ExtraVectorIndexes []ExtraVectorIndex // secondary vector columns (Phase 8)
-	IndexStatus        string             // "ready" | "indexing"
+	IndexStatus        string             // "ready" | "indexing" | "failed"
+	IndexError         string             // non-empty only when IndexStatus == "failed"
 	BatchID            string
 	EmbeddingModel     string // "<name>" or "<name>@<version>"; empty if not set
 	PartitionValue     string // agent_id or other partition value (Phase 9)
@@ -343,6 +344,7 @@ type ailakeEntryExt struct {
 	VectorCol          *string            `json:"vector_column"`
 	VectorDim          *uint32            `json:"vector_dim"`
 	IndexStatus        string             `json:"index_status"`
+	IndexError         *string            `json:"index_error"`
 	BatchID            *string            `json:"batch_id"`
 	EmbeddingModel     *string            `json:"embedding_model"`
 	ExtraVectorIndexes []ExtraVectorIndex `json:"extra_vector_indexes"`
@@ -410,6 +412,9 @@ func readManifestFile(path string) ([]DataFileEntry, error) {
 			RecordCount:   recordCount,
 			FileSizeBytes: fileSize,
 			IndexStatus:   ext.IndexStatus,
+		}
+		if ext.IndexError != nil {
+			entry.IndexError = *ext.IndexError
 		}
 		if ext.CentroidB64 != nil {
 			if centroid, err := decodeCentroid(*ext.CentroidB64); err == nil {
