@@ -101,9 +101,9 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 **Rust** (add to `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.20"
-ailake-query = "0.0.20"   # search(), TableWriter, ContextAssembler, search_multimodal
-ailake-store = "0.0.20"   # S3 / GCS / Azure / local backends
+ailake-core  = "0.0.23"
+ailake-query = "0.0.23"   # search(), TableWriter, ContextAssembler, search_multimodal
+ailake-store = "0.0.23"   # S3 / GCS / Azure / local backends
 ```
 
 **Python**:
@@ -138,7 +138,7 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.20
+VERSION=0.0.23
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
@@ -280,6 +280,18 @@ ailake/
 │       ├── AilakeVectorConnectorFactory.kt
 │       ├── AilakeVectorTableSink.kt
 │       └── AilakeVectorTableSource.kt
+├── ailake-fts/                 # Full-text search — Tantivy per-file FTS indexes (Phase 7)
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs              # FtsConfig, FtsIndex, blob_to_ram_dir
+│       ├── index.rs            # Tantivy index building, tokenizer registration
+│       └── blob.rs             # AILK_FTS blob serialization (zstd, MAX_FTS_FILES guard)
+├── airbyte-destination-ailake/ # Airbyte CDK destination (Python)
+│   ├── pyproject.toml
+│   └── airbyte_destination_ailake/
+│       ├── run.py              # Entry point: check / write
+│       ├── config.py           # AilakeDestinationConfig (dim, metric, fts_columns, …)
+│       └── destination.py      # StreamWriter, _flush(), state emission
 ├── ailake-go/                  # Go SDK — pure Go, no CGo (go.mod)
 │   ├── go.mod
 │   ├── ailake.go               # AilakeReader, AilakeWriter, VectorSearch

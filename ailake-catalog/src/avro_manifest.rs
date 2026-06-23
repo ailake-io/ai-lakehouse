@@ -228,6 +228,7 @@ pub fn write_manifest_file(
             vector_dim: f.vector_dim,
             extra_vector_indexes: f.extra_vector_indexes.clone(),
             index_status: f.index_status.clone(),
+            index_error: f.index_error.clone(),
             batch_id: f.batch_id.clone(),
             embedding_model: f.embedding_model.clone(),
             partition_value: f.partition_value.clone(),
@@ -464,6 +465,7 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                             .as_ref()
                             .map(|e| e.index_status.clone())
                             .unwrap_or_default(),
+                        index_error: ext.as_ref().and_then(|e| e.index_error.clone()),
                         batch_id: ext.as_ref().and_then(|e| e.batch_id.clone()),
                         embedding_model: ext.as_ref().and_then(|e| e.embedding_model.clone()),
                         partition_value: native_partition_value
@@ -501,6 +503,8 @@ struct AilakeEntryExt {
     pub extra_vector_indexes: Vec<crate::provider::ExtraVectorIndex>,
     #[serde(default)]
     pub index_status: IndexStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1088,6 +1092,7 @@ mod tests {
             vector_dim: Some(4),
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
+            index_error: None,
             batch_id: None,
             embedding_model: None,
             partition_value: None,
@@ -1118,6 +1123,7 @@ mod tests {
             vector_dim: Some(4),
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
+            index_error: None,
             batch_id: Some("dag_run_2026-05-28_taskA".to_string()),
             embedding_model: None,
             partition_value: None,
@@ -1148,6 +1154,7 @@ mod tests {
             vector_dim: Some(4),
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
+            index_error: None,
             batch_id: None,
             embedding_model: None,
             partition_value: None,
@@ -1175,6 +1182,7 @@ mod tests {
             vector_dim: None,
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
+            index_error: None,
             batch_id: None,
             embedding_model: None,
             partition_value: None,
@@ -1247,6 +1255,7 @@ mod tests {
             vector_dim: Some(4),
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
+            index_error: None,
             batch_id: None,
             embedding_model: None,
             partition_value: Some("agent-abc-123".to_string()),
@@ -1295,6 +1304,7 @@ mod tests {
             vector_dim: None,
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
+            index_error: None,
             batch_id: None,
             embedding_model: None,
             partition_value: Some("7".to_string()),
@@ -1352,6 +1362,7 @@ mod tests {
             vector_dim: Some(4),
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
+            index_error: None,
             batch_id: None,
             embedding_model: None,
             partition_value: Some(compound.to_string()),
@@ -1417,6 +1428,7 @@ mod tests {
             vector_dim: None,
             extra_vector_indexes: vec![],
             index_status: IndexStatus::Ready,
+            index_error: None,
             batch_id: None,
             embedding_model: None,
             partition_value: partition_value.map(String::from),
@@ -1518,5 +1530,37 @@ mod tests {
         }
         assert_eq!(rc_us, 3000, "us-east record_count should aggregate to 3000");
         assert_eq!(rc_eu, 500, "eu-west record_count should be 500");
+    }
+
+    #[test]
+    fn index_failed_roundtrip() {
+        let file = DataFileEntry {
+            path: "data/part-failed.parquet".to_string(),
+            record_count: 10,
+            file_size_bytes: 1024,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: Some("embedding".to_string()),
+            vector_dim: Some(4),
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Failed,
+            index_error: Some("k-means did not converge".to_string()),
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+        };
+        let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
+        let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
+        let bytes = write_manifest_file(&[file], 55, 1, schema_json, partition_spec, 2, None);
+        let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
+        assert_eq!(entries[0].index_status, IndexStatus::Failed);
+        assert_eq!(
+            entries[0].index_error.as_deref(),
+            Some("k-means did not converge")
+        );
     }
 }

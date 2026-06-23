@@ -67,7 +67,7 @@ jobs:
   # Runs ailake-index unit tests on a CPU-only Linux runner.
   # Verifies that hardware::detect_backend() falls back to CpuSimd when no
   # CUDA/ROCm libraries are present and that all index tests pass on that path.
-  # GPU tests live in ci-gpu.yml (Windows self-hosted runner with CUDA).
+  # GPU tests live in ci-gpu.yml (Windows bare-metal + Linux Docker on gpu-nvidia/gpu-amd runners).
   index-cpu-fallback:
     name: index — cpu fallback (no GPU)
     runs-on: [self-hosted, Linux]

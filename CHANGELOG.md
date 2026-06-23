@@ -9,6 +9,84 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.25] — 2026-06-23
+
+### Fixed
+
+- **Flink `AilakeJniIntegrationTest` always SKIPPED in CI** (`ailake-flink`, `.github/workflows/compat-heavy.yml`) — `-Dailake.native.lib=...` passed to Gradle sets a property in the Gradle daemon JVM but is not propagated to the test worker JVM, so `System.getProperty("ailake.native.lib")` always returned null and `assumeTrue` skipped all three tests (`writeAndSearch`, `deleteWhere`, `evolveSchema`). Fixed: CI now passes `AILAKE_NATIVE_LIB` as an environment variable (inherited by the test JVM automatically); `build.gradle.kts` `tasks.test` block also forwards the system property via `systemProperty()` for local dev (`gradle test -Dailake.native.lib=...`).
+
+### Added
+
+- **FTS `writeBatch` + `searchText` integration tests for Spark and Trino** (`spark-plugin`, `trino-plugin`) — `AilakeNativeTest` had `writeBatch(ftsColumns=[...])` and `searchText()` tests that correctly SKIP in CI when the native library is present (they test graceful degradation when absent), but there was no positive coverage of the FTS path when the library IS present. Added `writeBatchWithFtsColumnsAndSearchTextRoundtrip` to `AilakeWriteBatchIntegrationTest` in both plugins: writes 3 rows with `ftsColumns=["chunk_text"]` and `columns={"chunk_text": [...]}`, then calls `searchText("rust")` and asserts `rowId=0` is the top result.
+
+### Changed (CI)
+
+- **GPU CI consolidated** (`.github/workflows/`) — `ci-gpu-data.yml` deleted; its test (`cargo test -p ailake-index --test gpu_data`) was a strict subset of what `ci-gpu.yml` already runs (`cargo test -p ailake-index`). Single entry point: `ci-gpu.yml`. Linux GPU jobs (`index-gpu-linux-cuda`, `index-gpu-linux-rocm`) set to `if: false` — no Linux GPU runner registered; only Windows self-hosted GPU runner available.
+
+---
+
+## [0.0.24] — 2026-06-23
+
+### Fixed
+
+- **`HadoopCatalog` lost-update under concurrent in-process writes** (`ailake-catalog`) — `save_metadata()` performed two non-atomic `store.put()` calls (versioned JSON + version-hint.text). Two concurrent tokio tasks could both read version N and both write version N+1, causing one commit to be silently discarded. Fixed: added `Arc<tokio::sync::Mutex<()>>` to `HadoopCatalog` that serializes all `commit_snapshot` calls within the process. Cross-process concurrent writers (multi-JVM Spark) require a REST or Nessie catalog — same documented limitation as upstream Apache Iceberg `HadoopCatalog`.
+- **`GlueCatalog` lost-update under concurrent writes** (`ailake-catalog`) — `commit_snapshot` called `update_table()` without the Glue version_id OCC guard. Two concurrent writers could both read the same Glue table version and overwrite each other's `metadata_location`. Fixed: new `get_table_state()` method reads both `metadata_location` and Glue's `version_id`; `build_table_input()` now accepts `version_id: Option<&str>` and passes it to `update_table()`; on `ConcurrentModificationException` the commit retries up to 5 times with exponential back-off (100ms, 200ms, 400ms, …).
+- **`JdbcCatalog` lost-update under concurrent writes** (`ailake-catalog`) — `commit_snapshot` executed `UPDATE iceberg_tables SET metadata_location = ?` with no CAS condition, allowing concurrent writers to silently overwrite each other's commits. Fixed: `AND metadata_location = old_location` added as CAS predicate; `rows_affected() == 0` triggers up to 5 retries with 50ms exponential back-off; compatible with PostgreSQL, MySQL, and SQLite.
+
+- **`ailake_free_string` non-nullable in Trino JNA interface** (`trino-plugin`) — `Lib.ailake_free_string(ptr: Pointer)` was non-nullable; if Rust ever returns a null pointer under OOM, JNA would NPE before reaching the native call. Fixed: `Pointer?` matches Flink's `AilakeNativeLib.ailake_free_string(ptr: Pointer?)`.
+- **`searchMultimodal` `dropLast(1)` JSON hack in Trino** (`trino-plugin`) — `AilakeNative.searchMultimodal` built the JSON payload as `mapper.writeValueAsString(mapOf(...)).dropLast(1) + """,...}"""`, the same fragile string-concatenation pattern that was fixed in `evolveSchema` last sprint but not applied here. JSON would be malformed if `warehouse`/`namespace`/`table` contained `}` or `"`. Fixed: proper `mutableMapOf` + `mapper.writeValueAsString(payload)`.
+- **Trino/Spark missing `AILAKE_NATIVE_LIB` / `ailake.native.lib` override** (`trino-plugin`, `spark-plugin`) — Flink's `AilakeNativeLoader` supported explicit library path via `System.getProperty("ailake.native.lib")` and `System.getenv("AILAKE_NATIVE_LIB")` since sprint 4; Trino and Spark only used the JNA default search path, making it impossible to point to a specific lib path without changing `LD_LIBRARY_PATH` globally. Both now support the same discovery order: system property → env var → JNA default search path. Log message updated to match Flink style.
+
+### Added
+
+- **GPU Docker images for reproducible local and CI testing** (`docker/gpu-cuda/Dockerfile`, `docker/gpu-rocm/Dockerfile`, `docker-compose.gpu.yml`) — two purpose-built images replacing the need to manually install CUDA Toolkit or ROCm on a Linux development machine. `gpu-cuda` is based on `nvidia/cuda:12.6.0-runtime-ubuntu22.04` (runtime-only, not devel — ailake-index uses libloading so no compile-time SDK is needed); `gpu-rocm` on `rocm/dev-ubuntu-22.04:6.2`. Both images vendor Rust stable, pre-fetch workspace deps, and pre-build the test harness. `docker-compose.gpu.yml` provides `gpu-cuda` and `gpu-rocm` services with correct device passthrough flags. Local usage: `docker compose -f docker-compose.gpu.yml run --rm gpu-cuda`.
+- **Linux GPU CI jobs** (`.github/workflows/ci-gpu.yml`, `.github/workflows/ci-gpu-data.yml`) — new `index-gpu-linux-cuda` and `index-gpu-linux-rocm` jobs run the Docker images on `[self-hosted, Linux, gpu-nvidia]` / `[self-hosted, Linux, gpu-amd]` runners. GPU CI previously covered Windows bare-metal only; `hardware.rs` Linux paths (`libcuda.so.1`, `libamdhip64.so`) were never exercised in CI.
+- **Composite action `locate-rust-windows`** (`.github/actions/locate-rust-windows/action.yml`) — extracts the ~60-line PowerShell Rust-discovery block duplicated across `ci-gpu.yml` and `ci-gpu-data.yml` into a reusable composite action. Both workflows now call `uses: ./.github/actions/locate-rust-windows`.
+
+- **Concurrent-write stress tests** (`tests/tests/concurrent_writes.rs`) — three new integration tests: `hadoop_8_concurrent_appends_no_lost_update` (8 parallel tokio tasks, verifies all 8 files survive via `list_files`), `hadoop_overwrite_and_append_no_corruption` (4 Append + 2 Overwrite tasks race, verifies metadata integrity), `jdbc_4_concurrent_commits_no_lost_update` (4 SQLite writers, CAS retry, each snap_id individually findable). Requires `features = ["catalog-jdbc"]` in `tests/Cargo.toml`.
+
+- **ADR-017 — Arrow Flight rejected; Fase 10 Arrow IPC write_batch planned** (`docs/contributing/DECISIONS.md`, `CLAUDE.md`) — architectural decision record documenting evaluation of Apache Arrow Flight as unified interop layer; decision: not adopted. `ailake serve` (HTTP/JSON) already covers language-agnostic access; PyO3 and Go SDK are already zero-FFI; JVM FFI surface (JNA, 10 functions) is manageable post sprint-4 fixes; distributed Spark favors per-executor local search over centralised Flight server; Arrow Flight Java client would add 50MB+ to Spark classpath with version-conflict risk. Identified next incremental improvement: replace JSON embedding payload in `ailake_write_batch_json` with Arrow IPC bytes (12MB JSON → 3MB IPC binary per 1k×1536-dim batch) — Fase 10 in roadmap. Conditions that would reopen Flight: GPU co-location mandatory, >8 JVM plugins, multi-tenant shared inference cluster, or streaming >10k results.
+
+### Changed (docs)
+
+- **Version strings** — all `0.0.20` references updated to `0.0.23` in `README.md`, `README.pt-BR.md`, and `ailake-py/README.md`.
+- **Repository layout** — `ailake-fts/` and `airbyte-destination-ailake/` added to layout sections in `README.md` and `README.pt-BR.md`.
+- **`docs/specs/FILE_FORMAT.md`** — §7 renamed from "Phase T" to "Phase 7 — Full-Text Search"; new §8.2 subsection documents `index_status` / `index_error` in `key_metadata` JSON with full status table and failure JSON example.
+- **`docs/specs/COMPACTION.md`** — new "Failed index recovery" subsection: explains `IndexStatus::Failed` lifecycle, flat-scan fallback, and automatic self-healing at next compaction run.
+- **`docs/architecture/DATA_FLOW.md`** — `IndexStatus` lifecycle updated to include `Failed` state, `patch_index_failed()` reference, and flat-scan fallback for both `Indexing` and `Failed` files.
+- **`ailake-py/README.md`** — added `search_text()` API doc (BM25 + Tantivy fast path); added `info()` API doc showing `index_status`/`index_error` per-file fields; added **Version: 0.0.23** to header.
+- **`ailake-go/README.md`** — `DataFileEntry.IndexStatus` comment updated to include `"failed"`; `IndexError string` field added.
+
+### Changed (demo)
+
+- **Demo notebooks + init_demo.py updated to v0.0.23** — version strings updated from v0.0.20 in `01_ailake_demo.ipynb`, `09_hybrid_search.ipynb`, and `init_demo.py`.
+- **`01_ailake_demo.ipynb` — new feature demos**:
+  - §15 (HNSW tuning): added `ef_search` and `pruning_threshold` to markdown table and code cell — shows `search(..., ef_search=400)` and `search(..., pruning_threshold=0.7)`.
+  - §31 (new): `ailake.compact()` — merges small files and rebuilds index; post-compaction search verification.
+  - §30 (schema evolution): added `ailake.evolve_schema()` combined wrapper demo alongside `add_column` + `rename_column`.
+
+---
+
+## [0.0.23] — 2026-06-22
+
+### Fixed (release infrastructure)
+
+- **`ailake-fts` crates.io publish order** (`release`) — added `ailake-fts` to workspace crates.io publish sequence; unblocked v0.0.23 crates.io release after v0.0.22 publish failure.
+
+---
+
+## [0.0.22] — 2026-06-22
+
+### Fixed (release infrastructure)
+
+- **`ailake-fts` workspace dependency version** (`workspace`) — added explicit `version` pin to the workspace-level `ailake-fts` dependency entry; fixed missing version that blocked workspace publish.
+
+---
+
+## [0.0.21] — 2026-06-22
+
 ### Fixed
 
 - **Hybrid BM25 fusion score misalignment** (`ailake-query`) — `bm25_scores` was computed from `raw_candidates` before `sort_by()` but indexed by position after the sort; the candidate order changed but the score array did not track the shuffle, so every hybrid search returned wrong RRF fusion scores. Fixed: BM25 scores zipped into `candidates_with_bm25` tuples before sorting so each score travels with its candidate.
@@ -87,6 +165,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`fts-stemmer-langs` Cargo feature** (`ailake-fts`) — opt-in registration of 17 Snowball language stemmers + stop-word-filtered pipelines in every Tantivy index build. Bare stemmers: `ar_stem`, `da_stem`, `nl_stem`, `fi_stem`, `fr_stem`, `de_stem`, `el_stem`, `hu_stem`, `it_stem`, `no_stem`, `pt_stem`, `ro_stem`, `ru_stem`, `es_stem`, `sv_stem`, `ta_stem`, `tr_stem`. Stop-word-filtered: `pt_br` (Portuguese Snowball + PT stop words — recommended for Brazilian Portuguese workloads; ~10-15% smaller blobs); `en_stop` (English Snowball + EN stop words — use `en_stem` for standard English; `en_stop` when index size matters). Feature also enables `tantivy/stopwords` for stop word lists. English: built-in `en_stem` (always available, no feature needed) is the standard; no action required for EN workloads. Enable with `ailake-fts = { features = ["fts-stemmer-langs"] }`. Use via `FtsConfig { tokenizer: "pt_br", .. }`.
 - **`cjk_ngram` tokenizer** (`ailake-fts`) — always registered, zero extra deps. `NgramTokenizer(min=1, max=2, prefix_only=false)` + `LowerCaser`. Tokenizes CJK text into unigrams and bigrams so BM25 matches sub-word characters (unigram "知" and bigram "知能"). ~85% recall vs. dictionary-based segmenters (Lindera/jieba). For production CJK, register a custom tokenizer and pass its name as `FtsConfig::tokenizer`. Documented in `ailake-fts/src/tokenizers.rs` with limitations (Thai/Khmer, false-positive unigrams, compound recall gap).
 - **FTS text field upgraded to `WithFreqsAndPositions`** (`ailake-fts`) — previously `WithFreqs`; positions required for NgramTokenizer phrase queries and user phrase search (e.g. `"quick brown fox"`). ~25-40% larger uncompressed term postings; negligible after zstd. **Breaks blobs written by prior releases when phrase queries are used** — point queries unaffected; rewrite blobs to regain phrase-query support.
+
+### Fixed (security/correctness follow-up — `fix/security-and-correctness`)
+
+- **`write_batch_multi_deferred` never called `patch_index_failed`** (`ailake-query`) — when multi-column HNSW background build failed, the catalog entry stayed `IndexStatus::Indexing` forever; compaction never retried. Fixed: spawn block clones `catalog`, `table`, `fp` and calls `patch_index_failed(catalog, &table, &fp, &e.to_string()).await` on error, consistent with single-column and IVF-PQ deferred variants.
+- **`DataFileEntry` missing `index_error` in 18 struct literals** (`ailake-catalog`, `ailake-query`) — workspace failed to compile after `index_error: Option<String>` was added to the struct but not propagated to test initializers in `avro_manifest.rs`, `hadoop.rs`, `snapshot.rs`, `compaction.rs`, `delete.rs`, and `pruner.rs`. Fixed: `index_error: None` added to all 18 literal sites; `index_failed_roundtrip` test added to verify full Avro round-trip.
+- **`ailake-fts` blob deserializer missing adversarial guards** (`ailake-fts`) — `blob_to_ram_dir` did not validate file count, magic bytes, or per-entry bounds; a crafted AILK_FTS blob could allocate unlimited memory. Added: `MAX_FTS_FILES = 65_536` check, magic `"AFTS"` guard, checked arithmetic for entry lengths, and 4 adversarial unit tests.
+- **`AilakeIndexStatusSensor` polled forever on `"failed"` status** (`airflow-providers-ailake`) — sensor only branched on `"ready"` (return `True`) and everything else (return `False`); a permanently-failed index caused infinite polling. Fixed: `"failed"` branch raises `RuntimeError` with `index_error` detail. 5 tests added covering `ready`, `indexing`, absent, `failed`-with-detail, and `failed`-without-detail.
+- **`redundant_closure` clippy errors in JNI** (`ailake-jni`) — 5 occurrences of `.unwrap_or_else(|e| cstr_err_json(e))` flagged by `cargo clippy -D warnings`; simplified to `.unwrap_or_else(cstr_err_json)`.
+- **`cargo fmt` failures** — long method chains in `ailake-cli/src/main.rs`, `ailake-file/src/reader.rs`, and `ailake-query/src/writer.rs` were not formatted per rustfmt style. `cargo fmt --all` applied.
 
 ### Fixed (Sprint 3 — P2)
 

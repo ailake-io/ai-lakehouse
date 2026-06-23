@@ -7,6 +7,7 @@ use std::sync::Arc;
 use ailake_core::{AilakeError, AilakeResult};
 use async_trait::async_trait;
 use base64::Engine as _;
+use tokio::sync::Mutex;
 
 use crate::avro_manifest::{
     read_equality_delete_manifest, read_manifest_file, read_manifest_list_typed,
@@ -24,6 +25,10 @@ use bytes::Bytes;
 pub struct HadoopCatalog {
     store: Arc<dyn Store>,
     warehouse: String,
+    // Serializes commits within the same process. Cross-process concurrent writes
+    // require a REST or Nessie catalog — HadoopCatalog is single-process by design,
+    // matching upstream Iceberg's documented limitation.
+    commit_lock: Arc<Mutex<()>>,
 }
 
 impl HadoopCatalog {
@@ -31,6 +36,7 @@ impl HadoopCatalog {
         Self {
             store,
             warehouse: warehouse.trim_end_matches('/').to_string(),
+            commit_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -123,6 +129,7 @@ impl CatalogProvider for HadoopCatalog {
         table: &TableIdent,
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
+        let _guard = self.commit_lock.lock().await;
         let snap_id = snapshot.snapshot_id;
         let mut meta = self.load_raw_metadata(table).await?;
         let seq = meta.last_sequence_number + 1;
@@ -673,6 +680,7 @@ mod tests {
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
                 index_status: crate::provider::IndexStatus::Ready,
+                index_error: None,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -719,6 +727,7 @@ mod tests {
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
                 index_status: crate::provider::IndexStatus::Ready,
+                index_error: None,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -750,6 +759,7 @@ mod tests {
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
                 index_status: crate::provider::IndexStatus::Ready,
+                index_error: None,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -808,6 +818,7 @@ mod tests {
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
                 index_status: crate::provider::IndexStatus::Ready,
+                index_error: None,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -858,6 +869,7 @@ mod tests {
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
                 index_status: crate::provider::IndexStatus::Ready,
+                index_error: None,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -887,6 +899,7 @@ mod tests {
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
                 index_status: crate::provider::IndexStatus::Ready,
+                index_error: None,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -918,6 +931,7 @@ mod tests {
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
                 index_status: crate::provider::IndexStatus::Ready,
+                index_error: None,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,
@@ -957,6 +971,7 @@ mod tests {
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
                 index_status: crate::provider::IndexStatus::Ready,
+                index_error: None,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,

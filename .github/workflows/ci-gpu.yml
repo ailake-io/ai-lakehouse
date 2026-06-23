@@ -1,4 +1,4 @@
-name: CI GPU (ailake-index — Windows CUDA/ROCm)
+name: CI GPU (ailake-index — CUDA/ROCm)
 
 on:
   workflow_dispatch:
@@ -9,59 +9,24 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  # Runs ailake-index tests on a Windows self-hosted runner that has NVIDIA or
-  # AMD GPU drivers installed.  The gpu.rs libloading backend selects CUDA or
-  # ROCm at runtime based on whichever driver is present.
+  # ── Windows self-hosted (bare-metal CUDA or ROCm) ──────────────────────────
+  #
+  # Runs all ailake-index tests: unit tests (src/gpu.rs, src/hardware.rs, …)
+  # and data integration tests (tests/gpu_data.rs — real SGEMM recall checks).
+  # ci-gpu-data.yml was merged here; this is the single GPU CI entry point.
   #
   # Runner requirements:
-  #   - Windows 10/11 or Windows Server 2019+
-  #   - NVIDIA: CUDA Toolkit 11 or 12 installed (cudart64_*.dll + cublas64_*.dll in PATH)
-  #   - AMD:    ROCm for Windows installed (amdhip64.dll + hipblas.dll in PATH)
-  #   - Rust stable toolchain installed (rustup)
+  #   NVIDIA: CUDA Toolkit 11 or 12 (cudart64_*.dll + cublas64_*.dll in PATH)
+  #   AMD:    ROCm for Windows (amdhip64.dll + hipblas.dll in PATH)
+  #   Rust stable toolchain (rustup)
   index-gpu-windows:
     name: index — gpu (Windows)
     runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v6
 
-      - name: Locate and configure Rust
-        shell: pwsh
-        run: |
-          # Prefer the actual toolchain binary over the rustup shim.
-          # The shim at $USERPROFILE\.cargo\bin\cargo.exe requires rustup in PATH;
-          # the toolchain binary works standalone.
-          $rustBin = $null
-
-          # 1. Look for real cargo inside .rustup toolchains
-          $toolchainCargo = Get-ChildItem `
-            "$env:USERPROFILE\.rustup\toolchains\*\bin\cargo.exe", `
-            "C:\Users\$env:USERNAME\.rustup\toolchains\*\bin\cargo.exe" `
-            -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($toolchainCargo) {
-            $rustBin = Split-Path $toolchainCargo.FullName
-            Write-Host "Found toolchain cargo: $rustBin"
-          }
-
-          # 2. Fallback: shim path (only works if rustup shim resolves correctly)
-          if (-not $rustBin) {
-            foreach ($c in @("$env:USERPROFILE\.cargo\bin", "C:\Users\$env:USERNAME\.cargo\bin")) {
-              if (Test-Path "$c\cargo.exe") { $rustBin = $c; break }
-            }
-            if ($rustBin) { Write-Host "Found cargo shim: $rustBin" }
-          }
-
-          # 3. Already on PATH
-          if (-not $rustBin) {
-            $r = Get-Command cargo -ErrorAction SilentlyContinue
-            if ($r) { $rustBin = Split-Path $r.Source; Write-Host "cargo already on PATH: $rustBin" }
-          }
-
-          if (-not $rustBin) {
-            Write-Error "cargo not found. Install Rust stable on this runner."
-            exit 1
-          }
-
-          "$rustBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Locate Rust
+        uses: ./.github/actions/locate-rust-windows
 
       - uses: Swatinem/rust-cache@v2
 
@@ -74,24 +39,92 @@ jobs:
               if (Test-Path $p) { $p }
             } | Select-Object -First 1
           }
-
           $cuda = Find-Dll "cudart64_12.dll"
           if (-not $cuda) { $cuda = Find-Dll "cudart64_11.dll" }
           $rocm = Find-Dll "amdhip64.dll"
-
           if ($cuda) {
             Write-Host "NVIDIA CUDA runtime found: $cuda"
-            $env:AILAKE_GPU_BACKEND = "cuda"
+            echo "AILAKE_GPU_BACKEND=cuda" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           } elseif ($rocm) {
             Write-Host "AMD ROCm runtime found: $rocm"
-            $env:AILAKE_GPU_BACKEND = "rocm"
+            echo "AILAKE_GPU_BACKEND=rocm" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           } else {
-            Write-Host "WARNING: no CUDA or ROCm runtime found — GPU tests will be skipped by libloading fallback"
-            Write-Host "Install CUDA Toolkit 11/12 or ROCm for Windows to enable GPU tests on this runner."
-            $env:AILAKE_GPU_BACKEND = "none"
+            Write-Host "WARNING: no CUDA or ROCm runtime found — GPU tests will skip via libloading fallback"
+            echo "AILAKE_GPU_BACKEND=none" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
-          echo "AILAKE_GPU_BACKEND=$env:AILAKE_GPU_BACKEND" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run ailake-index tests (GPU path)
         shell: pwsh
         run: cargo test -p ailake-index -- --nocapture
+
+  # ── Linux self-hosted — NVIDIA (Docker + nvidia-container-toolkit) ─────────
+  #
+  # Runner label: gpu-nvidia
+  # Requirements:
+  #   - Linux x86-64, NVIDIA GPU, nvidia-container-toolkit installed
+  #   - Verify: docker run --gpus all --rm nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi
+  # Disabled: no Linux GPU runner available yet (only Windows self-hosted GPU runner exists).
+  # Re-enable by removing `if: false` when a runner with label gpu-nvidia is registered.
+  index-gpu-linux-cuda:
+    name: index — gpu (Linux/CUDA Docker)
+    if: false
+    runs-on: [self-hosted, Linux, X64, gpu-nvidia]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build CUDA test image
+        run: |
+          docker build \
+            --file docker/gpu-cuda/Dockerfile \
+            --tag ailake-gpu-cuda:ci-${{ github.sha }} \
+            .
+
+      - name: Run ailake-index tests in CUDA container
+        run: |
+          docker run --rm \
+            --gpus all \
+            -e AILAKE_GPU_BACKEND=cuda \
+            -e RUST_BACKTRACE=1 \
+            ailake-gpu-cuda:ci-${{ github.sha }} \
+            cargo test -p ailake-index -- --nocapture
+
+      - name: Remove CI image
+        if: always()
+        run: docker rmi ailake-gpu-cuda:ci-${{ github.sha }} || true
+
+  # ── Linux self-hosted — AMD (Docker + ROCm device passthrough) ────────────
+  #
+  # Runner label: gpu-amd
+  # Requirements:
+  #   - Linux x86-64, AMD GPU, amdgpu kernel module, /dev/kfd + /dev/dri accessible
+  #   - Verify: docker run --device /dev/kfd --device /dev/dri \
+  #               --group-add video --rm rocm/dev-ubuntu-22.04:6.2 rocm-smi
+  # Disabled: no Linux GPU runner available yet (only Windows self-hosted GPU runner exists).
+  # Re-enable by removing `if: false` when a runner with label gpu-amd is registered.
+  index-gpu-linux-rocm:
+    name: index — gpu (Linux/ROCm Docker)
+    if: false
+    runs-on: [self-hosted, Linux, X64, gpu-amd]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build ROCm test image
+        run: |
+          docker build \
+            --file docker/gpu-rocm/Dockerfile \
+            --tag ailake-gpu-rocm:ci-${{ github.sha }} \
+            .
+
+      - name: Run ailake-index tests in ROCm container
+        run: |
+          docker run --rm \
+            --device /dev/kfd --device /dev/dri \
+            --group-add video \
+            -e AILAKE_GPU_BACKEND=rocm \
+            -e RUST_BACKTRACE=1 \
+            ailake-gpu-rocm:ci-${{ github.sha }} \
+            cargo test -p ailake-index -- --nocapture
+
+      - name: Remove CI image
+        if: always()
+        run: docker rmi ailake-gpu-rocm:ci-${{ github.sha }} || true

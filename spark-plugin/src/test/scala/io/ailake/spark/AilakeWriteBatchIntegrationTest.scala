@@ -199,6 +199,52 @@ class AilakeWriteBatchIntegrationTest extends AnyFunSuite {
     println(s"[test] evolveSchema OK: new_schema_id=$schemaId")
   }
 
+  // ── Phase T: FTS write + searchText roundtrip ────────────────────────────
+
+  test("writeBatch with ftsColumns and searchText roundtrip") {
+    assume(libPath.isDefined,  "AILAKE_LIB_PATH not set — skipping")
+    assume(writeDir.isDefined, "AILAKE_WRITE_DIR not set — skipping")
+    assume(libPresent,         "libailake_jni.so not found — skipping")
+
+    val tableUri = s"${writeDir.get}/integration-fts-spark"
+    val texts    = Seq("rust programming language", "hello world example", "vector search database")
+    val snap = AilakeNative.writeBatch(
+      tableUri     = tableUri,
+      namespace    = "default",
+      tableName    = "integration_fts_spark",
+      vectorColumn = "embedding",
+      dim          = 4,
+      metric       = "cosine",
+      precision    = "f16",
+      ids          = Seq(0L, 1L, 2L),
+      embeddings   = Seq(
+        Seq(1.0f, 0.0f, 0.0f, 0.0f),
+        Seq(0.0f, 1.0f, 0.0f, 0.0f),
+        Seq(0.0f, 0.0f, 1.0f, 0.0f),
+      ),
+      ftsColumns   = Seq("chunk_text"),
+      ftsTokenizer = "default",
+      columns      = Map("chunk_text" -> texts),
+    )
+    assert(snap.isDefined, "writeBatch with ftsColumns returned None")
+    println(s"[test] writeBatch fts OK: snapshotId=${snap.get}")
+
+    val results = AilakeNative.searchText(
+      tableUri    = tableUri,
+      namespace   = "default",
+      tableName   = "integration_fts_spark",
+      queryText   = "rust",
+      textColumns = Seq("chunk_text"),
+      topK        = 3,
+    )
+    assert(results.nonEmpty, "searchText returned empty — FTS index not built or not searched")
+    val best = results.head
+    assert(best.rowId == 0L, s"expected rowId=0 (rust programming), got rowId=${best.rowId}")
+    println(s"[test] searchText OK: rowId=${best.rowId} distance=${best.distance}")
+    println()
+    println("PASS (Spark): FTS write+searchText roundtrip functional with real library.")
+  }
+
   // ── AilakeDataWriterFactory ───────────────────────────────────────────────
 
   test("AilakeDataWriterFactory creates distinct writer instances") {

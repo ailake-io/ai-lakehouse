@@ -388,3 +388,47 @@ Exposed in: Rust (`TableWriter::write_batch_auto_deferred`), Python (`Table.writ
 - Always IVF-PQ deferred: wrong choice on single-core machines; IVF-PQ quality degrades with <1k training vectors per cluster.
 - Always HNSW deferred: misses GPU acceleration available on ML infra nodes.
 - Caller-specified engine: puts the burden of hardware knowledge on every application developer.
+
+---
+
+## ADR-017: Reject Arrow Flight as unified interop layer; adopt Arrow IPC bytes in JNI write_batch
+
+**Date**: 2026-06
+**Status**: Accepted
+
+**Context**: Proposal to replace per-language FFI/JNI bindings (JNA C-ABI for Spark/Trino/Flink, subprocess for C++, CGo-free direct reads for Go) with Apache Arrow Flight (gRPC + Arrow IPC) as a single transport layer. Rationale: reduce C-binding boilerplate, eliminate CString/pointer lifecycle bugs, standardize data transfer format.
+
+**Decision**: Do **not** adopt Arrow Flight as a unified interop layer. Instead, replace JSON string serialization in `ailake_write_batch_json` with Arrow IPC bytes (binary) as the next incremental improvement to the JNI boundary.
+
+**Reasoning**:
+
+1. **FFI is not the bottleneck.** Write throughput is dominated by S3 PUT (~4000ms). JSON serialization of 1k×1536-dim embeddings adds ~10ms (0.25% overhead). Search JSON is ~6KB (one query vector) — parse time is noise vs HNSW traversal and S3 I/O.
+
+2. **`ailake serve` already provides language-agnostic transport.** The existing Axum HTTP/JSON server covers any language unable to embed native libs. Arrow Flight would be a binary-protocol version of this — better latency by ~0.5ms, but requires a mandatory daemon, port management, health checks, and crash recovery.
+
+3. **PyO3 and Go would regress.** PyO3 is zero-copy native (Arrow IPC in-process). Go reads catalog + AILK directly from S3 with zero FFI. Both would gain a network hop with no upside.
+
+4. **Distributed Spark benefits from distributed search.** Current model: each executor downloads HNSW + searches locally in parallel. Centralising search via a Flight server serialises this parallelism — wrong direction for large clusters.
+
+5. **JVM FFI surface is 10 functions behind JNA — manageable.** The correctness issues fixed this sprint (null-bytes, UTF-8 slices, pointer lifetimes) are addressed by `cstr_json` + clippy, not by a transport change.
+
+6. **Arrow Flight Java client adds 50MB+ of Arrow/gRPC/Netty to the Spark classpath**, with version conflict risk against Spark's own Arrow/Netty stack (Spark 3.5 ships Arrow 12).
+
+**Next incremental step (Fase 10)**: Replace the JSON embedding payload in `ailake_write_batch_json` with Arrow IPC bytes passed via JNI. Eliminates the only meaningful overhead (~10ms/1k vecs JSON encode/decode) without adding a daemon or changing the calling convention. Estimated effort: 1 week.
+
+**Conditions that would reopen Arrow Flight**:
+- GPU co-location becomes mandatory (all HNSW/IVF-PQ on dedicated GPU nodes, not co-located with Spark executors).
+- JVM plugin count grows beyond 8 and FFI maintenance becomes intractable.
+- Multi-tenant shared inference cluster required.
+- Streaming search results > 10k rows where HTTP chunked transfer is insufficient.
+
+**Consequences**:
+- JNA C-ABI surface (`ailake-jni`) remains the canonical JVM binding path.
+- `ailake serve` HTTP/JSON remains the canonical language-agnostic access path.
+- PyO3 (Python) and Go SDK remain as embedded zero-FFI paths.
+- Arrow IPC bytes in `write_batch` (Fase 10) is the only transport change planned.
+
+**Rejected alternatives**:
+- Full Arrow Flight adoption: operational complexity (daemon lifecycle, TLS, service discovery) outweighs benefits at current scale.
+- gRPC without Arrow: same daemon overhead, loses zero-copy columnar benefit.
+- Protobuf at the JNI boundary: additional schema maintenance without Arrow ecosystem benefits.

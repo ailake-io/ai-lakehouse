@@ -23,6 +23,16 @@ Records in un-compacted files are still searchable (their indexes exist, just sm
 
 > **Tip**: `write_batch_auto_deferred` (Python / Rust SDK) builds the per-shard index in a background Tokio task immediately after Parquet commit. New shards are served via flat scan until `IndexStatus::Ready`, then switch to HNSW/IVF-PQ automatically. This narrows the blind window to the index build time (~30-165 s per shard) without waiting for the compaction job.
 
+### Failed index recovery
+
+When a deferred background index build fails (e.g. k-means divergence, OOM), `patch_index_failed()` transitions the file's catalog entry to `IndexStatus::Failed` with an `index_error` reason string. Files in `Failed` state:
+
+1. **Continue serving reads** via flat scan (exact O(N) brute-force) — no data loss, no downtime.
+2. **Are selected first** by `CompactionPlanner` — the planner prioritises `Failed` files regardless of size or age.
+3. **Get their index rebuilt** during compaction — the compactor reads their Parquet row data and rebuilds HNSW/IVF-PQ from scratch, transitioning them back to `Ready`.
+
+This makes compaction the **self-healing** path for transient build failures (transient GPU OOM, k-means seed instability). No operator intervention required — the next compaction run recovers all `Failed` files automatically.
+
 ---
 
 ## Compaction triggers

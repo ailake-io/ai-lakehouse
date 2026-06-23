@@ -103,13 +103,17 @@ impl GlueCatalog {
         table_name: &str,
         table_root: &str,
         metadata_location: &str,
+        version_id: Option<&str>,
     ) -> AilakeResult<TableInput> {
         let sd = StorageDescriptor::builder().location(table_root).build();
-        TableInput::builder()
+        let mut b = TableInput::builder()
             .name(table_name)
             .storage_descriptor(sd)
-            .set_parameters(Some(Self::table_params(metadata_location)))
-            .build()
+            .set_parameters(Some(Self::table_params(metadata_location)));
+        if let Some(vid) = version_id {
+            b = b.version_id(vid);
+        }
+        b.build()
             .map_err(|e| AilakeError::Catalog(format!("GlueCatalog TableInput: {e}")))
     }
 
@@ -139,6 +143,38 @@ impl GlueCatalog {
                 table.namespace, table.name
             ))
         })
+    }
+
+    /// Returns `(metadata_location, glue_version_id)` for OCC commit guard.
+    async fn get_table_state(&self, table: &TableIdent) -> AilakeResult<(String, Option<String>)> {
+        let resp = self
+            .client
+            .get_table()
+            .database_name(&self.config.database)
+            .name(&table.name)
+            .send()
+            .await
+            .map_err(|e| AilakeError::Catalog(format!("Glue get_table: {e}")))?;
+
+        let t = resp
+            .table()
+            .ok_or_else(|| AilakeError::Catalog("Glue get_table: empty response".into()))?;
+
+        let version_id = t.version_id().map(str::to_string);
+
+        let params = t.parameters().ok_or_else(|| {
+            AilakeError::Catalog(format!(
+                "Glue table {}.{} has no parameters",
+                table.namespace, table.name
+            ))
+        })?;
+        let location = params.get("metadata_location").cloned().ok_or_else(|| {
+            AilakeError::Catalog(format!(
+                "Glue table {}.{} is not an Iceberg table (missing metadata_location)",
+                table.namespace, table.name
+            ))
+        })?;
+        Ok((location, version_id))
     }
 
     async fn load_iceberg_metadata(&self, location: &str) -> AilakeResult<IcebergMetadata> {
@@ -176,7 +212,8 @@ impl CatalogProvider for GlueCatalog {
             .put(&metadata_location, Bytes::from(json.into_bytes()))
             .await?;
 
-        let table_input = Self::build_table_input(&name.name, &table_root, &metadata_location)?;
+        let table_input =
+            Self::build_table_input(&name.name, &table_root, &metadata_location, None)?;
         self.client
             .create_table()
             .database_name(&self.config.database)
@@ -200,8 +237,10 @@ impl CatalogProvider for GlueCatalog {
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
         let snap_id = snapshot.snapshot_id;
+        let files_count = snapshot.files.len();
+        let operation_str = format!("{:?}", snapshot.operation).to_lowercase();
 
-        // 1. Write manifest
+        // 1. Write manifest once — orphaned manifests are benign in Iceberg.
         let root = self.table_root(table);
         let abs_manifest = format!("{root}/{}", manifest_path(snap_id));
         let manifest = build_manifest(&snapshot);
@@ -209,50 +248,68 @@ impl CatalogProvider for GlueCatalog {
             .put(&abs_manifest, Bytes::from(manifest.to_json()?.into_bytes()))
             .await?;
 
-        // 2. Load and update metadata
-        let old_location = self.get_metadata_location(table).await?;
-        let mut meta = self.load_iceberg_metadata(&old_location).await?;
-        let now_ms = now_ms();
-        let iceberg_snap = IcebergSnapshot {
-            snapshot_id: snap_id,
-            parent_snapshot_id: snapshot.parent_snapshot_id,
-            sequence_number: meta.last_sequence_number + 1,
-            timestamp_ms: now_ms,
-            manifest_list: abs_manifest,
-            summary: HashMap::from([
-                (
-                    "operation".into(),
-                    format!("{:?}", snapshot.operation).to_lowercase(),
-                ),
-                ("added-data-files".into(), snapshot.files.len().to_string()),
-            ]),
-            schema_id: Some(0),
-        };
-        meta.last_sequence_number += 1;
-        meta.last_updated_ms = now_ms;
-        meta.current_snapshot_id = Some(snap_id);
-        meta.snapshots.push(iceberg_snap);
-
-        // 3. Write new versioned metadata.json
-        let new_uuid = Uuid::new_v4().to_string();
-        let new_location = self.metadata_path(table, &new_uuid);
-        let json = meta.to_json()?;
-        self.store
-            .put(&new_location, Bytes::from(json.into_bytes()))
-            .await?;
-
-        // 4. Update Glue table pointer
+        // 2–4. OCC retry: read → mutate → write metadata → update_table with version_id.
+        // Glue rejects update_table when version_id doesn't match (ConcurrentModificationException),
+        // so we re-read and retry with the fresh version_id.
+        const MAX_RETRIES: u32 = 5;
         let table_root = self.table_root(table);
-        let table_input = Self::build_table_input(&table.name, &table_root, &new_location)?;
-        self.client
-            .update_table()
-            .database_name(&self.config.database)
-            .table_input(table_input)
-            .send()
-            .await
-            .map_err(|e| AilakeError::Catalog(format!("Glue update_table: {e}")))?;
+        for attempt in 0..MAX_RETRIES {
+            let (old_location, version_id) = self.get_table_state(table).await?;
+            let mut meta = self.load_iceberg_metadata(&old_location).await?;
+            let now_ms = now_ms();
+            let iceberg_snap = IcebergSnapshot {
+                snapshot_id: snap_id,
+                parent_snapshot_id: meta.current_snapshot_id,
+                sequence_number: meta.last_sequence_number + 1,
+                timestamp_ms: now_ms,
+                manifest_list: abs_manifest.clone(),
+                summary: HashMap::from([
+                    ("operation".into(), operation_str.clone()),
+                    ("added-data-files".into(), files_count.to_string()),
+                ]),
+                schema_id: Some(0),
+            };
+            meta.last_sequence_number += 1;
+            meta.last_updated_ms = now_ms;
+            meta.current_snapshot_id = Some(snap_id);
+            meta.snapshots.push(iceberg_snap);
 
-        Ok(snap_id)
+            let new_uuid = Uuid::new_v4().to_string();
+            let new_location = self.metadata_path(table, &new_uuid);
+            let json = meta.to_json()?;
+            self.store
+                .put(&new_location, Bytes::from(json.into_bytes()))
+                .await?;
+
+            let table_input = Self::build_table_input(
+                &table.name,
+                &table_root,
+                &new_location,
+                version_id.as_deref(),
+            )?;
+            match self
+                .client
+                .update_table()
+                .database_name(&self.config.database)
+                .table_input(table_input)
+                .send()
+                .await
+            {
+                Ok(_) => return Ok(snap_id),
+                Err(e) => {
+                    let svc = e.into_service_error();
+                    if svc.is_concurrent_modification_exception() && attempt + 1 < MAX_RETRIES {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100 << attempt))
+                            .await;
+                        continue;
+                    }
+                    return Err(AilakeError::Catalog(format!("Glue update_table: {svc}")));
+                }
+            }
+        }
+        Err(AilakeError::Catalog(format!(
+            "Glue commit_snapshot: {MAX_RETRIES} retries exhausted (concurrent modification)"
+        )))
     }
 
     async fn list_files(

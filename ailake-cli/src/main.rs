@@ -989,6 +989,10 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .iter()
                 .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Ready)
                 .count();
+            let failed = files
+                .iter()
+                .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Failed)
+                .count();
 
             let location = meta
                 .properties
@@ -1026,6 +1030,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                             "vector_metric": vector_metric,
                             "files": file_count,
                             "indexed_files": ready,
+                            "failed_files": failed,
                             "rows": row_count,
                             "size_bytes": size_bytes,
                             "snapshot_id": meta.current_snapshot_id,
@@ -1039,7 +1044,11 @@ async fn run(cli: Cli) -> Result<(), String> {
                     println!(
                         "vector:      col={vector_column} dim={vector_dim} metric={vector_metric}"
                     );
-                    println!("files:       {file_count} ({ready} indexed)");
+                    if failed > 0 {
+                        println!("files:       {file_count} ({ready} indexed, {failed} failed — compaction will rebuild)");
+                    } else {
+                        println!("files:       {file_count} ({ready} indexed)");
+                    }
                     println!("rows:        {row_count}");
                     println!("size:        {}", format_bytes(size_bytes));
                     if let Some(snap_id) = meta.current_snapshot_id {
@@ -1314,19 +1323,22 @@ fn run_estimate(
         .map(|m| m as u64)
         .unwrap_or_else(|| (dim / 32).max(8).min(dim));
 
-    // Raw vector bytes per row per precision.
-    let vec_f32 = rows * dim * 4;
-    let vec_f16 = rows * dim * 2;
-    let vec_i8 = rows * dim;
+    // Raw vector bytes per row per precision (saturate on overflow — display only).
+    let vec_f32 = rows.saturating_mul(dim).saturating_mul(4);
+    let vec_f16 = rows.saturating_mul(dim).saturating_mul(2);
+    let vec_i8 = rows.saturating_mul(dim);
 
     // HNSW index: each node stores ~M×2 neighbor IDs (u32 × 2 per layer).
     // Approximation: rows × hnsw_m × 2 × 4 bytes (two u32 per neighbor slot).
     // Real bincode overhead adds ~10-15%; use 18 bytes/neighbor as empirical factor.
-    let hnsw_bytes = rows * hnsw_m as u64 * 2 * 9; // ≈ M×2 neighbors × 9 bytes avg
+    let hnsw_bytes = rows
+        .saturating_mul(hnsw_m as u64)
+        .saturating_mul(2)
+        .saturating_mul(9); // ≈ M×2 neighbors × 9 bytes avg
 
     // IVF-PQ codes: rows × pq_m bytes (1 byte per sub-quantizer code).
     // Codebook: negligible vs row data for any practical table size.
-    let pq_bytes = rows * pq_m;
+    let pq_bytes = rows.saturating_mul(pq_m);
 
     // Recall estimates (literature + empirical for text embeddings dim=768-3072).
     let rows_table = vec![

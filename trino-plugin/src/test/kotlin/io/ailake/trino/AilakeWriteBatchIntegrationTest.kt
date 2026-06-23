@@ -180,4 +180,51 @@ class AilakeWriteBatchIntegrationTest {
         check(schemaId >= 0) { "evolveSchema returned $schemaId, expected >= 0" }
         println("[test] evolveSchema OK: new_schema_id=$schemaId")
     }
+
+    // ── Phase T: FTS write + searchText roundtrip ─────────────────────────────
+
+    @Test
+    fun writeBatchWithFtsColumnsAndSearchTextRoundtrip() {
+        assumeTrue(libPath != null)  { "AILAKE_LIB_PATH not set — skipping" }
+        assumeTrue(writeDir != null) { "AILAKE_WRITE_DIR not set — skipping" }
+        assumeTrue(libPresent)       { "libailake_jni.so not found — skipping" }
+
+        val tableUri = "$writeDir/integration-fts-trino"
+        val texts    = listOf("rust programming language", "hello world example", "vector search database")
+        val snap = AilakeNative.writeBatch(
+            tableUri     = tableUri,
+            namespace    = "default",
+            tableName    = "integration_fts_trino",
+            vectorColumn = "embedding",
+            dim          = 4,
+            metric       = "cosine",
+            precision    = "f16",
+            ids          = listOf(0L, 1L, 2L),
+            embeddings   = listOf(
+                listOf(1.0f, 0.0f, 0.0f, 0.0f),
+                listOf(0.0f, 1.0f, 0.0f, 0.0f),
+                listOf(0.0f, 0.0f, 1.0f, 0.0f),
+            ),
+            ftsColumns   = listOf("chunk_text"),
+            ftsTokenizer = "default",
+            columns      = mapOf("chunk_text" to texts),
+        )
+        checkNotNull(snap) { "writeBatch with ftsColumns returned null" }
+        println("[test] writeBatch fts OK: snapshotId=$snap")
+
+        val results = AilakeNative.searchText(
+            tableUri    = tableUri,
+            namespace   = "default",
+            tableName   = "integration_fts_trino",
+            queryText   = "rust",
+            textColumns = listOf("chunk_text"),
+            topK        = 3,
+        )
+        check(results.isNotEmpty()) { "searchText returned empty — FTS index not built or not searched" }
+        val best = results.first()
+        check(best.rowId == 0L) { "expected rowId=0 (rust programming), got rowId=${best.rowId}" }
+        println("[test] searchText OK: rowId=${best.rowId} distance=${best.distance}")
+        println()
+        println("PASS (Trino): FTS write+searchText roundtrip functional with real library.")
+    }
 }

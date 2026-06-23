@@ -58,24 +58,29 @@ object AilakeNative {
 
   private val AILAKE_EXPECTED_MAJOR = "0"
 
-  private lazy val lib: Option[Lib] =
+  private lazy val lib: Option[Lib] = {
+    val explicitPath = Option(System.getProperty("ailake.native.lib"))
+      .orElse(Option(System.getenv("AILAKE_NATIVE_LIB")))
     try {
-      val loaded = Native.load("ailake_jni", classOf[Lib]).asInstanceOf[Lib]
+      val loaded = explicitPath match {
+        case Some(p) => Native.load(p, classOf[Lib]).asInstanceOf[Lib]
+        case None    => Native.load("ailake_jni", classOf[Lib]).asInstanceOf[Lib]
+      }
       val version = loaded.ailake_version()
       val major = version.takeWhile(_ != '.')
       if (major != AILAKE_EXPECTED_MAJOR)
         log.warn(s"[ailake] Version mismatch: loaded ailake-jni $version but expected major version $AILAKE_EXPECTED_MAJOR. Search results may be incorrect.")
       else
-        log.info("[ailake] Native library libailake_jni {} loaded successfully", version)
+        log.info(s"[ailake] Native library libailake_jni $version loaded (path=${explicitPath.getOrElse("JNA default search path")})")
       Some(loaded)
     } catch {
       case e: Throwable =>
         log.warn(
           "[ailake] Native library libailake_jni not found — vector search disabled. " +
-          "Set java.library.path or LD_LIBRARY_PATH to the directory containing libailake_jni.so. " +
-          "Error: {}", e.getMessage)
+          "Set ailake.native.lib system property or AILAKE_NATIVE_LIB env var. Error: {}", e.getMessage)
         None
     }
+  }
 
   // Single shared mapper; ObjectMapper is thread-safe after configuration.
   private val mapper = new ObjectMapper()

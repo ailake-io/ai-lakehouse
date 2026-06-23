@@ -177,8 +177,10 @@ impl CatalogProvider for JdbcCatalog {
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
         let snap_id = snapshot.snapshot_id;
+        let files_count = snapshot.files.len();
+        let operation_str = format!("{:?}", snapshot.operation).to_lowercase();
 
-        // 1. Write manifest
+        // 1. Write manifest once — orphaned manifests are benign in Iceberg.
         let root = self.table_root(table);
         let abs_manifest = format!("{root}/{}", manifest_path(snap_id));
         let manifest = build_manifest(&snapshot);
@@ -186,52 +188,63 @@ impl CatalogProvider for JdbcCatalog {
             .put(&abs_manifest, Bytes::from(manifest.to_json()?.into_bytes()))
             .await?;
 
-        // 2. Load and update metadata
-        let old_location = self.get_metadata_location(table).await?;
-        let mut meta = self.load_iceberg_metadata(&old_location).await?;
-        let now_ms = now_ms();
-        let iceberg_snap = IcebergSnapshot {
-            snapshot_id: snap_id,
-            parent_snapshot_id: snapshot.parent_snapshot_id,
-            sequence_number: meta.last_sequence_number + 1,
-            timestamp_ms: now_ms,
-            manifest_list: abs_manifest,
-            summary: HashMap::from([
-                (
-                    "operation".into(),
-                    format!("{:?}", snapshot.operation).to_lowercase(),
-                ),
-                ("added-data-files".into(), snapshot.files.len().to_string()),
-            ]),
-            schema_id: Some(0),
-        };
-        meta.last_sequence_number += 1;
-        meta.last_updated_ms = now_ms;
-        meta.current_snapshot_id = Some(snap_id);
-        meta.snapshots.push(iceberg_snap);
+        // 2–4. OCC retry: read metadata → mutate → write new metadata.json → CAS UPDATE.
+        // The UPDATE includes AND metadata_location = old_location; rows_affected == 0 means
+        // a concurrent writer won the race — re-read and retry.
+        const MAX_RETRIES: u32 = 5;
+        for attempt in 0..MAX_RETRIES {
+            let old_location = self.get_metadata_location(table).await?;
+            let mut meta = self.load_iceberg_metadata(&old_location).await?;
+            let now_ms = now_ms();
+            let iceberg_snap = IcebergSnapshot {
+                snapshot_id: snap_id,
+                parent_snapshot_id: meta.current_snapshot_id,
+                sequence_number: meta.last_sequence_number + 1,
+                timestamp_ms: now_ms,
+                manifest_list: abs_manifest.clone(),
+                summary: HashMap::from([
+                    ("operation".into(), operation_str.clone()),
+                    ("added-data-files".into(), files_count.to_string()),
+                ]),
+                schema_id: Some(0),
+            };
+            meta.last_sequence_number += 1;
+            meta.last_updated_ms = now_ms;
+            meta.current_snapshot_id = Some(snap_id);
+            meta.snapshots.push(iceberg_snap);
 
-        // 3. Write new versioned metadata.json
-        let new_uuid = Uuid::new_v4().to_string();
-        let new_location = self.metadata_path(table, &new_uuid);
-        let json = meta.to_json()?;
-        self.store
-            .put(&new_location, Bytes::from(json.into_bytes()))
-            .await?;
+            let new_uuid = Uuid::new_v4().to_string();
+            let new_location = self.metadata_path(table, &new_uuid);
+            let json = meta.to_json()?;
+            self.store
+                .put(&new_location, Bytes::from(json.into_bytes()))
+                .await?;
 
-        // 4. Update pointer in DB
-        sqlx::query(
-            "UPDATE iceberg_tables SET metadata_location = ?
-             WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?",
-        )
-        .bind(&new_location)
-        .bind(&self.catalog_name)
-        .bind(&table.namespace)
-        .bind(&table.name)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| AilakeError::Catalog(format!("JDBC commit_snapshot: {e}")))?;
+            let result = sqlx::query(
+                "UPDATE iceberg_tables SET metadata_location = ?
+                 WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?
+                   AND metadata_location = ?",
+            )
+            .bind(&new_location)
+            .bind(&self.catalog_name)
+            .bind(&table.namespace)
+            .bind(&table.name)
+            .bind(&old_location)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AilakeError::Catalog(format!("JDBC commit_snapshot: {e}")))?;
 
-        Ok(snap_id)
+            if result.rows_affected() > 0 {
+                return Ok(snap_id);
+            }
+
+            if attempt + 1 < MAX_RETRIES {
+                tokio::time::sleep(tokio::time::Duration::from_millis(50 << attempt)).await;
+            }
+        }
+        Err(AilakeError::Catalog(format!(
+            "JDBC commit_snapshot: {MAX_RETRIES} retries exhausted (concurrent modification)"
+        )))
     }
 
     async fn list_files(
@@ -347,11 +360,12 @@ mod tests {
                 modality: None,
                 partition_by: None,
                 partition_value: None,
+                partition_column_type: None,
+                partition_fields: vec![],
             },
             extra: HashMap::new(),
             format_version: 2,
             partition_column_type: None,
-            partition_fields: vec![],
         };
 
         // create
@@ -376,6 +390,7 @@ mod tests {
                 vector_dim: Some(4),
                 extra_vector_indexes: vec![],
                 index_status: IndexStatus::Ready,
+                index_error: None,
                 batch_id: None,
                 embedding_model: None,
                 partition_value: None,

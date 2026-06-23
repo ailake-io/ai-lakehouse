@@ -122,7 +122,7 @@ TableWriter (fast path — Parquet only)
 
 **Throughput**: write returns after the Parquet PUT — ~200k vec/s for both engines. Index builds in background without blocking ingestion.
 
-**`IndexStatus` lifecycle**: `Indexing` (set at commit time) → `Ready` (set by background task after AILK section is written and catalog updated). The `SearchSession` serves `Indexing` shards via flat scan (exact brute-force) until the transition completes. `Replace` commits overwrite the manifest list with the new complete state to avoid duplicate entries.
+**`IndexStatus` lifecycle**: `Indexing` (set at commit time) → `Ready` (set by background task after AILK section is written and catalog updated) or `Failed` (set by `patch_index_failed()` if the build errors). The `SearchSession` serves both `Indexing` and `Failed` shards via **flat scan** (exact O(N) brute-force) rather than HNSW/IVF-PQ — no data loss or query downtime. `Failed` files include an `index_error` reason string in `key_metadata` and are rebuilt automatically at the next compaction run. `Replace` commits overwrite the manifest list with the new complete state to avoid duplicate entries.
 
 ---
 

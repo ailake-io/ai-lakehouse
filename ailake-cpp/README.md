@@ -194,7 +194,8 @@ struct DataFileEntry {
     std::string vector_column;
     uint32_t    vector_dim     = 0;
     std::vector<ExtraVectorIndex> extra_vector_indexes; // secondary columns (Phase 8)
-    std::string index_status;   // "ready" | "indexing"
+    std::string index_status;   // "ready" | "indexing" | "failed"
+    std::string index_error;    // non-empty only when index_status == "failed"
     std::string batch_id;
     std::string embedding_model; // from per-file key_metadata JSON; empty if not set
 };
