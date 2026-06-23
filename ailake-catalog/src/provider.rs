@@ -13,6 +13,9 @@ pub enum IndexStatus {
     Ready,
     /// Parquet written; HNSW build running in background — flat scan applies.
     Indexing,
+    /// Background index build failed permanently; `DataFileEntry::index_error`
+    /// holds the cause. Compaction will rebuild the index on next run.
+    Failed,
 }
 
 /// Fully-qualified table identifier: namespace.table_name.
@@ -81,6 +84,10 @@ pub struct DataFileEntry {
     /// Index build status. Defaults to Ready for backward compatibility with old manifests.
     #[serde(default)]
     pub index_status: IndexStatus,
+    /// Human-readable error from a failed background index build. Set only when
+    /// `index_status == IndexStatus::Failed`; None otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_error: Option<String>,
     /// Caller-supplied idempotency key. When set, `write_batch_idempotent` skips the
     /// write if a file with the same batch_id is already committed in the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -363,6 +370,7 @@ pub fn make_multi_column_data_file_entry(
         vector_dim: Some(primary_index.dim),
         extra_vector_indexes: extra.to_vec(),
         index_status: IndexStatus::Ready,
+        index_error: None,
         batch_id: None,
         embedding_model: None,
         partition_value: None,
@@ -402,6 +410,7 @@ pub fn make_data_file_entry_indexing(
         vector_dim: Some(dim),
         extra_vector_indexes: vec![],
         index_status: IndexStatus::Indexing,
+        index_error: None,
         batch_id: None,
         embedding_model: None,
         partition_value: None,

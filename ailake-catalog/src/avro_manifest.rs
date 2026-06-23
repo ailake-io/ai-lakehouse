@@ -228,6 +228,7 @@ pub fn write_manifest_file(
             vector_dim: f.vector_dim,
             extra_vector_indexes: f.extra_vector_indexes.clone(),
             index_status: f.index_status.clone(),
+            index_error: f.index_error.clone(),
             batch_id: f.batch_id.clone(),
             embedding_model: f.embedding_model.clone(),
             partition_value: f.partition_value.clone(),
@@ -464,6 +465,7 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                             .as_ref()
                             .map(|e| e.index_status.clone())
                             .unwrap_or_default(),
+                        index_error: ext.as_ref().and_then(|e| e.index_error.clone()),
                         batch_id: ext.as_ref().and_then(|e| e.batch_id.clone()),
                         embedding_model: ext.as_ref().and_then(|e| e.embedding_model.clone()),
                         partition_value: native_partition_value
@@ -501,6 +503,8 @@ struct AilakeEntryExt {
     pub extra_vector_indexes: Vec<crate::provider::ExtraVectorIndex>,
     #[serde(default)]
     pub index_status: IndexStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

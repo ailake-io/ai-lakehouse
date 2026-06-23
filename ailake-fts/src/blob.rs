@@ -79,6 +79,13 @@ pub fn blob_to_ram_dir(blob: &[u8]) -> AilakeResult<tantivy::directory::RamDirec
     let _version = u16::from_le_bytes([blob[4], blob[5]]);
     let flags = u16::from_le_bytes([blob[6], blob[7]]);
     let num_files = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]) as usize;
+    // Guard against crafted blobs that would cause excessive allocation.
+    const MAX_FTS_FILES: usize = 65_536;
+    if num_files > MAX_FTS_FILES {
+        return Err(AilakeError::Fts(format!(
+            "FTS blob claims {num_files} files (max {MAX_FTS_FILES})"
+        )));
+    }
 
     let mut pos = 12usize;
     let mut entries: Vec<(String, u64, u64)> = Vec::with_capacity(num_files);
@@ -88,7 +95,12 @@ pub fn blob_to_ram_dir(blob: &[u8]) -> AilakeResult<tantivy::directory::RamDirec
         }
         let nl = u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
-        if pos + nl + 16 > blob.len() {
+        // Use checked arithmetic to prevent overflow in the bounds expression.
+        let end = pos
+            .checked_add(nl)
+            .and_then(|v| v.checked_add(16))
+            .ok_or_else(|| AilakeError::Fts("file table entry length overflow".into()))?;
+        if end > blob.len() {
             return Err(AilakeError::Fts("truncated filename or offsets".into()));
         }
         let name = std::str::from_utf8(&blob[pos..pos + nl])
@@ -110,8 +122,15 @@ pub fn blob_to_ram_dir(blob: &[u8]) -> AilakeResult<tantivy::directory::RamDirec
 
     let dir = tantivy::directory::RamDirectory::create();
     for (name, off, len) in entries {
-        let s = off as usize;
-        let e = s + len as usize;
+        let s: usize = off
+            .try_into()
+            .map_err(|_| AilakeError::Fts(format!("file '{name}' offset overflow")))?;
+        let e: usize = s
+            .checked_add(
+                len.try_into()
+                    .map_err(|_| AilakeError::Fts(format!("file '{name}' length overflow")))?,
+            )
+            .ok_or_else(|| AilakeError::Fts(format!("file '{name}' offset+length overflow")))?;
         if e > payload.len() {
             return Err(AilakeError::Fts(format!("file '{name}' out of bounds")));
         }

@@ -182,12 +182,12 @@ impl TableWriter {
         let table = self.table.clone();
         let fp = file_path.clone();
         tokio::spawn(async move {
-            if let Err(e) = build_and_patch_index(store, catalog, policy, table, fp).await {
+            if let Err(e) = build_and_patch_index(store.clone(), catalog.clone(), policy, table.clone(), fp.clone()).await {
                 error!(
-                    "ailake: deferred HNSW build failed — file is indexed as Parquet-only until \
-                     next compaction rebuilds the index: {}",
-                    e
+                    "ailake: deferred HNSW build failed for {fp}: {e}; \
+                     marking IndexStatus::Failed — compaction will rebuild"
                 );
+                patch_index_failed(catalog, &table, &fp, &e.to_string()).await;
             }
         });
 
@@ -248,21 +248,21 @@ impl TableWriter {
         let codebook_cell = self.deferred_ivf_codebook.clone();
         tokio::spawn(async move {
             if let Err(e) = build_ivf_pq_and_patch_index(
-                store,
-                catalog,
+                store.clone(),
+                catalog.clone(),
                 policy,
-                table,
-                fp,
+                table.clone(),
+                fp.clone(),
                 ivf_config,
                 codebook_cell,
             )
             .await
             {
                 error!(
-                    "ailake: deferred IVF-PQ build failed — file is indexed as Parquet-only until \
-                     next compaction rebuilds the index: {}",
-                    e
+                    "ailake: deferred IVF-PQ build failed for {fp}: {e}; \
+                     marking IndexStatus::Failed — compaction will rebuild"
                 );
+                patch_index_failed(catalog, &table, &fp, &e.to_string()).await;
             }
         });
 
@@ -1139,6 +1139,48 @@ fn arrow_type_to_iceberg(dt: &arrow_schema::DataType, nested_id: &mut i32) -> se
 }
 
 /// Background task: reads a Parquet-only shard, builds full AILK file, patches catalog.
+/// Mark a file's catalog entry as `IndexStatus::Failed` with a reason.
+/// Best-effort: if the catalog commit itself fails, the error is logged and
+/// the file stays in `Indexing` state (compaction will rebuild it).
+async fn patch_index_failed(
+    catalog: Arc<dyn CatalogProvider>,
+    table: &TableIdent,
+    file_path: &str,
+    reason: &str,
+) {
+    let Ok(table_meta) = catalog.load_table(table).await else { return };
+    let parent_snapshot_id = table_meta.current_snapshot_id;
+    let Ok(mut files) = catalog.list_files(table, None).await else { return };
+    for f in &mut files {
+        if f.path == file_path {
+            f.index_status = IndexStatus::Failed;
+            f.index_error = Some(reason.to_string());
+            break;
+        }
+    }
+    let _ = catalog
+        .commit_snapshot(
+            table,
+            NewSnapshot {
+                snapshot_id: new_snapshot_id(),
+                parent_snapshot_id,
+                files,
+                operation: SnapshotOperation::Replace,
+                iceberg_schema: None,
+                extra_properties: std::collections::HashMap::new(),
+                bloom_filters: vec![],
+                equality_delete_files: vec![],
+            },
+        )
+        .await
+        .map_err(|e| {
+            error!(
+                "ailake: failed to write IndexStatus::Failed for {file_path}: {e}; \
+                 file will remain Indexing until compaction"
+            )
+        });
+}
+
 pub(crate) async fn build_and_patch_index(
     store: Arc<dyn Store>,
     catalog: Arc<dyn CatalogProvider>,
