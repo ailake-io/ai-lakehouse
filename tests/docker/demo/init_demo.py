@@ -10,7 +10,7 @@ Writes multiple AI-Lake tables to demonstrate all SDK features:
   - Agent memory      — 100 rows across 2 agents (Phase 9 partition isolation demo)
   - Partitioned v3    — 200 rows, partition_fields=[topic_id:identity:int], format_version=3
   - Delete demo       — 100 rows, 10 pre-deleted via delete_where (notebook §29 demo)
-  - Schema-evo demo   — 100 rows, add_column source_url + rename (notebook §30 demo)
+  - Schema-evo demo   — 100 rows, add_column + rename + evolve_schema (notebook §30 demo)
 
 Runs once at container startup via entrypoint.sh; skipped on restart if
 version-hint.text already exists in the main HNSW table.

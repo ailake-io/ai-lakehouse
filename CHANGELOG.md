@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (demo)
+
+- **Demo notebooks + init_demo.py updated to v0.0.23** — version strings updated from v0.0.20 in `01_ailake_demo.ipynb`, `09_hybrid_search.ipynb`, and `init_demo.py`.
+- **`01_ailake_demo.ipynb` — new feature demos**:
+  - §15 (HNSW tuning): added `ef_search` and `pruning_threshold` to markdown table and code cell — shows `search(..., ef_search=400)` and `search(..., pruning_threshold=0.7)`.
+  - §31 (new): `ailake.compact()` — merges small files and rebuilds index; post-compaction search verification.
+  - §30 (schema evolution): added `ailake.evolve_schema()` combined wrapper demo alongside `add_column` + `rename_column`.
+
 ### Fixed
 
 - **Hybrid BM25 fusion score misalignment** (`ailake-query`) — `bm25_scores` was computed from `raw_candidates` before `sort_by()` but indexed by position after the sort; the candidate order changed but the score array did not track the shuffle, so every hybrid search returned wrong RRF fusion scores. Fixed: BM25 scores zipped into `candidates_with_bm25` tuples before sorting so each score travels with its candidate.
