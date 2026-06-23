@@ -1,0 +1,60 @@
+# GPU test containers for ailake-index.
+#
+# Prerequisites
+# ─────────────
+#  NVIDIA:  nvidia-container-toolkit installed + Docker configured with the
+#           nvidia runtime.  Verify: docker run --gpus all --rm nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi
+#  AMD:     ROCm-capable host, /dev/kfd and /dev/dri accessible.
+#           Verify: docker run --device /dev/kfd --device /dev/dri --group-add video --rm rocm/dev-ubuntu-22.04:6.2 rocm-smi
+#
+# Usage
+# ─────
+#  NVIDIA  →  docker compose -f docker-compose.gpu.yml run --rm gpu-cuda
+#  AMD     →  docker compose -f docker-compose.gpu.yml run --rm gpu-rocm
+#
+#  Override the test target:
+#    docker compose -f docker-compose.gpu.yml run --rm gpu-cuda \
+#      cargo test -p ailake-index --test gpu_data -- --nocapture
+
+services:
+  gpu-cuda:
+    build:
+      context: .
+      dockerfile: docker/gpu-cuda/Dockerfile
+    image: ailake-gpu-cuda:latest
+    environment:
+      - AILAKE_GPU_BACKEND=cuda
+      - RUST_BACKTRACE=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Mount local Cargo registry cache to avoid re-downloading crates on every run
+    volumes:
+      - cargo-registry:/root/.cargo/registry
+      - cargo-git:/root/.cargo/git
+
+  gpu-rocm:
+    build:
+      context: .
+      dockerfile: docker/gpu-rocm/Dockerfile
+    image: ailake-gpu-rocm:latest
+    environment:
+      - AILAKE_GPU_BACKEND=rocm
+      - RUST_BACKTRACE=1
+      - LD_LIBRARY_PATH=/opt/rocm/lib
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    volumes:
+      - cargo-registry:/root/.cargo/registry
+      - cargo-git:/root/.cargo/git
+
+volumes:
+  cargo-registry:
+  cargo-git:

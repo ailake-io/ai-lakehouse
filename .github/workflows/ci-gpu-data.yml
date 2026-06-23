@@ -1,4 +1,4 @@
-name: CI GPU Data (ailake-index — Windows CUDA/ROCm data integration)
+name: CI GPU Data (ailake-index — CUDA/ROCm data integration)
 
 on:
   workflow_dispatch:
@@ -9,60 +9,24 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  # Runs GPU data integration tests on a Windows self-hosted runner with a
-  # real NVIDIA or AMD GPU.  Tests fire cuBLAS / hipBLAS SGEMM kernels against
-  # synthetic but realistic datasets (2 000–5 000 vectors, dim 64–128) and
-  # assert ≥99% recall vs CPU brute-force ground truth.
+  # ── Windows self-hosted (bare-metal CUDA or ROCm) ──────────────────────────
+  #
+  # Runs gpu_data integration tests: real cuBLAS/hipBLAS SGEMM kernels against
+  # synthetic datasets (2 000–5 000 vectors, dim 64–128), asserts ≥99% recall
+  # vs CPU brute-force ground truth.
   #
   # Runner requirements:
-  #   - Windows 10/11 or Windows Server 2019+
-  #   - NVIDIA: CUDA Toolkit 11 or 12 (cudart64_*.dll + cublas64_*.dll in PATH)
-  #   - AMD:    ROCm for Windows (amdhip64.dll + hipblas.dll in PATH)
-  #   - Rust stable toolchain (rustup)
+  #   NVIDIA: CUDA Toolkit 11 or 12 (cudart64_*.dll + cublas64_*.dll in PATH)
+  #   AMD:    ROCm for Windows (amdhip64.dll + hipblas.dll in PATH)
+  #   Rust stable toolchain (rustup)
   index-gpu-data-windows:
     name: index — gpu data (Windows)
     runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v6
 
-      - name: Locate and configure Rust
-        shell: pwsh
-        run: |
-          # Prefer the actual toolchain binary over the rustup shim.
-          # The shim at $USERPROFILE\.cargo\bin\cargo.exe requires rustup in PATH;
-          # the toolchain binary works standalone.
-          $rustBin = $null
-
-          # 1. Look for real cargo inside .rustup toolchains
-          $toolchainCargo = Get-ChildItem `
-            "$env:USERPROFILE\.rustup\toolchains\*\bin\cargo.exe", `
-            "C:\Users\$env:USERNAME\.rustup\toolchains\*\bin\cargo.exe" `
-            -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($toolchainCargo) {
-            $rustBin = Split-Path $toolchainCargo.FullName
-            Write-Host "Found toolchain cargo: $rustBin"
-          }
-
-          # 2. Fallback: shim path (only works if rustup shim resolves correctly)
-          if (-not $rustBin) {
-            foreach ($c in @("$env:USERPROFILE\.cargo\bin", "C:\Users\$env:USERNAME\.cargo\bin")) {
-              if (Test-Path "$c\cargo.exe") { $rustBin = $c; break }
-            }
-            if ($rustBin) { Write-Host "Found cargo shim: $rustBin" }
-          }
-
-          # 3. Already on PATH
-          if (-not $rustBin) {
-            $r = Get-Command cargo -ErrorAction SilentlyContinue
-            if ($r) { $rustBin = Split-Path $r.Source; Write-Host "cargo already on PATH: $rustBin" }
-          }
-
-          if (-not $rustBin) {
-            Write-Error "cargo not found. Install Rust stable on this runner."
-            exit 1
-          }
-
-          "$rustBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Locate Rust
+        uses: ./.github/actions/locate-rust-windows
 
       - uses: Swatinem/rust-cache@v2
 
@@ -75,23 +39,79 @@ jobs:
               if (Test-Path $p) { $p }
             } | Select-Object -First 1
           }
-
           $cuda = Find-Dll "cudart64_12.dll"
           if (-not $cuda) { $cuda = Find-Dll "cudart64_11.dll" }
           $rocm = Find-Dll "amdhip64.dll"
-
           if ($cuda) {
             Write-Host "NVIDIA CUDA runtime found: $cuda"
-            $backend = "cuda"
+            echo "AILAKE_GPU_BACKEND=cuda" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           } elseif ($rocm) {
             Write-Host "AMD ROCm runtime found: $rocm"
-            $backend = "rocm"
+            echo "AILAKE_GPU_BACKEND=rocm" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           } else {
             Write-Host "WARNING: no CUDA or ROCm runtime found — tests will print skip messages"
-            $backend = "none"
+            echo "AILAKE_GPU_BACKEND=none" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
-          echo "AILAKE_GPU_BACKEND=$backend" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run GPU data integration tests
         shell: pwsh
         run: cargo test -p ailake-index --test gpu_data -- --nocapture
+
+  # ── Linux self-hosted — NVIDIA (Docker + nvidia-container-toolkit) ─────────
+  #
+  # Runner label: gpu-nvidia
+  index-gpu-data-linux-cuda:
+    name: index — gpu data (Linux/CUDA Docker)
+    runs-on: [self-hosted, Linux, X64, gpu-nvidia]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build CUDA test image
+        run: |
+          docker build \
+            --file docker/gpu-cuda/Dockerfile \
+            --tag ailake-gpu-cuda:ci-data-${{ github.sha }} \
+            .
+
+      - name: Run GPU data integration tests in CUDA container
+        run: |
+          docker run --rm \
+            --gpus all \
+            -e AILAKE_GPU_BACKEND=cuda \
+            -e RUST_BACKTRACE=1 \
+            ailake-gpu-cuda:ci-data-${{ github.sha }} \
+            cargo test -p ailake-index --test gpu_data -- --nocapture
+
+      - name: Remove CI image
+        if: always()
+        run: docker rmi ailake-gpu-cuda:ci-data-${{ github.sha }} || true
+
+  # ── Linux self-hosted — AMD (Docker + ROCm device passthrough) ────────────
+  #
+  # Runner label: gpu-amd
+  index-gpu-data-linux-rocm:
+    name: index — gpu data (Linux/ROCm Docker)
+    runs-on: [self-hosted, Linux, X64, gpu-amd]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build ROCm test image
+        run: |
+          docker build \
+            --file docker/gpu-rocm/Dockerfile \
+            --tag ailake-gpu-rocm:ci-data-${{ github.sha }} \
+            .
+
+      - name: Run GPU data integration tests in ROCm container
+        run: |
+          docker run --rm \
+            --device /dev/kfd --device /dev/dri \
+            --group-add video \
+            -e AILAKE_GPU_BACKEND=rocm \
+            -e RUST_BACKTRACE=1 \
+            ailake-gpu-rocm:ci-data-${{ github.sha }} \
+            cargo test -p ailake-index --test gpu_data -- --nocapture
+
+      - name: Remove CI image
+        if: always()
+        run: docker rmi ailake-gpu-rocm:ci-data-${{ github.sha }} || true
