@@ -11,6 +11,10 @@ env:
 jobs:
   # ── Windows self-hosted (bare-metal CUDA or ROCm) ──────────────────────────
   #
+  # Runs all ailake-index tests: unit tests (src/gpu.rs, src/hardware.rs, …)
+  # and data integration tests (tests/gpu_data.rs — real SGEMM recall checks).
+  # ci-gpu-data.yml was merged here; this is the single GPU CI entry point.
+  #
   # Runner requirements:
   #   NVIDIA: CUDA Toolkit 11 or 12 (cudart64_*.dll + cublas64_*.dll in PATH)
   #   AMD:    ROCm for Windows (amdhip64.dll + hipblas.dll in PATH)
