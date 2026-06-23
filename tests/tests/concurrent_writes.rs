@@ -9,11 +9,11 @@ mod fixtures;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ailake_catalog::JdbcCatalog;
 use ailake_catalog::{
     new_snapshot_id, CatalogProvider, DataFileEntry, HadoopCatalog, IndexStatus, NewSnapshot,
     SnapshotOperation, TableIdent, TableProperties,
 };
-use ailake_catalog::JdbcCatalog;
 use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
 use ailake_query::TableWriter;
 use ailake_store::LocalStore;
@@ -81,10 +81,8 @@ fn fake_file(path: &str) -> DataFileEntry {
 async fn hadoop_8_concurrent_appends_no_lost_update() {
     let dir = TempDir::new().unwrap();
     let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(dir.path()));
-    let catalog: Arc<dyn CatalogProvider> = Arc::new(HadoopCatalog::new(
-        Arc::clone(&store),
-        "warehouse",
-    ));
+    let catalog: Arc<dyn CatalogProvider> =
+        Arc::new(HadoopCatalog::new(Arc::clone(&store), "warehouse"));
     let table = TableIdent::new("default", "concurrent_test");
     let policy = make_policy(16);
 
@@ -102,15 +100,10 @@ async fn hadoop_8_concurrent_appends_no_lost_update() {
         let policy2 = policy.clone();
         handles.push(tokio::spawn(async move {
             let (batch, embeddings) = fixtures::generate_batch(50, 16);
-            let mut writer = TableWriter::create_or_open(
-                catalog2,
-                store2,
-                policy2,
-                table2,
-                i as u8 + 1,
-            )
-            .await
-            .unwrap();
+            let mut writer =
+                TableWriter::create_or_open(catalog2, store2, policy2, table2, i as u8 + 1)
+                    .await
+                    .unwrap();
             writer.write_batch(&batch, &embeddings).await.unwrap();
             writer.commit().await.unwrap();
         }));

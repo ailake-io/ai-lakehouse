@@ -168,15 +168,12 @@ impl GlueCatalog {
                 table.namespace, table.name
             ))
         })?;
-        let location = params
-            .get("metadata_location")
-            .cloned()
-            .ok_or_else(|| {
-                AilakeError::Catalog(format!(
-                    "Glue table {}.{} is not an Iceberg table (missing metadata_location)",
-                    table.namespace, table.name
-                ))
-            })?;
+        let location = params.get("metadata_location").cloned().ok_or_else(|| {
+            AilakeError::Catalog(format!(
+                "Glue table {}.{} is not an Iceberg table (missing metadata_location)",
+                table.namespace, table.name
+            ))
+        })?;
         Ok((location, version_id))
     }
 
@@ -215,7 +212,8 @@ impl CatalogProvider for GlueCatalog {
             .put(&metadata_location, Bytes::from(json.into_bytes()))
             .await?;
 
-        let table_input = Self::build_table_input(&name.name, &table_root, &metadata_location, None)?;
+        let table_input =
+            Self::build_table_input(&name.name, &table_root, &metadata_location, None)?;
         self.client
             .create_table()
             .database_name(&self.config.database)
