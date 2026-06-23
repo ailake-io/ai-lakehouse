@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ailake_free_string` non-nullable in Trino JNA interface** (`trino-plugin`) — `Lib.ailake_free_string(ptr: Pointer)` was non-nullable; if Rust ever returns a null pointer under OOM, JNA would NPE before reaching the native call. Fixed: `Pointer?` matches Flink's `AilakeNativeLib.ailake_free_string(ptr: Pointer?)`.
+- **`searchMultimodal` `dropLast(1)` JSON hack in Trino** (`trino-plugin`) — `AilakeNative.searchMultimodal` built the JSON payload as `mapper.writeValueAsString(mapOf(...)).dropLast(1) + """,...}"""`, the same fragile string-concatenation pattern that was fixed in `evolveSchema` last sprint but not applied here. JSON would be malformed if `warehouse`/`namespace`/`table` contained `}` or `"`. Fixed: proper `mutableMapOf` + `mapper.writeValueAsString(payload)`.
+- **Trino/Spark missing `AILAKE_NATIVE_LIB` / `ailake.native.lib` override** (`trino-plugin`, `spark-plugin`) — Flink's `AilakeNativeLoader` supported explicit library path via `System.getProperty("ailake.native.lib")` and `System.getenv("AILAKE_NATIVE_LIB")` since sprint 4; Trino and Spark only used the JNA default search path, making it impossible to point to a specific lib path without changing `LD_LIBRARY_PATH` globally. Both now support the same discovery order: system property → env var → JNA default search path. Log message updated to match Flink style.
+
 ### Added
 
 - **ADR-017 — Arrow Flight rejected; Fase 10 Arrow IPC write_batch planned** (`docs/contributing/DECISIONS.md`, `CLAUDE.md`) — architectural decision record documenting evaluation of Apache Arrow Flight as unified interop layer; decision: not adopted. `ailake serve` (HTTP/JSON) already covers language-agnostic access; PyO3 and Go SDK are already zero-FFI; JVM FFI surface (JNA, 10 functions) is manageable post sprint-4 fixes; distributed Spark favors per-executor local search over centralised Flight server; Arrow Flight Java client would add 50MB+ to Spark classpath with version-conflict risk. Identified next incremental improvement: replace JSON embedding payload in `ailake_write_batch_json` with Arrow IPC bytes (12MB JSON → 3MB IPC binary per 1k×1536-dim batch) — Fase 10 in roadmap. Conditions that would reopen Flight: GPU co-location mandatory, >8 JVM plugins, multi-tenant shared inference cluster, or streaming >10k results.

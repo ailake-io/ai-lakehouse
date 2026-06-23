@@ -59,13 +59,19 @@ object AilakeNative {
         /** Compact small files. Returns `{"ok":true,"files_compacted":N}`. Caller must free. */
         fun ailake_compact_json(requestJson: String): Pointer?
 
-        fun ailake_free_string(ptr: Pointer)
+        fun ailake_free_string(ptr: Pointer?)
     }
 
     private const val AILAKE_EXPECTED_MAJOR = "0"
 
     private val lib: Lib? by lazy {
-        runCatching { Native.load("ailake_jni", Lib::class.java) as Lib }
+        val explicitPath =
+            System.getProperty("ailake.native.lib")
+                ?: System.getenv("AILAKE_NATIVE_LIB")
+        runCatching {
+            if (explicitPath != null) Native.load(explicitPath, Lib::class.java) as Lib
+            else Native.load("ailake_jni", Lib::class.java) as Lib
+        }
             .onSuccess { loaded ->
                 val version = loaded.ailake_version()
                 val major = version.substringBefore('.')
@@ -75,13 +81,13 @@ object AilakeNative {
                         "Search results may be incorrect.", version, AILAKE_EXPECTED_MAJOR
                     )
                 else
-                    log.info("[ailake] Native library libailake_jni {} loaded successfully", version)
+                    log.info("[ailake] Native library libailake_jni {} loaded (path={})",
+                        version, explicitPath ?: "JNA default search path")
             }
             .onFailure {
                 log.warn(
                     "[ailake] Native library libailake_jni not found — vector search disabled. " +
-                    "Set java.library.path or LD_LIBRARY_PATH to the directory containing libailake_jni.so. " +
-                    "Error: ${it.message}"
+                    "Set ailake.native.lib system property or AILAKE_NATIVE_LIB env var. Error: ${it.message}"
                 )
             }
             .getOrNull()
@@ -368,15 +374,18 @@ object AilakeNative {
         if (queries.isEmpty()) return emptyList()
 
         val effectiveTable = tableName.ifBlank { tableUri.trimEnd('/').substringAfterLast('/') }
-        val queriesJson = queries.joinToString(",", "[", "]") { (col, q, w) ->
-            val qArr = q.joinToString(",", "[", "]")
-            """{"col":${mapper.writeValueAsString(col)},"query":$qArr,"weight":$w,"dim":0}"""
+        val queriesArr = queries.map { (col, q, w) ->
+            mapOf("col" to col, "query" to q, "weight" to w, "dim" to 0)
         }
-        val partJson = if (partitionFilter != null) ""","partition_filter":${mapper.writeValueAsString(partitionFilter)}""" else ""
-        val requestJson = mapper.writeValueAsString(
-            mapOf("warehouse" to tableUri, "namespace" to namespace, "table" to effectiveTable,
-                  "top_k" to topK)
-        ).dropLast(1) + ""","queries":$queriesJson$partJson}"""
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to tableUri,
+            "namespace" to namespace,
+            "table"     to effectiveTable,
+            "queries"   to queriesArr,
+            "top_k"     to topK,
+        )
+        if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        val requestJson = mapper.writeValueAsString(payload)
 
         val ptr = native.ailake_search_multimodal_json(requestJson) ?: run {
             log.warn("[ailake] ailake_search_multimodal_json returned null for tableUri={}", tableUri)
