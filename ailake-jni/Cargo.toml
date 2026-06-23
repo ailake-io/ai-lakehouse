@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-jni"
-version = "0.0.23"
+version = "0.0.24"
 edition     = "2021"
 description = "C-ABI cdylib for AI-Lake — Spark, Trino, and Flink connectors via JNA"
 readme      = "README.md"
@@ -13,11 +13,11 @@ categories  = ["database", "api-bindings"]
 crate-type = ["cdylib"]
 
 [dependencies]
-ailake-query   = { path = "../ailake-query", version = "0.0.23" }
+ailake-query   = { path = "../ailake-query", version = "0.0.24" }
 ailake-fts     = { workspace = true }
-ailake-catalog = { path = "../ailake-catalog", version = "0.0.23" }
-ailake-store   = { path = "../ailake-store", version = "0.0.23" }
-ailake-core    = { path = "../ailake-core", version = "0.0.23" }
+ailake-catalog = { path = "../ailake-catalog", version = "0.0.24" }
+ailake-store   = { path = "../ailake-store", version = "0.0.24" }
+ailake-core    = { path = "../ailake-core", version = "0.0.24" }
 tokio          = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }

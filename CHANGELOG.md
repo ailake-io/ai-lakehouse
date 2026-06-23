@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.0.24] — 2026-06-23
+
 ### Fixed
 
 - **`HadoopCatalog` lost-update under concurrent in-process writes** (`ailake-catalog`) — `save_metadata()` performed two non-atomic `store.put()` calls (versioned JSON + version-hint.text). Two concurrent tokio tasks could both read version N and both write version N+1, causing one commit to be silently discarded. Fixed: added `Arc<tokio::sync::Mutex<()>>` to `HadoopCatalog` that serializes all `commit_snapshot` calls within the process. Cross-process concurrent writers (multi-JVM Spark) require a REST or Nessie catalog — same documented limitation as upstream Apache Iceberg `HadoopCatalog`.
@@ -46,6 +50,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - §15 (HNSW tuning): added `ef_search` and `pruning_threshold` to markdown table and code cell — shows `search(..., ef_search=400)` and `search(..., pruning_threshold=0.7)`.
   - §31 (new): `ailake.compact()` — merges small files and rebuilds index; post-compaction search verification.
   - §30 (schema evolution): added `ailake.evolve_schema()` combined wrapper demo alongside `add_column` + `rename_column`.
+
+---
+
+## [0.0.23] — 2026-06-22
+
+### Fixed (release infrastructure)
+
+- **`ailake-fts` crates.io publish order** (`release`) — added `ailake-fts` to workspace crates.io publish sequence; unblocked v0.0.23 crates.io release after v0.0.22 publish failure.
+
+---
+
+## [0.0.22] — 2026-06-22
+
+### Fixed (release infrastructure)
+
+- **`ailake-fts` workspace dependency version** (`workspace`) — added explicit `version` pin to the workspace-level `ailake-fts` dependency entry; fixed missing version that blocked workspace publish.
+
+---
+
+## [0.0.21] — 2026-06-22
 
 ### Fixed
 
