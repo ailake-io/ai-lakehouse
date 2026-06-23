@@ -46,6 +46,10 @@ tasks.shadowJar {
 
 tasks.test {
     useJUnitPlatform()
+    // Forward ailake.native.lib system property to the test JVM so that
+    // `gradle test -Dailake.native.lib=/path/to/libailake_jni.so` works.
+    // CI uses AILAKE_NATIVE_LIB env var (inherited automatically).
+    System.getProperty("ailake.native.lib")?.let { systemProperty("ailake.native.lib", it) }
 }
 
 kotlin {
