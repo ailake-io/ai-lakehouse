@@ -181,7 +181,9 @@ impl HadoopCatalog {
     part-NNNNN.parquet         ← Parquet + AILK footer
 ```
 
-**Commit**: writes a new `vN.metadata.json` and updates `version-hint.text` (S3 `PUT` semantics). Manifest files are Avro OCF with verbatim schema JSON so field-ids survive round-trips (apache-avro 0.16 strips unknown schema properties). Safe for single-writer workloads.
+**Commit**: writes a new `vN.metadata.json` and updates `version-hint.text` (S3 `PUT` semantics). Manifest files are Avro OCF with verbatim schema JSON so field-ids survive round-trips (apache-avro 0.16 strips unknown schema properties).
+
+**Concurrent-write safety**: an `Arc<tokio::sync::Mutex<()>>` in `HadoopCatalog` serializes all `commit_snapshot` calls within the process, preventing the two non-atomic `store.put()` calls (versioned JSON + version-hint.txt) from racing between concurrent tokio tasks. Cross-JVM concurrent writers (multi-node Spark) require a REST or Nessie catalog — same documented limitation as upstream Apache Iceberg `HadoopCatalog`.
 
 **`SnapshotOperation` semantics** — critical for deferred index builds:
 
@@ -540,7 +542,7 @@ let catalog = JdbcCatalog::connect(
 ).await?;
 ```
 
-**Commit protocol**: each `commit_snapshot` writes a new UUID-named `metadata.json` to object storage and updates the `metadata_location` pointer in the DB with a single `UPDATE`. No two-phase commit — single-writer assumption (same as `HadoopCatalog`).
+**Commit protocol**: each `commit_snapshot` writes a new UUID-named `metadata.json` to object storage and updates the `metadata_location` pointer in the DB using a CAS `UPDATE ... AND metadata_location = old_location`. `rows_affected() == 0` means a concurrent writer raced ahead — the commit retries up to 5 times with exponential backoff (50ms base). Compatible with PostgreSQL, MySQL, and SQLite.
 
 ---
 
@@ -581,7 +583,7 @@ let catalog = GlueCatalog::from_client(client, config, s3_store);
 
 **Namespace model**: `TableIdent.namespace` is ignored by Glue (all tables go into `config.database`). Use separate `GlueCatalogConfig.database` per namespace if isolation is needed.
 
-**Commit protocol**: writes a new UUID-named `metadata.json` to S3, then calls `UpdateTable` in Glue with the new path. Glue's optimistic locking is not enforced — single-writer assumption.
+**Commit protocol**: writes a new UUID-named `metadata.json` to S3, then calls `UpdateTable` in Glue with the new path. Uses Glue's native `version_id` OCC guard — the commit reads the current Glue table `version_id` alongside `metadata_location`, then passes it back to `UpdateTable`. AWS rejects the request with `ConcurrentModificationException` if another writer committed in the meantime. Up to 5 retries with exponential backoff (100ms base).
 
 ---
 

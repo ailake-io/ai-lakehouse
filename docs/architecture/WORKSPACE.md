@@ -431,9 +431,12 @@ Delivered in Phase 6:
 - **`publish-jvm.yml`** — builds Spark/Trino/Flink fat-JARs (via Gradle `shadowJar`) + `libailake_jni.so` (Rust `--release`); uploads all four artifacts to GitHub Release; pre-built JARs downloadable without Rust toolchain or Gradle
 - **CI Go** (`ci-go.yml`) — `go build ./...` + `go vet ./...` for `ailake-go`
 - **CI C++** (`ci-cpp.yml`) — CMake configure + build for `ailake-cpp` (CPU-only, no CUDA)
+- **CI GPU** (`ci-gpu.yml`, `ci-gpu-data.yml`) — three-platform GPU tests: Windows bare-metal (existing), Linux/CUDA Docker (new, runner label `gpu-nvidia`), Linux/ROCm Docker (new, runner label `gpu-amd`). Previously Windows-only; `hardware.rs` Linux paths (`libcuda.so.1`, `libamdhip64.so`) now exercised in CI.
+- **Composite action `locate-rust-windows`** (`.github/actions/locate-rust-windows/action.yml`) — reusable PowerShell action that finds `cargo.exe` on Windows self-hosted runners (toolchain dir → rustup shim → PATH). Extracts ~60-line block previously duplicated in `ci-gpu.yml` and `ci-gpu-data.yml`.
+- **GPU Docker images** (`docker/gpu-cuda/Dockerfile`, `docker/gpu-rocm/Dockerfile`, `docker-compose.gpu.yml`) — purpose-built images for reproducible local and CI GPU testing. `gpu-cuda`: `nvidia/cuda:12.6.0-runtime-ubuntu22.04` (runtime-only; no CUDA Toolkit headers needed because `ailake-index` uses libloading). `gpu-rocm`: `rocm/dev-ubuntu-22.04:6.2`. Both pre-fetch deps and pre-build test harness for fast subsequent runs. `docker-compose.gpu.yml` wires up device passthrough flags.
 - **Node.js 24 opt-in** — `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` across all 9 workflows; eliminates deprecation warnings ahead of GitHub-forced switch
 
-Manual Actions trigger order (pre-release): CI → CI Go → CI C++ → Compat Heavy → Release → Publish Python / Airflow Provider / JVM Plugins (parallel). See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.
+Manual Actions trigger order (pre-release): CI → CI Go → CI C++ → Compat Heavy → Release → Publish Python / Airflow Provider / JVM Plugins (parallel). GPU CI (steps 4–5) runs in parallel with CI Go and CI C++. See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.
 
 ### Phase 7 — DuckDB Extension + Deferred Engine + Airbyte 🚧
 
@@ -500,3 +503,20 @@ Delivered in Phase T (branch `feature/phase-t-tantivy-fts`, 2026-06-20):
 - **Compaction** — compaction rebuilds Tantivy index from merged Parquet; output files carry FTS section if any input file had `fts_columns` set.
 - **Airflow** — `AilakeWriteOperator(fts_columns=...)` + new `AilakeFtsSearchOperator`.
 - **Airbyte** — `fts_columns` field in `AilakeDestinationConfig` and `spec.json`.
+
+### Post-Phase T — Catalog OCC + GPU CI Infrastructure ✅
+
+Delivered on branch `fix/security-and-correctness` (2026-06-23):
+
+**Catalog concurrent-write safety:**
+
+- **`HadoopCatalog` mutex** (`ailake-catalog/src/hadoop.rs`) — `save_metadata()` had two non-atomic `store.put()` calls (versioned JSON + version-hint.txt); two concurrent tokio tasks could both read version N and both write version N+1, silently discarding one commit. Fixed: `Arc<tokio::sync::Mutex<()>>` serializes all `commit_snapshot` calls within the process. Cross-JVM concurrent writers (multi-node Spark) require a REST or Nessie catalog — same upstream Apache Iceberg `HadoopCatalog` limitation.
+- **`GlueCatalog` OCC** (`ailake-catalog/src/glue.rs`) — `commit_snapshot` called `update_table()` without Glue's native `version_id` CAS guard. Fixed: new `get_table_state()` returns both `metadata_location` and `version_id`; `build_table_input()` accepts `version_id: Option<&str>`; `ConcurrentModificationException` triggers up to 5 retries with exponential backoff (100ms base).
+- **`JdbcCatalog` CAS** (`ailake-catalog/src/jdbc.rs`) — `UPDATE iceberg_tables SET metadata_location = ?` executed with no predicate; concurrent writers silently overwrote each other. Fixed: `AND metadata_location = old_location` CAS predicate; `rows_affected() == 0` triggers up to 5 retries with 50ms exponential backoff. Compatible with PostgreSQL, MySQL, and SQLite.
+- **Concurrent-write stress tests** (`tests/tests/concurrent_writes.rs`) — three new integration tests: `hadoop_8_concurrent_appends_no_lost_update` (8 parallel tokio tasks, all 8 files must survive), `hadoop_overwrite_and_append_no_corruption` (4 Append + 2 Overwrite tasks race), `jdbc_4_concurrent_commits_no_lost_update` (4 SQLite CAS-retry writers, each snap_id individually verified).
+
+**GPU CI infrastructure:**
+
+- **GPU Docker images** (`docker/gpu-cuda/Dockerfile`, `docker/gpu-rocm/Dockerfile`, `docker-compose.gpu.yml`) — `gpu-cuda` based on `nvidia/cuda:12.6.0-runtime-ubuntu22.04` (runtime-only; libloading requires no compile-time SDK); `gpu-rocm` based on `rocm/dev-ubuntu-22.04:6.2`. Both pre-fetch deps and pre-build `ailake-index` for fast CI runs. `docker-compose.gpu.yml` wires correct device passthrough flags for local use.
+- **Linux GPU CI jobs** (`ci-gpu.yml`, `ci-gpu-data.yml`) — new `index-gpu-linux-cuda` (runner `gpu-nvidia`) and `index-gpu-linux-rocm` (runner `gpu-amd`) jobs. Linux `hardware.rs` paths (`libcuda.so.1`, `libamdhip64.so`) were untested in CI before this change.
+- **Composite action `locate-rust-windows`** (`.github/actions/locate-rust-windows/action.yml`) — reusable PowerShell composite action, finds `cargo.exe` in three fallback locations; replaces ~60-line inline block duplicated in both GPU workflows.
