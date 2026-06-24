@@ -34,6 +34,7 @@ COPY ailake-catalog   ailake-catalog/
 COPY ailake-store     ailake-store/
 COPY ailake-query     ailake-query/
 COPY ailake-py        ailake-py/
+COPY ailake-fts       ailake-fts/
 # Workspace members not needed for the wheel build, but cargo metadata requires
 # all members listed in the root Cargo.toml to exist in the build context.
 COPY ailake-cli       ailake-cli/

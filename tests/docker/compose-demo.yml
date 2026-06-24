@@ -2,11 +2,14 @@
 #
 # Usage (from repo root):
 #
-#   Basic demo (notebooks 01-03 + 07, vector search + Iceberg compat + DuckDB + Spark + multimodal):
+#   Basic demo (notebooks 01-03 + 07-12, vector search + Iceberg compat + DuckDB + Spark + multimodal):
 #     docker compose -f tests/docker/compose-demo.yml up -d
 #
 #   Full demo with engine plugins (notebooks 04-05, adds Trino + BigQuery emulator):
 #     docker compose -f tests/docker/compose-demo.yml --profile engines up -d
+#
+#   Airflow demo (notebook 12, Apache Airflow 2.9 + AI-Lake provider):
+#     docker compose -f tests/docker/compose-demo.yml --profile airflow up -d
 #
 # Then open: http://localhost:8888
 #
@@ -18,6 +21,10 @@
 # Services (--profile engines):
 #   trino           — Trino 446 with Iceberg/Nessie connector (http://localhost:8080)
 #   bigquery-emulator — goccy BigQuery emulator (http://localhost:19050 on host)
+#
+# Services (--profile airflow):
+#   airflow — Apache Airflow 2.9 standalone (http://localhost:8090, admin/admin)
+#             Uses SequentialExecutor + SQLite — demo-only, not for production.
 #
 # First run builds the ailake-py wheel via maturin (~3-5 min).
 # Subsequent runs are instant (Docker layer cache).
@@ -96,6 +103,11 @@ services:
       BQ_EMULATOR_HOST: bigquery-emulator
       BQ_EMULATOR_PORT: "9050"
       BQ_PROJECT: ailake-demo
+      # Airflow endpoint — consumed by notebook 12 when --profile airflow is active.
+      # Ignored silently when Airflow is not running.
+      AIRFLOW_URL: "http://ailake-demo-airflow:8080"
+      AIRFLOW_USER: admin
+      AIRFLOW_PASSWORD: admin
     depends_on:
       minio-init:
         condition: service_completed_successfully
@@ -139,6 +151,53 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+
+  # ── Airflow service (--profile airflow) ────────────────────────────────────
+  #
+  # Runs Apache Airflow 2.9 in single-node mode (SequentialExecutor + SQLite).
+  # The same ailake-py wheel built for the jupyter service is embedded in this
+  # image — DAGs call `import ailake` directly via PythonOperator.
+  #
+  # UI:       http://localhost:8090  (user: admin / pass: admin)
+  # REST API: http://localhost:8090/api/v1/
+  # DAGs dir: tests/docker/demo/dags/ (hot-reloaded, read-only mount)
+  #
+  # First run builds a separate Airflow image (~5-8 min, cached after).
+  # Start with:
+  #   docker compose -f tests/docker/compose-demo.yml --profile airflow up -d
+
+  airflow:
+    profiles: ["airflow"]
+    build:
+      context: ../..
+      dockerfile: tests/docker/demo/Dockerfile.airflow
+    container_name: ailake-demo-airflow
+    command: bash /opt/ailake/airflow-entrypoint.sh
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "sqlite:////opt/airflow/airflow.db"
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "ailake-demo-secret-do-not-use-in-prod"
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "10"
+      AILAKE_TABLE_PATH: /data/ailake_airflow
+      AILAKE_RAG_TABLE_PATH: /data/ailake_rag_airflow
+      DEMO_DIM: "32"
+    volumes:
+      - ./demo/dags:/opt/airflow/dags:ro
+      - ./demo/airflow-entrypoint.sh:/opt/ailake/airflow-entrypoint.sh:ro
+      - demo-data:/data
+      - airflow-db:/opt/airflow
+    ports:
+      - "8090:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 16
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
 
   # ── GPU service (--profile gpu) ─────────────────────────────────────────────
   #
@@ -199,3 +258,4 @@ volumes:
   minio-data:
   demo-data:
   trino-var:
+  airflow-db:

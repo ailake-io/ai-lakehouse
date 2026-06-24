@@ -66,12 +66,14 @@ Depois abra **http://localhost:8888** e execute os notebooks:
 | `09_hybrid_search.ipynb` | Escrita BM25 (`bm25_text_column`), `search_text` lexical puro, RRF híbrido (vetor + BM25), ablação de pesos |
 | `10_gpu_demo.ipynb` | `hardware_info()`, `write_batch_auto_deferred`, comparação de tempo HNSW vs diferido, QPS de busca, recall@10, fallback CPU |
 | `11_fts.ipynb` | FTS Tantivy por arquivo (`fts_text_columns`), `search_text` fast path O(log N), indexação multi-coluna, sintaxe de query, fallback BM25 para arquivos legados, re-ranking FTS + HNSW híbrido, layout de storage |
+| `12_airflow.ipynb` | Apache Airflow 2.9 + provider AI-Lake: `AilakeWriteOperator`, `AilakeSearchOperator`, `AilakeFtsSearchOperator`, trigger de DAG via API REST, inspeção de XCom, padrão PythonOperator direto, configuração de conexão em produção |
 
-Notebooks 03 e 04 requerem o perfil `engines` (adiciona Trino). Notebook 10 requer o perfil `gpu` (NVIDIA Container Toolkit):
+Notebooks 03 e 04 requerem o perfil `engines` (adiciona Trino). Notebook 10 requer o perfil `gpu` (NVIDIA Container Toolkit). Notebook 12 requer o perfil `airflow`:
 
 ```bash
 docker compose -f tests/docker/compose-demo.yml --profile engines up -d   # Trino
 docker compose -f tests/docker/compose-demo.yml --profile gpu up -d        # JupyterLab GPU na :8889
+docker compose -f tests/docker/compose-demo.yml --profile airflow up -d    # Airflow na :8090
 ```
 
 Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
