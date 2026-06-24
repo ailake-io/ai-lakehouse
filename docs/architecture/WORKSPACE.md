@@ -336,7 +336,7 @@ debug       = true
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS runtime-only), HNSW perf optimizations, IVF-PQ native index, GPU k-means, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog, JNA bridge) |
 | **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP server, Airflow provider, idempotent writes, Compat Heavy CI, TruffleHog scanning, cloud deployment guides |
 | **Phase 6** | ✅ Complete | Public distribution — crates.io pipeline, PyPI manylinux wheels, Airflow provider on PyPI, pre-built JVM JARs + native lib on GitHub Releases, dynamic Python versioning |
-| **Phase 7** | 🚧 In progress | DuckDB extension (`duckdb-ailake/`), Python `fetch_data=True`, `write_batch_auto_deferred` + async (~200k vec/s), `pq_only`/`ivf_residual` in Python SDK, Airbyte CDK v3 destination connector, expanded JupyterLab demo (5 fixture tables, `07_multimodal.ipynb`), **Tantivy FTS** (`ailake-fts` crate, `AILK_FTS` section, O(log N) `search_text()`, `fts_columns` in all SDKs + JVM plugins), **hybrid BM25+vector** (`SearchConfig::hybrid`, RRF fusion). Remaining: DuckLake catalog backend |
+| **Phase 7** | ✅ Complete | DuckDB extension (`duckdb-ailake/`), Python `fetch_data=True`, `write_batch_auto_deferred` + async (~200k vec/s), `pq_only`/`ivf_residual` in Python SDK, Airbyte CDK v3 destination connector, expanded JupyterLab demo (`01`–`12` notebooks, 11 fixture tables in `init_demo.py`), **Tantivy FTS** (`ailake-fts` crate, `AILK_FTS` section, O(log N) `search_text()`, `fts_columns` in all SDKs + JVM plugins — delivered in Phase T), **hybrid BM25+vector** (`SearchConfig::hybrid`, RRF fusion — delivered in Phase 9). DuckLake catalog backend deferred indefinitely. |
 | **Phase 8** | ✅ Complete | Multimodal — `VectorModality` enum, `ailake.modality-<col>` Iceberg property, N generalized vector columns with independent HNSW, `write_batch_multi`, CLI `--vector-cols`, cross-modal RRF (`search_multimodal`), `MultimodalContextSchema`, Python `VectorColSpec`. Propagated to all plugins: `ailake_search_multimodal_json` C-ABI, `searchMultimodal()` Spark/Trino/Flink, `ailake_search_multimodal()` DuckDB, `SearchMultimodal()` Go SDK, `search_multimodal()` C++ SDK |
 | **Phase 9** | ✅ Complete | BM25 Hybrid Search + Agent Memory — `BM25Scorer`, `IdfStats` at write time, `SearchConfig::hybrid` (RRF + linear fusion), `search_text()` pure-lexical scan, `ailake_search_text_json` C-ABI, `ailake_search_text()` DuckDB, Flink `searchText()` + hybrid params; `ToolCallSchema`, `EpisodicMemorySchema` with recency decay, injectable `ScoreFn`, `agent_id` Iceberg identity partitioning, `WorkingMemoryBuffer`, `MemoryDecayJob`, Python `ailake.Agent` helper |
 
@@ -459,7 +459,7 @@ Delivered in Phase 7:
 - **`write_batch_auto_deferred`** — async deferred variant of the `Auto` engine: detects hardware at runtime, writes Parquet immediately (~200k vec/s), builds index in background via `IndexStatus::Indexing → Ready`.
 - **`pq_only` + `ivf_residual`** — Python SDK `TableWriter(pq_only=True, ivf_residual=True)`.
 - **`airbyte-destination-ailake`** — Airbyte CDK v3 destination connector with `cmd`, `openai`, `cohere`, `http` embedding backends; state message → commit durability.
-- **Demo expansion** — `07_multimodal.ipynb`, 5 fixture tables in `init_demo.py`.
+- **Demo expansion** — `07_multimodal.ipynb` (Phase 7), `08_agents.ipynb` + `09_hybrid_search.ipynb` (Phase 9), `10_gpu_demo.ipynb` (Phase 4 GPU CI), `11_fts.ipynb` (Phase T), `12_airflow.ipynb` (Post-Phase T). 11 fixture tables in `init_demo.py`.
 
 Remaining:
 - **DuckLake catalog backend** — `DuckLakeCatalog` on top of `duckdb` crate (awaiting spec stabilization; introduces C++ dep — deferred indefinitely, `HadoopCatalog` covers the use case).
@@ -516,6 +516,7 @@ Delivered in Phase T (branch `feature/phase-t-tantivy-fts`, 2026-06-20):
 - **Compaction** — compaction rebuilds Tantivy index from merged Parquet; output files carry FTS section if any input file had `fts_columns` set.
 - **Airflow** — `AilakeWriteOperator(fts_columns=...)` + new `AilakeFtsSearchOperator`.
 - **Airbyte** — `fts_columns` field in `AilakeDestinationConfig` and `spec.json`.
+- **Demo** — `11_fts.ipynb` (7 sections: write with FTS, Tantivy fast path, multi-column, query syntax, BM25 fallback, hybrid RRF, storage comparison); `12_airflow.ipynb` (`--profile airflow`, DAG trigger via REST API, XCom pull, shared volume read-back); `ailake_fts` fixture in `init_demo.py`; `Dockerfile.airflow` two-stage build; `--profile airflow` service in `compose-demo.yml` (port 8090).
 
 ### Post-Phase T — Catalog OCC + GPU CI Infrastructure ✅
 
