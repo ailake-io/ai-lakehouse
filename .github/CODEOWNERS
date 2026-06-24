@@ -6,9 +6,10 @@
 /ailake-file/    @ThiagoLange
 /ailake-parquet/ @ThiagoLange
 
-# Vector index and quantization
+# Vector index, quantization and FTS
 /ailake-index/   @ThiagoLange
 /ailake-vec/     @ThiagoLange
+/ailake-fts/     @ThiagoLange
 
 # Query engine and catalog
 /ailake-query/   @ThiagoLange
