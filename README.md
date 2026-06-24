@@ -284,11 +284,13 @@ ailake/
 │       ├── AilakeVectorConnectorFactory.kt
 │       ├── AilakeVectorTableSink.kt
 │       └── AilakeVectorTableSource.kt
-├── ailake-fts/                 # Full-text search — Tantivy per-file FTS indexes (Phase 7)
+├── ailake-fts/                 # Full-text search — Tantivy per-file FTS indexes (Phase T)
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs              # FtsConfig, FtsIndex, blob_to_ram_dir
-│       ├── index.rs            # Tantivy index building, tokenizer registration
+│       ├── builder.rs          # Tantivy index building, tokenizer registration
+│       ├── searcher.rs         # Tantivy query execution, top-k collection
+│       ├── tokenizers.rs       # Custom tokenizers (whitespace, ngram, language)
 │       └── blob.rs             # AILK_FTS blob serialization (zstd, MAX_FTS_FILES guard)
 ├── airbyte-destination-ailake/ # Airbyte CDK destination (Python)
 │   ├── pyproject.toml
@@ -329,24 +331,46 @@ ailake/
     └── airflow_providers_ailake/
         # AilakeHook, AilakeWriteOperator, AilakeSearchOperator, AilakeSnapshotSensor
 tests/
-├── write_read_roundtrip.rs
-├── iceberg_compat.rs
-├── parquet_trailing_bytes.rs
-├── vector_pruning.rs
-├── positional_invariant.rs
-├── context_assembler.rs
+├── Cargo.toml
+├── src/lib.rs
+├── tests/
+│   ├── write_read_roundtrip.rs
+│   ├── iceberg_compat.rs
+│   ├── parquet_trailing_bytes.rs
+│   ├── vector_pruning.rs
+│   ├── positional_invariant.rs
+│   ├── context_assembler.rs
+│   ├── hybrid_search.rs
+│   ├── concurrent_writes.rs
+│   ├── partition_isolation.rs
+│   ├── fts_fast_path.rs
+│   └── fixtures/mod.rs
+├── fixtures/
+│   ├── write_fixture.py
+│   └── write_jni_fixture.py
+├── compat/
+│   ├── check_pyarrow.py
+│   ├── check_ailake_py.py
+│   ├── check_jni_cabi.py
+│   ├── check_pyiceberg.py
+│   └── check_duckdb.py
 └── docker/
     ├── compose.yml              # MinIO + Nessie + Localstack (Phase 2 integration)
     ├── compose-engines.yml      # + Spark + Trino containers (Phase 3 compat)
-    ├── compose-demo.yml         # Single-command onboarding demo; --profile engines adds Trino + BQ
+    ├── compose-demo.yml         # Single-command onboarding demo; --profile engines/gpu/airflow
     └── demo/
         ├── Dockerfile           # Two-stage: Rust/maturin → JupyterLab
-        ├── entrypoint.sh        # Init fixture then start Jupyter
-        ├── init_demo.py         # Generates 8 fixture tables (HNSW, PQ-only, Residual-PQ, Deferred, Multimodal, Partitioned-v3, Delete-demo, Schema-evo)
+        ├── Dockerfile.airflow   # Airflow 2.x image with ailake provider pre-installed
+        ├── entrypoint.sh        # Init fixtures then start Jupyter
+        ├── airflow-entrypoint.sh # Init DB + start scheduler + webserver
+        ├── init_demo.py         # Generates 11 fixture tables (HNSW, PQ-only, Residual-PQ, Deferred, Model-tracked, Multimodal, Agent-memory, Delete-demo, Schema-evo, Partitioned-v3, FTS)
+        ├── dags/
+        │   ├── dag_ailake_ingest_search.py  # TaskFlow ingest + vector search DAG
+        │   └── dag_ailake_compaction.py     # Scheduled compaction DAG
         ├── trino-catalog/
         │   └── ailake.properties # Trino Iceberg HadoopCatalog config
         └── notebooks/
-            ├── 01_ailake_demo.ipynb  # Full SDK walkthrough (23 sections): write, search, IVF-PQ, deferred, HNSW tuning, async, RAG, multi-column, RRF
+            ├── 01_ailake_demo.ipynb  # Full SDK walkthrough: write, search, IVF-PQ, deferred, HNSW tuning, async, RAG, multi-column, RRF
             ├── 02_duckdb.ipynb       # DuckDB Parquet scan, per-file stats, F16 decode, Iceberg metadata
             ├── 03_spark.ipynb        # PySpark + Iceberg SQL + time-travel VERSION AS OF
             ├── 04_trino.ipynb        # Trino SQL + $properties / $files / $manifests (--profile engines)
@@ -354,7 +378,10 @@ tests/
             ├── 06_airbyte_destination.ipynb  # Airbyte CDK destination, CmdEmbedder, StreamWriter
             ├── 07_multimodal.ipynb   # VectorColSpec, write_batch_multi, modality tags, cross-modal RRF fusion
             ├── 08_agents.ipynb       # ailake.Agent, episodic memory, ToolCallSchema, WorkingMemoryBuffer, decay_memories
-            └── 09_hybrid_search.ipynb # BM25 write, search_text, hybrid RRF (vector+BM25), WorkingMemoryBuffer
+            ├── 09_hybrid_search.ipynb # BM25 write, search_text, hybrid RRF (vector+BM25), WorkingMemoryBuffer
+            ├── 10_gpu_demo.ipynb     # GPU backend detection, IVF-PQ GPU, hardware profiling (--profile gpu)
+            ├── 11_fts.ipynb          # Tantivy per-file FTS, fts_text_columns, search_text O(log N)
+            └── 12_airflow.ipynb      # Airflow DAGs, AilakeWriteOperator, AilakeSnapshotSensor (--profile airflow)
 ```
 
 ## Storage

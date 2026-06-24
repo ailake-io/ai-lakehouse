@@ -186,24 +186,50 @@ ailake/
 ├── spark-plugin/               # Plugin Spark em Scala (Gradle)
 ├── trino-plugin/               # Conector Trino em Kotlin (Gradle)
 ├── ailake-flink/               # Conector Flink em Kotlin (Gradle)
-├── ailake-fts/                 # Índice Tantivy FTS por arquivo (Phase 7 — Busca full-text)
+├── ailake-fts/                 # Índice Tantivy FTS por arquivo (Phase T — Busca full-text)
 ├── airbyte-destination-ailake/ # Destino Airbyte CDK (Python)
 ├── ailake-go/                  # SDK Go puro, sem CGo
 ├── ailake-cpp/                 # SDK C++17 header-only
 └── airflow-providers-ailake/   # Provider Apache Airflow 2.x/3.x
 tests/
-├── write_read_roundtrip.rs
-├── iceberg_compat.rs
-├── parquet_trailing_bytes.rs
-├── vector_pruning.rs
-├── positional_invariant.rs
-├── context_assembler.rs
+├── Cargo.toml
+├── src/lib.rs
+├── tests/
+│   ├── write_read_roundtrip.rs
+│   ├── iceberg_compat.rs
+│   ├── parquet_trailing_bytes.rs
+│   ├── vector_pruning.rs
+│   ├── positional_invariant.rs
+│   ├── context_assembler.rs
+│   ├── hybrid_search.rs
+│   ├── concurrent_writes.rs
+│   ├── partition_isolation.rs
+│   ├── fts_fast_path.rs
+│   └── fixtures/mod.rs
+├── fixtures/
+│   ├── write_fixture.py
+│   └── write_jni_fixture.py
+├── compat/
+│   ├── check_pyarrow.py
+│   ├── check_ailake_py.py
+│   ├── check_jni_cabi.py
+│   ├── check_pyiceberg.py
+│   └── check_duckdb.py
 └── docker/
     ├── compose.yml              # MinIO + Nessie + Localstack
     ├── compose-engines.yml      # + Spark + Trino
-    ├── compose-demo.yml         # Demo de onboarding; --profile engines adiciona Trino + BQ
+    ├── compose-demo.yml         # Demo de onboarding; --profile engines/gpu/airflow
     └── demo/
-        ├── init_demo.py         # Gera 8 tabelas fixture (HNSW, PQ-only, Residual-PQ, Deferred, Multimodal, Partitioned-v3, Delete-demo, Schema-evo, Deferred, Multimodal)
+        ├── Dockerfile           # Dois estágios: Rust/maturin → JupyterLab
+        ├── Dockerfile.airflow   # Imagem Airflow 2.x com provider ailake instalado
+        ├── entrypoint.sh        # Gera fixtures e inicia Jupyter
+        ├── airflow-entrypoint.sh # Inicia DB + scheduler + webserver
+        ├── init_demo.py         # Gera 11 tabelas fixture (HNSW, PQ-only, Residual-PQ, Deferred, Model-tracked, Multimodal, Agent-memory, Delete-demo, Schema-evo, Partitioned-v3, FTS)
+        ├── dags/
+        │   ├── dag_ailake_ingest_search.py  # DAG TaskFlow: ingestão + busca vetorial
+        │   └── dag_ailake_compaction.py     # DAG de compaction agendado
+        ├── trino-catalog/
+        │   └── ailake.properties
         └── notebooks/
             ├── 01_ailake_demo.ipynb
             ├── 02_duckdb.ipynb
@@ -213,7 +239,10 @@ tests/
             ├── 06_airbyte_destination.ipynb
             ├── 07_multimodal.ipynb
             ├── 08_agents.ipynb
-            └── 09_hybrid_search.ipynb
+            ├── 09_hybrid_search.ipynb
+            ├── 10_gpu_demo.ipynb
+            ├── 11_fts.ipynb
+            └── 12_airflow.ipynb
 ```
 
 ## Storage
