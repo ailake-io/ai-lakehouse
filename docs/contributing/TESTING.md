@@ -646,7 +646,7 @@ cargo bench --workspace
 | `compat-duckdb` | `write_fixture` + `pip install duckdb` + `check_duckdb.py` | DuckDB reads via `parquet_scan` |
 | `compat-pyiceberg` | `write_fixture` + `pip install pyiceberg[pyarrow]` + `check_pyiceberg.py` | PyIceberg `StaticTable.scan()` |
 | `test-airflow-provider` | `pip install apache-airflow pytest` + `pytest tests/` | Airflow provider unit tests (2.x/3.x) |
-| `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context |
+| `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context; `fts_text_columns` write + `search_text()` (Tantivy fast path); `search_multimodal` RRF |
 
 ### `ci-gpu.yml` — manual dispatch (`workflow_dispatch`)
 
@@ -746,7 +746,7 @@ Fails the step with a descriptive error if cargo is not found. Adding the found 
 |---|---|
 | `compat-spark` | PySpark: direct Parquet read + Spark+Iceberg HadoopCatalog SQL (`COUNT`, `MIN`/`MAX`, schema) |
 | `compat-trino` | Trino: `tabulario/iceberg-rest` REST catalog + `trinodb/trino:436`; PyIceberg REST scan + Trino Python client |
-| `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests |
+| `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests; includes FTS write (`fts_columns[]`) + `ailake_search_text_json` round-trip for Spark and Trino |
 | `compat-bigquery` | BigQuery: `fsouza/fake-gcs-server` + `goccy/bigquery-emulator:0.6.6`; pyarrow reads AILK Parquet + BQ streaming inserts (`insertAll`); validates row count, schema, `MIN`/`MAX(id)` |
 
 ### `publish-jvm.yml` — manual fallback (`workflow_dispatch`)
