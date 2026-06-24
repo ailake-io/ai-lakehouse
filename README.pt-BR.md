@@ -216,34 +216,9 @@ tests/
             └── 09_hybrid_search.ipynb
 ```
 
-## Performance
+## Storage
 
-Números do repositório [ailake-benchmark](https://github.com/ThiagoLange/ailake-benchmark) rodando em uma AWS `c6i.8xlarge` (32 vCPU, 64 GB RAM) com NVMe local. Números GPU em `g5.xlarge` (NVIDIA A10G).
-
-### Throughput de escrita (`text-embedding-3-small`, dim=1536)
-
-| Caminho | Throughput | Observações |
-|---|---|---|
-| `write_batch` (HNSW inline) | ~6 k vec/s | Grafo HNSW construído sincronamente por shard |
-| `write_batch_deferred` (HNSW async) | ~200 k vec/s | Parquet escrito imediatamente; HNSW construído em background |
-| `write_batch_ivf_pq_deferred` (IVF-PQ async) | ~250 k vec/s | Parquet + índice PQ treinado por k-means async |
-| `write_batch_auto_deferred` (auto) | ~200–250 k vec/s | Hardware-aware: seleciona IVF-PQ em GPU/≥8 cores, HNSW caso contrário |
-
-### Latência de busca (top-10, dim=1536, 1 M vetores, cosine)
-
-| Índice | Recall@10 | Latência p50 | Latência p99 |
-|---|---|---|---|
-| HNSW (F16, ef=50) | ~97% | ~4 ms | ~12 ms |
-| HNSW (F16, ef=50, NormalizedCosine) | ~97% | ~3 ms | ~10 ms |
-| IVF-PQ (nprobe=8) | ~93% | ~2 ms | ~8 ms |
-| IVF-PQ residual (nprobe=8) | ~96% | ~2 ms | ~8 ms |
-| IVF-PQ GPU (A10G, nprobe=8) | ~93% | ~0,4 ms | ~1 ms |
-
-Pruning geométrico elimina 95–99% dos arquivos antes de qualquer índice ser acessado em tabelas com milhares de shards.
-
-> **NormalizedCosine**: `pre_normalize=True` normaliza vetores para L2 unitário na escrita, substituindo a distância cosseno por `1−dot(a,b)` no hot loop do HNSW (sem `sqrt`). Redução de latência de ~12–20% em dim=1536 (embeddings OpenAI, Cohere). Ative via `ailake create --pre-normalize` ou `TableWriter(pre_normalize=True)`.
-
-### Storage (`text-embedding-3-small`, dim=1536, 100 M vetores)
+Estimativas para `text-embedding-3-small` (dim=1536), 100 M vetores.
 
 | Modo | Coluna vetorial | Overhead HNSW/IVF-PQ | Total |
 |---|---|---|---|
@@ -254,6 +229,10 @@ Pruning geométrico elimina 95–99% dos arquivos antes de qualquer índice ser 
 | PQ-only (`--pq-only`) | 0 GB (raw omitido) | ~5 GB | **~5 GB** |
 
 Modo PQ-only troca precisão de reranking por 98% de redução de storage. Recall@10 ~93–95%.
+
+**Pruning geométrico** elimina 95–99% dos arquivos antes de qualquer índice ser acessado em tabelas com milhares de shards.
+
+> **NormalizedCosine**: `pre_normalize=True` normaliza vetores para L2 unitário na escrita, substituindo a distância cosseno por `1−dot(a,b)` no hot loop do HNSW (sem `sqrt`). Redução de latência de ~12–20% em dim=1536 (embeddings OpenAI, Cohere). Ative via `ailake create --pre-normalize` ou `TableWriter(pre_normalize=True)`.
 
 > **Tantivy FTS**: quando `fts_columns` está definido, cada arquivo embute um índice invertido por arquivo (seção `AILK_FTS`, comprimida com zstd). Adiciona ~3–4 MB por arquivo (~7 GB para tabela com 2.000 shards a 50 k docs/arquivo) — pequeno em relação ao overhead da coluna vetorial.
 
