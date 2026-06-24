@@ -119,8 +119,11 @@ fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>)
     // files contain absolute file:// paths. Required for Trino's Iceberg
     // connector and any reader that resolves location URIs strictly.
     // LocalStore::full_path strips the file:// prefix before I/O.
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
-    let warehouse_uri = format!("file://{}", canonical.display());
+    //
+    // std::path::absolute resolves relative paths without requiring the directory
+    // to exist (unlike canonicalize, which fails on new table paths).
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let warehouse_uri = format!("file://{}", absolute.display());
     let catalog: Arc<dyn CatalogProvider> =
         Arc::new(HadoopCatalog::new(Arc::clone(&store), &warehouse_uri));
     (catalog, store)

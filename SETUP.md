@@ -11,24 +11,39 @@ Guide for running the file format locally: writing batches, vector search with g
 docker compose -f tests/docker/compose-demo.yml up -d
 ```
 
-Open **http://localhost:8888** — JupyterLab starts with pre-built fixture tables (HNSW standard, PQ-only, Residual-PQ, Deferred write, partitioned Iceberg v3, delete demo, schema evolution, multimodal, agent memory, BM25) and 500 synthetic documents indexed across them.
+Open **http://localhost:8888** — JupyterLab starts with pre-built fixture tables (HNSW, PQ-only, Residual-PQ, Deferred, multimodal, agent memory, BM25, Tantivy FTS, partitioned Iceberg v3, delete demo, schema evolution) and 500 synthetic documents indexed across them.
 
-The demo covers all SDK features across 10 notebooks: `01_ailake_demo.ipynb` (vector search through §31 partitioned v3), `07_multimodal.ipynb`, `08_agents.ipynb`, `09_hybrid_search.ipynb`, `10_gpu_demo.ipynb` (GPU acceleration + `hardware_info()`), and connector notebooks (`02`–`06`).
+**12 notebooks** cover the full SDK:
 
-For engine demos (Trino + BigQuery emulator):
+| Notebook | Requires | Topics |
+|---|---|---|
+| `01_ailake_demo.ipynb` | — | Write, search, IVF-PQ, deferred, HNSW tuning, async, RAG context, multimodal, agents, schema evolution, partitioned v3 |
+| `02_duckdb.ipynb` | — | DuckDB Parquet scan, F16 decode, Iceberg metadata |
+| `03_spark.ipynb` | — | PySpark local[*], SQL, time-travel, partition read |
+| `04_trino.ipynb` | `--profile engines` | Trino SQL, system tables, DDL inspection |
+| `05_bigquery.ipynb` | `--profile engines` | BigQuery emulator, streaming inserts |
+| `06_airbyte_destination.ipynb` | — | Airbyte destination connector |
+| `07_multimodal.ipynb` | — | Dual embeddings, cross-modal RRF |
+| `08_agents.ipynb` | — | `ailake.Agent`, episodic memory, decay |
+| `09_hybrid_search.ipynb` | — | BM25 hybrid, RRF weight ablation |
+| `10_gpu_demo.ipynb` | `--profile gpu` | CUDA/ROCm auto-detection, GPU QPS |
+| `11_fts.ipynb` | — | Tantivy FTS, `search_text` O(log N), hybrid |
+| `12_airflow.ipynb` | `--profile airflow` | Airflow DAG trigger, XCom, operators |
+
+Optional profiles add heavyweight services:
 
 ```bash
+# Trino + BigQuery emulator (notebooks 04-05)
 docker compose -f tests/docker/compose-demo.yml --profile engines up -d
-```
 
-For GPU demo (requires NVIDIA Container Toolkit + NVIDIA GPU):
+# Apache Airflow 2.9 on http://localhost:8090 (notebook 12)
+docker compose -f tests/docker/compose-demo.yml --profile airflow up -d
 
-```bash
+# NVIDIA GPU JupyterLab on http://localhost:8889 (notebook 10)
 docker compose -f tests/docker/compose-demo.yml --profile gpu up -d
-# Opens on http://localhost:8889
 ```
 
-See [`tests/docker/`](./tests/docker/) for full details.
+→ **[Full step-by-step notebook guide](docs/guides/DEMO_NOTEBOOKS.md)** — prerequisites, per-notebook walkthrough, execution order, troubleshooting.
 
 ---
 

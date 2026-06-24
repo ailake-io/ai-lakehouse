@@ -82,6 +82,29 @@ Invariant after commit:
 - Seek back, rewrite Parquet footer with correct `ailake.hnsw_offset/len`
 - The rewrite is bounded — only the last few KB of the file change
 
+### FTS write path (opt-in via `fts_columns`)
+
+When `TableWriter` is constructed with `fts_columns = ["chunk_text", ...]`, `AilakeFileWriter` additionally:
+
+```
+After HNSW/IVF-PQ section is written:
+  │
+  ├─► ailake-fts / FtsIndexBuilder
+  │     │  for each row in RecordBatch:
+  │     │    add_doc(row_id, [(col, text), ...]) for each fts_column
+  │     └─► finish() → zstd-compressed Tantivy index bytes
+  │
+  └─► AilakeFileWriter
+        │  append AILK_FTS section header (magic "AFTS", version, len)
+        │  append compressed Tantivy index bytes
+        │  rewrite Parquet footer KV:
+        │    ailake.fts_offset = <byte offset of AILK_FTS section>
+        │    ailake.fts_len    = <length of AILK_FTS section>
+        └─► FLAG_HAS_FTS set in AilakeHeader.flags
+```
+
+Storage: ~3-4 MB per file for 50k documents with `WithFreqs` (no stored fields, no positions).
+
 ---
 
 ## Deferred write path (HNSW and IVF-PQ)
@@ -209,6 +232,43 @@ ailake-query / VectorScanner
 - Pruned file: 0 bytes from S3 (centroid read from Avro manifest, no Parquet/footer access)
 - Surviving file (no match): ~10-15 MB (HNSW footer fetch)
 - Surviving file (with match): ~10-15 MB + ~1 MB row group fetch = ~16 MB
+
+---
+
+## Read path — full-text search (`search_text`)
+
+`search_text(table, query_text, top_k, text_columns)` has two paths depending on whether the file has a Tantivy FTS index:
+
+```
+ailake-query / search_text
+  │
+  ├─► ailake-catalog: list_files → Vec<DataFileEntry>
+  │     (centroid pruning NOT applied — FTS search spans all files)
+  │
+  └─► [for each file, in parallel]
+        │
+        ├─► CHECK: DataFileEntry.fts_offset.is_some()?
+        │
+        ├─► YES (file has AILK_FTS section) — Tantivy O(log N) fast path
+        │     ├─► ailake-store: GET range [fts_offset, fts_offset + fts_len)
+        │     ├─► ailake-fts: FtsReader::from_bytes(compressed_bytes)
+        │     └─► FtsReader::search_multi_column(query, text_columns, top_k)
+        │           → Vec<(row_id, bm25_score)>
+        │
+        └─► NO (legacy file, no FTS section) — BM25 brute-force O(N) fallback
+              ├─► ailake-store: GET full Parquet file (or column projection)
+              └─► BM25Scorer::score_all(query, column_values)
+                    → Vec<(row_id, bm25_score)>  (IdfStats from metadata)
+
+Merge top-k results across all files by descending bm25_score.
+Return: Vec<SearchResult { row_id, distance: -score, file_path }>
+  (distance = negated BM25 score, consistent with vector search convention)
+```
+
+**Hybrid search** (`SearchConfig::hybrid = Some(HybridConfig { text, bm25_weight })`) combines the vector HNSW pipeline with BM25 scoring via Reciprocal Rank Fusion:
+1. HNSW pipeline retrieves `10 × top_k` vector candidates.
+2. BM25 pipeline scores each candidate against `hybrid_text`.
+3. RRF: `final_score = Σ weight_i / (60 + rank_i)` — merged and re-sorted.
 
 ---
 

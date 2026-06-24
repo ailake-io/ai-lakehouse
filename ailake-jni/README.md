@@ -91,6 +91,9 @@ Writes a batch of records and their embeddings to an AI-Lake table.
 Optional fields:
 - `ivf_residual` (bool, default `false`) — enable residual PQ encoding (`vec - cluster_centroid`); improves recall@10 by ~2-4 pp at same storage.
 - `embedding_model` (string, default absent) — model identifier stored in Iceberg properties (`ailake.embedding-model`). Format: `"<name>"` or `"<name>@<version>"`.
+- `pre_normalize` (bool, default `false`) — normalize vectors to unit L2 at write time; enables `1-dot(a,b)` fast path in HNSW (~12-20% speedup for `cosine` metric). Stored as `ailake.pre-normalize` in Iceberg properties.
+- `fts_columns` (array of strings, default `[]`) — text column names to index with Tantivy FTS (e.g. `["chunk_text","document_title"]`). When set, each file receives an `AILK_FTS` section; `ailake_search_text_json` uses O(log N) Tantivy path instead of BM25 brute-force.
+- `fts_tokenizer` (string, default `"simple"`) — Tantivy tokenizer: `"simple"` (whitespace + lowercase) or `"raw"` (no tokenization).
 - `partition_by` (string, default absent) — single-column Iceberg identity partition column (legacy; prefer `partition_fields` for new tables).
 - `partition_value` (string, default absent) — value for `partition_by`. Must be set when `partition_by` is set.
 - `partition_fields` (array, default `[]`) — multi-column Iceberg partition spec. Each object: `{column, transform, column_type}`. Supports all Iceberg transforms: `identity`, `year`, `month`, `day`, `hour`, `bucket[N]`, `truncate[N]`. Takes precedence over `partition_by` when non-empty.
@@ -217,7 +220,8 @@ Pure BM25 full-text search — no HNSW required. Scans all Parquet files and ret
 ```
 
 Optional fields:
-- `text_column` (string, default `"chunk_text"`) — Parquet column to score.
+- `text_columns` (array of strings, default `["chunk_text"]`) — Parquet columns to score. Each column is searched independently; scores are combined. Example: `["chunk_text","document_title"]`.
+- `text_column` (string, deprecated alias for `text_columns[0]`) — still accepted for backward compatibility.
 - `partition_filter` (string, default absent) — restrict to files tagged with this `partition_value`.
 
 **Response JSON:** `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}` where `distance` = negated BM25 score (lower = more relevant, consistent with vector search convention).
@@ -300,10 +304,18 @@ fn ailake_vector_search_json(
 Binary-parameter API — accepts a raw `f32` array pointer rather than a JSON-encoded query. Used by the DuckDB extension (which calls into C-ABI directly without JSON marshalling). Hardcodes namespace `"default"`, table `"table"`, `vec_col` `"embedding"`.
 
 - Null `table_uri` or `query_ptr` → returns `[]` (empty JSON array).
+- `query_len > 65 536` → returns `{"ok":false,"error":"query_len N exceeds maximum supported dimension (65536)"}`.
 - On error → `{"ok":false,"error":"..."}`.
 - On success → `{"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}`.
 
 **Prefer `ailake_search_json` for new integrations.** This function exists for DuckDB's native binary call path.
+
+### Security constraints
+
+| Limit | Applied in | Value |
+|---|---|---|
+| Max `query_len` (legacy API) | `ailake_vector_search_json` | 65 536 dimensions |
+| Max `ef_search` | `ailake_search_json`, `ailake_scan_json` | 100 000 (clamped via `.min(100_000)`) |
 
 ---
 

@@ -1,6 +1,6 @@
 # ailake — AI-Lake Format Python SDK
 
-**Version**: 0.0.23 — Unified storage for tabular data, embeddings, and HNSW vector index in a single Parquet-compatible file. 100% Apache Iceberg Spec v2 compatible.
+**Version**: 0.0.25 — Unified storage for tabular data, embeddings, and HNSW vector index in a single Parquet-compatible file. Apache Iceberg Spec v2/v3 compatible.
 
 ## Install
 
@@ -133,6 +133,7 @@ Opens or creates an AI-Lake table at `path`.
 | `ivf_residual` | `False` | Encode `vec − cluster_centroid` per IVF cell (residual PQ). Same storage as standard PQ; ~2-4 pp better recall@10. |
 | `embedding_model` | `None` | Embedding model name stored in Iceberg properties (`ailake.embedding-model`). Used for mismatch detection and migration tracking. |
 | `embedding_model_version` | `None` | Optional model version. Stored as `"<name>@<version>"` in Iceberg properties. |
+| `fts_text_columns` | `None` | List of text column names to index with Tantivy FTS (e.g. `["chunk_text", "document_title"]`). When set, each file gets an `AILK_FTS` section; `search_text()` uses O(log N) Tantivy path instead of BM25 brute-force. |
 | `embed_fn` | `None` | Auto-embed callable `list[str] → list[list[float]]`. When set, `insert(texts)` and `write_batch(texts)` can be called without passing `embeddings` — the callable is invoked automatically. |
 | `partition_by` | `None` | Single-column Iceberg identity partition (e.g. `"agent_id"`). Stored in `metadata.json`. Prefer `partition_fields` for new tables. |
 | `partition_value` | `None` | Per-write value for `partition_by`. Tagged in `key_metadata`; used for manifest-level pruning at search time. |

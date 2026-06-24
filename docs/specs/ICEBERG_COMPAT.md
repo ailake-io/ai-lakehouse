@@ -12,7 +12,7 @@ This document specifies exactly how that guarantee is maintained.
 
 AI-Lake compatibility relies on **two specifications simultaneously**:
 
-1. **Iceberg Spec v2** — for `metadata.json` and Avro manifests
+1. **Iceberg Spec v2 or v3** — for `metadata.json` and Avro manifests (`format_version=2` default; `format_version=3` opt-in via `TableWriter(format_version=3)` or `ailake create --format-version 3`)
 2. **Apache Parquet Spec** — for the file-level extension (AI-Lake footer after `PAR1`)
 
 Both specifications define mechanisms for application-specific extensions that unknown readers ignore safely. We use both.
@@ -116,6 +116,8 @@ File-level `key_value_metadata`:
 - `ailake.hnsw_len` = `"4194304"`
 - `ailake.precision` = `"f16"`
 - `ailake.metric` = `"cosine"`
+- `ailake.fts_offset` = `"16777216"` (byte offset of `AILK_FTS` section; absent when no FTS index)
+- `ailake.fts_len` = `"3145728"` (FTS section length in bytes; absent when no FTS index)
 
 **Why this is safe**:
 - `FIXED_LEN_BYTE_ARRAY` is a standard Parquet physical type.
@@ -147,7 +149,7 @@ See [`FILE_FORMAT.md`](./FILE_FORMAT.md) for the binary layout.
 
 The `ailake-catalog` crate is responsible for maintaining this list. Every catalog write operation must pass these checks before committing:
 
-- [x] `format-version` is `2`
+- [x] `format-version` is `2` or `3` (v3 opt-in; default is `2`)
 - [x] `table-uuid` is a valid UUID v4
 - [x] `current-schema-id` references a valid schema in `schemas`
 - [x] `current-snapshot-id` references a valid snapshot in `snapshots`
@@ -213,7 +215,7 @@ When the AI-Lake format needs a breaking change in how vector metadata is stored
 4. Iceberg readers ignore the version key entirely — the table itself remains readable regardless.
 5. New format versions MUST NOT change the Parquet schema layout, Avro manifest structure, or the position of the AI-Lake trailer (last 24 bytes of file).
 
-The Iceberg `format-version` (currently `2`) is NOT our version number and MUST NOT be changed.
+The Iceberg `format-version` (`2` by default, `3` opt-in) is NOT the AI-Lake format version. The AI-Lake format version is tracked separately in `ailake.format-version` inside `properties`.
 
 ---
 

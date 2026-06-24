@@ -6,11 +6,15 @@
 //   POST /write    {"texts":["..."], "embeddings":[[f32...]], "batch_id":"..."}
 //   POST /compact  {}
 //   GET  /info
+//
+// SECURITY: This server has no authentication. It is designed for trusted-network
+// deployments (localhost, VPC-internal, sidecar). Do NOT expose it on a public
+// interface without an authenticating reverse proxy (e.g., nginx + mTLS, API gateway).
 
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -62,6 +66,9 @@ type ApiResult<T> = Result<T, ApiError>;
 // ---------------------------------------------------------------------------
 // Request / response types
 // ---------------------------------------------------------------------------
+
+const MAX_TOP_K: usize = 10_000;
+const MAX_BODY_BYTES: usize = 32 * 1024 * 1024; // 32 MB
 
 #[derive(Deserialize)]
 struct SearchRequest {
@@ -152,10 +159,14 @@ async fn handle_search(
     let req: SearchRequest =
         serde_json::from_str(&body).map_err(|e| ApiError(format!("invalid JSON: {e}")))?;
 
+    if req.query.is_empty() {
+        return Err(ApiError("query must not be empty".into()));
+    }
+    let top_k = req.top_k.clamp(1, MAX_TOP_K);
     let dim = req.query.len() as u32;
     let config = SearchConfig {
-        top_k: req.top_k,
-        ef_search: req.top_k * 5,
+        top_k,
+        ef_search: top_k.saturating_mul(5),
         pruning_threshold: req.pruning_threshold,
         rerank_factor: None,
         score_fn: None,
@@ -405,6 +416,7 @@ pub(crate) async fn run(
         .route("/write", post(handle_write))
         .route("/compact", post(handle_compact))
         .route("/info", get(handle_info))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
@@ -413,5 +425,6 @@ pub(crate) async fn run(
         .map_err(|e| format!("bind {addr}: {e}"))?;
 
     eprintln!("ailake server listening on http://{addr}");
+    eprintln!("WARNING: no authentication — expose only on a trusted network or behind an authenticating proxy");
     axum::serve(listener, app).await.map_err(|e| e.to_string())
 }

@@ -55,6 +55,25 @@ write_op = AilakeWriteOperator(
     # multi-column partition spec (takes precedence over partition_by when set):
     partition_fields=[{"column": "topic_id", "transform": "identity", "column_type": "int"}],
     format_version=3,             # Iceberg v3 (default: 2)
+    fts_columns=["chunk_text"],   # Tantivy FTS index on these text columns (opt-in)
+    fts_tokenizer="simple",       # "simple" (default) or "raw"
+    pre_normalize=False,          # normalize vectors to unit L2 at write time (~12-20% speedup)
+)
+```
+
+`AilakeFtsSearchOperator` — runs a full-text search (Tantivy O(log N) when FTS index present; BM25 brute-force fallback) and pushes results to XCom.
+
+```python
+from airflow_providers_ailake.operators.ailake import AilakeFtsSearchOperator
+
+fts_op = AilakeFtsSearchOperator(
+    task_id="fts_search",
+    conn_id="ailake_default",
+    table_path="s3://my-lake/docs/",
+    query_text="rust async programming",
+    text_columns=["chunk_text", "document_title"],  # default: ["chunk_text"]
+    top_k=10,
+    do_xcom_push=True,
 )
 ```
 
@@ -127,6 +146,8 @@ wait_for_index = AilakeIndexStatusSensor(
 `AilakeHook.compact(table_path, *, min_files=4, target_size_bytes=None, max_files_per_pass=20) → int` — runs compaction on the table via CLI; returns number of files compacted.
 
 `AilakeHook.decay_memories(table_path, *, decay_lambda=0.1) → int` — applies exponential recency decay (`exp(-λ × days_since_access)`) to the `recency_weight` column; returns number of files updated.
+
+`AilakeHook.search_text(table, query_text, text_columns=None, top_k=10, partition_filter=None) → list[dict]` — full-text search via Tantivy (O(log N) fast path) or BM25 brute-force fallback. Wraps `ailake search --text`.
 
 ## Requirements
 

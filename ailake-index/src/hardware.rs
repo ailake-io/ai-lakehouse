@@ -19,7 +19,7 @@ const MIN_CORES_FOR_IVF_PQ: usize = 8;
 pub enum HardwareBackend {
     /// No GPU detected — use SIMD-accelerated CPU kernels (rayon).
     CpuSimd,
-    /// NVIDIA GPU with CUDA driver (candle-core + CUDA kernels).
+    /// NVIDIA GPU with CUDA driver (cuBLAS SGEMM via libloading — no compile-time SDK required).
     NvidiaCuda,
     /// AMD GPU with ROCm/HIP driver (hipBLAS SGEMM via libloading).
     AmdRocm,
@@ -29,7 +29,7 @@ pub enum HardwareBackend {
 pub struct HardwareProfile {
     /// Active GPU backend (highest priority GPU, or CpuSimd when none found).
     pub backend: HardwareBackend,
-    /// CUDA-capable GPU found at runtime (NVIDIA only; requires `gpu` feature at compile time).
+    /// CUDA-capable GPU found at runtime via libloading (`libcuda.so.1` + `libcublas.so`).
     pub has_cuda: bool,
     /// AMD ROCm/HIP GPU found at runtime.
     pub has_rocm: bool,

@@ -646,17 +646,19 @@ cargo bench --workspace
 | `compat-duckdb` | `write_fixture` + `pip install duckdb` + `check_duckdb.py` | DuckDB reads via `parquet_scan` |
 | `compat-pyiceberg` | `write_fixture` + `pip install pyiceberg[pyarrow]` + `check_pyiceberg.py` | PyIceberg `StaticTable.scan()` |
 | `test-airflow-provider` | `pip install apache-airflow pytest` + `pytest tests/` | Airflow provider unit tests (2.x/3.x) |
-| `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context |
+| `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context; `fts_text_columns` write + `search_text()` (Tantivy fast path); `search_multimodal` RRF |
 
 ### `ci-gpu.yml` — manual dispatch (`workflow_dispatch`)
 
-Runs `ailake-index` unit + integration tests on GPU runners. Three parallel jobs cover Windows bare-metal, Linux/CUDA Docker, and Linux/ROCm Docker.
+Runs `ailake-index` unit + integration tests on GPU runners.
 
-| Job | Runner | What it covers |
-|---|---|---|
-| `index-gpu-windows` | `[self-hosted, Windows, X64]` | Detects CUDA (`cudart64_*.dll`) or ROCm (`amdhip64.dll`) via `Find-Dll` (PATH search); uses composite action `locate-rust-windows`; runs full `ailake-index` test suite including GPU unit tests in `src/gpu.rs` |
-| `index-gpu-linux-cuda` | `[self-hosted, Linux, X64, gpu-nvidia]` | Builds `docker/gpu-cuda/Dockerfile` (FROM `nvidia/cuda:12.6.0-runtime-ubuntu22.04`); runs `cargo test -p ailake-index -- --nocapture` with `--gpus all`; exercises the Linux `libcuda.so.1` / `libcublas.so.12` libloading path |
-| `index-gpu-linux-rocm` | `[self-hosted, Linux, X64, gpu-amd]` | Builds `docker/gpu-rocm/Dockerfile` (FROM `rocm/dev-ubuntu-22.04:6.2`); passes `--device /dev/kfd --device /dev/dri --group-add video`; exercises the Linux `libamdhip64.so` / `libhipblas.so` libloading path |
+> **Note (v0.0.25):** Linux GPU jobs (`index-gpu-linux-cuda`, `index-gpu-linux-rocm`) are disabled (`if: false`) — no Linux GPU runner is currently registered. Only the Windows bare-metal job is active. Docker images (`docker/gpu-cuda/Dockerfile`, `docker/gpu-rocm/Dockerfile`) and `docker-compose.gpu.yml` are provided for local use.
+
+| Job | Runner | Status | What it covers |
+|---|---|---|---|
+| `index-gpu-windows` | `[self-hosted, Windows, X64]` | **Active** | Detects CUDA (`cudart64_*.dll`) or ROCm (`amdhip64.dll`) via `Find-Dll` (PATH search); uses composite action `locate-rust-windows`; runs full `ailake-index` test suite including GPU unit tests in `src/gpu.rs` |
+| `index-gpu-linux-cuda` | `[self-hosted, Linux, X64, gpu-nvidia]` | Disabled (`if: false`) | Builds `docker/gpu-cuda/Dockerfile` (FROM `nvidia/cuda:12.6.0-runtime-ubuntu22.04`); runs `cargo test -p ailake-index -- --nocapture` with `--gpus all`; exercises the Linux `libcuda.so.1` / `libcublas.so.12` libloading path |
+| `index-gpu-linux-rocm` | `[self-hosted, Linux, X64, gpu-amd]` | Disabled (`if: false`) | Builds `docker/gpu-rocm/Dockerfile` (FROM `rocm/dev-ubuntu-22.04:6.2`); passes `--device /dev/kfd --device /dev/dri --group-add video`; exercises the Linux `libamdhip64.so` / `libhipblas.so` libloading path |
 
 **GPU unit tests** (`ailake-index/src/gpu.rs`, gated on `AILAKE_GPU_BACKEND`):
 
@@ -683,20 +685,12 @@ docker compose -f docker-compose.gpu.yml run --rm gpu-cuda
 # AMD
 docker compose -f docker-compose.gpu.yml run --rm gpu-rocm
 
-# Override test target (e.g. run gpu_data instead of default)
+# Run only the gpu_data integration tests
 docker compose -f docker-compose.gpu.yml run --rm gpu-cuda \
   cargo test -p ailake-index --test gpu_data -- --nocapture
 ```
 
-### `ci-gpu-data.yml` — manual dispatch (`workflow_dispatch`)
-
-Runs GPU **data integration** tests. Same three-platform structure as `ci-gpu.yml`.
-
-| Job | Runner | What it covers |
-|---|---|---|
-| `index-gpu-data-windows` | `[self-hosted, Windows, X64]` | Uses composite action `locate-rust-windows`; `cargo test -p ailake-index --test gpu_data` — 3 tests in `ailake-index/tests/gpu_data.rs` |
-| `index-gpu-data-linux-cuda` | `[self-hosted, Linux, X64, gpu-nvidia]` | Same `docker/gpu-cuda/Dockerfile`; runs `gpu_data` test target with `--gpus all` |
-| `index-gpu-data-linux-rocm` | `[self-hosted, Linux, X64, gpu-amd]` | Same `docker/gpu-rocm/Dockerfile`; runs `gpu_data` test target with ROCm device passthrough |
+> **Note (v0.0.25):** `ci-gpu-data.yml` was deleted — its `gpu_data` test target is a strict subset of `cargo test -p ailake-index` already run by `ci-gpu.yml`. The `gpu_data` tests are documented below for reference; they run in the Windows job.
 
 **GPU data integration tests** (`ailake-index/tests/gpu_data.rs`, gated on `AILAKE_GPU_BACKEND`):
 
@@ -708,11 +702,9 @@ Runs GPU **data integration** tests. Same three-platform structure as `ci-gpu.ym
 
 All three skip when `AILAKE_GPU_BACKEND=none`.
 
-**Runner requirements**: same as `ci-gpu.yml`.
-
 ### Composite action: `locate-rust-windows`
 
-`.github/actions/locate-rust-windows/action.yml` — reusable composite action used by both `ci-gpu.yml` and `ci-gpu-data.yml` Windows jobs. Finds `cargo.exe` on a self-hosted Windows runner with three fallback levels:
+`.github/actions/locate-rust-windows/action.yml` — reusable composite action used by the `ci-gpu.yml` Windows job. Finds `cargo.exe` on a self-hosted Windows runner with three fallback levels:
 
 1. Real toolchain binary inside `~\.rustup\toolchains\*\bin\`
 2. Rustup shim at `~\.cargo\bin\`
@@ -746,7 +738,7 @@ Fails the step with a descriptive error if cargo is not found. Adding the found 
 |---|---|
 | `compat-spark` | PySpark: direct Parquet read + Spark+Iceberg HadoopCatalog SQL (`COUNT`, `MIN`/`MAX`, schema) |
 | `compat-trino` | Trino: `tabulario/iceberg-rest` REST catalog + `trinodb/trino:436`; PyIceberg REST scan + Trino Python client |
-| `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests |
+| `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests; includes FTS write (`fts_columns[]`) + `ailake_search_text_json` round-trip for Spark and Trino |
 | `compat-bigquery` | BigQuery: `fsouza/fake-gcs-server` + `goccy/bigquery-emulator:0.6.6`; pyarrow reads AILK Parquet + BQ streaming inserts (`insertAll`); validates row count, schema, `MIN`/`MAX(id)` |
 
 ### `publish-jvm.yml` — manual fallback (`workflow_dispatch`)
@@ -785,12 +777,11 @@ All CI workflows are `workflow_dispatch`. Trigger in this order — each step mu
 | 1 | **CI** (`ci.yml`) | Rust fmt/clippy/deny, unit, integration, compat Python/DuckDB/PyIceberg/ailake-py, Airflow provider tests | Must pass |
 | 2 | **CI Go** (`ci-go.yml`) | Go SDK build + vet | Must pass |
 | 3 | **CI C++** (`ci-cpp.yml`) | C++17 cmake build | Must pass |
-| 4 | **CI GPU** (`ci-gpu.yml`) | GPU unit tests on Windows bare-metal + Linux Docker (CUDA/ROCm); skips gracefully if `AILAKE_GPU_BACKEND=none` | Must pass (on GPU runners) |
-| 5 | **CI GPU Data** (`ci-gpu-data.yml`) | GPU data integration tests on Windows bare-metal + Linux Docker — recall@10 ≥ 99% vs CPU brute-force | Must pass (on GPU runners) |
-| 6 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
-| 7 | **Release** (`release.yml`) | Triggered automatically on merge to `main` — runs all publishing steps sequentially (see chain below). Can also be triggered manually via `workflow_dispatch`. | Steps 1–6 green |
+| 4 | **CI GPU** (`ci-gpu.yml`) | GPU unit + data integration tests on Windows bare-metal; Linux jobs disabled (`if: false`); skips gracefully if `AILAKE_GPU_BACKEND=none` | Must pass (on GPU runner) |
+| 5 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
+| 6 | **Release** (`release.yml`) | Triggered automatically on merge to `main` — runs all publishing steps sequentially (see chain below). Can also be triggered manually via `workflow_dispatch`. | Steps 1–5 green |
 
-Steps 4 and 5 require GPU runners (Windows bare-metal or Linux Docker) — can run in parallel with steps 2 and 3. All three GPU job variants (Windows, Linux/CUDA, Linux/ROCm) must pass for the workflow to be green.
+Step 4 requires the Windows GPU runner — can run in parallel with steps 2 and 3. Only the Windows job is currently active; Linux jobs (`index-gpu-linux-cuda`, `index-gpu-linux-rocm`) are disabled until a Linux GPU runner is registered.
 
 ### `release.yml` sequential chain
 

@@ -7,7 +7,7 @@
 
 > 🇧🇷 Você está lendo a versão em Português brasileiro. [Read in English →](./README.md)
 
-Formato de Lakehouse nativo para vetores, construído sobre o Apache Iceberg Spec v2, escrito em Rust.
+Formato de Lakehouse nativo para vetores, construído sobre o Apache Iceberg Spec v2/v3, escrito em Rust.
 
 **Arquivo único e auto-contido**: dados tabulares, embeddings e índice HNSW vivem juntos em um único arquivo Parquet estendido na camada S3. Transações ACID via Iceberg. Qualquer framework compatível com Iceberg lê tabelas AI-Lake sem modificação — o índice vetorial no rodapé do arquivo é invisível para leitores Parquet padrão.
 
@@ -65,12 +65,15 @@ Depois abra **http://localhost:8888** e execute os notebooks:
 | `08_agents.ipynb` | `ailake.Agent`, memória episódica, `ToolCallSchema`, `EpisodicMemorySchema`, `WorkingMemoryBuffer`, `decay_memories`, isolamento por agente via partição |
 | `09_hybrid_search.ipynb` | Escrita BM25 (`bm25_text_column`), `search_text` lexical puro, RRF híbrido (vetor + BM25), ablação de pesos |
 | `10_gpu_demo.ipynb` | `hardware_info()`, `write_batch_auto_deferred`, comparação de tempo HNSW vs diferido, QPS de busca, recall@10, fallback CPU |
+| `11_fts.ipynb` | FTS Tantivy por arquivo (`fts_text_columns`), `search_text` fast path O(log N), indexação multi-coluna, sintaxe de query, fallback BM25 para arquivos legados, re-ranking FTS + HNSW híbrido, layout de storage |
+| `12_airflow.ipynb` | Apache Airflow 2.9 + provider AI-Lake: `AilakeWriteOperator`, `AilakeSearchOperator`, `AilakeFtsSearchOperator`, trigger de DAG via API REST, inspeção de XCom, padrão PythonOperator direto, configuração de conexão em produção |
 
-Notebooks 03 e 04 requerem o perfil `engines` (adiciona Trino). Notebook 10 requer o perfil `gpu` (NVIDIA Container Toolkit):
+Notebooks 03 e 04 requerem o perfil `engines` (adiciona Trino). Notebook 10 requer o perfil `gpu` (NVIDIA Container Toolkit). Notebook 12 requer o perfil `airflow`:
 
 ```bash
 docker compose -f tests/docker/compose-demo.yml --profile engines up -d   # Trino
 docker compose -f tests/docker/compose-demo.yml --profile gpu up -d        # JupyterLab GPU na :8889
+docker compose -f tests/docker/compose-demo.yml --profile airflow up -d    # Airflow na :8090
 ```
 
 Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
@@ -95,15 +98,16 @@ Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Convenções Rust, tratamento de erros, política de unsafe, regras de testes |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | Log de ADRs — por que cada escolha-chave foi feita |
 | [`SETUP.md`](./SETUP.md) | Setup de dev local — roda a stack completa (MinIO, Nessie, testes de compat) na sua máquina |
+| [`docs/guides/DEMO_NOTEBOOKS.md`](./docs/guides/DEMO_NOTEBOOKS.md) | Guia passo-a-passo da demo — pré-requisitos, 12 notebooks, profiles, troubleshooting |
 
 ## Instalação
 
 **Rust** (adicione ao `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.23"
-ailake-query = "0.0.23"   # search(), TableWriter, ContextAssembler, search_multimodal
-ailake-store = "0.0.23"   # backends S3 / GCS / Azure / local
+ailake-core  = "0.0.25"
+ailake-query = "0.0.25"   # search(), TableWriter, ContextAssembler, search_multimodal
+ailake-store = "0.0.25"   # backends S3 / GCS / Azure / local
 ```
 
 **Python**:
@@ -138,7 +142,7 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — baixe os JARs pré-compilados em [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.23
+VERSION=0.0.25
 
 # Plugin Spark
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
@@ -230,11 +234,14 @@ Números do repositório [ailake-benchmark](https://github.com/ThiagoLange/ailak
 | Índice | Recall@10 | Latência p50 | Latência p99 |
 |---|---|---|---|
 | HNSW (F16, ef=50) | ~97% | ~4 ms | ~12 ms |
+| HNSW (F16, ef=50, NormalizedCosine) | ~97% | ~3 ms | ~10 ms |
 | IVF-PQ (nprobe=8) | ~93% | ~2 ms | ~8 ms |
 | IVF-PQ residual (nprobe=8) | ~96% | ~2 ms | ~8 ms |
 | IVF-PQ GPU (A10G, nprobe=8) | ~93% | ~0,4 ms | ~1 ms |
 
 Pruning geométrico elimina 95–99% dos arquivos antes de qualquer índice ser acessado em tabelas com milhares de shards.
+
+> **NormalizedCosine**: `pre_normalize=True` normaliza vetores para L2 unitário na escrita, substituindo a distância cosseno por `1−dot(a,b)` no hot loop do HNSW (sem `sqrt`). Redução de latência de ~12–20% em dim=1536 (embeddings OpenAI, Cohere). Ative via `ailake create --pre-normalize` ou `TableWriter(pre_normalize=True)`.
 
 ### Storage (`text-embedding-3-small`, dim=1536, 100 M vetores)
 
@@ -247,6 +254,8 @@ Pruning geométrico elimina 95–99% dos arquivos antes de qualquer índice ser 
 | PQ-only (`--pq-only`) | 0 GB (raw omitido) | ~5 GB | **~5 GB** |
 
 Modo PQ-only troca precisão de reranking por 98% de redução de storage. Recall@10 ~93–95%.
+
+> **Tantivy FTS**: quando `fts_columns` está definido, cada arquivo embute um índice invertido por arquivo (seção `AILK_FTS`, comprimida com zstd). Adiciona ~3–4 MB por arquivo (~7 GB para tabela com 2.000 shards a 50 k docs/arquivo) — pequeno em relação ao overhead da coluna vetorial.
 
 ---
 
@@ -280,7 +289,7 @@ cargo check --workspace
 | **Fase 4** | ✅ Completa | Reranking pós-PQ, spec pública do formato, busca GPU (NVIDIA cuBLAS + AMD hipBLAS, ambos runtime-only), otimizações HNSW, índice nativo IVF-PQ, k-means GPU, `MemTableWriter`, colunas multi-vetor, seleção adaptativa de índice, conector Kotlin `ailake-flink`; **codebook compartilhado IVF-PQ**; **`write_batch_ivf_pq_deferred`**; **fix k-means++ O(n×k)**; **fix `HadoopCatalog` Replace** |
 | **Fase 5** | ✅ Completa | SDKs multi-linguagem (`ailake-go`, `ailake-cpp`), servidor HTTP REST `ailake serve`, provider Apache Airflow, escritas idempotentes, CI Compat Heavy, scanning de segredos TruffleHog, guias de deploy em cloud |
 | **Fase 6** | ✅ Completa | Pipeline de distribuição pública — crates.io, PyPI (wheels manylinux abi3), provider Airflow no PyPI, JARs JVM pré-compilados + `libailake_jni.so` no GitHub Releases, versionamento Python dinâmico |
-| **Fase 7** | 🚧 Em andamento | Concluído: extensão DuckDB (`duckdb-ailake/`), leitura completa Python (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` expostos no SDK Python, guia dbt (`docs/guides/DBT_INTEGRATION.md`), `partition_fields` (spec de partição Iceberg multi-coluna), `format_version=3` (tabelas Iceberg v3), `delete_where` + `evolve_schema` em todos os SDKs (Python, Go, C++, Spark, Trino, Flink, DuckDB, Airflow, Airbyte), binding `hardware_info()` Python, notebook de demo GPU (`10_gpu_demo.ipynb`), demo JupyterLab expandida (10 notebooks). Restante: backend de catálogo DuckLake |
+| **Fase 7** | 🚧 Em andamento | Concluído: extensão DuckDB (`duckdb-ailake/`), leitura completa Python (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` expostos no SDK Python, guia dbt (`docs/guides/DBT_INTEGRATION.md`), `partition_fields` (spec de partição Iceberg multi-coluna), `format_version=3` (tabelas Iceberg v3), `delete_where` + `evolve_schema` em todos os SDKs (Python, Go, C++, Spark, Trino, Flink, DuckDB, Airflow, Airbyte), binding `hardware_info()` Python, notebook de demo GPU (`10_gpu_demo.ipynb`), demo JupyterLab expandida (10 notebooks), **FTS Tantivy por arquivo** (crate `ailake-fts` — seção `AILK_FTS`, zstd; fast path `search_text()` O(log N); opt-in via `fts_columns` em todos os SDKs e plugins JVM), **busca híbrida BM25+vetor** (`SearchConfig::hybrid`, fusão RRF, fallback BM25 brute-force para arquivos legados). Restante: backend de catálogo DuckLake |
 | **Fase 8** | ✅ Completa | Multimodal — enum `VectorModality`, propriedade Iceberg `ailake.modality-<col>`, N colunas vetoriais generalizadas com HNSW independente, `write_batch_multi`, CLI `--vector-cols`, `search_multimodal` (RRF cross-modal), `MultimodalContextSchema` + módulo `multimodal_columns`, Python `VectorColSpec`, notebook e fixture multimodal |
 | **Fase 9** | ✅ Completa | Memória de agentes — `ToolCallSchema` (histórico de tool calls pesquisável), `EpisodicMemorySchema` (decaimento de recência, contagem de acesso, pontuação de importância), `ScoreFn` injetável para scoring híbrido (distância × recência × importância), `partition_by`/`partition_value` para isolamento por agente via particionamento Iceberg, `partition_filter` para pruning ao nível de manifesto antes de centroide e HNSW, helper Python `ailake.Agent` (LangChain/CrewAI/AutoGen). Propagado para todos os SDKs e conectores: Spark, Trino, Flink, Go, C++, DuckDB, Airbyte, Airflow. Fix: `TableWriter::create_or_open` inicializa `part_counter` a partir da contagem de arquivos existentes. |
 

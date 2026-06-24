@@ -1,0 +1,61 @@
+# AI-Lake Airflow Demo Image
+#
+# Two-stage build — Stage 1 mirrors the main Dockerfile builder.
+#   Stage 1 (builder): Rust + maturin → ailake-py wheel
+#   Stage 2 (airflow): Apache Airflow 2.9.2 (Python 3.11) + ailake wheel + providers
+#
+# Build context must be the repository root (set in compose-demo.yml).
+
+# ── Stage 1: build ailake-py wheel ───────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:$PATH"
+
+RUN pip install --no-cache-dir maturin
+
+COPY Cargo.toml Cargo.lock ./
+COPY ailake-core      ailake-core/
+COPY ailake-vec       ailake-vec/
+COPY ailake-parquet   ailake-parquet/
+COPY ailake-index     ailake-index/
+COPY ailake-file      ailake-file/
+COPY ailake-fts       ailake-fts/
+COPY ailake-catalog   ailake-catalog/
+COPY ailake-store     ailake-store/
+COPY ailake-query     ailake-query/
+COPY ailake-py        ailake-py/
+COPY ailake-cli       ailake-cli/
+COPY ailake-jni       ailake-jni/
+COPY tests            tests/
+
+WORKDIR /ailake-py
+RUN maturin build --release --out /wheels
+
+# ── Stage 2: Airflow runtime ──────────────────────────────────────────────────
+FROM apache/airflow:2.9.2
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+USER airflow
+
+COPY --from=builder /wheels /opt/ailake/wheels
+COPY airflow-providers-ailake /opt/ailake/providers
+
+# Install ailake Python wheel + providers into the Airflow Python environment.
+# numpy + pyarrow are needed by the demo DAGs (synthetic embeddings, Arrow I/O).
+RUN pip install --no-cache-dir \
+        /opt/ailake/wheels/*.whl \
+        /opt/ailake/providers \
+        numpy \
+        pyarrow

@@ -11,6 +11,50 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.26] — 2026-06-24
+
+### Security
+
+- **`ailake-jni` JNI `query_len` upper-bound guard** (`ailake-jni/src/lib.rs`) — `ailake_search_legacy` accepted any `u32` value for `query_len`; `u32::MAX` cast to `usize` would instruct `from_raw_parts` to read ~16 GB from the caller's address space, causing OOM or out-of-bounds memory access. Now returns `{"ok":false,"error":"query_len exceeds maximum supported dimension (65536)"}` for values > 65,536.
+- **`ailake-jni` `ef_search` DoS cap in JNI search path** (`ailake-jni/src/lib.rs`) — the HTTP server already clamped `ef_search` via `top_k.min(10_000).saturating_mul(5)`, but JNI callers (`ailake_search_json`, `ailake_search_text_json`) accepted arbitrary `ef_search` values, allowing a buggy or malicious Spark/Trino executor to trigger an arbitrarily expensive HNSW traversal. Both JNI search paths now apply `.min(100_000)` before passing to `do_search`.
+- **Airflow hook: truncate CLI output in error messages** (`airflow-providers-ailake/airflow_providers_ailake/hooks/ailake.py`) — `run_cli` raised a `RuntimeError` with full `stdout`+`stderr` from the subprocess; cloud SDKs in verbose/debug mode can print credential-adjacent context (error messages referencing access key IDs, SDK configuration) to stderr. Both outputs are now truncated to 4096 characters in the error message. Operational debugging is not affected — the full output is still accessible via Airflow's task log if the subprocess itself writes to stderr incrementally.
+- **HTTP server: documented trusted-network requirement** (`ailake-cli/src/serve.rs`) — `ailake serve` has no authentication by design (sidecar / VPC-internal use case). Added a file-level comment and a startup `eprintln!` warning to make this explicit: the server must not be exposed on a public interface without an authenticating reverse proxy (nginx + mTLS, API gateway, etc.).
+
+### Added (demo)
+
+- **`12_airflow.ipynb`** — new notebook demonstrating Airflow 2.9 integration: trigger DAGs via REST API, poll run status, pull XCom results, read Airflow-written tables from Jupyter. Requires `--profile airflow`.
+- **`--profile airflow`** in `compose-demo.yml` — new `ailake-demo-airflow` service (port 8090) built from `Dockerfile.airflow`; two-stage image (Rust/maturin wheel build + `apache/airflow:2.9.2`); `SequentialExecutor` + SQLite for demo simplicity; shares `demo-data` volume with Jupyter.
+- **`Dockerfile.airflow`** — two-stage Docker build: same `rust:1.78-slim` builder stage as main Dockerfile (includes `ailake-fts` COPY fix) → `apache/airflow:2.9.2` runtime with ailake wheel + providers + numpy + pyarrow.
+- **`airflow-entrypoint.sh`** — `airflow db migrate` + `users create` (admin/admin) + scheduler + webserver startup in single entrypoint; fixed credentials for demo usability.
+- **`dags/dag_ailake_ingest_search.py`** — `@daily` DAG: `write_docs → vector_search → fts_search → assemble_context` using TaskFlow API + `import ailake` directly (no CLI binary required in Airflow container).
+- **`dags/dag_ailake_compaction.py`** — `@weekly` DAG: `compact_table → table_info`; reads Iceberg `metadata.json` and logs `ailake.*` properties.
+- **`docs/guides/DEMO_NOTEBOOKS.md`** — new complete step-by-step demo walkthrough (10 sections): prerequisites, service/port map, optional profiles, fixture table reference (11 tables), per-notebook guide (01–12 with required profiles, fixtures, and section maps), recommended execution order, stop/cleanup commands, troubleshooting, env var reference.
+- **FTS intro section in `01_ailake_demo.ipynb`** — §32 added linking to `11_fts.ipynb` as next-steps entry; `12_airflow.ipynb` row added to Next Steps table.
+
+### Fixed
+
+- **`ailake-py` local path resolution for new tables** (`ailake-py/src/lib.rs`) — `std::fs::canonicalize` fails when the table directory does not yet exist, producing a relative `file://` URI in Iceberg metadata that Trino/Spark cannot resolve. Replaced with `std::path::absolute` (Rust 1.79+), which resolves against CWD without requiring the path to exist.
+- **`ailake-jni` per-table commit serialization** (`ailake-jni/src/lib.rs`) — each JNI call created a fresh `HadoopCatalog` instance with its own in-process mutex, so concurrent Spark/Trino executors writing to the same table raced on `metadata.json` (last write wins, earlier snapshot silently lost). Added `jni_table_lock` — a process-level static `HashMap<path, Arc<Mutex<()>>>` — that serializes all four mutating JNI functions (`write_batch`, `delete_where`, `evolve_schema`, `compact`) per warehouse/namespace/table key.
+- **`ailake-jni` empty query guard** (`ailake-jni/src/lib.rs`) — `ailake_search_json` with `query_len == 0` previously passed a zero-length slice to `from_raw_parts`, producing undefined behaviour. Now returns `{"ok":false,"error":"query_len must be > 0"}` before any unsafe code.
+- **`ailake-vec` distance function dimension assertions** (`ailake-vec/src/distance.rs`) — added `debug_assert_eq!` to all six public distance functions (`dot_product`, `euclidean_distance`, `cosine_distance` and their `_f16` variants). Dimension mismatches now panic in debug/test builds with a clear message instead of silently reading out-of-bounds.
+- **`ailake-file` centroid decode panic message** (`ailake-file/src/reader.rs`) — `.unwrap()` in `get_centroid` replaced with `.expect("invariant")` to surface the invariant violated on panic.
+- **`ailake-query` geometric pruner panics on multimodal secondary column** (`ailake-query/src/pruner.rs`) — `VectorPruner::prune` compared the secondary column's query (e.g. `dim=2`) against the file's centroid for the primary column (`dim=4`), causing a `debug_assert_eq` panic in the distance function. Fix: when `centroid.values.len() != query.len()`, pruning is skipped and the file is kept (conservative fallback). Exposed and fixed by the distance-assertion fix above.
+- **`ailake-cli` HTTP server DoS and overflow** (`ailake-cli/src/serve.rs`) — three issues: (1) no request body size limit allowed OOM via oversized POST `/write`; added `DefaultBodyLimit::max(32 MB)`. (2) `ef_search = req.top_k * 5` overflowed for large `top_k`; replaced with `top_k.min(10_000).saturating_mul(5)`. (3) empty `query` vector reached the search engine with `dim=0`; now returns HTTP 400 before dispatch.
+- **`ailake-query` multi-column embedding dim validation** (`ailake-query/src/writer.rs`) — `write_batch_multi` only validated the first column's dimension, silently accepting mismatched dims in secondary columns and corrupting Parquet row groups. Refactored into `validate_embedding_dim_for_policy` (static); all `MultiVectorBatch` columns now validated against their own `policy.dim` before any I/O.
+- **`ailake-catalog` centroid decode panic messages** (`ailake-catalog/src/hadoop.rs`, `ailake-catalog/src/provider.rs`) — two remaining `.unwrap()` calls on `chunks_exact(4).try_into()` replaced with `.expect("invariant")` for consistency with the same fix in `ailake-file`.
+- **`ailake-cli` embed-cmd stdin pipe** (`ailake-cli/src/main.rs`) — `child.stdin.take().unwrap()` panicked if the OS did not allocate a pipe handle. Replaced with `ok_or_else(|| io::Error::new(BrokenPipe, ...))`. Added explicit `drop(stdin)` before `wait_with_output()` to ensure child receives EOF on all code paths.
+
+### Changed (docs)
+
+- **`SETUP.md` §1** — "Fastest path — Docker demo" updated: notebook count 10 → 12; full notebook table with profiles; `--profile airflow` command block added; link to `docs/guides/DEMO_NOTEBOOKS.md`.
+- **`README.md` + `README.pt-BR.md`** — `12_airflow.ipynb` row added to notebook table; `--profile airflow` added to profile commands block; `docs/guides/DEMO_NOTEBOOKS.md` row added to Quick Orientation table.
+- **`docs/architecture/WORKSPACE.md`** — Phase 7 table row: `🚧 In progress` → `✅ Complete`; demo entry updated (01–12 notebooks, 11 fixture tables); Phase T deliverables section adds `11_fts.ipynb`, `12_airflow.ipynb`, `Dockerfile.airflow`, `--profile airflow` compose service.
+- **`docs/specs/JVM_PLUGINS.md`** — `VERSION=0.0.17` example updated to `0.0.25`.
+- **`docs/specs/GPU_FFI_EVALUATION.md`** — §1 intro: callout box added noting `candle-core`/`--features gpu` replaced in Phase 4 (document preserved as decision record); §7 recommendation: stale "Option D (candle + cublas)" replaced with Phase 4 outcome (libloading cuBLAS/hipBLAS implemented); cuVS remains recommended for large-file ANN.
+- **`docs/contributing/TESTING.md`** — `compat-ailake-py` description: adds `fts_text_columns` write + `search_text()` Tantivy fast path + `search_multimodal` RRF; `compat-jvm-plugins` description: adds FTS write (`fts_columns[]`) + `ailake_search_text_json` Spark/Trino round-trip tests.
+
+---
+
 ## [0.0.25] — 2026-06-23
 
 ### Fixed

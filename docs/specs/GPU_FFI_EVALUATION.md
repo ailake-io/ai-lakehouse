@@ -13,14 +13,17 @@ NVIDIA or AMD hardware at startup via `dlopen`. See §7 (NVIDIA decision) and §
 ## 1. Background
 
 AI-Lake performs vector search per-file: each Parquet file carries its own
-index, and queries fan out across surviving files. The index implementation
-(`ailake-index`) uses **parallel CPU brute-force** (rayon `par_iter`, O(n))
-as the default CPU path, and optionally GPU brute-force via `candle-core/cuda`
-when compiled with `--features gpu` and a CUDA device is available at runtime.
+index, and queries fan out across surviving files.
+
+> **Note (Phase 4, 2026):** The `candle-core`/`--features gpu` path described in
+> §2 has been replaced. The current implementation uses **`libloading` cuBLAS**
+> (NVIDIA) and **`libloading` hipBLAS** (AMD ROCm) — no compile-time GPU SDK
+> required. See **§8 Status After Phase 4** for the actual implementation.
+> This document is preserved as the decision record leading to that choice.
 
 This document evaluates whether GPU-accelerated ANN (Approximate Nearest
-Neighbor) search via NVIDIA cuVS is a better next step than the current
-candle-core approach.
+Neighbor) search via NVIDIA cuVS is a better next step than the (then-current)
+`candle-core` approach.
 
 ---
 
@@ -266,10 +269,15 @@ GPU FFI becomes justified when at least **two** of these conditions hold:
 - Target deployment environment guarantees NVIDIA hardware (e.g., dedicated ML
   inference cluster)
 
-Recommended GPU path when the time comes: **Option D (candle + cublas)** for
-brute-force batch queries, OR **Option A (bindgen on cuVS IVF-PQ)** for
-approximate search on large in-memory indices. cuVS CAGRA gives the best
-recall/latency tradeoff but requires the most complex build setup.
+**Phase 4 outcome:** GPU brute-force was implemented via **libloading cuBLAS**
+(NVIDIA) and **libloading hipBLAS** (AMD ROCm) — not Option D (candle). This
+eliminates the compile-time CUDA Toolkit dependency while achieving the same
+SGEMM throughput. See §8 for details.
+
+For approximate search on large in-memory indices (> 500k vectors per file),
+**Option A (bindgen on cuVS IVF-PQ)** remains the recommended next step.
+cuVS CAGRA gives the best recall/latency tradeoff but requires the most complex
+build setup.
 
 ### Phase 5 GPU work items (future)
 

@@ -186,6 +186,16 @@ SELECT ailake_write_batch(
     partition_fields VARCHAR,        -- JSON array: '[{"column":"topic_id","transform":"identity","column_type":"int"}]'
     format_version   INTEGER         -- 2 (default) or 3 (Iceberg v3)
 ) → BIGINT
+
+-- Named parameters (Tantivy FTS + pre_normalize)
+SELECT ailake_write_batch(
+    table_path,
+    ids,
+    embeddings,
+    fts_columns      VARCHAR,        -- JSON array of text column names: '["chunk_text","document_title"]'
+    fts_tokenizer    VARCHAR,        -- 'simple' (default) or 'raw'
+    pre_normalize    BOOLEAN         -- normalize vectors to unit L2 at write time (~12-20% search speedup for cosine)
+) → BIGINT
 ```
 
 **Examples:**
