@@ -220,6 +220,9 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     if table_uri.is_null() || query_ptr.is_null() {
         return cstr_empty_json();
     }
+    if query_len == 0 {
+        return cstr_err_json("query_len must be > 0");
+    }
     let uri = match CStr::from_ptr(table_uri).to_str() {
         Ok(s) => s.to_string(),
         Err(e) => return cstr_err_json(format!("invalid UTF-8 in table_uri: {e}")),

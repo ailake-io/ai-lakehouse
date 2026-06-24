@@ -25,6 +25,18 @@ impl VectorPruner {
             .filter(|entry| {
                 match decode_centroid(entry, metric) {
                     Some(centroid) => {
+                        // Centroid is stored for the primary column. When searching a
+                        // secondary column with a different dimension (multimodal), dims
+                        // won't match — skip pruning and keep the file conservatively.
+                        if centroid.values.len() != query.len() {
+                            debug!(
+                                "ailake: pruner {} — centroid dim={} != query dim={}, skipping (secondary column)",
+                                entry.path,
+                                centroid.values.len(),
+                                query.len(),
+                            );
+                            return true;
+                        }
                         let dist = compute_distance(query, &centroid.values, metric);
                         let keep = dist - centroid.radius <= threshold;
                         debug!(
