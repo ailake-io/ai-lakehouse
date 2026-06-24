@@ -11,6 +11,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.27] — 2026-06-24
+
+### Security
+
+- **`ailake-jni` JNI `query_len` upper-bound guard** (`ailake-jni/src/lib.rs`) — `ailake_search_legacy` accepted any `u32` value for `query_len`; `u32::MAX` cast to `usize` would instruct `from_raw_parts` to read ~16 GB from the caller's address space, causing OOM or out-of-bounds memory access. Now returns `{"ok":false,"error":"query_len exceeds maximum supported dimension (65536)"}` for values > 65,536.
+- **`ailake-jni` `ef_search` DoS cap in JNI search path** (`ailake-jni/src/lib.rs`) — the HTTP server already clamped `ef_search` via `top_k.min(10_000).saturating_mul(5)`, but JNI callers (`ailake_search_json`, `ailake_search_text_json`) accepted arbitrary `ef_search` values, allowing a buggy or malicious Spark/Trino executor to trigger an arbitrarily expensive HNSW traversal. Both JNI search paths now apply `.min(100_000)` before passing to `do_search`.
+- **Airflow hook: truncate CLI output in error messages** (`airflow-providers-ailake/airflow_providers_ailake/hooks/ailake.py`) — `run_cli` raised a `RuntimeError` with full `stdout`+`stderr` from the subprocess; cloud SDKs in verbose/debug mode can print credential-adjacent context (error messages referencing access key IDs, SDK configuration) to stderr. Both outputs are now truncated to 4096 characters in the error message. Operational debugging is not affected — the full output is still accessible via Airflow's task log if the subprocess itself writes to stderr incrementally.
+- **HTTP server: documented trusted-network requirement** (`ailake-cli/src/serve.rs`) — `ailake serve` has no authentication by design (sidecar / VPC-internal use case). Added a file-level comment and a startup `eprintln!` warning to make this explicit: the server must not be exposed on a public interface without an authenticating reverse proxy (nginx + mTLS, API gateway, etc.).
+
+---
+
 ## [0.0.26] — 2026-06-24
 
 ### Fixed

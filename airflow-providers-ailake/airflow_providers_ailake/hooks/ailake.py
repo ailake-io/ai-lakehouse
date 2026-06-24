@@ -117,9 +117,13 @@ class AilakeHook(BaseHook):
             check=False,
         )
         if check and result.returncode != 0:
+            # Truncate outputs to prevent cloud SDK verbose error messages (which may
+            # include credential-adjacent context) from flooding Airflow task logs.
+            stdout_snippet = result.stdout[:4096]
+            stderr_snippet = result.stderr[:4096]
             raise RuntimeError(
                 f"ailake CLI failed (exit {result.returncode}):\n"
-                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+                f"stdout: {stdout_snippet}\nstderr: {stderr_snippet}"
             )
         return result
 

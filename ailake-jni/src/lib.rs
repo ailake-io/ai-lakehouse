@@ -245,6 +245,10 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     if query_len == 0 {
         return cstr_err_json("query_len must be > 0");
     }
+    // u32::MAX as usize = 4B f32s = ~16 GB; guard prevents OOM from a buggy or malicious JNA caller.
+    if query_len > 65_536 {
+        return cstr_err_json(format!("query_len {query_len} exceeds maximum supported dimension (65536)"));
+    }
     let uri = match CStr::from_ptr(table_uri).to_str() {
         Ok(s) => s.to_string(),
         Err(e) => return cstr_err_json(format!("invalid UTF-8 in table_uri: {e}")),
@@ -378,7 +382,7 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         req.dim,
         req.query,
         req.top_k,
-        req.ef_search,
+        req.ef_search.min(100_000),
         req.partition_filter,
         req.hybrid_text,
         &text_column,
@@ -1280,7 +1284,7 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         req.dim,
         req.query,
         req.top_k,
-        req.ef_search,
+        req.ef_search.min(100_000),
         req.partition_filter,
         None,
         "",

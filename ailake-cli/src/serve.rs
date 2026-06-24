@@ -6,6 +6,10 @@
 //   POST /write    {"texts":["..."], "embeddings":[[f32...]], "batch_id":"..."}
 //   POST /compact  {}
 //   GET  /info
+//
+// SECURITY: This server has no authentication. It is designed for trusted-network
+// deployments (localhost, VPC-internal, sidecar). Do NOT expose it on a public
+// interface without an authenticating reverse proxy (e.g., nginx + mTLS, API gateway).
 
 use std::sync::Arc;
 
@@ -421,5 +425,6 @@ pub(crate) async fn run(
         .map_err(|e| format!("bind {addr}: {e}"))?;
 
     eprintln!("ailake server listening on http://{addr}");
+    eprintln!("WARNING: no authentication — expose only on a trusted network or behind an authenticating proxy");
     axum::serve(listener, app).await.map_err(|e| e.to_string())
 }
