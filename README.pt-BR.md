@@ -98,6 +98,7 @@ Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Convenções Rust, tratamento de erros, política de unsafe, regras de testes |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | Log de ADRs — por que cada escolha-chave foi feita |
 | [`SETUP.md`](./SETUP.md) | Setup de dev local — roda a stack completa (MinIO, Nessie, testes de compat) na sua máquina |
+| [`docs/guides/DEMO_NOTEBOOKS.md`](./docs/guides/DEMO_NOTEBOOKS.md) | Guia passo-a-passo da demo — pré-requisitos, 12 notebooks, profiles, troubleshooting |
 
 ## Instalação
 
