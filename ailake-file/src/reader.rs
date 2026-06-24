@@ -135,9 +135,13 @@ impl AilakeFileReader {
 
         let values: Vec<f32> = centroid_data[..dim * 4]
             .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .map(|b| f32::from_le_bytes(b.try_into().expect("chunks_exact(4) guarantees 4-byte slices")))
             .collect();
-        let radius = f32::from_le_bytes(centroid_data[dim * 4..].try_into().unwrap());
+        let radius = f32::from_le_bytes(
+            centroid_data[dim * 4..]
+                .try_into()
+                .expect("invariant: validated len == dim*4 + 4 above"),
+        );
         let metric = distance_metric_to_vector_metric(header.distance_metric);
 
         Ok(Centroid {

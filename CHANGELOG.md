@@ -11,6 +11,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.26] — 2026-06-24
+
+### Fixed
+
+- **`ailake-py` local path resolution for new tables** (`ailake-py/src/lib.rs`) — `std::fs::canonicalize` fails when the table directory does not yet exist, producing a relative `file://` URI in Iceberg metadata that Trino/Spark cannot resolve. Replaced with `std::path::absolute` (Rust 1.79+), which resolves against CWD without requiring the path to exist.
+- **`ailake-jni` per-table commit serialization** (`ailake-jni/src/lib.rs`) — each JNI call created a fresh `HadoopCatalog` instance with its own in-process mutex, so concurrent Spark/Trino executors writing to the same table raced on `metadata.json` (last write wins, earlier snapshot silently lost). Added `jni_table_lock` — a process-level static `HashMap<path, Arc<Mutex<()>>>` — that serializes all four mutating JNI functions (`write_batch`, `delete_where`, `evolve_schema`, `compact`) per warehouse/namespace/table key.
+- **`ailake-jni` empty query guard** (`ailake-jni/src/lib.rs`) — `ailake_search_json` with `query_len == 0` previously passed a zero-length slice to `from_raw_parts`, producing undefined behaviour. Now returns `{"ok":false,"error":"query_len must be > 0"}` before any unsafe code.
+- **`ailake-vec` distance function dimension assertions** (`ailake-vec/src/distance.rs`) — added `debug_assert_eq!` to all six public distance functions (`dot_product`, `euclidean_distance`, `cosine_distance` and their `_f16` variants). Dimension mismatches now panic in debug/test builds with a clear message instead of silently reading out-of-bounds.
+- **`ailake-file` centroid decode panic message** (`ailake-file/src/reader.rs`) — `.unwrap()` in `get_centroid` replaced with `.expect("invariant")` to surface the invariant violated on panic.
+- **`ailake-query` geometric pruner panics on multimodal secondary column** (`ailake-query/src/pruner.rs`) — `VectorPruner::prune` compared the secondary column's query (e.g. `dim=2`) against the file's centroid for the primary column (`dim=4`), causing a `debug_assert_eq` panic in the distance function. Fix: when `centroid.values.len() != query.len()`, pruning is skipped and the file is kept (conservative fallback). Exposed and fixed by the distance-assertion fix above.
+- **`ailake-cli` HTTP server DoS and overflow** (`ailake-cli/src/serve.rs`) — three issues: (1) no request body size limit allowed OOM via oversized POST `/write`; added `DefaultBodyLimit::max(32 MB)`. (2) `ef_search = req.top_k * 5` overflowed for large `top_k`; replaced with `top_k.min(10_000).saturating_mul(5)`. (3) empty `query` vector reached the search engine with `dim=0`; now returns HTTP 400 before dispatch.
+- **`ailake-query` multi-column embedding dim validation** (`ailake-query/src/writer.rs`) — `write_batch_multi` only validated the first column's dimension, silently accepting mismatched dims in secondary columns and corrupting Parquet row groups. Refactored into `validate_embedding_dim_for_policy` (static); all `MultiVectorBatch` columns now validated against their own `policy.dim` before any I/O.
+- **`ailake-catalog` centroid decode panic messages** (`ailake-catalog/src/hadoop.rs`, `ailake-catalog/src/provider.rs`) — two remaining `.unwrap()` calls on `chunks_exact(4).try_into()` replaced with `.expect("invariant")` for consistency with the same fix in `ailake-file`.
+- **`ailake-cli` embed-cmd stdin pipe** (`ailake-cli/src/main.rs`) — `child.stdin.take().unwrap()` panicked if the OS did not allocate a pipe handle. Replaced with `ok_or_else(|| io::Error::new(BrokenPipe, ...))`. Added explicit `drop(stdin)` before `wait_with_output()` to ensure child receives EOF on all code paths.
+
+---
+
 ## [0.0.25] — 2026-06-23
 
 ### Fixed
