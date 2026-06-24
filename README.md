@@ -7,7 +7,7 @@
 
 > 🇧🇷 [Leia em Português brasileiro →](./README.pt-BR.md)
 
-Vector-native Lakehouse format built on Apache Iceberg Spec v2, written in Rust.
+Vector-native Lakehouse format built on Apache Iceberg Spec v2/v3, written in Rust.
 
 **Single self-contained file**: tabular data, embeddings, and HNSW index live together in one Parquet-extended file at the S3 layer. ACID transactions via Iceberg. Any Iceberg-compatible framework reads AI-Lake tables without modification — the vector index in the file footer is invisible to standard Parquet readers.
 
@@ -101,9 +101,9 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 **Rust** (add to `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.23"
-ailake-query = "0.0.23"   # search(), TableWriter, ContextAssembler, search_multimodal
-ailake-store = "0.0.23"   # S3 / GCS / Azure / local backends
+ailake-core  = "0.0.25"
+ailake-query = "0.0.25"   # search(), TableWriter, ContextAssembler, search_multimodal
+ailake-store = "0.0.25"   # S3 / GCS / Azure / local backends
 ```
 
 **Python**:
@@ -138,7 +138,7 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.23
+VERSION=0.0.25
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
@@ -371,11 +371,14 @@ Numbers below are from the [ailake-benchmark](https://github.com/ThiagoLange/ail
 | Index | Recall@10 | p50 latency | p99 latency |
 |---|---|---|---|
 | HNSW (F16, ef=50) | ~97% | ~4 ms | ~12 ms |
+| HNSW (F16, ef=50, NormalizedCosine) | ~97% | ~3 ms | ~10 ms |
 | IVF-PQ (nprobe=8) | ~93% | ~2 ms | ~8 ms |
 | IVF-PQ residual (nprobe=8) | ~96% | ~2 ms | ~8 ms |
 | IVF-PQ GPU (A10G, nprobe=8) | ~93% | ~0.4 ms | ~1 ms |
 
 Geometric pruning eliminates 95–99% of files before any index is touched on tables with thousands of shards.
+
+> **NormalizedCosine**: `pre_normalize=True` normalizes vectors to unit L2 at write time, replacing cosine distance with `1−dot(a,b)` in the HNSW hot loop (no `sqrt`). ~12–20% latency reduction on dim=1536 (OpenAI, Cohere embeddings). Enable via `ailake create --pre-normalize` or `TableWriter(pre_normalize=True)`.
 
 ### Storage (`text-embedding-3-small`, dim=1536, 100 M vectors)
 
@@ -388,6 +391,8 @@ Geometric pruning eliminates 95–99% of files before any index is touched on ta
 | PQ-only (`--pq-only`) | 0 GB (raw omitted) | ~5 GB | **~5 GB** |
 
 PQ-only mode trades reranking precision for 98% storage reduction. Recall@10 ~93–95%.
+
+> **Tantivy FTS**: when `fts_columns` is set, each file embeds a per-file inverted index (`AILK_FTS` section, zstd-compressed). Adds ~3–4 MB per file (~7 GB for a 2,000-shard table at 50 k docs/file) — small relative to vector column overhead.
 
 ---
 
@@ -421,7 +426,7 @@ cargo check --workspace
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS, both runtime-only), HNSW optimizations, IVF-PQ native index, GPU k-means, `MemTableWriter`, multi-vector columns, adaptive index selection, `ailake-flink` Kotlin connector; **IVF-PQ shared codebook** (single k-means training across all shards — ADC distances comparable cross-shard); **`write_batch_ivf_pq_deferred`** (~250k vec/s write, async IVF-PQ build); **k-means++ O(n×k) fix** + rayon parallelism (17× speedup); **`HadoopCatalog` Replace fix** (`IndexStatus::Ready` convergence with concurrent background tasks) |
 | **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP REST server, Apache Airflow provider, idempotent writes, Compat Heavy CI (Spark+Iceberg, Trino+REST, BigQuery emulator), TruffleHog secret scanning, cloud deployment guides |
 | **Phase 6** | ✅ Complete | Public distribution pipeline — crates.io, PyPI (manylinux abi3 wheels), Airflow provider on PyPI, pre-built JVM JARs + `libailake_jni.so` on GitHub Releases, dynamic Python versioning |
-| **Phase 7** | 🚧 In progress | Done: DuckDB extension (`duckdb-ailake/`), Python full-read (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` exposed in Python SDK, dbt integration guide (`docs/guides/DBT_INTEGRATION.md`), `partition_fields` (multi-column Iceberg partition spec), `format_version=3` (Iceberg v3 tables), `delete_where` + `evolve_schema` across all SDKs (Python, Go, C++, Spark, Trino, Flink, DuckDB, Airflow, Airbyte), `hardware_info()` Python binding, GPU demo notebook (`10_gpu_demo.ipynb`), expanded JupyterLab demo (10 notebooks). Remaining: DuckLake catalog backend |
+| **Phase 7** | 🚧 In progress | Done: DuckDB extension (`duckdb-ailake/`), Python full-read (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` exposed in Python SDK, dbt integration guide (`docs/guides/DBT_INTEGRATION.md`), `partition_fields` (multi-column Iceberg partition spec), `format_version=3` (Iceberg v3 tables), `delete_where` + `evolve_schema` across all SDKs (Python, Go, C++, Spark, Trino, Flink, DuckDB, Airflow, Airbyte), `hardware_info()` Python binding, GPU demo notebook (`10_gpu_demo.ipynb`), expanded JupyterLab demo (10 notebooks), **Tantivy per-file FTS** (`ailake-fts` crate — `AILK_FTS` section, zstd; `search_text()` O(log N) fast path; opt-in via `fts_columns` in all SDKs and JVM plugins), **hybrid BM25+vector search** (`SearchConfig::hybrid`, RRF fusion, `search_text()` brute-force fallback for legacy files). Remaining: DuckLake catalog backend |
 | **Phase 8** | ✅ Complete | Multimodal — `VectorModality` enum, `ailake.modality-<col>` Iceberg property, N generalized vector columns with independent HNSW, `write_batch_multi`, CLI `--vector-cols`, `search_multimodal` (cross-modal RRF), `MultimodalContextSchema` + `multimodal_columns` constants, Python `VectorColSpec`, multimodal demo notebook + fixture. Propagated to all native plugins: `ailake_search_multimodal_json` C-ABI (JNI), `searchMultimodal()` in Spark/Trino/Flink, `ailake_search_multimodal()` DuckDB table function, `SearchMultimodal()` Go SDK + `ExtraVectorIndex` catalog parsing, `search_multimodal()` C++ SDK + `ExtraVectorIndex` in `DataFileEntry`. |
 | **Phase 9** | ✅ Complete | Agent memory — `ToolCallSchema` (searchable tool call history), `EpisodicMemorySchema` (recency decay, access count, importance score), injectable `ScoreFn` for hybrid scoring (distance × recency × importance), `partition_by`/`partition_value` Iceberg identity partitioning for per-agent file isolation, `partition_filter` manifest-level pruning before centroid check and HNSW load, Python `ailake.Agent` helper (LangChain/CrewAI/AutoGen). Propagated to all SDKs and connectors: Spark, Trino, Flink, Go, C++, DuckDB (`ailake_search` + `ailake_search_multimodal` + `ailake_write_batch`), Airbyte destination, Airflow provider. Fix: `TableWriter::create_or_open` part_counter initialized from existing file count (prevents file path collision on multi-writer tables). |
 
