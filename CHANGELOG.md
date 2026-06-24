@@ -9,6 +9,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (demo)
+
+- **`12_airflow.ipynb`** — new notebook demonstrating Airflow 2.9 integration: trigger DAGs via REST API, poll run status, pull XCom results, read Airflow-written tables from Jupyter. Requires `--profile airflow`.
+- **`--profile airflow`** in `compose-demo.yml` — new `ailake-demo-airflow` service (port 8090) built from `Dockerfile.airflow`; two-stage image (Rust/maturin wheel build + `apache/airflow:2.9.2`); `SequentialExecutor` + SQLite for demo simplicity; shares `demo-data` volume with Jupyter.
+- **`Dockerfile.airflow`** — two-stage Docker build: same `rust:1.78-slim` builder stage as main Dockerfile (includes `ailake-fts` COPY fix) → `apache/airflow:2.9.2` runtime with ailake wheel + providers + numpy + pyarrow.
+- **`airflow-entrypoint.sh`** — `airflow db migrate` + `users create` (admin/admin) + scheduler + webserver startup in single entrypoint; fixed credentials for demo usability.
+- **`dags/dag_ailake_ingest_search.py`** — `@daily` DAG: `write_docs → vector_search → fts_search → assemble_context` using TaskFlow API + `import ailake` directly (no CLI binary required in Airflow container).
+- **`dags/dag_ailake_compaction.py`** — `@weekly` DAG: `compact_table → table_info`; reads Iceberg `metadata.json` and logs `ailake.*` properties.
+- **`docs/guides/DEMO_NOTEBOOKS.md`** — new complete step-by-step demo walkthrough (10 sections): prerequisites, service/port map, optional profiles, fixture table reference (11 tables), per-notebook guide (01–12 with required profiles, fixtures, and section maps), recommended execution order, stop/cleanup commands, troubleshooting, env var reference.
+- **FTS intro section in `01_ailake_demo.ipynb`** — §32 added linking to `11_fts.ipynb` as next-steps entry; `12_airflow.ipynb` row added to Next Steps table.
+
+### Changed (docs)
+
+- **`SETUP.md` §1** — "Fastest path — Docker demo" updated: notebook count 10 → 12; full notebook table with profiles; `--profile airflow` command block added; link to `docs/guides/DEMO_NOTEBOOKS.md`.
+- **`README.md` + `README.pt-BR.md`** — `12_airflow.ipynb` row added to notebook table; `--profile airflow` added to profile commands block; `docs/guides/DEMO_NOTEBOOKS.md` row added to Quick Orientation table.
+- **`docs/architecture/WORKSPACE.md`** — Phase 7 table row: `🚧 In progress` → `✅ Complete`; demo entry updated (01–12 notebooks, 11 fixture tables); Phase T deliverables section adds `11_fts.ipynb`, `12_airflow.ipynb`, `Dockerfile.airflow`, `--profile airflow` compose service.
+- **`docs/specs/JVM_PLUGINS.md`** — `VERSION=0.0.17` example updated to `0.0.25`.
+- **`docs/specs/GPU_FFI_EVALUATION.md`** — §1 intro: callout box added noting `candle-core`/`--features gpu` replaced in Phase 4 (document preserved as decision record); §7 recommendation: stale "Option D (candle + cublas)" replaced with Phase 4 outcome (libloading cuBLAS/hipBLAS implemented); cuVS remains recommended for large-file ANN.
+- **`docs/contributing/TESTING.md`** — `compat-ailake-py` description: adds `fts_text_columns` write + `search_text()` Tantivy fast path + `search_multimodal` RRF; `compat-jvm-plugins` description: adds FTS write (`fts_columns[]`) + `ailake_search_text_json` Spark/Trino round-trip tests.
+
 ---
 
 ## [0.0.27] — 2026-06-24
