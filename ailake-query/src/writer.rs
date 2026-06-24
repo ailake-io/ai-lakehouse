@@ -307,8 +307,8 @@ impl TableWriter {
     /// Returns `ModelMismatch` error when dim differs — prevents silently mixing
     /// incompatible vectors (same error type used across write paths for consistency).
     fn validate_embedding_dim(&self, embeddings: &[Vec<f32>]) -> AilakeResult<()> {
-        if let Some(first) = embeddings.first() {
-            let actual = first.len() as u32;
+        for emb in embeddings {
+            let actual = emb.len() as u32;
             if actual != self.policy.dim {
                 let table_model = self
                     .policy

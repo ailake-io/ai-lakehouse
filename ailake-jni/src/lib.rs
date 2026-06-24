@@ -87,6 +87,28 @@ fn parse_metric(s: &str) -> VectorMetric {
     }
 }
 
+/// Returns a per-table `Mutex` shared across all JNI calls in this process.
+///
+/// `HadoopCatalog` serializes commits via a per-instance mutex, but each JNI call
+/// creates a fresh catalog instance — so concurrent calls for the same table race
+/// on `metadata.json`. This static map provides the missing cross-call serialization,
+/// preserving the "single-process" catalog isolation guarantee documented on HadoopCatalog.
+fn jni_table_lock(
+    warehouse: &str,
+    namespace: &str,
+    table: &str,
+) -> Arc<std::sync::Mutex<()>> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>> = OnceLock::new();
+    let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .entry(format!("{warehouse}/{namespace}/{table}"))
+        .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+        .clone()
+}
+
 /// Core search logic called by C-ABI exports.
 #[allow(clippy::too_many_arguments)]
 fn do_search(
@@ -614,6 +636,8 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     };
 
     let deferred = req.deferred;
+    let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
+    let _commit_guard = _table_lock.lock().unwrap_or_else(|e| e.into_inner());
     let result = rt().block_on(async {
         let base =
             TableWriter::create_or_open(catalog, store, policy, table, format_version).await?;
@@ -1359,6 +1383,8 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
     let table = TableIdent::new(&req.namespace, &req.table);
     let values_ref: Vec<&str> = req.values.iter().map(String::as_str).collect();
 
+    let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
+    let _commit_guard = _table_lock.lock().unwrap_or_else(|e| e.into_inner());
     let result = rt().block_on(delete_where(
         catalog,
         store,
@@ -1498,6 +1524,8 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
     let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
     let table = TableIdent::new(&req.namespace, &req.table);
 
+    let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
+    let _commit_guard = _table_lock.lock().unwrap_or_else(|e| e.into_inner());
     let result = rt().block_on(catalog.evolve_schema(&table, evolution));
 
     #[derive(serde::Serialize)]
@@ -1591,6 +1619,8 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
         Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
     let table = TableIdent::new(&req.namespace, &req.table);
 
+    let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
+    let _commit_guard = _table_lock.lock().unwrap_or_else(|e| e.into_inner());
     let result = rt().block_on(async {
         let meta = catalog.load_table(&table).await?;
 
