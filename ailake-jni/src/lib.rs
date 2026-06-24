@@ -93,11 +93,7 @@ fn parse_metric(s: &str) -> VectorMetric {
 /// creates a fresh catalog instance — so concurrent calls for the same table race
 /// on `metadata.json`. This static map provides the missing cross-call serialization,
 /// preserving the "single-process" catalog isolation guarantee documented on HadoopCatalog.
-fn jni_table_lock(
-    warehouse: &str,
-    namespace: &str,
-    table: &str,
-) -> Arc<std::sync::Mutex<()>> {
+fn jni_table_lock(warehouse: &str, namespace: &str, table: &str) -> Arc<std::sync::Mutex<()>> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>> = OnceLock::new();
@@ -247,7 +243,9 @@ pub unsafe extern "C" fn ailake_vector_search_json(
     }
     // u32::MAX as usize = 4B f32s = ~16 GB; guard prevents OOM from a buggy or malicious JNA caller.
     if query_len > 65_536 {
-        return cstr_err_json(format!("query_len {query_len} exceeds maximum supported dimension (65536)"));
+        return cstr_err_json(format!(
+            "query_len {query_len} exceeds maximum supported dimension (65536)"
+        ));
     }
     let uri = match CStr::from_ptr(table_uri).to_str() {
         Ok(s) => s.to_string(),
