@@ -24,6 +24,25 @@
 /ailake-cli/     @ThiagoLange
 # ailake-bench lives in the separate ailake-benchmark repository
 
+# JVM plugins
+/spark-plugin/   @ThiagoLange
+/trino-plugin/   @ThiagoLange
+/ailake-flink/   @ThiagoLange
+
+# DuckDB extension
+/duckdb-ailake/  @ThiagoLange
+
+# Multi-language SDKs
+/ailake-go/      @ThiagoLange
+/ailake-cpp/     @ThiagoLange
+
+# Connectors and providers
+/airflow-providers-ailake/    @ThiagoLange
+/airbyte-destination-ailake/  @ThiagoLange
+
+# Tests and demo
+/tests/          @ThiagoLange
+
 # CI and release
 /.github/        @ThiagoLange
 
