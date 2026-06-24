@@ -1095,7 +1095,14 @@ async fn run(cli: Cli) -> Result<(), String> {
                         .stderr(std::process::Stdio::inherit())
                         .spawn()
                         .and_then(|mut child| {
-                            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+                            let mut stdin = child.stdin.take().ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::BrokenPipe,
+                                    "embed-cmd stdin unavailable",
+                                )
+                            })?;
+                            stdin.write_all(input.as_bytes())?;
+                            drop(stdin); // close stdin so the child sees EOF
                             child.wait_with_output()
                         })
                         .map_err(|e| {

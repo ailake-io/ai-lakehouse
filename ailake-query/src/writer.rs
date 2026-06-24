@@ -307,18 +307,24 @@ impl TableWriter {
     /// Returns `ModelMismatch` error when dim differs — prevents silently mixing
     /// incompatible vectors (same error type used across write paths for consistency).
     fn validate_embedding_dim(&self, embeddings: &[Vec<f32>]) -> AilakeResult<()> {
+        Self::validate_embedding_dim_for_policy(embeddings, &self.policy)
+    }
+
+    fn validate_embedding_dim_for_policy(
+        embeddings: &[Vec<f32>],
+        policy: &VectorStoragePolicy,
+    ) -> AilakeResult<()> {
         for emb in embeddings {
             let actual = emb.len() as u32;
-            if actual != self.policy.dim {
-                let table_model = self
-                    .policy
+            if actual != policy.dim {
+                let table_model = policy
                     .embedding_model
                     .as_ref()
                     .map(|m| m.to_property_value())
-                    .unwrap_or_else(|| format!("dim={}", self.policy.dim));
+                    .unwrap_or_else(|| format!("dim={}", policy.dim));
                 return Err(AilakeError::ModelMismatch {
                     table_model,
-                    table_dim: self.policy.dim,
+                    table_dim: policy.dim,
                     batch_model: format!("dim={}", actual),
                     batch_dim: actual,
                 });
@@ -555,6 +561,10 @@ impl TableWriter {
             return Err(AilakeError::InvalidArgument(
                 "write_batch_multi requires at least one column".into(),
             ));
+        }
+
+        for col in columns {
+            Self::validate_embedding_dim_for_policy(col.embeddings, &col.policy)?;
         }
 
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);

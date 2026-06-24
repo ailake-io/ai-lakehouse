@@ -440,7 +440,7 @@ pub fn decode_centroid(
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     let values: Vec<f32> = bytes
         .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .map(|b| f32::from_le_bytes(b.try_into().expect("chunks_exact(4) guarantees 4-byte slices")))
         .collect();
     Some(Centroid {
         values,
