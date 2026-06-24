@@ -65,6 +65,7 @@ Then open **http://localhost:8888** and run the notebooks:
 | `08_agents.ipynb` | `ailake.Agent`, episodic memory, `ToolCallSchema`, `EpisodicMemorySchema`, `WorkingMemoryBuffer`, `decay_memories`, per-agent partition isolation |
 | `09_hybrid_search.ipynb` | BM25 write (`bm25_text_column`), `search_text` pure lexical, hybrid RRF (vector + BM25), weight ablation |
 | `10_gpu_demo.ipynb` | `hardware_info()`, `write_batch_auto_deferred`, timing comparison HNSW vs deferred, search QPS, recall@10, CPU fallback |
+| `11_fts.ipynb` | Tantivy per-file FTS (`fts_text_columns`), `search_text` O(log N) fast path, multi-column indexing, query syntax, BM25 brute-force fallback for legacy files, FTS + HNSW hybrid re-ranking, storage layout |
 
 Notebooks 03 and 04 require the `engines` profile (adds Trino). Notebook 10 requires the `gpu` profile (NVIDIA Container Toolkit):
 
