@@ -162,7 +162,7 @@ async fn handle_search(
     if req.query.is_empty() {
         return Err(ApiError("query must not be empty".into()));
     }
-    let top_k = req.top_k.min(MAX_TOP_K).max(1);
+    let top_k = req.top_k.clamp(1, MAX_TOP_K);
     let dim = req.query.len() as u32;
     let config = SearchConfig {
         top_k,
