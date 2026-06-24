@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-parquet"
-version = "0.0.25"
+version = "0.0.26"
 edition     = "2021"
 description = "Parquet reader/writer with VECTOR column type for the AI-Lake format"
 license     = "MIT OR Apache-2.0"
@@ -9,8 +9,8 @@ keywords    = ["parquet", "arrow", "vector", "iceberg", "embedding"]
 categories  = ["database", "encoding", "data-structures"]
 
 [dependencies]
-ailake-core  = { path = "../ailake-core", version = "0.0.25" }
-ailake-vec   = { path = "../ailake-vec", version = "0.0.25" }
+ailake-core  = { path = "../ailake-core", version = "0.0.26" }
+ailake-vec   = { path = "../ailake-vec", version = "0.0.26" }
 parquet      = { workspace = true }
 arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
