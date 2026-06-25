@@ -576,6 +576,10 @@ impl CatalogProvider for HadoopCatalog {
             .unwrap_or_default()
             .as_millis() as i64;
 
+        for (k, v) in evolution.extra_properties {
+            meta.properties.insert(k, v);
+        }
+
         self.save_metadata(table, &meta).await?;
         tracing::info!(
             "ailake: schema evolved — table={}/{}, new schema-id={new_schema_id}, \

@@ -258,6 +258,57 @@ enum Commands {
         #[arg(long = "rename", value_name = "OLD:NEW")]
         renames: Vec<String>,
     },
+    /// Add a new vector column to an existing table schema (no data files rewritten).
+    ///
+    /// Stores ailake.dim-<col>, ailake.metric-<col>, ailake.precision-<col> in metadata.json.
+    /// Old files return null for the new column until BackfillVectorColumn is run.
+    AddVectorColumn {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// New vector column name
+        #[arg(long)]
+        column: String,
+        /// Vector dimensionality for the new column
+        #[arg(long)]
+        dim: u32,
+        /// Distance metric for the new column
+        #[arg(long, value_enum, default_value = "cosine")]
+        metric: Metric,
+        /// Vector precision for the new column
+        #[arg(long, value_enum, default_value = "f16")]
+        precision: Precision,
+        /// Normalize vectors to unit L2 at write time (enables NormalizedCosine fast path)
+        #[arg(long, default_value_t = false)]
+        pre_normalize: bool,
+        /// HNSW M — connections per node (default: 16)
+        #[arg(long)]
+        hnsw_m: Option<u32>,
+        /// HNSW ef_construction — candidate pool during build (default: 150)
+        #[arg(long)]
+        hnsw_ef: Option<u32>,
+    },
+    /// Backfill a new vector column in all existing files (rewrite each file with new embeddings).
+    ///
+    /// Reads text from --text-column, calls an embed command for each batch, and rewrites
+    /// files to include both the original vector column and the new one (via write_multi).
+    /// Idempotent: files already containing the column are skipped.
+    BackfillVectorColumn {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// New vector column to backfill (must already exist via add-vector-column)
+        #[arg(long)]
+        column: String,
+        /// Parquet column that holds the raw text to embed
+        #[arg(long, default_value = "chunk_text")]
+        text_column: String,
+        /// Shell command that reads a JSON array of strings from stdin and writes
+        /// a JSON array of float arrays to stdout.
+        #[arg(long)]
+        embed_cmd: String,
+        /// How many texts to embed per embed-cmd call
+        #[arg(long, default_value = "512")]
+        batch_size: usize,
+    },
     /// Estimate storage usage before writing (no I/O — pure math)
     Estimate {
         /// Number of vectors (supports K/M/B suffixes: 1M, 500K, 1B)
@@ -1242,6 +1293,148 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
 
             println!("new_schema_id: {new_schema_id}");
+            Ok(())
+        }
+
+        Commands::AddVectorColumn {
+            table,
+            column,
+            dim,
+            metric,
+            precision,
+            pre_normalize,
+            hnsw_m,
+            hnsw_ef,
+        } => {
+            use ailake_core::VectorColSpec;
+            let ident = parse_table_ident(&table);
+            let spec = VectorColSpec {
+                column_name: column,
+                dim,
+                metric: metric.into(),
+                precision: precision.into(),
+                pre_normalize,
+                hnsw_m,
+                hnsw_ef_construction: hnsw_ef,
+            };
+            let new_schema_id = catalog
+                .add_vector_column(&ident, &spec)
+                .await
+                .map_err(|e| e.to_string())?;
+            println!("vector column '{}' added — new_schema_id: {new_schema_id}", spec.column_name);
+            Ok(())
+        }
+
+        Commands::BackfillVectorColumn {
+            table,
+            column,
+            text_column,
+            embed_cmd,
+            batch_size,
+        } => {
+            use ailake_core::VectorColSpec;
+            use ailake_query::{BackfillJob, EmbedFn};
+            let ident = parse_table_ident(&table);
+
+            // Load new column spec from table properties.
+            let table_meta = catalog
+                .load_table(&ident)
+                .await
+                .map_err(|e| e.to_string())?;
+            let dim_key = format!("ailake.dim-{column}");
+            let metric_key = format!("ailake.metric-{column}");
+            let precision_key = format!("ailake.precision-{column}");
+
+            let dim: u32 = table_meta
+                .properties
+                .get(&dim_key)
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| {
+                    format!("column '{column}' not found — run add-vector-column first")
+                })?;
+
+            let metric: VectorMetric = match table_meta
+                .properties
+                .get(&metric_key)
+                .map(|s| s.as_str())
+                .unwrap_or("cosine")
+            {
+                "euclidean" => VectorMetric::Euclidean,
+                "dotproduct" | "dot_product" => VectorMetric::DotProduct,
+                "normalizedcosine" | "normalized_cosine" => VectorMetric::NormalizedCosine,
+                _ => VectorMetric::Cosine,
+            };
+
+            let precision: VectorPrecision = match table_meta
+                .properties
+                .get(&precision_key)
+                .map(|s| s.as_str())
+                .unwrap_or("f16")
+            {
+                "f32" => VectorPrecision::F32,
+                "i8" => VectorPrecision::I8,
+                _ => VectorPrecision::F16,
+            };
+
+            let new_col = VectorColSpec {
+                column_name: column.clone(),
+                dim,
+                metric,
+                precision,
+                pre_normalize: false,
+                hnsw_m: None,
+                hnsw_ef_construction: None,
+            };
+
+            let cmd = embed_cmd.clone();
+            let embed_fn: EmbedFn = Arc::new(move |texts: &[String]| {
+                use std::io::Write;
+                use std::process::{Command, Stdio};
+                let input = serde_json::to_string(texts).map_err(|e| {
+                    ailake_core::AilakeError::InvalidArgument(e.to_string())
+                })?;
+                let mut child = Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(input.as_bytes())
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+                let out = child
+                    .wait_with_output()
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+                serde_json::from_slice::<Vec<Vec<f32>>>(&out.stdout).map_err(|e| {
+                    ailake_core::AilakeError::InvalidArgument(format!(
+                        "embed-cmd output parse error: {e}"
+                    ))
+                })
+            });
+
+            let job = BackfillJob {
+                table: ident,
+                text_column,
+                new_col,
+                embed_fn,
+                batch_size,
+                on_progress: Some(Arc::new(|p: ailake_query::BackfillProgress| {
+                    eprintln!(
+                        "backfill: {}/{} files done ({} skipped), {} rows",
+                        p.files_done, p.files_total, p.files_skipped, p.rows_backfilled
+                    );
+                })),
+            };
+
+            job.run(catalog as Arc<dyn CatalogProvider>, store)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            println!("backfill complete for column '{column}'");
             Ok(())
         }
 
