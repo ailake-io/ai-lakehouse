@@ -880,7 +880,15 @@ class Agent:
 
         import pyarrow as pa  # noqa: PLC0415
 
-        q: list[float] = query.tolist() if hasattr(query, "tolist") else list(query)
+        if isinstance(query, str):
+            if self._embed_fn is None:
+                raise ValueError(
+                    "Agent.recall() received a text string but no embed_fn was provided. "
+                    "Pass embed_fn to Agent.__init__() or pass a pre-computed vector."
+                )
+            q = list(self._embed_fn([query])[0])
+        else:
+            q = query.tolist() if hasattr(query, "tolist") else list(query)
         candidate_k = top_k * max(1, oversample)
 
         raw_ipc: bytes = _search_with_data(self._table_path, q, candidate_k, self._agent_id)

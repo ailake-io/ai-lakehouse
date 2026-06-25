@@ -13,6 +13,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.0.26] — 2026-06-24
 
+### Fixed
+
+- **`Agent.recall()` text query not embedded** (`ailake-py/python/ailake/__init__.py`) — `recall()` received a plain text string but called `list(query)` directly, producing a list of characters instead of a float vector, causing `TypeError: must be real number, not str` in the PyO3 `search_with_data` binding. Added `isinstance(query, str)` guard: text strings are now embedded via `self._embed_fn([query])[0]` before search; raises `ValueError` with a clear message if `embed_fn` was not provided.
+
 ### Fixed (demo)
 
 - **`Dockerfile` JAR download `RUN`** — multi-line `python3 -c "..."` without `\` line continuation caused Docker parser to treat `import` as a Dockerfile instruction (`unknown instruction: import`); condensed to single logical line with `;` separators and `\` continuation. Layer was previously hidden by build cache; exposed on forced rebuild.
