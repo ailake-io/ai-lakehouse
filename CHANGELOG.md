@@ -11,7 +11,62 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.26-demo-fixes-4] — 2026-06-25
+
+### Fixed (demo)
+
+- **`trino-catalog/ailake.properties`** — `iceberg.nessie-catalog.uri` was `/api/v2`; Trino 446 bundles `nessie-client-0.80.0` which only supports API v1 → `GENERIC_INTERNAL_ERROR: API version mismatch (expected: 1, actual: 2)`. Reverted to `/api/v1`.
+- **`init_demo.py` Nessie namespace registration** — `PUT /namespaces/namespace/main/default` body was missing `"type": "NAMESPACE"` discriminator; Nessie server rejected with 400 `missing type id property 'type'`, swallowed silently, namespace never created → Trino `SCHEMA_NOT_FOUND`. Added `"type": "NAMESPACE"` back.
+- **`04_trino.ipynb` cell `e48e0f6881b74f8b`** — `split_part(file_path, '/', -1)` raises `INVALID_FUNCTION_ARGUMENT: Index must be greater than zero` in Trino (no negative index support). Changed to `element_at(split(file_path, '/'), -1)`.
+- **`04_trino.ipynb` cell `17283aefb7164c0b`** — `added_files_count` column not found in `$manifests`; actual column name is `added_data_files_count`.
+- **`04_trino.ipynb` cell `d40637b2`** — `WHERE "key" IN (...)` inside single-quoted Python string caused `SyntaxError: invalid syntax`; rewrote query strings using double-quoted outer and escaped inner double-quotes.
+
+---
+
+## [0.0.26-demo-fixes-3] — 2026-06-25
+
+### Fixed
+
+- **`airbyte-destination-ailake` `StreamWriter.commit()`** — after committing on Airbyte STATE message, `self._table` still pointed to the committed `TableWriter`; subsequent records raised `ValueError: TableWriter already committed`. Reset `self._table = None` after `commit()`.
+
+### Fixed (demo)
+
+- **`06_airbyte_destination.ipynb` cell `destination`** — `ConfiguredAirbyteCatalog.model_validate()` removed in airbyte-cdk 7.x (now dataclass). Replaced with explicit construction.
+- **`06_airbyte_destination.ipynb` cell `destination`** — added `shutil.rmtree` guard for idempotent re-runs.
+- **`06_airbyte_destination.ipynb` cell `duckdb-query`** — `category` column not stored by `StreamWriter`; changed query to use only the `text` column.
+
+---
+
+## [0.0.26-demo-fixes-2] — 2026-06-25
+
+### Fixed (demo)
+
+- **Notebook format normalization** — `NotebookEdit` left markdown cells with `execution_count`/`outputs` fields and some cells with `id=None`; fixed with stdlib JSON pass across all notebooks before execution.
+- **`01_ailake_demo.ipynb` hybrid scoring cell `c813d6dc`** — `fetch_data=True` search drops the internal `row_id` field; comparison used `pure_top5['row_id']` which raised `KeyError`. Fixed by writing an explicit `mem_idx` extra column and comparing that instead. Added `shutil.rmtree` guard to avoid Arrow schema conflict from stale data across notebook re-runs.
+- **`01_ailake_demo.ipynb` episodic memory cell `f144c3c9`** — Same `row_id`/`KeyError` pattern as hybrid scoring. Fixed to `mem_idx` + `shutil.rmtree` guard.
+- **`01_ailake_demo.ipynb` tool call cell `acaa0ec5`** — `row["chunk_text"]` raised `KeyError`; `write_batch()` stores the text column as `"text"`, not `"chunk_text"`. Fixed to `row["text"]`.
+- **`01_ailake_demo.ipynb` compaction cell `dd5090ba`** — `ailake.compact()` invokes the `ailake` CLI binary which is not installed in the demo container; raised `FileNotFoundError`. Wrapped in `try/except (FileNotFoundError, OSError)` with a clear install message.
+- **`01_ailake_demo.ipynb` FTS intro cell `cell-fts-intro-code`** — `open_table()` does not accept `fts_text_columns`; only `TableWriter` does. Replaced with `TableWriter(..., fts_text_columns=['text'])` + `write_batch()` + `commit()`. Added `shutil.rmtree` guard for idempotent re-runs.
+- **`03_spark.ipynb` cell `3cb57e3c89004aec`** — `table\\$files` produced literal backslash in SQL (`table\$files`); `ParseException` at position 138. Changed to dot notation `table.files` (Iceberg 1.5.x Spark syntax).
+- **`03_spark.ipynb` cell `2bef4e682e6547d1`** — `ailake.default.\`table$properties\`` also had backslash-backtick escaping issue; `table.properties` is not a valid Spark metadata table. Replaced with `SHOW TBLPROPERTIES` + Python-side filter.
+- **`03_spark.ipynb` cell `eecdeb7a`** — `IllegalArgumentException: Cannot read unsupported version 3`; Iceberg 1.5.2 bundled in demo image does not support format-version 3. Wrapped in `try/except` with upgrade note.
+- **`03_spark.ipynb` cell `a2117fa7`** — `NullPointerException` reading `delete_demo` (equality delete compatibility issue with Iceberg 1.5.2). Wrapped in `try/except`.
+- **`03_spark.ipynb` cell `f67af38b`** — `ValidationException: multiple fields for name ingest_ts` when reading `schema_evo` after notebook 01 ran `evolve_schema` adding the column a second time. Wrapped in `try/except` with restart hint.
+- **`08_agents.ipynb` cell `000000007`** — `Agent.remember()` buffers in `self._pending`; `commit()` must be called to persist. Cell never called `commit()`, so the table was never written; subsequent `recall()` raised `ValueError: I/O error: No such file or directory`. Added `agent_x.commit()` and `agent_y.commit()` at end of cell.
+- **`08_agents.ipynb` cell `000000010`** — Partition isolation check used `set(x_only['row_id']) & set(y_only['row_id'])`; `row_id` is per-file sequential (starts at 0 in each shard) so values overlap legitimately. Changed to check `file` column instead.
+- **`08_agents.ipynb` cell `000000014`** — `search_tool_calls()` selected `'chunk_text'` column but `write_batch()` stores text as `'text'`; raised `KeyError`. Changed to `'text'`.
+- **`08_agents.ipynb` cell `000000022`** — `agent_ctx.assemble_context()` calls `recall()` internally which requires data on disk; `remember()` was called without `commit()`. Added `agent_ctx.commit()` before `assemble_context()`. Added `shutil.rmtree` guard for idempotent re-runs.
+- **`ailake-py` `Agent.recall()` in container** — Runtime fix: copied updated `__init__.py` into the container to activate the `isinstance(query, str)` text-embedding fix without full image rebuild.
+
+---
+
 ## [0.0.26] — 2026-06-24
+
+### Fixed
+
+- **`01_ailake_demo.ipynb` partition isolation assertion** (cell `f94290f5`) — `row_id` is a per-file sequential index starting at 0 in every shard; checking `row_id` overlap between agent partitions always fails. Fixed to check `file` column overlap, which correctly reflects whether two partitions share any Parquet files (they never should).
+- **`01_ailake_demo.ipynb` FTS intro cell `cell-fts-intro-code`** — `h["score"]` causes `KeyError`; `search_text()` returns dicts with `distance` field (negated score). Fixed to `score={-h["distance"]:.4f}` and added `text_column='text'` kwarg.
+- **`Agent.recall()` text query not embedded** (`ailake-py/python/ailake/__init__.py`) — `recall()` received a plain text string but called `list(query)` directly, producing a list of characters instead of a float vector, causing `TypeError: must be real number, not str` in the PyO3 `search_with_data` binding. Added `isinstance(query, str)` guard: text strings are now embedded via `self._embed_fn([query])[0]` before search; raises `ValueError` with a clear message if `embed_fn` was not provided.
 
 ### Fixed (demo)
 

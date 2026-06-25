@@ -103,5 +103,6 @@ class StreamWriter:
         self._flush()
         table = self._get_table()
         snap_id = table.commit()
+        self._table = None  # reset so next batch gets a fresh TableWriter
         logger.info("stream=%s committed snapshot_id=%d", self._stream_name, snap_id)
         return snap_id
