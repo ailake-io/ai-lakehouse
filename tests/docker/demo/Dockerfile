@@ -76,14 +76,13 @@ RUN pip install --no-cache-dir \
 
 # Pre-download Iceberg Spark runtime JAR — avoids Ivy/Maven download at notebook runtime.
 # Placed in /opt/iceberg/ so spark.jars can reference a deterministic path.
-RUN python3 -c "
-import urllib.request, pathlib, sys
-jar_url = 'https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.5.2/iceberg-spark-runtime-3.5_2.12-1.5.2.jar'
-dest = pathlib.Path('/opt/iceberg/iceberg-spark-runtime-3.5_2.12-1.5.2.jar')
-dest.parent.mkdir(parents=True, exist_ok=True)
-urllib.request.urlretrieve(jar_url, str(dest))
-print(f'Iceberg JAR: {dest.stat().st_size} bytes', flush=True)
-"
+RUN python3 -c "\
+import urllib.request, pathlib; \
+jar_url='https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.5.2/iceberg-spark-runtime-3.5_2.12-1.5.2.jar'; \
+dest=pathlib.Path('/opt/iceberg/iceberg-spark-runtime-3.5_2.12-1.5.2.jar'); \
+dest.parent.mkdir(parents=True, exist_ok=True); \
+urllib.request.urlretrieve(jar_url, str(dest)); \
+print(f'Iceberg JAR: {dest.stat().st_size} bytes', flush=True)"
 
 COPY tests/docker/demo/init_demo.py              /opt/init_demo.py
 COPY tests/docker/demo/entrypoint.sh             /entrypoint.sh

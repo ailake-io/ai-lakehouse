@@ -15,6 +15,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed (demo)
 
+- **`Dockerfile` JAR download `RUN`** — multi-line `python3 -c "..."` without `\` line continuation caused Docker parser to treat `import` as a Dockerfile instruction (`unknown instruction: import`); condensed to single logical line with `;` separators and `\` continuation. Layer was previously hidden by build cache; exposed on forced rebuild.
+
 - **`03_spark.ipynb`** — `ClassNotFoundException: org.apache.iceberg.spark.SparkCatalog`: `spark.jars` loads the Iceberg JAR at runtime after the JVM classloader is fixed; fix sets `SPARK_CLASSPATH` env var before `SparkSession` creation so the JAR is on the classpath at JVM launch.
 - **`04_trino.ipynb`** — `SCHEMA_NOT_FOUND: Schema 'default' does not exist` caused by two independent bugs: (1) `ailake.properties` URI `http://nessie:19120/api/v1` caused Trino 446's nessie-client 0.83+ to build wrong API paths (`/api/v1/api/v2/config`); changed to `/api/v2`; (2) `init_demo.py` namespace PUT body contained `"type": "NAMESPACE"`, not a valid field in the Nessie v1 `Namespace` model — 400 silently swallowed, namespace never registered; removed the field. Added pre-flight guard cell that fails fast with a human-readable message if `default` schema is missing.
 - **`04_trino.ipynb` cell `cell-26`** — SyntaxError: `split_part(file_path, '/', -1)` embedded in single-quoted Python string; changed outer quote to double-quote.
