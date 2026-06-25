@@ -9,18 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed (demo)
-
-- **`07_multimodal.ipynb` cell `ff4798c26ba84498`** — replaced invalid conditional `from ... import (...) if ... else ...` syntax (SyntaxError in CPython) with `try/except ImportError` guard.
-- **`09_hybrid_search.ipynb` cells `cell-7`, `cell-9`** — `ailake.search()` returns `SearchQuery`, not an iterable; added `.to_list()` before iteration in both cells.
-- **`10_gpu_demo.ipynb` cell `cell-10`** — `BENCH_PATH` pointed to `/data/gpu_bench_ivfpq` (never written); corrected to `/data/gpu_bench_deferred` (written in cell-8 via `write_batch_auto_deferred`).
-- **`12_airflow.ipynb` cell `read-back-code`** — `search_text()` returns dicts with `distance` field (negated BM25 score), not `score`; fixed `h.get('score', 0)` → `-h.get('distance', 0)`, added `text_column='text'`, added guard for missing table.
-- **`04_trino.ipynb` cell `cell-26`** — SyntaxError: `split_part(file_path, '/', -1)` embedded in single-quoted Python string; changed outer quote to double-quote.
-- **`compose-demo.yml`** — notebooks were baked into the Docker image only; new notebooks added after initial build were invisible until `--build`. Added bind-mount `./demo/notebooks:/notebooks:ro` to `jupyter` and `jupyter-gpu` services so notebooks appear immediately without rebuilding.
-
 ---
 
 ## [0.0.26] — 2026-06-24
+
+### Fixed (demo)
+
+- **`03_spark.ipynb`** — `ClassNotFoundException: org.apache.iceberg.spark.SparkCatalog`: `spark.jars` loads the Iceberg JAR at runtime after the JVM classloader is fixed; fix sets `SPARK_CLASSPATH` env var before `SparkSession` creation so the JAR is on the classpath at JVM launch.
+- **`04_trino.ipynb`** — `SCHEMA_NOT_FOUND: Schema 'default' does not exist` caused by two independent bugs: (1) `ailake.properties` URI `http://nessie:19120/api/v1` caused Trino 446's nessie-client 0.83+ to build wrong API paths (`/api/v1/api/v2/config`); changed to `/api/v2`; (2) `init_demo.py` namespace PUT body contained `"type": "NAMESPACE"`, not a valid field in the Nessie v1 `Namespace` model — 400 silently swallowed, namespace never registered; removed the field. Added pre-flight guard cell that fails fast with a human-readable message if `default` schema is missing.
+- **`04_trino.ipynb` cell `cell-26`** — SyntaxError: `split_part(file_path, '/', -1)` embedded in single-quoted Python string; changed outer quote to double-quote.
+- **`07_multimodal.ipynb` cell `ff4798c26ba84498`** — `from ... import (...) if ... else ...` is not valid Python syntax (SyntaxError); replaced with `try/except ImportError` guard.
+- **`09_hybrid_search.ipynb` cells `cell-7`, `cell-9`** — `ailake.search()` returns a lazy `SearchQuery`, not an iterable; added `.to_list()` before iteration in both cells.
+- **`10_gpu_demo.ipynb` cell `cell-10`** — `BENCH_PATH = "/data/gpu_bench_ivfpq"` referenced a path never written; corrected to `/data/gpu_bench_deferred` (written in cell-8 via `write_batch_auto_deferred`).
+- **`12_airflow.ipynb` cell `read-back-code`** — `search_text()` returns dicts with a `distance` field (negated BM25 score), not `score`; fixed `h.get('score', 0)` → `-h.get('distance', 0)`, added missing `text_column='text'` kwarg, added guard for missing RAG table.
+- **`compose-demo.yml`** — notebooks were only baked into the Docker image; notebooks added after the initial build were invisible to users running `docker compose up -d` without `--build`. Added bind-mount `./demo/notebooks:/notebooks:ro` to `jupyter` and `jupyter-gpu` services so the live repo directory is always served without rebuilding.
 
 ### Security
 
