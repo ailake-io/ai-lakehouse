@@ -16,6 +16,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`10_gpu_demo.ipynb` cell `cell-10`** — `BENCH_PATH` pointed to `/data/gpu_bench_ivfpq` (never written); corrected to `/data/gpu_bench_deferred` (written in cell-8 via `write_batch_auto_deferred`).
 - **`12_airflow.ipynb` cell `read-back-code`** — `search_text()` returns dicts with `distance` field (negated BM25 score), not `score`; fixed `h.get('score', 0)` → `-h.get('distance', 0)`, added `text_column='text'`, added guard for missing table.
 - **`04_trino.ipynb` cell `cell-26`** — SyntaxError: `split_part(file_path, '/', -1)` embedded in single-quoted Python string; changed outer quote to double-quote.
+- **`compose-demo.yml`** — notebooks were baked into the Docker image only; new notebooks added after initial build were invisible until `--build`. Added bind-mount `./demo/notebooks:/notebooks:ro` to `jupyter` and `jupyter-gpu` services so notebooks appear immediately without rebuilding.
 
 ---
 
