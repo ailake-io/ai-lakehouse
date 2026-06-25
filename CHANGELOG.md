@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (demo)
+
+- **`07_multimodal.ipynb` cell `ff4798c26ba84498`** — replaced invalid conditional `from ... import (...) if ... else ...` syntax (SyntaxError in CPython) with `try/except ImportError` guard.
+- **`09_hybrid_search.ipynb` cells `cell-7`, `cell-9`** — `ailake.search()` returns `SearchQuery`, not an iterable; added `.to_list()` before iteration in both cells.
+- **`10_gpu_demo.ipynb` cell `cell-10`** — `BENCH_PATH` pointed to `/data/gpu_bench_ivfpq` (never written); corrected to `/data/gpu_bench_deferred` (written in cell-8 via `write_batch_auto_deferred`).
+- **`12_airflow.ipynb` cell `read-back-code`** — `search_text()` returns dicts with `distance` field (negated BM25 score), not `score`; fixed `h.get('score', 0)` → `-h.get('distance', 0)`, added `text_column='text'`, added guard for missing table.
+- **`04_trino.ipynb` cell `cell-26`** — SyntaxError: `split_part(file_path, '/', -1)` embedded in single-quoted Python string; changed outer quote to double-quote.
+
 ---
 
 ## [0.0.26] — 2026-06-24
