@@ -15,6 +15,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`01_ailake_demo.ipynb` partition isolation assertion** (cell `f94290f5`) — `row_id` is a per-file sequential index starting at 0 in every shard; checking `row_id` overlap between agent partitions always fails. Fixed to check `file` column overlap, which correctly reflects whether two partitions share any Parquet files (they never should).
+- **`01_ailake_demo.ipynb` FTS intro cell `cell-fts-intro-code`** — `h["score"]` causes `KeyError`; `search_text()` returns dicts with `distance` field (negated score). Fixed to `score={-h["distance"]:.4f}` and added `text_column='text'` kwarg.
 - **`Agent.recall()` text query not embedded** (`ailake-py/python/ailake/__init__.py`) — `recall()` received a plain text string but called `list(query)` directly, producing a list of characters instead of a float vector, causing `TypeError: must be real number, not str` in the PyO3 `search_with_data` binding. Added `isinstance(query, str)` guard: text strings are now embedded via `self._embed_fn([query])[0]` before search; raises `ValueError` with a clear message if `embed_fn` was not provided.
 
 ### Fixed (demo)
