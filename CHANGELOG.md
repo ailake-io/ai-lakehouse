@@ -11,6 +11,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.26-demo-fixes-4] — 2026-06-25
+
+### Fixed (demo)
+
+- **`trino-catalog/ailake.properties`** — `iceberg.nessie-catalog.uri` was `/api/v2`; Trino 446 bundles `nessie-client-0.80.0` which only supports API v1 → `GENERIC_INTERNAL_ERROR: API version mismatch (expected: 1, actual: 2)`. Reverted to `/api/v1`.
+- **`init_demo.py` Nessie namespace registration** — `PUT /namespaces/namespace/main/default` body was missing `"type": "NAMESPACE"` discriminator; Nessie server rejected with 400 `missing type id property 'type'`, swallowed silently, namespace never created → Trino `SCHEMA_NOT_FOUND`. Added `"type": "NAMESPACE"` back.
+- **`04_trino.ipynb` cell `e48e0f6881b74f8b`** — `split_part(file_path, '/', -1)` raises `INVALID_FUNCTION_ARGUMENT: Index must be greater than zero` in Trino (no negative index support). Changed to `element_at(split(file_path, '/'), -1)`.
+- **`04_trino.ipynb` cell `17283aefb7164c0b`** — `added_files_count` column not found in `$manifests`; actual column name is `added_data_files_count`.
+- **`04_trino.ipynb` cell `d40637b2`** — `WHERE "key" IN (...)` inside single-quoted Python string caused `SyntaxError: invalid syntax`; rewrote query strings using double-quoted outer and escaped inner double-quotes.
+
+---
+
 ## [0.0.26-demo-fixes-3] — 2026-06-25
 
 ### Fixed
