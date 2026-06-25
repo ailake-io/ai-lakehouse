@@ -403,7 +403,7 @@ def _maybe_register_nessie(table_path: str, *, nessie_name: str = "table") -> No
     try:
         try:
             _nessie("PUT", "/namespaces/namespace/main/default", {
-                "type": "NAMESPACE", "elements": ["default"], "properties": {},
+                "elements": ["default"], "properties": {},
             })
         except urllib.error.HTTPError as e:
             if e.code != 409:
