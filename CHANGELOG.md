@@ -11,6 +11,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.26-demo-fixes-3] — 2026-06-25
+
+### Fixed
+
+- **`airbyte-destination-ailake` `StreamWriter.commit()`** — after committing on Airbyte STATE message, `self._table` still pointed to the committed `TableWriter`; subsequent records raised `ValueError: TableWriter already committed`. Reset `self._table = None` after `commit()`.
+
+### Fixed (demo)
+
+- **`06_airbyte_destination.ipynb` cell `destination`** — `ConfiguredAirbyteCatalog.model_validate()` removed in airbyte-cdk 7.x (now dataclass). Replaced with explicit construction.
+- **`06_airbyte_destination.ipynb` cell `destination`** — added `shutil.rmtree` guard for idempotent re-runs.
+- **`06_airbyte_destination.ipynb` cell `duckdb-query`** — `category` column not stored by `StreamWriter`; changed query to use only the `text` column.
+
+---
+
 ## [0.0.26-demo-fixes-2] — 2026-06-25
 
 ### Fixed (demo)
