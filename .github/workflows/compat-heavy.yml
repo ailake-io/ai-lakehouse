@@ -16,7 +16,7 @@ env:
 jobs:
   compat-spark:
     name: compat-spark
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -148,7 +148,7 @@ jobs:
 
   compat-trino:
     name: compat-trino
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -293,7 +293,7 @@ jobs:
 
   compat-jvm-plugins:
     name: compat-jvm-plugins
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -348,7 +348,7 @@ jobs:
 
   compat-fts:
     name: compat-fts (Phase T — Tantivy write + search via C-ABI)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -380,7 +380,7 @@ jobs:
 
   compat-bigquery:
     name: compat-bigquery
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
