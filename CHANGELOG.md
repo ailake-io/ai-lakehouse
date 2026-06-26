@@ -11,6 +11,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.0.28] — 2026-06-26
+
+### Fixed
+
+- **`open_table()` / `Table.__init__` missing FTS kwargs** (`ailake-py/python/ailake/__init__.py`) — `open_table()` and the `Table` class did not expose `fts_text_columns`, `bm25_text_column`, or `fts_tokenizer`; only the lower-level `TableWriter` accepted them. Any code using the higher-level `Table` API with Tantivy FTS (including `12_airflow.ipynb` `dag_ailake_ingest_search.py`) raised `TypeError: open_table() got an unexpected keyword argument 'fts_text_columns'`. Added the three parameters to both `Table.__init__` and `open_table()`, forwarding them to the underlying `_TableWriter`.
+- **`compact()` fatal crash when CLI absent** (`ailake-py/python/ailake/__init__.py`) — `compact()` resolved the binary path with `shutil.which("ailake") or "ailake"`; when `ailake` was not in `PATH`, `shutil.which` returned `None` and the fallback literal `"ailake"` caused `subprocess.run` to raise `PermissionError: [Errno 13] Permission denied: 'ailake'`, failing the whole Airflow task. Fixed: when `shutil.which` returns `None`, return `{"ok": True, "files_compacted": 0, "warning": "ailake CLI not found; skipping"}` immediately without spawning a subprocess. Also wrapped the `subprocess.run` call in `try/except (FileNotFoundError, PermissionError)` for defence-in-depth.
+
+### Fixed (demo)
+
+- **`airflow-entrypoint.sh` — Airflow user cannot write to `/data` volume** — the `demo-data` Docker volume is initialised by `minio-init` running as root; the Airflow container runs as `uid=50000`, which had no write permission to `/data` (`drwxr-xr-x root root`). All Airflow DAG tasks writing to `/data` failed with `ValueError: I/O error: Permission denied (os error 13)`. Added `chmod 777 /data 2>/dev/null || true` to `airflow-entrypoint.sh` before `airflow db migrate`.
+- **`08_agents.ipynb` cell `a0000000-0001-4000-8000-000000000017`** — `datetime.datetime.utcnow()` deprecated in Python 3.12; `DeprecationWarning` emitted on every run. Changed to `datetime.datetime.now(datetime.UTC)`.
+- **`09_hybrid_search.ipynb` cell `db066ffe`** — same `datetime.datetime.utcnow()` deprecation as notebook 08. Changed to `datetime.datetime.now(datetime.UTC)`.
+
+---
+
 ## [0.0.27] — 2026-06-26
 
 ### Fixed
