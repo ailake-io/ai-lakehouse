@@ -44,7 +44,7 @@ Options:
 ```cmake
 include(FetchContent)
 FetchContent_Declare(ailake
-  GIT_REPOSITORY https://github.com/ThiagoLange/iceberg-ai-deltalakehouse
+  GIT_REPOSITORY https://github.com/ThiagoLange/ai-lakehouse
   GIT_TAG        main
   SOURCE_SUBDIR  ailake-cpp
 )

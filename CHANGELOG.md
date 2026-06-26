@@ -11,36 +11,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.0.26-demo-fixes-4] — 2026-06-25
+## [0.0.27] — 2026-06-26
+
+### Added
+
+- **`docs/guides/JVM_INTEGRATION.md`** — comprehensive integration guide for Spark, Databricks, Trino, and Flink. Covers: native library build and deployment; Spark plugin launch (spark-shell, spark-submit, SparkSession builder, Kubernetes), `ailakeSearch()`/`ailakeWrite()` implicits, DataSource V2 `format("ailake")`, hybrid/FTS/multimodal search, delete, schema evolution, compact, and tests; Databricks section (init script, cluster library attach, Scala and PySpark notebooks, Unity Catalog Iceberg read, Delta + AI-Lake hybrid pattern); Trino catalog configuration (`ailake.properties`), session properties, SQL walkthrough, Nessie catalog config, and test classes; Flink SQL DDL sink, Kotlin `AilakeNativeLoader` API (`search`, `searchText`, `searchMultimodal`, `writeBatch`, `deleteWhere`, `evolveSchema`), supported DDL options, and tests; cross-engine delete/schema evolution/compact reference; troubleshooting table.
+
+### Fixed
+
+- **`open_table()` / `Table.__init__` missing FTS kwargs** (`ailake-py/python/ailake/__init__.py`) — `open_table()` and the `Table` class did not expose `fts_text_columns`, `bm25_text_column`, or `fts_tokenizer`; only the lower-level `TableWriter` accepted them. Any code using the higher-level `Table` API with Tantivy FTS (including `12_airflow.ipynb` `dag_ailake_ingest_search.py`) raised `TypeError: open_table() got an unexpected keyword argument 'fts_text_columns'`. Added the three parameters to both `Table.__init__` and `open_table()`, forwarding them to the underlying `_TableWriter`.
+- **`compact()` fatal crash when CLI absent** (`ailake-py/python/ailake/__init__.py`) — `compact()` resolved the binary path with `shutil.which("ailake") or "ailake"`; when `ailake` was not in `PATH`, `shutil.which` returned `None` and the fallback literal `"ailake"` caused `subprocess.run` to raise `PermissionError: [Errno 13] Permission denied: 'ailake'`, failing the whole Airflow task. Fixed: when `shutil.which` returns `None`, return `{"ok": True, "files_compacted": 0, "warning": "ailake CLI not found; skipping"}` immediately without spawning a subprocess. Also wrapped the `subprocess.run` call in `try/except (FileNotFoundError, PermissionError)` for defence-in-depth.
+- **`new_snapshot_id()` collision** (`ailake-catalog/src/provider.rs`) — snapshot ID used `as_millis()` precision; two commits within the same millisecond (common in fast local tests) produced identical IDs, causing the second manifest to silently overwrite the first and `write_batch_idempotent` to return the same `snapshot_id` for a genuinely new `batch_id`. Switched to `as_micros()` for 1000× more precision.
+- **`create_or_open` broken snapshot chain** (`ailake-query/src/writer.rs`) — `TableWriter::create_or_open` on an existing table never populated `parent_snapshot_id` from the table's `current_snapshot_id`; every writer reopened on an existing table committed with `parent_snapshot_id: None`, producing a disconnected snapshot chain visible in Iceberg tooling. Fixed by loading `current_snapshot_id` from the catalog before constructing the writer.
+- **`airbyte-destination-ailake` `StreamWriter.commit()` reuse** — after committing on Airbyte STATE message, `self._table` still pointed to the consumed `TableWriter`; subsequent records raised `ValueError: TableWriter already committed`. Reset `self._table = None` after `commit()`.
 
 ### Fixed (demo)
 
+- **`airflow-entrypoint.sh` — Airflow user cannot write to `/data` volume** — the `demo-data` Docker volume is initialised by `minio-init` running as root; the Airflow container runs as `uid=50000`, which had no write permission to `/data` (`drwxr-xr-x root root`). All Airflow DAG tasks writing to `/data` failed with `ValueError: I/O error: Permission denied (os error 13)`. Added `chmod 777 /data 2>/dev/null || true` to `airflow-entrypoint.sh` before `airflow db migrate`.
+- **`08_agents.ipynb` cell `a0000000-0001-4000-8000-000000000017`** — `datetime.datetime.utcnow()` deprecated in Python 3.12; `DeprecationWarning` emitted on every run. Changed to `datetime.datetime.now(datetime.UTC)`.
+- **`09_hybrid_search.ipynb` cell `db066ffe`** — same `datetime.datetime.utcnow()` deprecation as notebook 08. Changed to `datetime.datetime.now(datetime.UTC)`.
 - **`trino-catalog/ailake.properties`** — `iceberg.nessie-catalog.uri` was `/api/v2`; Trino 446 bundles `nessie-client-0.80.0` which only supports API v1 → `GENERIC_INTERNAL_ERROR: API version mismatch (expected: 1, actual: 2)`. Reverted to `/api/v1`.
 - **`init_demo.py` Nessie namespace registration** — `PUT /namespaces/namespace/main/default` body was missing `"type": "NAMESPACE"` discriminator; Nessie server rejected with 400 `missing type id property 'type'`, swallowed silently, namespace never created → Trino `SCHEMA_NOT_FOUND`. Added `"type": "NAMESPACE"` back.
 - **`04_trino.ipynb` cell `e48e0f6881b74f8b`** — `split_part(file_path, '/', -1)` raises `INVALID_FUNCTION_ARGUMENT: Index must be greater than zero` in Trino (no negative index support). Changed to `element_at(split(file_path, '/'), -1)`.
 - **`04_trino.ipynb` cell `17283aefb7164c0b`** — `added_files_count` column not found in `$manifests`; actual column name is `added_data_files_count`.
 - **`04_trino.ipynb` cell `d40637b2`** — `WHERE "key" IN (...)` inside single-quoted Python string caused `SyntaxError: invalid syntax`; rewrote query strings using double-quoted outer and escaped inner double-quotes.
-
----
-
-## [0.0.26-demo-fixes-3] — 2026-06-25
-
-### Fixed
-
-- **`airbyte-destination-ailake` `StreamWriter.commit()`** — after committing on Airbyte STATE message, `self._table` still pointed to the committed `TableWriter`; subsequent records raised `ValueError: TableWriter already committed`. Reset `self._table = None` after `commit()`.
-
-### Fixed (demo)
-
-- **`06_airbyte_destination.ipynb` cell `destination`** — `ConfiguredAirbyteCatalog.model_validate()` removed in airbyte-cdk 7.x (now dataclass). Replaced with explicit construction.
-- **`06_airbyte_destination.ipynb` cell `destination`** — added `shutil.rmtree` guard for idempotent re-runs.
+- **`06_airbyte_destination.ipynb` cell `destination`** — `ConfiguredAirbyteCatalog.model_validate()` removed in airbyte-cdk 7.x (now dataclass). Replaced with explicit construction. Added `shutil.rmtree` guard for idempotent re-runs.
 - **`06_airbyte_destination.ipynb` cell `duckdb-query`** — `category` column not stored by `StreamWriter`; changed query to use only the `text` column.
-
----
-
-## [0.0.26-demo-fixes-2] — 2026-06-25
-
-### Fixed (demo)
-
 - **Notebook format normalization** — `NotebookEdit` left markdown cells with `execution_count`/`outputs` fields and some cells with `id=None`; fixed with stdlib JSON pass across all notebooks before execution.
 - **`01_ailake_demo.ipynb` hybrid scoring cell `c813d6dc`** — `fetch_data=True` search drops the internal `row_id` field; comparison used `pure_top5['row_id']` which raised `KeyError`. Fixed by writing an explicit `mem_idx` extra column and comparing that instead. Added `shutil.rmtree` guard to avoid Arrow schema conflict from stale data across notebook re-runs.
 - **`01_ailake_demo.ipynb` episodic memory cell `f144c3c9`** — Same `row_id`/`KeyError` pattern as hybrid scoring. Fixed to `mem_idx` + `shutil.rmtree` guard.
@@ -49,14 +45,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`01_ailake_demo.ipynb` FTS intro cell `cell-fts-intro-code`** — `open_table()` does not accept `fts_text_columns`; only `TableWriter` does. Replaced with `TableWriter(..., fts_text_columns=['text'])` + `write_batch()` + `commit()`. Added `shutil.rmtree` guard for idempotent re-runs.
 - **`03_spark.ipynb` cell `3cb57e3c89004aec`** — `table\\$files` produced literal backslash in SQL (`table\$files`); `ParseException` at position 138. Changed to dot notation `table.files` (Iceberg 1.5.x Spark syntax).
 - **`03_spark.ipynb` cell `2bef4e682e6547d1`** — `ailake.default.\`table$properties\`` also had backslash-backtick escaping issue; `table.properties` is not a valid Spark metadata table. Replaced with `SHOW TBLPROPERTIES` + Python-side filter.
-- **`03_spark.ipynb` cell `eecdeb7a`** — `IllegalArgumentException: Cannot read unsupported version 3`; Iceberg 1.5.2 bundled in demo image does not support format-version 3. Wrapped in `try/except` with upgrade note.
-- **`03_spark.ipynb` cell `a2117fa7`** — `NullPointerException` reading `delete_demo` (equality delete compatibility issue with Iceberg 1.5.2). Wrapped in `try/except`.
-- **`03_spark.ipynb` cell `f67af38b`** — `ValidationException: multiple fields for name ingest_ts` when reading `schema_evo` after notebook 01 ran `evolve_schema` adding the column a second time. Wrapped in `try/except` with restart hint.
-- **`08_agents.ipynb` cell `000000007`** — `Agent.remember()` buffers in `self._pending`; `commit()` must be called to persist. Cell never called `commit()`, so the table was never written; subsequent `recall()` raised `ValueError: I/O error: No such file or directory`. Added `agent_x.commit()` and `agent_y.commit()` at end of cell.
+- **`03_spark.ipynb` cells `eecdeb7a`, `a2117fa7`, `f67af38b`** — Iceberg 1.5.2 in demo image does not support format-version 3 (`Cannot read unsupported version 3`), has equality delete NPE, and raises `ValidationException` on duplicate column on schema re-run. Wrapped in `try/except` with explanatory messages.
+- **`08_agents.ipynb` cell `000000007`** — `Agent.remember()` buffers in `self._pending`; `commit()` must be called to persist. Cell never called `commit()` → subsequent `recall()` raised `ValueError: I/O error: No such file or directory`. Added `agent_x.commit()` and `agent_y.commit()`.
 - **`08_agents.ipynb` cell `000000010`** — Partition isolation check used `set(x_only['row_id']) & set(y_only['row_id'])`; `row_id` is per-file sequential (starts at 0 in each shard) so values overlap legitimately. Changed to check `file` column instead.
-- **`08_agents.ipynb` cell `000000014`** — `search_tool_calls()` selected `'chunk_text'` column but `write_batch()` stores text as `'text'`; raised `KeyError`. Changed to `'text'`.
-- **`08_agents.ipynb` cell `000000022`** — `agent_ctx.assemble_context()` calls `recall()` internally which requires data on disk; `remember()` was called without `commit()`. Added `agent_ctx.commit()` before `assemble_context()`. Added `shutil.rmtree` guard for idempotent re-runs.
-- **`ailake-py` `Agent.recall()` in container** — Runtime fix: copied updated `__init__.py` into the container to activate the `isinstance(query, str)` text-embedding fix without full image rebuild.
+- **`08_agents.ipynb` cells `000000014`, `000000022`** — `search_tool_calls()` selected `'chunk_text'` column but `write_batch()` stores text as `'text'`; raised `KeyError`. Changed to `'text'`. Added `agent_ctx.commit()` before `assemble_context()`.
 
 ---
 

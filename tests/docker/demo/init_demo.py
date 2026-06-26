@@ -269,7 +269,8 @@ def _write_delete_demo(texts: list[str], embeddings: list[list[float]]) -> None:
     import ailake
     os.makedirs(DELETE_DEMO_PATH, exist_ok=True)
     w = ailake.TableWriter(DELETE_DEMO_PATH, dim=DIM, metric=METRIC)
-    w.write_batch(texts[:100], embeddings[:100])
+    w.write_batch(texts[:100], embeddings[:100],
+                  extra_columns={"id": [str(i) for i in range(100)]})
     snap_id = w.commit()
     # Pre-delete rows 0-9 so notebook §29 shows "before/after" scan counts.
     ailake.delete_where(DELETE_DEMO_PATH, "id", [str(i) for i in range(10)])

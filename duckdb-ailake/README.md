@@ -112,7 +112,7 @@ Returns 0 rows (no error) if `libailake_jni.so` is not loaded or does not export
 
 ---
 
-### `ailake_search_text` — pure BM25 full-text search (Phase 9)
+### `ailake_search_text` — full-text search (Phase T — Tantivy FTS)
 
 ```sql
 SELECT * FROM ailake_search_text(

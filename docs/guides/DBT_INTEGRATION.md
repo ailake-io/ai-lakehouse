@@ -276,9 +276,9 @@ import ailake
 
 # Triggered by Airflow after `dbt run --select ailake_embeddings`
 ailake.compact(
-    table="s3://my-lake/warehouse/marts/ailake_embeddings",
+    "s3://my-lake/warehouse/marts/ailake_embeddings",
     min_files=4,
-    target_file_size_mb=128,
+    target_size_bytes=128 * 1024 * 1024,  # 128 MiB
 )
 ```
 

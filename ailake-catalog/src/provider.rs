@@ -455,9 +455,10 @@ pub fn decode_centroid(
 }
 
 pub fn new_snapshot_id() -> SnapshotId {
-    // Use timestamp-based ID for simplicity (Iceberg uses i64)
+    // Microsecond precision avoids collisions when multiple snapshots are committed
+    // within the same millisecond (common in fast local-filesystem tests).
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() as i64
+        .as_micros() as i64
 }

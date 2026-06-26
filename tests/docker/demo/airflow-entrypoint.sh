@@ -2,6 +2,9 @@
 # Airflow demo entrypoint — init DB, create admin user, start scheduler + webserver.
 set -e
 
+# Grant write access to the shared data volume (created by root via Jupyter/minio-init).
+chmod 777 /data 2>/dev/null || true
+
 airflow db migrate
 
 # Create admin user (no-op if it already exists).
