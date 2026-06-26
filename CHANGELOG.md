@@ -11,6 +11,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.0] — 2026-06-26
+
+First minor release. All phases 1–9 complete. Production-ready for tabular + vector + LLM workloads.
+
+### Added
+
+- **Integration guides** — `docs/guides/` now ships complete language-specific guides:
+  - `PYTHON_INTEGRATION.md` — full Python SDK reference (20 sections, `TableWriter`, `SearchQuery` lazy API, `Agent`, `WorkingMemoryBuffer`, deferred indexing, RAG example)
+  - `GO_INTEGRATION.md` — Go client (`Search` pure Go, `WriteBatch`/FTS via CLI, `ErrNoBinary`, multimodal RRF)
+  - `CPP_INTEGRATION.md` — C++17 header-only SDK (CMake FetchContent, CUDA/ROCm, full API surface)
+  - `JVM_INTEGRATION.md` — Spark (+ Databricks), Trino, and Flink (JNA plugin, `ailakeSearch()`/`ailakeWrite()` implicits, DataSource V2, Databricks init script + Unity Catalog, Trino catalog config, Flink SQL DDL + Kotlin API)
+- **`SETUP.md` integration guide table** — quick-nav to all language guides from the setup doc
+
+### Changed
+
+- Version bumped `0.0.x` → `0.1.0` across all Rust crates and docs — marks stable public API commitment for the core read/write/search path
+
+---
+
 ## [0.0.27] — 2026-06-26
 
 ### Added
