@@ -15,7 +15,7 @@ env:
 jobs:
   fmt:
     name: fmt
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -26,7 +26,7 @@ jobs:
 
   clippy:
     name: clippy
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -37,7 +37,7 @@ jobs:
 
   deny:
     name: deny (licenses + advisories)
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -48,7 +48,7 @@ jobs:
 
   unit:
     name: unit
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -57,7 +57,7 @@ jobs:
 
   integration:
     name: integration
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -70,7 +70,7 @@ jobs:
   # GPU tests live in ci-gpu.yml (Windows bare-metal + Linux Docker on gpu-nvidia/gpu-amd runners).
   index-cpu-fallback:
     name: index — cpu fallback (no GPU)
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -87,7 +87,7 @@ jobs:
 
   compat-parquet:
     name: compat-parquet
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -98,7 +98,7 @@ jobs:
 
   compat-pyarrow:
     name: compat-pyarrow
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -117,7 +117,7 @@ jobs:
 
   compat-duckdb:
     name: compat-duckdb
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -136,7 +136,7 @@ jobs:
 
   compat-pyiceberg:
     name: compat-pyiceberg
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -155,7 +155,7 @@ jobs:
 
   test-airflow-provider:
     name: test-airflow-provider
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
@@ -171,7 +171,7 @@ jobs:
 
   test-airbyte:
     name: test-airbyte
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
@@ -187,7 +187,7 @@ jobs:
 
   compat-ailake-py:
     name: compat-ailake-py
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -209,7 +209,7 @@ jobs:
 
   fts-e2e:
     name: fts-e2e (Phase T Tantivy)
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -229,7 +229,7 @@ jobs:
 
   test-jvm:
     name: test-jvm (trino + spark plugins)
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

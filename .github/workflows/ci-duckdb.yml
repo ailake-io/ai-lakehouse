@@ -14,7 +14,7 @@ env:
 jobs:
   build-and-test:
     name: build + test (Linux x86_64)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v6

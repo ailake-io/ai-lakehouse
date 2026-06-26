@@ -9,7 +9,7 @@ env:
 jobs:
   build:
     name: go build + vet + test
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 

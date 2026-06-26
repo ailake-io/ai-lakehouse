@@ -17,7 +17,7 @@ env:
 jobs:
   publish:
     name: Build and publish apache-airflow-providers-ailake to PyPI (manual)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
