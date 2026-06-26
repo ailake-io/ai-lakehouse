@@ -105,9 +105,9 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 **Rust** (add to `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.25"
-ailake-query = "0.0.25"   # search(), TableWriter, ContextAssembler, search_multimodal
-ailake-store = "0.0.25"   # S3 / GCS / Azure / local backends
+ailake-core  = "0.0.27"
+ailake-query = "0.0.27"   # search(), TableWriter, ContextAssembler, search_multimodal
+ailake-store = "0.0.27"   # S3 / GCS / Azure / local backends
 ```
 
 **Python**:
@@ -142,7 +142,7 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.25
+VERSION=0.0.27
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
