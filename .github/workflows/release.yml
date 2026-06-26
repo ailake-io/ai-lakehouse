@@ -2,6 +2,11 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      version_override:
+        description: "Version to release (e.g. 0.1.0). Leave empty for automatic patch+1."
+        required: false
+        default: ""
   # push:
   #   branches: [main]
 
@@ -30,14 +35,18 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Derive next version from latest semver tag (patch+1).
-          # Falls back to v0.0.0 when no tags exist yet.
+          # Derive next version from latest semver tag (patch+1),
+          # or use version_override when explicitly provided.
           LATEST=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
           LATEST=${LATEST:-v0.0.0}
           MAJOR=$(echo "${LATEST#v}" | cut -d. -f1)
           MINOR=$(echo "${LATEST#v}" | cut -d. -f2)
           PATCH=$(echo "${LATEST#v}" | cut -d. -f3)
-          NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          if [ -n "${{ inputs.version_override }}" ]; then
+            NEW_VERSION="${{ inputs.version_override }}"
+          else
+            NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          fi
           NEW_TAG="v$NEW_VERSION"
 
           # Bump every Cargo.toml (crate versions + inter-crate deps).
