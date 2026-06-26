@@ -129,7 +129,7 @@ class SearchQuery:
         self._pruning_threshold = pruning_threshold
         self._ef_search = ef_search
         self._results: list[dict] | None = None      # lazy — pointer-only
-        self._arrow_batch = None                      # lazy — full RecordBatch
+        self._arrow_batch: Any | None = None          # lazy — full RecordBatch
 
     # ── chain ─────────────────────────────────────────────────────────────────
 
