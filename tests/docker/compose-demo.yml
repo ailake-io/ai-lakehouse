@@ -121,7 +121,7 @@ services:
 
   trino:
     profiles: ["engines"]
-    image: trinodb/trino:446
+    image: trinodb/trino:460
     container_name: ailake-demo-trino
     ports:
       - "8080:8080"

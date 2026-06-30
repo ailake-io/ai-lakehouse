@@ -13,6 +13,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **demo notebook 03 — embedding model tracking** — `init_demo.py` now writes the main HNSW fixture with `embedding_model="synthetic-embed-v1"` and `embedding_model_version="1.0"`, so section 8 of `03_spark.ipynb` (`SHOW TBLPROPERTIES`) correctly displays `ailake.embedding-model` instead of the "(not set)" fallback message
 - **demo notebook 03 — Iceberg format-version 3** — upgraded bundled Iceberg JAR `1.5.2` → `1.7.0` (`iceberg-spark-runtime-3.5_2.12`); section 9 (`ailake_partitioned_v3`) now reads successfully instead of failing with `Cannot read unsupported version 3`
+- **demo notebook 04 — Trino hang on format-version 3** — upgraded Trino `446` → `460` in `compose-demo.yml` (format-version 3 support added in Trino 450); added `request_timeout=60` to Trino Python connection to prevent indefinite blocking; removed stale version references in cells `d40637b2` and `70b723e0`
 
 ---
 
