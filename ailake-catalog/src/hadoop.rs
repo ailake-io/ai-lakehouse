@@ -285,6 +285,34 @@ impl CatalogProvider for HadoopCatalog {
         meta.snapshots.push(iceberg_snap);
 
         if let Some(schema_update) = snapshot.iceberg_schema {
+            // Bootstrap metadata (IcebergMetadata::new, for partition_by /
+            // partition_fields tables) assigns the partition column field-id
+            // assuming it is the *only* schema field at table-creation time.
+            // The real first write replaces that bootstrap schema with the
+            // full column set in actual Arrow order, so the partition column
+            // can land at a different field-id (e.g. "topic_id" written
+            // second behind "text" ends up id=2, not id=1). Remap every
+            // partition-spec's source-id to whatever id the matching column
+            // name now has — otherwise readers (Trino/Spark iceberg-java)
+            // reject the table with "Cannot create identity partition
+            // sourced from different field in schema".
+            let new_id_by_name: std::collections::HashMap<&str, i64> = schema_update
+                .fields
+                .iter()
+                .filter_map(|f| Some((f["name"].as_str()?, f["id"].as_i64()?)))
+                .collect();
+            for spec in meta.partition_specs.iter_mut() {
+                if let Some(fields) = spec["fields"].as_array_mut() {
+                    for pf in fields.iter_mut() {
+                        if let Some(name) = pf["name"].as_str() {
+                            if let Some(&new_id) = new_id_by_name.get(name) {
+                                pf["source-id"] = serde_json::json!(new_id);
+                            }
+                        }
+                    }
+                }
+            }
+
             if let Some(schema) = meta.schemas.first_mut() {
                 schema["fields"] = serde_json::Value::Array(schema_update.fields);
             }
@@ -328,6 +356,7 @@ impl CatalogProvider for HadoopCatalog {
                             let mut blob_refs = vec![BlobRef {
                                 blob_type: crate::puffin::BLOB_TYPE_VECTOR_STATS.to_string(),
                                 snapshot_id: snap_id,
+                                sequence_number: seq,
                                 fields: vec![],
                                 offset: result.vector_stats_blob.0,
                                 length: result.vector_stats_blob.1,
@@ -336,6 +365,7 @@ impl CatalogProvider for HadoopCatalog {
                                 blob_refs.push(BlobRef {
                                     blob_type: crate::puffin::BLOB_TYPE_BM25_BLOOM.to_string(),
                                     snapshot_id: snap_id,
+                                    sequence_number: seq,
                                     fields: vec![],
                                     offset: off,
                                     length: len,

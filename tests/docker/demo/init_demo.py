@@ -13,7 +13,12 @@ Writes multiple AI-Lake tables to demonstrate all SDK features:
   - Schema-evo demo   — 100 rows, add_column + rename + evolve_schema (notebook §30 demo)
 
 Runs once at container startup via entrypoint.sh; skipped on restart if
-version-hint.text already exists in the main HNSW table.
+version-hint.text already exists AND the stamp file at /data/.fixture-version
+matches FIXTURE_VERSION below. Bump FIXTURE_VERSION whenever this script
+changes what gets written (new table, new property, new arg) — otherwise a
+container restart against a pre-existing `demo-data` volume silently keeps
+serving fixtures from before the change, since the volume outlives image
+rebuilds.
 """
 
 import json
@@ -22,6 +27,11 @@ import os
 import pathlib
 import random
 import sys
+
+# Bump on any change to what main() writes (new table, new property, new
+# arg) — entrypoint.sh compares this against /data/.fixture-version and
+# forces a regen on mismatch, even if version-hint.text already exists.
+FIXTURE_VERSION     = "3"
 
 TABLE_PATH          = os.environ.get("DEMO_TABLE_PATH", "/data/ailake_demo")
 PQ_PATH             = str(pathlib.Path(TABLE_PATH).parent / "ailake_pq")
@@ -369,6 +379,10 @@ def main() -> None:
     _maybe_register_nessie(PARTITIONED_V3_PATH, nessie_name="partitioned_v3")
     _maybe_register_nessie(DELETE_DEMO_PATH,    nessie_name="delete_demo")
     _maybe_register_nessie(SCHEMA_EVO_PATH,     nessie_name="schema_evo")
+
+    stamp_path = pathlib.Path(TABLE_PATH).parent / ".fixture-version"
+    stamp_path.write_text(FIXTURE_VERSION)
+
     print("All fixtures ready.")
 
 
