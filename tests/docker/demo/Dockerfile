@@ -78,8 +78,8 @@ RUN pip install --no-cache-dir \
 # Placed in /opt/iceberg/ so spark.jars can reference a deterministic path.
 RUN python3 -c "\
 import urllib.request, pathlib; \
-jar_url='https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.5.2/iceberg-spark-runtime-3.5_2.12-1.5.2.jar'; \
-dest=pathlib.Path('/opt/iceberg/iceberg-spark-runtime-3.5_2.12-1.5.2.jar'); \
+jar_url='https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.7.0/iceberg-spark-runtime-3.5_2.12-1.7.0.jar'; \
+dest=pathlib.Path('/opt/iceberg/iceberg-spark-runtime-3.5_2.12-1.7.0.jar'); \
 dest.parent.mkdir(parents=True, exist_ok=True); \
 urllib.request.urlretrieve(jar_url, str(dest)); \
 print(f'Iceberg JAR: {dest.stat().st_size} bytes', flush=True)"
