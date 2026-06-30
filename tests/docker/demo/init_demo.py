@@ -87,7 +87,13 @@ def _write_hnsw(texts: list[str], embeddings: list[list[float]]) -> None:
     """Main HNSW table — standard index, raw vectors kept for reranking."""
     import ailake
     os.makedirs(TABLE_PATH, exist_ok=True)
-    table = ailake.open_table(TABLE_PATH, dim=DIM, metric=METRIC)
+    table = ailake.open_table(
+        TABLE_PATH,
+        dim=DIM,
+        metric=METRIC,
+        embedding_model="synthetic-embed-v1",
+        embedding_model_version="1.0",
+    )
     table.insert(texts, embeddings)
     snap_id = table.commit()
     print(f"[HNSW]     Committed snapshot_id={snap_id}  rows={len(texts)}")

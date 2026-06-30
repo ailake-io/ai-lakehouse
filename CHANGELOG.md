@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **demo notebook 03 — embedding model tracking** — `init_demo.py` now writes the main HNSW fixture with `embedding_model="synthetic-embed-v1"` and `embedding_model_version="1.0"`, so section 8 of `03_spark.ipynb` (`SHOW TBLPROPERTIES`) correctly displays `ailake.embedding-model` instead of the "(not set)" fallback message
+
 ---
 
 ## [0.1.0] — 2026-06-26
