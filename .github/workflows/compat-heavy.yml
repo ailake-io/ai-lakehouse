@@ -7,6 +7,10 @@ on:
         description: "Number of rows in test fixture"
         default: "1000"
         required: false
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
 
 env:
   CARGO_TERM_COLOR: always
