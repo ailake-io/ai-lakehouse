@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ailake-query` — `MigrationJob::run_atomic_replace` wiped the table down to one file** — it committed `SnapshotOperation::Replace` with `files: vec![new_entry]` (a single file) inside a loop over every old file, and `Replace` doesn't inherit the previous manifest — every iteration after the first silently discarded every file migrated by prior iterations. Running an `AtomicReplace` migration on a table with N files left it with just the last-migrated file. Now maintains a running view of the table's full file list (like the neighboring `run_dual_write` already did) and swaps each entry in place, committing the complete current state every iteration. Same bug class as the compaction `Replace` fix in #72; found during that PR's review as a sibling bug in an untouched file. Regression test `run_atomic_replace_preserves_all_files_not_just_the_last` (uses 3 files — the bug is invisible with only 1)
+
 ---
 
 ## [0.1.0] — 2026-06-26
