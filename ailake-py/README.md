@@ -36,6 +36,13 @@ embeddings = np.random.rand(2, 1536).astype(np.float32)
 table.insert(texts, embeddings)   # accepts list or numpy array
 snapshot_id = table.commit()
 
+# Tabular metadata columns alongside text + embedding
+table.insert(
+    texts, embeddings,
+    extra_columns={"id": [1, 2], "category": ["news", "blog"]},  # type inferred from 1st element
+)
+table.commit()
+
 # Pattern B — auto-embed without passing embeddings explicitly
 def my_embed(texts: list[str]) -> list[list[float]]:
     return np.random.rand(len(texts), 1536).tolist()  # replace with real model
@@ -144,8 +151,8 @@ Opens or creates an AI-Lake table at `path`.
 
 | Method | Description |
 |---|---|
-| `insert(texts, embeddings=None) → Table` | Buffer a batch. `embeddings`: `list[list[float]]` or numpy array. When `embed_fn` was set on `open_table()`, `embeddings` may be omitted — the callable is invoked automatically. |
-| `write_batch_auto_deferred(texts, embeddings=None) → Table` | Deferred write — Parquet persisted immediately (~200k vec/s); index (HNSW or IVF-PQ, auto-selected) built in a background thread. Shard served via flat scan until index ready. |
+| `insert(texts, embeddings=None, extra_columns=None) → Table` | Buffer a batch. `embeddings`: `list[list[float]]` or numpy array. When `embed_fn` was set on `open_table()`, `embeddings` may be omitted — the callable is invoked automatically. `extra_columns`: `dict[str, list]` of additional tabular columns (e.g. `id`, `category`) written alongside `text`/`embedding`; type per column inferred from its first element (bool/float/int/str). |
+| `write_batch_auto_deferred(texts, embeddings=None, extra_columns=None) → Table` | Deferred write — Parquet persisted immediately (~200k vec/s); index (HNSW or IVF-PQ, auto-selected) built in a background thread. Shard served via flat scan until index ready. |
 | `commit() → int` | Persist as a new Iceberg snapshot; returns snapshot ID. |
 | `search(query, top_k=10, fetch_data=False, partition_filter=None, score_fn=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None) → SearchQuery` | Lazy, chainable search. `query`: `list[float]` or numpy array. `fetch_data=True` returns all Parquet columns + `_distance`. `hybrid_text` enables BM25+vector RRF fusion. `pruning_threshold` skips files whose centroid is farther than this from the query. `ef_search` overrides the HNSW search pool size. Raises `ModelMismatch` if query dim ≠ table dim. |
 | `insert_async(...)` | Async variant of `insert`. |
