@@ -45,6 +45,16 @@ docker compose -f tests/docker/compose-demo.yml --profile gpu up -d
 
 → **[Full step-by-step notebook guide](docs/guides/DEMO_NOTEBOOKS.md)** — prerequisites, per-notebook walkthrough, execution order, troubleshooting.
 
+**Integration guides** (language-specific usage beyond the local demo):
+
+| Guide | Topics |
+|---|---|
+| [Python](docs/guides/PYTHON_INTEGRATION.md) | `TableWriter`, `search()`, `Agent`, `WorkingMemoryBuffer`, `SearchQuery` lazy API, deferred indexing |
+| [JVM — Spark / Databricks / Trino / Flink](docs/guides/JVM_INTEGRATION.md) | JNA plugin, `ailakeSearch()`, DataSource V2, Databricks init script, Trino catalog, Flink DDL |
+| [Go](docs/guides/GO_INTEGRATION.md) | Pure-Go search, `WriteBatch` via CLI, `ErrNoBinary`, multimodal, hybrid |
+| [C++](docs/guides/CPP_INTEGRATION.md) | Header-only SDK, CMake FetchContent, CUDA/ROCm, `search()`, `write_batch()` |
+| [dbt](docs/guides/DBT_INTEGRATION.md) | Spark/Trino/DuckDB macros, `stg_documents → int_chunks → ailake_embeddings` |
+
 ---
 
 ## Prerequisites

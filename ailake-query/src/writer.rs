@@ -981,8 +981,14 @@ impl TableWriter {
                 existing_file_count = 0;
             }
         }
+        let parent_snapshot_id = catalog
+            .load_table(&table)
+            .await
+            .ok()
+            .and_then(|m| m.current_snapshot_id);
         let mut writer = Self::new(catalog, store, policy, table);
         writer.part_counter = Arc::new(AtomicU32::new(existing_file_count));
+        writer.parent_snapshot_id = parent_snapshot_id;
         Ok(writer)
     }
 }

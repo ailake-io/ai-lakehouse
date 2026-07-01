@@ -44,7 +44,60 @@ First-run output (abridged):
 
 ---
 
-## 3. Services and ports
+## 3. Building the Docker images
+
+The demo uses two Docker images built locally from source:
+
+| Image | Built from | Contains |
+|---|---|---|
+| `docker-jupyter` | `tests/docker/demo/Dockerfile` | Rust toolchain → `maturin build` → ailake-py wheel → JupyterLab |
+| `docker-airflow` | `tests/docker/demo/Dockerfile.airflow` | Same Rust builder stage → ailake-py wheel → `apache/airflow:2.9.2` |
+
+Build happens automatically on first `docker compose up -d`. The Airflow image is only built when `--profile airflow` is used.
+
+### What triggers a rebuild
+
+| Change | Rebuild needed? | Command |
+|---|---|---|
+| Notebook files (`tests/docker/demo/notebooks/`) | **No** — bind-mounted live from the repo | — |
+| `airflow-entrypoint.sh`, DAG files | **No** — bind-mounted live | — |
+| `ailake-py/python/ailake/__init__.py` (pure Python) | **Yes** — baked into the wheel | See below |
+| Any Rust source (`ailake-*/src/`) | **Yes** — requires full recompile | See below |
+| `tests/docker/demo/init_demo.py` | **Yes** — COPY'd into image | See below |
+| `tests/docker/demo/Dockerfile` | **Yes** | See below |
+
+### Rebuild commands
+
+```bash
+# Rebuild Jupyter image only (most common — Rust or Python SDK change)
+docker compose -f tests/docker/compose-demo.yml build jupyter
+
+# Rebuild without layer cache (force full recompile)
+docker compose -f tests/docker/compose-demo.yml build --no-cache jupyter
+
+# Rebuild Airflow image (after SDK or DAG-infrastructure change)
+docker compose -f tests/docker/compose-demo.yml build airflow
+
+# Rebuild both images then restart
+docker compose -f tests/docker/compose-demo.yml build jupyter airflow
+docker compose -f tests/docker/compose-demo.yml up -d
+```
+
+> **Tip:** `build` without `--no-cache` reuses cached layers up to the first changed file — so a pure Python change to `ailake-py/python/` skips the Rust recompile (the heaviest layer) and finishes in ~30 s instead of ~3-5 min.
+
+### Build time reference
+
+| Scenario | Approx time |
+|---|---|
+| First build (no cache) | 3–5 min (Rust + wheel + JupyterLab) |
+| Python-only change (`__init__.py`) | ~30 s |
+| Rust source change (any `ailake-*/src/`) | 3–5 min (full recompile) |
+| Airflow image, first build | 5–8 min |
+| Subsequent `up -d` (no rebuild) | < 5 s |
+
+---
+
+## 4. Services and ports
 
 | Service | URL | Profile | Description |
 |---|---|---|---|
@@ -58,7 +111,7 @@ First-run output (abridged):
 
 ---
 
-## 4. Optional profiles
+## 5. Optional profiles
 
 Profiles add heavyweight services on demand. Core notebooks (01-03, 07-12) work without any profile.
 
@@ -98,7 +151,7 @@ docker compose -f tests/docker/compose-demo.yml --profile engines --profile airf
 
 ---
 
-## 5. Demo fixture tables
+## 6. Demo fixture tables
 
 When the Jupyter container starts for the first time, `init_demo.py` writes fixture tables to `/data/` (Docker volume `demo-data`). This runs once and is skipped on restart.
 
@@ -120,7 +173,7 @@ All tables live in the shared `demo-data` Docker volume — they persist across 
 
 ---
 
-## 6. Notebook walkthrough
+## 7. Notebook walkthrough
 
 Open **http://localhost:8888** and execute notebooks top-to-bottom. Each notebook is self-contained — cells load the demo fixture paths from environment variables set by Docker Compose.
 
@@ -199,7 +252,7 @@ Wait ~30 s for Trino health check. Then open the notebook.
 | 2 | `COUNT(*)`, `SHOW TBLPROPERTIES` — `ailake.*` properties visible |
 | 3 | `$files` + `$manifests` system tables (HNSW offset, centroid in key_metadata) |
 | 4 | `partition_fields` DDL inspection |
-| 5 | Equality delete visibility — row 0 masked in scan |
+| 5 | Equality delete files — 5 eq-del manifests committed (verified via `$manifests`); Trino 446 / Iceberg 1.5.2 does not apply them in MOR scan (COUNT stays 100); requires Iceberg 1.7+ / Trino 450+ for full MOR support |
 
 ---
 
@@ -342,7 +395,7 @@ Two pre-loaded DAGs (from `tests/docker/demo/dags/`):
 
 ---
 
-## 7. Recommended execution order
+## 8. Recommended execution order
 
 For first-time exploration:
 
@@ -366,7 +419,7 @@ Notebooks 01, 02, 03, 06, 07, 08, 09, 11 can run in any order without profiles.
 
 ---
 
-## 8. Stopping and cleanup
+## 9. Stopping and cleanup
 
 ```bash
 # Stop all services (data volumes preserved)
@@ -383,7 +436,7 @@ After `down -v`, the next `up -d` re-runs `init_demo.py` and rebuilds all fixtur
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 ### JupyterLab blank or connection refused
 
@@ -418,16 +471,7 @@ curl -sf http://localhost:8080/v1/info | python3 -m json.tool | grep starting
 
 ### Rebuild after code changes
 
-```bash
-docker compose -f tests/docker/compose-demo.yml build --no-cache jupyter
-docker compose -f tests/docker/compose-demo.yml up -d
-```
-
-For Airflow image:
-
-```bash
-docker compose -f tests/docker/compose-demo.yml build --no-cache airflow
-```
+See [§3 Building the Docker images](#3-building-the-docker-images) for the full rebuild reference.
 
 ### Port conflicts
 
@@ -440,7 +484,7 @@ docker compose -f tests/docker/compose-demo.yml build --no-cache airflow
 
 ---
 
-## 10. Environment variables reference
+## 11. Environment variables reference
 
 All variables are set by `compose-demo.yml` and consumed by `init_demo.py` and the notebooks.
 

@@ -17,7 +17,7 @@ env:
 jobs:
   publish-jvm:
     name: Build and upload JVM plugin JARs (manual)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:

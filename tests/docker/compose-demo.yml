@@ -85,6 +85,9 @@ services:
       - "8888:8888"
     volumes:
       - demo-data:/data
+      # Bind-mount notebooks from repo so new/edited notebooks appear without
+      # rebuilding the image (overrides the COPY baked into the Dockerfile).
+      - ./demo/notebooks:/notebooks:ro
     environment:
       MINIO_ENDPOINT: "http://minio:9000"
       MINIO_ACCESS_KEY: minioadmin
@@ -224,6 +227,7 @@ services:
       - "8889:8888"
     volumes:
       - demo-data:/data
+      - ./demo/notebooks:/notebooks:ro
     environment:
       MINIO_ENDPOINT: "http://minio:9000"
       MINIO_ACCESS_KEY: minioadmin

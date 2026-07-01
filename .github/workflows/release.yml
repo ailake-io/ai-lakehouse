@@ -2,6 +2,11 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      version_override:
+        description: "Version to release (e.g. 0.1.0). Leave empty for automatic patch+1."
+        required: false
+        default: ""
   # push:
   #   branches: [main]
 
@@ -13,7 +18,7 @@ env:
 jobs:
   release:
     name: Create GitHub Release
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     permissions:
       contents: write   # needed to create tags and GitHub Releases
     outputs:
@@ -30,14 +35,18 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Derive next version from latest semver tag (patch+1).
-          # Falls back to v0.0.0 when no tags exist yet.
+          # Derive next version from latest semver tag (patch+1),
+          # or use version_override when explicitly provided.
           LATEST=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
           LATEST=${LATEST:-v0.0.0}
           MAJOR=$(echo "${LATEST#v}" | cut -d. -f1)
           MINOR=$(echo "${LATEST#v}" | cut -d. -f2)
           PATCH=$(echo "${LATEST#v}" | cut -d. -f3)
-          NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          if [ -n "${{ inputs.version_override }}" ]; then
+            NEW_VERSION="${{ inputs.version_override }}"
+          else
+            NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          fi
           NEW_TAG="v$NEW_VERSION"
 
           # Bump every Cargo.toml (crate versions + inter-crate deps).
@@ -106,7 +115,7 @@ jobs:
   publish-crates:
     name: Publish to crates.io
     needs: release
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -151,7 +160,7 @@ jobs:
   publish-jvm:
     name: Build and upload JVM plugin JARs
     needs: [release, publish-crates]
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
@@ -197,7 +206,7 @@ jobs:
   publish-airflow:
     name: Build and publish Airflow provider
     needs: [release, publish-jvm]
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
@@ -237,7 +246,7 @@ jobs:
   pypi-linux:
     name: Build Python wheel — Linux (${{ matrix.target }})
     needs: [release, publish-airflow]
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         target: [x86_64, aarch64]
@@ -275,11 +284,7 @@ jobs:
           path: dist
 
   pypi-macos:
-    # Disabled: no macOS self-hosted runner available.
-    # To enable: remove `if: false`, set runs-on to the macOS runner label
-    # (e.g. [self-hosted, macOS, ARM64]), and add `pypi-macos` to pypi-publish needs.
     name: Build Python wheel — macOS (${{ matrix.target }})
-    if: false
     needs: [release, pypi-linux]
     runs-on: macos-latest
     strategy:
@@ -316,7 +321,7 @@ jobs:
   pypi-windows:
     name: Build Python wheel — Windows (x86_64)
     needs: [release, pypi-linux]
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -362,7 +367,7 @@ jobs:
   pypi-sdist:
     name: Build Python sdist
     needs: [release, pypi-linux]
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - name: Fix Docker-owned file permissions
         run: |
@@ -392,8 +397,8 @@ jobs:
 
   pypi-publish:
     name: Publish Python wheel to PyPI
-    needs: [release, pypi-linux, pypi-windows, pypi-sdist]
-    runs-on: [self-hosted, Linux, X64]
+    needs: [release, pypi-linux, pypi-macos, pypi-windows, pypi-sdist]
+    runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: write

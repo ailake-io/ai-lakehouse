@@ -129,7 +129,7 @@ class SearchQuery:
         self._pruning_threshold = pruning_threshold
         self._ef_search = ef_search
         self._results: list[dict] | None = None      # lazy — pointer-only
-        self._arrow_batch = None                      # lazy — full RecordBatch
+        self._arrow_batch: Any | None = None          # lazy — full RecordBatch
 
     # ── chain ─────────────────────────────────────────────────────────────────
 
@@ -338,6 +338,9 @@ class Table:
         embedding_model: str | None = None,
         embedding_model_version: str | None = None,
         embed_fn: Optional[Callable[[list[str]], list[list[float]]]] = None,
+        bm25_text_column: str | None = None,
+        fts_text_columns: list[str] | None = None,
+        fts_tokenizer: str = "default",
     ) -> None:
         self._path = path
         self._vector_column = vector_column
@@ -364,6 +367,9 @@ class Table:
             embedding_model=embedding_model,
             embedding_model_version=embedding_model_version,
             embed_fn=embed_fn,
+            bm25_text_column=bm25_text_column,
+            fts_text_columns=fts_text_columns,
+            fts_tokenizer=fts_tokenizer,
         )
 
     # ── write ─────────────────────────────────────────────────────────────────
@@ -590,6 +596,9 @@ def open_table(
     embedding_model: str | None = None,
     embedding_model_version: str | None = None,
     embed_fn: Optional[Callable[[list[str]], list[list[float]]]] = None,
+    bm25_text_column: str | None = None,
+    fts_text_columns: list[str] | None = None,
+    fts_tokenizer: str = "default",
 ) -> Table:
     """Open or create an AI-Lake table at *path*.
 
@@ -607,6 +616,9 @@ def open_table(
         embedding_model_version: Optional version tag (e.g. ``"2024-01"``).
         embed_fn: ``Callable[[list[str]], list[list[float]]]`` — auto-embed callable.
                   When set, ``insert(texts)`` may be called without *embeddings*.
+        bm25_text_column: Column name for BM25 scoring (Phase 5 hybrid search).
+        fts_text_columns: Columns to index with Tantivy FTS (Phase T).
+        fts_tokenizer: Tokenizer for Tantivy FTS (default ``"default"``).
     """
     return Table(
         path,
@@ -621,6 +633,9 @@ def open_table(
         embedding_model=embedding_model,
         embedding_model_version=embedding_model_version,
         embed_fn=embed_fn,
+        bm25_text_column=bm25_text_column,
+        fts_text_columns=fts_text_columns,
+        fts_tokenizer=fts_tokenizer,
     )
 
 
@@ -880,7 +895,15 @@ class Agent:
 
         import pyarrow as pa  # noqa: PLC0415
 
-        q: list[float] = query.tolist() if hasattr(query, "tolist") else list(query)
+        if isinstance(query, str):
+            if self._embed_fn is None:
+                raise ValueError(
+                    "Agent.recall() received a text string but no embed_fn was provided. "
+                    "Pass embed_fn to Agent.__init__() or pass a pre-computed vector."
+                )
+            q = list(self._embed_fn([query])[0])
+        else:
+            q = query.tolist() if hasattr(query, "tolist") else list(query)
         candidate_k = top_k * max(1, oversample)
 
         raw_ipc: bytes = _search_with_data(self._table_path, q, candidate_k, self._agent_id)
@@ -1193,7 +1216,10 @@ def compact(
     import shutil
     import subprocess
 
-    bin_path = os.environ.get("AILAKE_BIN") or shutil.which("ailake") or "ailake"
+    bin_path = os.environ.get("AILAKE_BIN") or shutil.which("ailake")
+    if bin_path is None:
+        return {"ok": True, "files_compacted": 0, "warning": "ailake CLI not found; skipping"}
+
     table_id = "default.table"
 
     args = [
@@ -1203,7 +1229,10 @@ def compact(
         "--min-files", str(min_files),
         "--target-size", str(target_size_bytes),
     ]
-    result = subprocess.run(args, capture_output=True, text=True)
+    try:
+        result = subprocess.run(args, capture_output=True, text=True)
+    except (FileNotFoundError, PermissionError) as exc:
+        return {"ok": True, "files_compacted": 0, "warning": f"ailake CLI not executable: {exc}"}
     if result.returncode != 0:
         return {"ok": False, "error": result.stderr.strip() or result.stdout.strip()}
     return {"ok": True, "files_compacted": 1}

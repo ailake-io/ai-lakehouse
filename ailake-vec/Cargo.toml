@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-vec"
-version = "0.0.26"
+version = "0.1.0"
 edition     = "2021"
 description = "Vector quantization (F32/F16/I8/PQ) and SIMD distance kernels for AI-Lake"
 license     = "MIT OR Apache-2.0"
@@ -12,7 +12,7 @@ categories  = ["algorithms", "data-structures", "science"]
 avx512 = []  # enable AVX-512 kernels; requires Rust ≥ 1.89 (intrinsics stabilised there)
 
 [dependencies]
-ailake-core = { path = "../ailake-core", version = "0.0.26" }
+ailake-core = { path = "../ailake-core", version = "0.1.0" }
 half        = { workspace = true }
 lz4_flex    = { workspace = true }
 zstd        = { workspace = true }

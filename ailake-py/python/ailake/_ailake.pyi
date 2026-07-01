@@ -49,7 +49,13 @@ class TableWriter:
         embed_fn: Optional[Callable[[list[str]], list[list[float]]]] = None,
         partition_by: Optional[str] = None,
         partition_value: Optional[str] = None,
+        partition_column_type: Optional[str] = None,
+        partition_fields: Optional[list[tuple[str, str, str]]] = None,
+        partition_values: Optional[dict[str, str]] = None,
         bm25_text_column: Optional[str] = None,
+        format_version: int = 2,
+        fts_text_columns: Optional[list[str]] = None,
+        fts_tokenizer: str = "default",
     ) -> None:
         """Open or create an AI-Lake table at *path*.
 
