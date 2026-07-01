@@ -875,20 +875,28 @@ with tempfile.TemporaryDirectory() as tmp:
         print(f"PASS (extra_columns visible via fetch_data=True): columns={col_names_ec}")
 
     # DuckDB reads the extra columns as plain Parquet columns — no ailake plugin needed
-    import duckdb
-    parquet_glob = str(pathlib.Path(path) / "**" / "data" / "*.parquet")
-    con = duckdb.connect()
-    row = con.execute(
-        f"SELECT id, category, score FROM read_parquet('{parquet_glob}') WHERE id = 7"
-    ).fetchone()
-    assert row is not None, "FAIL: DuckDB found no row with id=7"
-    assert row[0] == 7, f"FAIL: DuckDB id={row[0]}, expected 7"
-    assert row[1] == "cat_1", f"FAIL: DuckDB category={row[1]!r}, expected 'cat_1'"
-    assert abs(row[2] - 10.5) < 1e-6, f"FAIL: DuckDB score={row[2]}, expected 10.5"
-    count = con.execute(f"SELECT COUNT(*) FROM read_parquet('{parquet_glob}')").fetchone()[0]
-    assert count == N, f"FAIL: DuckDB row count={count}, expected {N}"
-    con.close()
-    print(f"PASS (extra_columns via DuckDB, no ailake plugin): id=7 → {row}, total rows={count}")
+    try:
+        import duckdb
+        HAS_DUCKDB = True
+    except ImportError:
+        HAS_DUCKDB = False
+
+    if HAS_DUCKDB:
+        parquet_glob = str(pathlib.Path(path) / "**" / "data" / "*.parquet")
+        con = duckdb.connect()
+        row = con.execute(
+            f"SELECT id, category, score FROM read_parquet('{parquet_glob}') WHERE id = 7"
+        ).fetchone()
+        assert row is not None, "FAIL: DuckDB found no row with id=7"
+        assert row[0] == 7, f"FAIL: DuckDB id={row[0]}, expected 7"
+        assert row[1] == "cat_1", f"FAIL: DuckDB category={row[1]!r}, expected 'cat_1'"
+        assert abs(row[2] - 10.5) < 1e-6, f"FAIL: DuckDB score={row[2]}, expected 10.5"
+        count = con.execute(f"SELECT COUNT(*) FROM read_parquet('{parquet_glob}')").fetchone()[0]
+        assert count == N, f"FAIL: DuckDB row count={count}, expected {N}"
+        con.close()
+        print(f"PASS (extra_columns via DuckDB, no ailake plugin): id=7 → {row}, total rows={count}")
+    else:
+        print("SKIP (extra_columns via DuckDB): duckdb not installed")
 
     # insert_async also accepts extra_columns
     async def _extra_cols_async(p: str) -> None:

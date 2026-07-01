@@ -275,7 +275,7 @@ async fn write_backfilled_file(
         &[
             VectorColumnBatch {
                 policy: primary_policy,
-                embeddings: &primary_embeddings,
+                embeddings: primary_embeddings,
             },
             VectorColumnBatch {
                 policy: new_policy,
@@ -296,7 +296,7 @@ async fn write_backfilled_file(
     let new_header = reader.read_header_for_column(&new_policy.column_name)?;
     let new_hnsw_abs = new_ailk_offset + new_header.hnsw_offset;
 
-    let primary_centroid = compute_centroid_and_radius(&primary_embeddings, primary_policy.metric);
+    let primary_centroid = compute_centroid_and_radius(primary_embeddings, primary_policy.metric);
     let new_centroid = compute_centroid_and_radius(new_embeddings, new_policy.metric);
 
     let extra = vec![ExtraVectorIndex {
