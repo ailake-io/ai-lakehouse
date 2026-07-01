@@ -114,6 +114,23 @@ pub struct DataFileEntry {
     pub first_row_id: Option<i64>,
 }
 
+impl DataFileEntry {
+    /// True iff this file was never written by the AI-Lake SDK — most likely rewritten
+    /// by a generic Iceberg engine (Spark/Trino `OPTIMIZE`/`rewrite_data_files`, DuckDB)
+    /// with no knowledge of AI-Lake.
+    ///
+    /// Every AI-Lake write path (`make_data_file_entry`, `make_data_file_entry_indexing`)
+    /// computes and stores a centroid unconditionally, even for `IndexStatus::Indexing`
+    /// files — before the HNSW build itself completes. A missing centroid is therefore a
+    /// reliable "not ours" signal, distinct from `IndexStatus::Failed` (an internal
+    /// indexing failure on a file the SDK *did* write — see `writer.rs::patch_index_failed`,
+    /// which never touches `centroid_b64`). Shared by `CompactionPlanner::plan()`,
+    /// `scanner.rs::search`, and `ailake info` so the three can't drift on the definition.
+    pub fn is_foreign(&self) -> bool {
+        self.centroid_b64.is_none()
+    }
+}
+
 /// One field from the current Iceberg table schema (Phase G).
 ///
 /// Parsed from `schemas[current-schema-id].fields` in `metadata.json`.

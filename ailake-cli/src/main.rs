@@ -993,6 +993,15 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .iter()
                 .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Failed)
                 .count();
+            // Files with no centroid were never written by the AI-Lake SDK — likely a
+            // generic Iceberg engine (Spark/Trino OPTIMIZE, DuckDB) rewrote them with no
+            // knowledge of AI-Lake. Every query against these degrades to an O(N) flat
+            // scan until `ailake compact` repairs them (see CompactionPlanner::plan).
+            let foreign: Vec<&str> = files
+                .iter()
+                .filter(|f| f.is_foreign())
+                .map(|f| f.path.as_str())
+                .collect();
 
             let location = meta
                 .properties
@@ -1031,6 +1040,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                             "files": file_count,
                             "indexed_files": ready,
                             "failed_files": failed,
+                            "foreign_files": foreign.len(),
+                            "foreign_file_paths": foreign,
                             "rows": row_count,
                             "size_bytes": size_bytes,
                             "snapshot_id": meta.current_snapshot_id,
@@ -1048,6 +1059,16 @@ async fn run(cli: Cli) -> Result<(), String> {
                         println!("files:       {file_count} ({ready} indexed, {failed} failed — compaction will rebuild)");
                     } else {
                         println!("files:       {file_count} ({ready} indexed)");
+                    }
+                    if !foreign.is_empty() {
+                        println!(
+                            "foreign:     {} file(s) with no AI-Lake index (external rewrite \
+                             suspected) — degraded to flat scan, run `ailake compact` to repair",
+                            foreign.len()
+                        );
+                        for path in &foreign {
+                            println!("               - {path}");
+                        }
                     }
                     println!("rows:        {row_count}");
                     println!("size:        {}", format_bytes(size_bytes));
