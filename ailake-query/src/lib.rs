@@ -4,6 +4,7 @@
 //! Integration layer. Depends on all data-plane crates.
 //! Public surface: TableWriter, search(), ContextAssembler, CompactionPlanner, CompactionExecutor.
 
+pub mod backfill;
 pub mod bloom;
 pub mod bm25;
 pub mod compaction;
@@ -28,6 +29,7 @@ pub use delete::{delete_rows, delete_where, PuffinWriter};
 pub use equality_delete::EqualityDeleteFilter;
 pub use mem_table::{MemTableConfig, MemTableWriter, WorkingMemoryBuffer, WorkingMemoryEntry};
 pub use memory_decay::MemoryDecayJob;
+pub use backfill::{BackfillJob, BackfillProgress, BackfillProgressFn};
 pub use migration::{EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy, ProgressFn};
 pub use pruner::{BloomPruner, VectorPruner};
 pub use scanner::{

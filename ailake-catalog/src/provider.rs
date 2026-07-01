@@ -335,6 +335,71 @@ pub trait CatalogProvider: Send + Sync {
     ) -> AilakeResult<Vec<EqualityDeleteFile>> {
         Ok(vec![])
     }
+
+    /// Add a new vector column to the table schema without rewriting data files.
+    ///
+    /// - Adds the column as Iceberg type `binary` (maps to `FIXED_LEN_BYTE_ARRAY` in Parquet).
+    /// - Stores `ailake.dim-<col>`, `ailake.metric-<col>`, `ailake.precision-<col>` in properties.
+    /// - Old files missing the column return `null` at read time (`initial-default = null`).
+    /// - Does NOT commit a snapshot or backfill embeddings — use `BackfillJob` for that.
+    ///
+    /// Returns the new `schema-id`.
+    async fn add_vector_column(
+        &self,
+        table: &TableIdent,
+        spec: &ailake_core::VectorColSpec,
+    ) -> AilakeResult<i32> {
+        use crate::schema_evolution::{AddColumnRequest, SchemaEvolution};
+        use std::collections::HashMap;
+
+        let mut props: HashMap<String, String> = HashMap::new();
+        props.insert(
+            format!("ailake.dim-{}", spec.column_name),
+            spec.dim.to_string(),
+        );
+        props.insert(
+            format!("ailake.metric-{}", spec.column_name),
+            format!("{:?}", spec.metric).to_lowercase(),
+        );
+        props.insert(
+            format!("ailake.precision-{}", spec.column_name),
+            format!("{:?}", spec.precision).to_lowercase(),
+        );
+        if spec.pre_normalize {
+            props.insert(
+                format!("ailake.pre-normalize-{}", spec.column_name),
+                "true".to_string(),
+            );
+        }
+        if let Some(m) = spec.hnsw_m {
+            props.insert(
+                format!("ailake.hnsw-m-{}", spec.column_name),
+                m.to_string(),
+            );
+        }
+        if let Some(ef) = spec.hnsw_ef_construction {
+            props.insert(
+                format!("ailake.hnsw-ef-construction-{}", spec.column_name),
+                ef.to_string(),
+            );
+        }
+
+        let evolution = SchemaEvolution::new()
+            .add_column(AddColumnRequest {
+                name: spec.column_name.clone(),
+                iceberg_type: "binary".to_string(),
+                required: false,
+                initial_default: None,
+                write_default: None,
+                doc: Some(format!(
+                    "Vector column {} dim={} metric={:?}",
+                    spec.column_name, spec.dim, spec.metric
+                )),
+            })
+            .with_properties(props);
+
+        self.evolve_schema(table, evolution).await
+    }
 }
 
 /// Vector index metadata for a single data file.
