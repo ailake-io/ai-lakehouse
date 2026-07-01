@@ -907,5 +907,48 @@ with tempfile.TemporaryDirectory() as tmp:
     print("PASS (insert_async extra_columns): commit succeeded")
 
 
+# ── 23. open_table(partition_by=..., partition_fields=..., format_version=...) ─
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = str(pathlib.Path(tmp) / "open_table_partition_test")
+
+    # open_table() used to silently drop partition_by/partition_value/
+    # partition_column_type/partition_fields/partition_values/format_version —
+    # TableWriter (raw binding) already accepted them, but Table.__init__/open_table
+    # never passed them through, raising TypeError for any caller that used them.
+    table = ailake.open_table(
+        path,
+        dim=DIM,
+        metric="cosine",
+        partition_by="agent_id",
+        partition_value="agent-42",
+        partition_column_type="string",
+        format_version=3,
+    )
+    table.insert([f"doc_{i}" for i in range(N)], [make_embedding(i) for i in range(N)])
+    snap_pt = table.commit()
+    assert snap_pt >= 0, f"FAIL: open_table partition_by commit returned {snap_pt}"
+    print(f"PASS (open_table partition_by/partition_value/format_version=3): snapshot_id={snap_pt}")
+
+    results_pt = ailake.search(path, make_embedding(0), top_k=3).to_list()
+    assert len(results_pt) > 0, "FAIL: search on partitioned open_table returned empty"
+    print(f"PASS (search on open_table-created partitioned table): {len(results_pt)} results")
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = str(pathlib.Path(tmp) / "open_table_partition_fields_test")
+
+    table_mc = ailake.open_table(
+        path,
+        dim=DIM,
+        metric="cosine",
+        partition_fields=[("agent_id", "identity", "string")],
+        partition_values={"agent_id": "agent-7"},
+    )
+    table_mc.insert([f"doc_{i}" for i in range(N)], [make_embedding(i) for i in range(N)])
+    snap_mc = table_mc.commit()
+    assert snap_mc >= 0, f"FAIL: open_table partition_fields commit returned {snap_mc}"
+    print(f"PASS (open_table partition_fields/partition_values): snapshot_id={snap_mc}")
+
+
 print()
 print("PASS: ailake Python SDK — all checks passed.")
