@@ -372,10 +372,7 @@ pub trait CatalogProvider: Send + Sync {
             );
         }
         if let Some(m) = spec.hnsw_m {
-            props.insert(
-                format!("ailake.hnsw-m-{}", spec.column_name),
-                m.to_string(),
-            );
+            props.insert(format!("ailake.hnsw-m-{}", spec.column_name), m.to_string());
         }
         if let Some(ef) = spec.hnsw_ef_construction {
             props.insert(

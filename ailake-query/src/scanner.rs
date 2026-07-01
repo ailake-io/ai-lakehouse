@@ -400,7 +400,10 @@ pub async fn search(
                          permanently ({}); serving via flat scan until the next compaction \
                          rebuilds the index",
                         file_entry.path,
-                        file_entry.index_error.as_deref().unwrap_or("no error recorded")
+                        file_entry
+                            .index_error
+                            .as_deref()
+                            .unwrap_or("no error recorded")
                     );
                 }
                 IndexStatus::Ready => {

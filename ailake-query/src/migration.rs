@@ -528,7 +528,11 @@ mod tests {
         }
 
         let files_before = catalog.list_files(&table, None).await.unwrap();
-        assert_eq!(files_before.len(), 3, "sanity: 3 files committed via Append");
+        assert_eq!(
+            files_before.len(),
+            3,
+            "sanity: 3 files committed via Append"
+        );
 
         let job = MigrationJob {
             table: table.clone(),

@@ -403,33 +403,38 @@ impl CompactionExecutor {
         // retained only for the dominant file, and only when it actually has an index
         // to reuse (needed to load its HNSW without a second round-trip); otherwise the
         // dominant-file match below falls back to a full rebuild via `compact()`.
-        let futs: Vec<_> = files
-            .iter()
-            .map(|entry| {
-                let store = self.store.clone();
-                let path = entry.path.clone();
-                let col = column.clone();
-                let is_dom = path == dom_path;
-                async move {
-                    let bytes: Bytes = store.get(&path).await?;
-                    let reader = AilakeFileReader::new(bytes.clone(), &col, dim);
-                    let has_index = reader.is_ailake_file();
-                    if is_dom && !has_index {
-                        debug!(
-                            "ailake: compact_incremental — dominant candidate {} has no \
+        let futs: Vec<_> =
+            files
+                .iter()
+                .map(|entry| {
+                    let store = self.store.clone();
+                    let path = entry.path.clone();
+                    let col = column.clone();
+                    let is_dom = path == dom_path;
+                    async move {
+                        let bytes: Bytes = store.get(&path).await?;
+                        let reader = AilakeFileReader::new(bytes.clone(), &col, dim);
+                        let has_index = reader.is_ailake_file();
+                        if is_dom && !has_index {
+                            debug!(
+                                "ailake: compact_incremental — dominant candidate {} has no \
                              AI-Lake index; will fall back to full rebuild if no HNSW to reuse",
-                            path
-                        );
+                                path
+                            );
+                        }
+                        let (batch, vecs) = reader.read_parquet()?;
+                        let retained = if is_dom && has_index {
+                            Some(bytes)
+                        } else {
+                            None
+                        };
+                        Ok::<
+                            (RecordBatch, Vec<Vec<f32>>, bool, Option<Bytes>),
+                            ailake_core::AilakeError,
+                        >((batch, vecs, is_dom, retained))
                     }
-                    let (batch, vecs) = reader.read_parquet()?;
-                    let retained = if is_dom && has_index { Some(bytes) } else { None };
-                    Ok::<
-                        (RecordBatch, Vec<Vec<f32>>, bool, Option<Bytes>),
-                        ailake_core::AilakeError,
-                    >((batch, vecs, is_dom, retained))
-                }
-            })
-            .collect();
+                })
+                .collect();
 
         // Every future above always resolves to one tuple per input file (or propagates an
         // Err via `?`) — no per-file filtering, so no emptiness check is needed given the
@@ -1262,9 +1267,8 @@ mod tests {
                         .collect()
                 })
                 .collect();
-            let batch =
-                RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(ids))])
-                    .unwrap();
+            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(ids))])
+                .unwrap();
             let bytes = AilakeFileWriter::new(policy.clone())
                 .write(&batch, &embs)
                 .unwrap();
@@ -1769,9 +1773,8 @@ mod tests {
 
         // Two small files — eligible for compaction.
         let write_file = |path: &str, ids: Vec<i32>, embs: Vec<Vec<f32>>| {
-            let batch =
-                RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(ids))])
-                    .unwrap();
+            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(ids))])
+                .unwrap();
             let bytes = AilakeFileWriter::new(policy.clone())
                 .write(&batch, &embs)
                 .unwrap();
@@ -1842,7 +1845,10 @@ mod tests {
             bloom_filters: vec![],
             equality_delete_files: vec![],
         };
-        catalog.commit_snapshot(&table, initial_snapshot).await.unwrap();
+        catalog
+            .commit_snapshot(&table, initial_snapshot)
+            .await
+            .unwrap();
 
         let planner = CompactionPlanner::new(CompactionConfig {
             min_files_to_compact: 2,

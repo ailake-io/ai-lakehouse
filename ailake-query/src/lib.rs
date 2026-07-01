@@ -21,6 +21,7 @@ pub mod schema_filler;
 pub mod writer;
 
 pub use ailake_index::IvfPqConfig;
+pub use backfill::{BackfillJob, BackfillProgress, BackfillProgressFn};
 pub use bloom::BloomFilter;
 pub use bm25::{BM25Scorer, HybridConfig, HybridFusion, IdfStats};
 pub use compaction::{CompactionConfig, CompactionExecutor, CompactionMode, CompactionPlanner};
@@ -29,7 +30,6 @@ pub use delete::{delete_rows, delete_where, PuffinWriter};
 pub use equality_delete::EqualityDeleteFilter;
 pub use mem_table::{MemTableConfig, MemTableWriter, WorkingMemoryBuffer, WorkingMemoryEntry};
 pub use memory_decay::MemoryDecayJob;
-pub use backfill::{BackfillJob, BackfillProgress, BackfillProgressFn};
 pub use migration::{EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy, ProgressFn};
 pub use pruner::{BloomPruner, VectorPruner};
 pub use scanner::{
