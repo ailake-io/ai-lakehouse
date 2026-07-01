@@ -705,6 +705,91 @@ mod tests {
         assert_eq!(files[0].path, "data/part-00001.parquet");
     }
 
+    fn make_entry(path: &str) -> DataFileEntry {
+        DataFileEntry {
+            path: path.to_string(),
+            record_count: 10,
+            file_size_bytes: 1024,
+            centroid_b64: None,
+            radius: Some(0.3),
+            hnsw_offset: Some(512),
+            hnsw_len: Some(256),
+            vector_column: Some("embedding".to_string()),
+            vector_dim: Some(4),
+            extra_vector_indexes: vec![],
+            index_status: crate::provider::IndexStatus::Ready,
+            index_error: None,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+        }
+    }
+
+    /// Documents the `Replace`/`Overwrite` contract: the new manifest becomes the
+    /// *complete* file list, with no inheritance from the previous snapshot (see the
+    /// comment above `all_manifests` in `commit_snapshot`). Callers that commit a
+    /// partial file list under `Replace` — instead of first fetching `list_files()`
+    /// and carrying forward untouched entries — silently lose those files. This bit
+    /// `CompactionExecutor::run()`/`run_deferred()` in `ailake-query`, which is why
+    /// they now rebuild the full file list before committing. `TableWriter`
+    /// (deferred index Ready-swap) and `MemoryDecayJob::run()` already followed this
+    /// contract correctly.
+    #[tokio::test]
+    async fn replace_does_not_inherit_previous_manifest() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let catalog = HadoopCatalog::new(store, "warehouse");
+        let table = TableIdent::new("default", "docs");
+        catalog.create_table(&table, &make_props()).await.unwrap();
+
+        // Snapshot 1 (Append): two files present — "small.parquet" (compaction candidate)
+        // and "big.parquet" (above target size, planner would never select it).
+        let snap1 = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![make_entry("data/small.parquet"), make_entry("data/big.parquet")],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap1).await.unwrap();
+
+        let files_before = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(files_before.len(), 2, "sanity: both files visible after Append");
+
+        // Snapshot 2 (Replace): mirrors CompactionExecutor::run() — commits ONLY the
+        // merged output of the compacted subset ("small.parquet" → "merged.parquet"),
+        // never re-listing "big.parquet" because it was outside `to_compact`.
+        let snap2 = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![make_entry("data/merged.parquet")],
+            operation: crate::provider::SnapshotOperation::Replace,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap2).await.unwrap();
+
+        let files_after = catalog.list_files(&table, None).await.unwrap();
+        let paths_after: Vec<&str> = files_after.iter().map(|f| f.path.as_str()).collect();
+
+        // By design, `Replace` does NOT inherit "big.parquet" from the previous
+        // snapshot — the committing caller is responsible for including it if it
+        // should remain visible. This is the sharp edge that bit compaction.rs.
+        assert_eq!(
+            paths_after,
+            vec!["data/merged.parquet"],
+            "Replace must reflect exactly the file list it was given, nothing inherited — \
+             files_after={paths_after:?}"
+        );
+    }
+
     #[tokio::test]
     async fn v3_assigns_first_row_id_monotonically() {
         let dir = TempDir::new().unwrap();
