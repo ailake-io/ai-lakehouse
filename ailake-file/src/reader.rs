@@ -58,6 +58,21 @@ impl AilakeFileReader {
         self.ailk_offset_from_trailer()
     }
 
+    /// True iff this file has its own AILK section specifically for `column` — i.e. a
+    /// `ailake.{column}.footer_offset` KV entry is present.
+    ///
+    /// Unlike `ailk_offset_for_column()`, this does **not** fall back to the primary
+    /// column's footer or the trailer bootstrap: those fallbacks make
+    /// `ailk_offset_for_column(...).is_ok()` return `true` for *any* AI-Lake file
+    /// regardless of `column`, which is correct for "give me an offset to read" but
+    /// wrong for "does this specific secondary column exist" — e.g. an idempotency
+    /// check before adding a new vector column to files that don't have it yet.
+    pub fn has_column_footer(&self, column: &str) -> bool {
+        let reader = ParquetVectorReader::new(self.bytes.clone(), column);
+        let col_key = format!("ailake.{column}.footer_offset");
+        matches!(reader.kv_metadata(&col_key), Ok(Some(_)))
+    }
+
     /// Bootstrap AILK offset from the `AilakeTrailer` embedded just before the Parquet footer.
     ///
     /// The `AilakeTrailer` (24 bytes) ends immediately before the Parquet footer thrift
@@ -392,5 +407,69 @@ mod tests {
         let (batch, embs) = reader.read_parquet().unwrap();
         assert_eq!(batch.num_rows(), 3);
         assert_eq!(embs.len(), 3);
+    }
+
+    /// Regression: `ailk_offset_for_column("some_col_that_was_never_written")` used to
+    /// be misused as an existence check (e.g. `BackfillJob`'s idempotency skip) — but it
+    /// falls back to the *primary* column's footer when no per-column KV key exists, so
+    /// `.is_ok()` is `true` for any AI-Lake file regardless of `column`, silently
+    /// skipping every file on the very first backfill run. `has_column_footer` checks
+    /// the per-column KV key directly, with no such fallback.
+    #[test]
+    fn has_column_footer_does_not_false_positive_on_primary_fallback() {
+        let file = write_file(3, 4);
+        let reader = AilakeFileReader::new(file, "embedding", 4);
+
+        // A column that was never written must NOT be reported as present, even though
+        // ailk_offset_for_column() incorrectly succeeds via the primary-column fallback
+        // (the exact behavior has_column_footer exists to avoid).
+        assert!(!reader.has_column_footer("embedding_v2"));
+        assert!(
+            reader.ailk_offset_for_column("embedding_v2").is_ok(),
+            "sanity: ailk_offset_for_column's primary-fallback behavior is what \
+             has_column_footer exists to avoid — if this assert ever fails, the \
+             fallback was removed and has_column_footer may be redundant"
+        );
+    }
+
+    /// True-positive counterpart: a genuine extra column written via `write_multi`
+    /// (its own `ailake.{column}.footer_offset` KV entry, per the per-column convention)
+    /// must be detected as present.
+    #[test]
+    fn has_column_footer_detects_genuine_extra_column() {
+        use crate::writer::VectorColumnBatch;
+
+        let dim = 4u32;
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![0i32, 1, 2]))])
+                .unwrap();
+        let primary_embs: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0]; 3];
+        let extra_embs: Vec<Vec<f32>> = vec![vec![0.0, 1.0, 0.0, 0.0]; 3];
+        let extra_policy = make_policy(dim);
+        let mut extra_policy = extra_policy.clone();
+        extra_policy.column_name = "embedding_v2".to_string();
+
+        let primary_policy = make_policy(dim);
+        let file_bytes = AilakeFileWriter::new(primary_policy.clone())
+            .write_multi(
+                &batch,
+                &[
+                    VectorColumnBatch {
+                        policy: &primary_policy,
+                        embeddings: &primary_embs,
+                    },
+                    VectorColumnBatch {
+                        policy: &extra_policy,
+                        embeddings: &extra_embs,
+                    },
+                ],
+            )
+            .unwrap();
+
+        let reader = AilakeFileReader::new(file_bytes, "embedding", dim);
+        assert!(reader.has_column_footer("embedding_v2"));
+        // Still correctly absent for a column that really was never written.
+        assert!(!reader.has_column_footer("embedding_v3"));
     }
 }

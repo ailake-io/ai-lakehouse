@@ -6,7 +6,7 @@
 //! `write_multi`). Commits an Overwrite snapshot per file (AtomicReplace semantics).
 //!
 //! Idempotent: files that already contain the new column (detected via
-//! `ailk_offset_for_column`) are skipped.
+//! `has_column_footer`) are skipped.
 
 use std::sync::Arc;
 
@@ -93,17 +93,25 @@ impl BackfillJob {
         let primary_policy = primary_policy_from_props(&table_meta.properties)?;
 
         let mut parent_snap = table_meta.current_snapshot_id;
+        // Running view of every file currently in the table. `Overwrite` does not
+        // inherit the previous manifest (same contract as `Replace` — see
+        // `HadoopCatalog::commit_snapshot`), so each commit below must carry the
+        // complete current state, not just the one file that changed this iteration,
+        // or every file backfilled (or not yet reached) in a prior iteration would
+        // vanish from the table on this commit.
+        let mut current_files = files.clone();
 
         for (idx, entry) in files.iter().enumerate() {
             let file_bytes = store.get(&entry.path).await?;
 
-            // Idempotency: skip if new column already has an AILK section.
+            // Idempotency: skip if new column already has its own AILK section.
+            // `has_column_footer` checks the per-column KV key directly — unlike
+            // `ailk_offset_for_column`, it doesn't fall back to the primary column's
+            // footer, which would make every AI-Lake file look like it already has
+            // the new column and skip backfilling entirely.
             let reader =
                 AilakeFileReader::new(file_bytes.clone(), &primary_policy.column_name, primary_policy.dim);
-            if reader
-                .ailk_offset_for_column(&self.new_col.column_name)
-                .is_ok()
-            {
+            if reader.has_column_footer(&self.new_col.column_name) {
                 files_skipped += 1;
                 info!(
                     "ailake backfill: skipping {} — column '{}' already present ({}/{})",
@@ -140,7 +148,13 @@ impl BackfillJob {
 
             rows_backfilled += new_entry.record_count;
 
-            // Commit Overwrite snapshot: replaces old file with new multi-column file.
+            // Swap this file's entry in place; every other file (already backfilled in
+            // a prior iteration, skipped as idempotent, or not yet reached) is carried
+            // forward unchanged.
+            current_files[idx] = new_entry;
+
+            // Commit Overwrite snapshot: replaces old file with new multi-column file,
+            // carrying forward the full current file list (see comment above the loop).
             let snap_id = new_snapshot_id();
             catalog
                 .commit_snapshot(
@@ -148,7 +162,7 @@ impl BackfillJob {
                     NewSnapshot {
                         snapshot_id: snap_id,
                         parent_snapshot_id: parent_snap,
-                        files: vec![new_entry],
+                        files: current_files.clone(),
                         operation: SnapshotOperation::Overwrite,
                         iceberg_schema: None,
                         extra_properties: std::collections::HashMap::new(),
@@ -368,4 +382,187 @@ fn primary_policy_from_props(
         partition_column_type: None,
         partition_fields: vec![],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ailake_catalog::{HadoopCatalog, TableProperties};
+    use ailake_core::{VectorMetric, VectorPrecision};
+    use ailake_store::LocalStore;
+    use arrow_array::Int32Array;
+    use arrow_schema::{DataType, Field, Schema};
+    use tempfile::TempDir;
+
+    fn make_policy(dim: u32) -> VectorStoragePolicy {
+        VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        }
+    }
+
+    /// Regression test: `BackfillJob::run` used to commit `SnapshotOperation::Overwrite`
+    /// with `files: vec![new_entry]` per loop iteration. `Overwrite` doesn't inherit the
+    /// previous manifest (same contract as `Replace` — see
+    /// `hadoop.rs::replace_does_not_inherit_previous_manifest`), so every iteration after
+    /// the first silently discarded every file backfilled by prior iterations. Uses 3
+    /// files specifically because the bug is invisible with only 1 (replacing "the only
+    /// file" with a partial list is coincidentally correct).
+    #[tokio::test]
+    async fn run_preserves_all_files_not_just_the_last() {
+        let dir = TempDir::new().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog_dir = TempDir::new().unwrap();
+        let catalog_store = Arc::new(LocalStore::new(catalog_dir.path()));
+        let catalog: Arc<dyn CatalogProvider> = Arc::new(HadoopCatalog::new(catalog_store, ""));
+        let table = TableIdent::new("ns", "tbl");
+
+        let dim = 4u32;
+        let policy = make_policy(dim);
+        catalog
+            .create_table(
+                &table,
+                &TableProperties {
+                    policy: policy.clone(),
+                    extra: std::collections::HashMap::new(),
+                    format_version: 2,
+                    partition_column_type: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("chunk_text", DataType::Utf8, false),
+        ]));
+
+        // Three files — each its own commit, so list_files() returns 3 entries.
+        let mut parent_snap = None;
+        for (i, (ids, texts)) in [
+            (vec![0i32, 1], vec!["a0", "a1"]),
+            (vec![2, 3], vec!["b0", "b1"]),
+            (vec![4, 5], vec!["c0", "c1"]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let embs: Vec<Vec<f32>> = ids.iter().map(|&v| vec![v as f32; dim as usize]).collect();
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int32Array::from(ids.clone())),
+                    Arc::new(StringArray::from(texts)),
+                ],
+            )
+            .unwrap();
+            let bytes = AilakeFileWriter::new(policy.clone())
+                .write(&batch, &embs)
+                .unwrap();
+            let path = format!("data/old_{i}.parquet");
+            store.put(&path, bytes.clone()).await.unwrap();
+
+            let centroid = compute_centroid_and_radius(&embs, VectorMetric::Cosine);
+            let reader = AilakeFileReader::new(bytes.clone(), "embedding", dim);
+            let header = reader.read_header().unwrap();
+            let ailk_start = reader.ailk_offset().unwrap();
+            let entry = ailake_catalog::make_data_file_entry(
+                &path,
+                ids.len() as u64,
+                bytes.len() as u64,
+                &centroid,
+                VectorIndexInfo {
+                    column: "embedding",
+                    dim,
+                    hnsw_offset: ailk_start + header.hnsw_offset,
+                    hnsw_len: header.hnsw_len,
+                },
+            );
+            let snap_id = new_snapshot_id();
+            catalog
+                .commit_snapshot(
+                    &table,
+                    NewSnapshot {
+                        snapshot_id: snap_id,
+                        parent_snapshot_id: parent_snap,
+                        files: vec![entry],
+                        operation: SnapshotOperation::Append,
+                        iceberg_schema: None,
+                        extra_properties: std::collections::HashMap::new(),
+                        bloom_filters: vec![],
+                        equality_delete_files: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+            parent_snap = Some(snap_id);
+        }
+
+        let files_before = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(files_before.len(), 3, "sanity: 3 files committed via Append");
+
+        let job = BackfillJob {
+            table: table.clone(),
+            text_column: "chunk_text".into(),
+            new_col: ailake_core::VectorColSpec {
+                column_name: "embedding_v2".into(),
+                dim,
+                metric: VectorMetric::Cosine,
+                precision: VectorPrecision::F16,
+                pre_normalize: false,
+                hnsw_m: None,
+                hnsw_ef_construction: None,
+            },
+            embed_fn: Arc::new(|texts: &[String]| {
+                Ok(texts.iter().map(|_| vec![9.0f32; 4]).collect())
+            }),
+            batch_size: 10,
+            on_progress: None,
+        };
+        job.run(catalog.clone(), store.clone()).await.unwrap();
+
+        let files_after = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(
+            files_after.len(),
+            3,
+            "BUG: expected all 3 backfilled files to remain visible, got {:?}",
+            files_after.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        let total_rows: u64 = files_after.iter().map(|f| f.record_count).sum();
+        assert_eq!(total_rows, 6, "all 6 original rows must survive backfill");
+
+        // Every file must actually have been rewritten (not skipped as a false-positive
+        // "already has the column" idempotency match) and be independently readable
+        // with both columns present.
+        for entry in &files_after {
+            assert!(
+                entry.path.starts_with("data/backfill-"),
+                "BUG: {} was never backfilled (idempotency check false-skipped it)",
+                entry.path
+            );
+            let bytes = store.get(&entry.path).await.unwrap();
+            let reader = AilakeFileReader::new(bytes, "embedding", dim);
+            assert!(
+                reader.has_column_footer("embedding_v2"),
+                "file {} missing backfilled column",
+                entry.path
+            );
+            let (batch, _) = reader.read_parquet().unwrap();
+            assert_eq!(batch.num_rows(), 2);
+        }
+    }
 }
