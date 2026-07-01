@@ -112,7 +112,10 @@ jobs:
               # Iceberg Spark extension + HadoopCatalog (no HMS needed)
               .config(
                   "spark.jars.packages",
-                  "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2",
+                  # 1.7.0, not 1.5.2: format-version=3 (partition-spec + V3 statistics)
+                  # support was added in iceberg-java 1.6+ — the V3 read-back check below
+                  # needs this to actually exercise the V3 code path, not just parse V2.
+                  "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.7.0",
               )
               .config(
                   "spark.sql.extensions",
@@ -150,6 +153,90 @@ jobs:
           spark.stop()
           EOF
 
+      - name: Build V3 partitioned fixture
+        env:
+          COMPAT_FIXTURE_PATH: ./compat-fixture-v3
+          COMPAT_TABLE_NAME: compat_test_v3
+          COMPAT_FORMAT_VERSION: "3"
+          COMPAT_PARTITION_BY_ID: "true"
+        run: cargo run --example write_fixture -p ailake-query
+
+      - name: Check Spark + Iceberg V3 partitioned table (SQL query)
+        # Regression coverage for two bugs that used to make every V3 AI-Lake table
+        # unreadable by standard Iceberg engines: (1) metadata.json's V3 statistics
+        # blob used the wrong JSON key (blob-file-references instead of the
+        # spec-correct blob-metadata), which iceberg-java's parser hard-errored on;
+        # (2) the partition spec's source-id could point at the wrong schema
+        # field-id after the real first write assigned different field-ids than the
+        # bootstrap schema assumed, which Spark rejected as
+        # "Cannot create identity partition sourced from different field in schema".
+        # Before both fixes, opening this table below would fail outright.
+        run: |
+          unset SPARK_HOME
+          export PYSPARK_PYTHON=/tmp/spark-venv/bin/python3
+          export SPARK_LOCAL_IP=127.0.0.1
+          /tmp/spark-venv/bin/python3 - <<'EOF'
+          import pathlib
+          from pyspark.sql import SparkSession
+
+          fixture_dir = pathlib.Path("./compat-fixture-v3").resolve()
+          expected = int((fixture_dir / "fixture_rows.txt").read_text().strip())
+
+          spark = (
+              SparkSession.builder
+              .appName("ailake-iceberg-v3-compat")
+              .master("local[2]")
+              .config("spark.driver.memory", "1g")
+              .config("spark.sql.shuffle.partitions", "2")
+              .config("spark.sql.sources.v2.pushAggregation", "false")
+              .config(
+                  "spark.jars.packages",
+                  "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.7.0",
+              )
+              .config(
+                  "spark.sql.extensions",
+                  "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+              )
+              .config("spark.sql.catalog.ailake_v3", "org.apache.iceberg.spark.SparkCatalog")
+              .config("spark.sql.catalog.ailake_v3.type", "hadoop")
+              .config("spark.sql.catalog.ailake_v3.warehouse", f"file://{fixture_dir}")
+              .getOrCreate()
+          )
+          spark.sparkContext.setLogLevel("ERROR")
+
+          # Table open + scan succeeding at all is the regression check: both fixed
+          # bugs made this throw before either fix landed.
+          count = spark.sql(
+              "SELECT count(*) AS n FROM ailake_v3.default.compat_test_v3"
+          ).collect()[0][0]
+          assert count == expected, f"FAIL: V3 Iceberg SQL count {count} != {expected}"
+
+          props = {
+              r["key"]: r["value"]
+              for r in spark.sql(
+                  "SHOW TBLPROPERTIES ailake_v3.default.compat_test_v3"
+              ).collect()
+          }
+          fmt = props.get("format-version")
+          assert fmt == "3", f"FAIL: expected format-version=3, got {fmt!r} ({props})"
+
+          print(f"PASS (V3 Iceberg SQL): {count} rows, format-version={fmt}")
+          spark.stop()
+          EOF
+
+  # NOTE: no V3 read-back check in compat-trino (below) — verified locally (real
+  # containers, not guessed) that it isn't currently achievable with this job's stack:
+  #   - `tabulario/iceberg-rest` (both :0.10.0 and :latest, checked 2026-07) fails
+  #     loading a V3 table server-side with "Cannot read unsupported version 3" —
+  #     the REST *server's* bundled iceberg-java predates V3 support, independent of
+  #     the Trino client version.
+  #   - Trino 460's Iceberg connector rejects `iceberg.catalog.type=hadoop` outright
+  #     ("Invalid value 'hadoop' for type CatalogType") — recent Trino dropped the
+  #     direct Hadoop-catalog type this job would need to bypass the REST server.
+  # Revisit once tabulario/iceberg-rest ships V3 support, or by switching this job to
+  # a JDBC/Nessie catalog. Spark (above) already exercises the same fixed bugs
+  # (V3 stats blob-metadata key, partition-spec source-id remap) via HadoopCatalog
+  # directly, with no REST server in the path.
   compat-trino:
     name: compat-trino
     runs-on: ubuntu-latest
