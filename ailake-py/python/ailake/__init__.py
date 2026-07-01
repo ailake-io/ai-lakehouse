@@ -378,6 +378,7 @@ class Table:
         self,
         texts: list[str],
         embeddings: Optional[_Embeddings] = None,
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> "Table":
         """Buffer a batch for writing.  Call ``commit()`` to persist.
 
@@ -386,6 +387,9 @@ class Table:
             embeddings: ``list[list[float]]`` or any array with a ``.tolist()``
                         method (numpy, torch, etc.).  May be omitted when
                         *embed_fn* was passed to ``__init__``.
+            extra_columns: additional tabular columns, e.g.
+                           ``{"id": [...], "category": [...]}``. Column type is
+                           inferred from the first element (bool/float/int/str).
         """
         if embeddings is not None:
             _emb: list[list[float]] | None = (
@@ -395,7 +399,7 @@ class Table:
             )
         else:
             _emb = None
-        self._writer.write_batch(texts, _emb)
+        self._writer.write_batch(texts, _emb, extra_columns)
         return self
 
     def commit(self) -> int:
@@ -409,6 +413,7 @@ class Table:
         self,
         texts: list[str],
         embeddings: _Embeddings,
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> "Table":
         """Deferred-index write — Parquet persisted immediately (~200k vec/s).
 
@@ -419,19 +424,21 @@ class Table:
         Args:
             texts: one string per row.
             embeddings: ``list[list[float]]`` or any array with a ``.tolist()`` method.
+            extra_columns: additional tabular columns — see :meth:`insert`.
         """
         _emb: list[list[float]] = (
             embeddings.tolist()  # type: ignore[union-attr]
             if hasattr(embeddings, "tolist")
             else [list(row) for row in embeddings]
         )
-        self._writer.write_batch_auto_deferred(texts, _emb)
+        self._writer.write_batch_auto_deferred(texts, _emb, extra_columns)
         return self
 
     async def write_batch_auto_deferred_async(
         self,
         texts: list[str],
         embeddings: _Embeddings,
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> "Table":
         """Async variant of :meth:`write_batch_auto_deferred`."""
         _emb: list[list[float]] = (
@@ -440,13 +447,16 @@ class Table:
             else [list(row) for row in embeddings]
         )
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._writer.write_batch_auto_deferred, texts, _emb)
+        await loop.run_in_executor(
+            None, self._writer.write_batch_auto_deferred, texts, _emb, extra_columns
+        )
         return self
 
     async def insert_async(
         self,
         texts: list[str],
         embeddings: _Embeddings,
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> "Table":
         """Async variant of :meth:`insert` — runs write_batch in a thread executor."""
         _emb: list[list[float]] = (
@@ -455,7 +465,7 @@ class Table:
             else [list(row) for row in embeddings]
         )
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._writer.write_batch, texts, _emb)
+        await loop.run_in_executor(None, self._writer.write_batch, texts, _emb, extra_columns)
         return self
 
     async def commit_async(self) -> int:

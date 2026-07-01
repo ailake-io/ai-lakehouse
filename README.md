@@ -78,6 +78,16 @@ docker compose -f tests/docker/compose-demo.yml --profile airflow up -d    # Air
 
 See [`tests/docker/`](./tests/docker/) for compose file details.
 
+> **Updating an existing demo stack**: the fixture data lives in the named
+> volume `demo-data`, which survives `docker compose build` / `up` across
+> code changes — only `down -v` (or deleting the volume) removes it. The
+> container's `entrypoint.sh` detects this automatically: it stamps a
+> `FIXTURE_VERSION` (from `init_demo.py`) onto the volume after generation,
+> compares it on every startup, and wipes + regenerates the fixtures when the
+> running image's version doesn't match what's on disk — so `docker compose
+> build && docker compose up -d` alone is enough to pick up fixture changes.
+> No manual `down -v` needed unless you're debugging the entrypoint itself.
+
 ---
 
 ## Quick orientation
