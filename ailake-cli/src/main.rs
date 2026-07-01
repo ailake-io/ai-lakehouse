@@ -999,7 +999,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             // scan until `ailake compact` repairs them (see CompactionPlanner::plan).
             let foreign: Vec<&str> = files
                 .iter()
-                .filter(|f| f.centroid_b64.is_none())
+                .filter(|f| f.is_foreign())
                 .map(|f| f.path.as_str())
                 .collect();
 

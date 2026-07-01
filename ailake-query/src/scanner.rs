@@ -379,23 +379,53 @@ pub async fn search(
             || !eq_del_filter.is_empty();
 
         if file_entry.index_status == IndexStatus::Indexing || !reader.is_ailake_file() {
-            if file_entry.index_status == IndexStatus::Indexing {
-                flat_scan_deferred += 1;
-                debug!(
-                    "ailake: flat scan fallback for {} — index build in progress \
-                     (deferred write, expected to resolve once background job completes)",
-                    file_entry.path
-                );
-            } else {
-                flat_scan_unexpected += 1;
-                warn!(
-                    "ailake: flat scan fallback for {} — file has no AI-Lake index and is \
-                     not in IndexStatus::Indexing; likely rewritten by a generic Iceberg \
-                     engine (OPTIMIZE / rewrite_data_files) with no knowledge of AI-Lake. \
-                     Results are still correct (exact O(N) scan), but degraded until this \
-                     file is recompacted by the AI-Lake SDK",
-                    file_entry.path
-                );
+            match file_entry.index_status {
+                IndexStatus::Indexing => {
+                    flat_scan_deferred += 1;
+                    debug!(
+                        "ailake: flat scan fallback for {} — index build in progress \
+                         (deferred write, expected to resolve once background job completes)",
+                        file_entry.path
+                    );
+                }
+                IndexStatus::Failed => {
+                    // An internal indexing failure, not a foreign write — the file still
+                    // has a real (foreign-write-style) centroid_b64 from make_data_file_entry
+                    // *_indexing, since only index_status/index_error get patched on failure
+                    // (see writer.rs::patch_index_failed). Attributing this to an external
+                    // engine would send on-call looking for a Spark job that never ran.
+                    flat_scan_unexpected += 1;
+                    warn!(
+                        "ailake: flat scan fallback for {} — background index build failed \
+                         permanently ({}); serving via flat scan until the next compaction \
+                         rebuilds the index",
+                        file_entry.path,
+                        file_entry.index_error.as_deref().unwrap_or("no error recorded")
+                    );
+                }
+                IndexStatus::Ready => {
+                    // Ready but no loadable index/footer: either a genuine foreign write
+                    // (no centroid_b64 — see CompactionPlanner::plan's detection) or a rare
+                    // internally-inconsistent state (Ready without ever getting an index).
+                    flat_scan_unexpected += 1;
+                    if file_entry.is_foreign() {
+                        warn!(
+                            "ailake: flat scan fallback for {} — file has no AI-Lake index \
+                             and no centroid; likely rewritten by a generic Iceberg engine \
+                             (OPTIMIZE / rewrite_data_files) with no knowledge of AI-Lake. \
+                             Results are still correct (exact O(N) scan), but degraded until \
+                             this file is recompacted by the AI-Lake SDK",
+                            file_entry.path
+                        );
+                    } else {
+                        warn!(
+                            "ailake: flat scan fallback for {} — marked Ready but has no \
+                             loadable AI-Lake index despite a recorded centroid; internal \
+                             inconsistency, not an external rewrite. Run compaction to rebuild",
+                            file_entry.path
+                        );
+                    }
+                }
             }
             let (raw_batch, raw_vectors) = reader.read_parquet()?;
             // Phase G: inject columns added via schema evolution with initial_default values.
