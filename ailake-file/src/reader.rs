@@ -273,10 +273,13 @@ impl AilakeFileReader {
         Ok(Some(self.bytes.slice(blob_start..blob_end)))
     }
 
-    /// Verify the positional invariant: Parquet record_count == HNSW node_count.
+    /// Verify the positional invariant: Parquet record_count == index node_count.
+    ///
+    /// Dispatches via `load_any_index()` (HNSW or IVF-PQ, per `header.flags`) — unlike
+    /// `load_index()`, which always assumes HNSW and errors out on an IVF-PQ-indexed file.
     pub fn verify_integrity(&self) -> AilakeResult<()> {
         let header = self.read_header()?;
-        let index = self.load_index()?;
+        let index = self.load_any_index()?;
         let reader = ParquetVectorReader::new(self.bytes.clone(), &self.vector_column);
         let parquet_count = reader.record_count()?;
 

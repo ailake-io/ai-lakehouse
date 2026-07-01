@@ -1246,6 +1246,12 @@ pub(crate) async fn build_and_patch_index(
     let hnsw_abs_offset = ailk_start + header.hnsw_offset;
     let hnsw_len = header.hnsw_len;
 
+    // Positional invariant check — see `compaction.rs::compact()` for rationale. This is
+    // the single build point shared by every deferred-index path (plain deferred insert
+    // via write_batch_deferred, and compact_deferred's background job), so checking here
+    // covers both instead of requiring each caller to remember it.
+    full_reader.verify_integrity()?;
+
     // Overwrite the Parquet-only file with the full AILK version.
     store.put(&file_path, full_bytes).await?;
 

@@ -198,6 +198,14 @@ let hnsw: HnswIndex = bincode::deserialize(&mmap[..])?;
 
 **Trade-off explícito**: não há índice HNSW global compartilhado entre arquivos. A busca abre múltiplos índices (um por arquivo "quente") e mescla resultados. Isso é compensado pelo Particionamento Geométrico — em vez de buscar em 10.000 índices, busca em 50-100.
 
+**Compatibilidade de leitura ≠ compatibilidade de escrita** (ADR-018, `docs/contributing/DECISIONS.md`): a garantia de leitor Iceberg padrão (§12) não implica que engines genéricos possam escrever com segurança sobre o índice. Se `OPTIMIZE`/`rewrite_data_files` do Spark/Trino (ou qualquer maintenance job Iceberg-padrão) reescrever um arquivo AI-Lake, o resultado é Parquet válido, mas **sem rodapé AILK e sem `centroid`/`radius` no manifesto** — esse par vive em `key_metadata` (campo reservado do Iceberg pra chave de criptografia), que escritores genéricos nunca populam. Isso não corrompe a tabela nem retorna resultado errado, mas degrada:
+
+- **Busca**: cai pra flat scan O(N) exato nesse arquivo (`scanner.rs`), com `warn!` visível (não mais silencioso) e agregado ao fim de cada busca.
+- **Compaction**: `CompactionPlanner::plan()` detecta arquivo sem `centroid_b64` (= nunca escrito pelo SDK AI-Lake) e prioriza reindex, ignorando os limiares de batching (`min_files_to_compact`/tamanho) — um único arquivo "foreign" já dispara reparo.
+- **`ailake info`** reporta arquivos "foreign" (sem índice) pra visibilidade proativa, sem depender de uma busca lenta pra descobrir o drift.
+
+A divisão de trabalho documentada continua valendo: SDK AI-Lake (ou plugins Spark/Trino/Flink) escreve; engines genéricos só leem com segurança. Escrita cruzada é suportada (não quebra), mas degrada até o próximo `ailake compact`.
+
 ### 5B — Alinhamento de Linhas e Consistência ACID
 
 **Invariante**: `parquet_row_groups[row_N].embedding == hnsw_graph.lookup_by_row_id(N)`
@@ -205,7 +213,7 @@ let hnsw: HnswIndex = bincode::deserialize(&mmap[..])?;
 Essa garantia é mantida por:
 
 1. **Escrita unificada**: o Parquet e o HNSW são escritos no mesmo arquivo, em uma única transação de I/O. Se a escrita falhar a qualquer momento, o arquivo é descartado antes do commit ao manifesto Iceberg.
-2. **Verificação de integridade**: ao abrir, o leitor verifica que `parquet_record_count == hnsw_graph.node_count`.
+2. **Verificação de integridade**: `AilakeFileReader::verify_integrity()` compara `parquet_record_count == hnsw_graph.node_count == header.record_count`. Roda após todo merge de compaction, antes do commit ao catálogo (`compact()`/`compact_incremental()` em `ailake-query/src/compaction.rs`) — falha o build em vez de deixar um arquivo inconsistente chegar ao manifesto.
 3. **Deletes lógicos**: registros deletados via Position Delete Files também invalidam o resultado HNSW correspondente no leitor (filtro pós-busca).
 
 ### 5C — Tipo Lógico `VECTOR`
