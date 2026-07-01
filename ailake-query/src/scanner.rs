@@ -330,6 +330,15 @@ pub async fn search(
     let mut raw_candidates: Vec<(RowId, f32, String, String)> = Vec::new();
     let mut all_results: Vec<SearchResult> = Vec::new();
 
+    // Observability for the flat-scan fallback below: `deferred` counts files still
+    // being indexed by our own deferred-write path (expected, transient). `unexpected`
+    // counts files with no AI-Lake index that are NOT in that state — most likely
+    // rewritten by a generic Iceberg engine (Spark/Trino OPTIMIZE, DuckDB) with no
+    // knowledge of AI-Lake. Those files still return correct results (flat scan is
+    // exact), just O(N) instead of O(log N), and silently forever unless recompacted.
+    let mut flat_scan_deferred = 0usize;
+    let mut flat_scan_unexpected = 0usize;
+
     for file_entry in &surviving_files {
         let file_bytes: Bytes = store.get(&file_entry.path).await?;
         let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
@@ -370,10 +379,24 @@ pub async fn search(
             || !eq_del_filter.is_empty();
 
         if file_entry.index_status == IndexStatus::Indexing || !reader.is_ailake_file() {
-            debug!(
-                "ailake: flat scan fallback for {} (index_status={:?})",
-                file_entry.path, file_entry.index_status
-            );
+            if file_entry.index_status == IndexStatus::Indexing {
+                flat_scan_deferred += 1;
+                debug!(
+                    "ailake: flat scan fallback for {} — index build in progress \
+                     (deferred write, expected to resolve once background job completes)",
+                    file_entry.path
+                );
+            } else {
+                flat_scan_unexpected += 1;
+                warn!(
+                    "ailake: flat scan fallback for {} — file has no AI-Lake index and is \
+                     not in IndexStatus::Indexing; likely rewritten by a generic Iceberg \
+                     engine (OPTIMIZE / rewrite_data_files) with no knowledge of AI-Lake. \
+                     Results are still correct (exact O(N) scan), but degraded until this \
+                     file is recompacted by the AI-Lake SDK",
+                    file_entry.path
+                );
+            }
             let (raw_batch, raw_vectors) = reader.read_parquet()?;
             // Phase G: inject columns added via schema evolution with initial_default values.
             let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
@@ -472,6 +495,23 @@ pub async fn search(
                 });
             }
         }
+    }
+
+    if flat_scan_unexpected > 0 {
+        warn!(
+            "ailake: search degraded — {}/{} files scanned without an AI-Lake index \
+             (unexpected — likely external rewrites; {} more in expected deferred-indexing \
+             state). Run compaction to restore O(log N) search on affected files",
+            flat_scan_unexpected,
+            surviving_files.len(),
+            flat_scan_deferred
+        );
+    } else if flat_scan_deferred > 0 {
+        debug!(
+            "ailake: search — {}/{} files scanned via flat fallback (deferred indexing)",
+            flat_scan_deferred,
+            surviving_files.len()
+        );
     }
 
     // Hybrid BM25 fusion: applied after all HNSW candidates are collected.

@@ -82,24 +82,65 @@ impl CompactionPlanner {
     /// (cheapest to read), and caps the selection at `max_files_per_pass`. This
     /// tiered approach prevents a single pass from compacting the entire table into
     /// memory when thousands of small files exist.
+    ///
+    /// Foreign-write detection: every file written by the AI-Lake SDK always carries a
+    /// `centroid_b64` (see `make_data_file_entry`/`make_data_file_entry_indexing` —
+    /// centroid is computed and stored even for `IndexStatus::Indexing` files, before
+    /// the HNSW build itself completes). A manifest entry with no centroid was never
+    /// produced by AI-Lake — almost certainly a generic Iceberg engine (Spark/Trino
+    /// `OPTIMIZE` / `rewrite_data_files`, DuckDB) rewrote the file with no knowledge of
+    /// AI-Lake. Every query against it silently degrades to an O(N) flat scan (see the
+    /// `flat_scan_unexpected` warning in `scanner.rs::search`). These files bypass both
+    /// the size filter and `min_files_to_compact` — a single such file is worth
+    /// repairing on its own; it shouldn't wait for enough small files to accumulate.
     pub fn plan(&self, files: &[DataFileEntry]) -> Vec<DataFileEntry> {
-        let mut candidates: Vec<DataFileEntry> = files
+        let mut foreign: Vec<DataFileEntry> = files
             .iter()
-            .filter(|f| f.file_size_bytes < self.config.target_file_size_bytes)
+            .filter(|f| f.centroid_b64.is_none())
             .cloned()
             .collect();
-        if candidates.len() < self.config.min_files_to_compact {
-            debug!(
-                "ailake: compaction skipped — {} eligible files < min_files_to_compact={}",
-                candidates.len(),
-                self.config.min_files_to_compact
+        if !foreign.is_empty() {
+            warn!(
+                "ailake: compaction plan — {} file(s) with no AI-Lake index detected \
+                 (likely a foreign/external rewrite) — prioritizing for reindex: {:?}",
+                foreign.len(),
+                foreign.iter().map(|f| f.path.as_str()).collect::<Vec<_>>()
             );
-            return vec![];
         }
+
+        let foreign_paths: std::collections::HashSet<&str> =
+            foreign.iter().map(|f| f.path.as_str()).collect();
+        let mut size_candidates: Vec<DataFileEntry> = files
+            .iter()
+            .filter(|f| {
+                f.file_size_bytes < self.config.target_file_size_bytes
+                    && !foreign_paths.contains(f.path.as_str())
+            })
+            .cloned()
+            .collect();
+
+        if size_candidates.len() < self.config.min_files_to_compact {
+            if foreign.is_empty() {
+                debug!(
+                    "ailake: compaction skipped — {} eligible files < min_files_to_compact={}",
+                    size_candidates.len(),
+                    self.config.min_files_to_compact
+                );
+                return vec![];
+            }
+            // Not enough small files to justify a size-based pass on their own, but
+            // foreign files still need repair regardless of batching thresholds.
+            size_candidates.clear();
+        }
+
         // Sort smallest-first so each pass handles the cheapest files first.
         // This bounds peak RAM to max_files_per_pass * avg_small_file_size.
-        candidates.sort_unstable_by_key(|f| f.file_size_bytes);
-        candidates.truncate(self.config.max_files_per_pass);
+        size_candidates.sort_unstable_by_key(|f| f.file_size_bytes);
+        // Foreign files take priority; size-based candidates fill the rest of the pass.
+        foreign.extend(size_candidates);
+        foreign.truncate(self.config.max_files_per_pass);
+        let candidates = foreign;
+
         let total_bytes: u64 = candidates.iter().map(|f| f.file_size_bytes).sum();
         info!(
             "ailake: compaction plan — {} files ({} bytes) → 1 merged file",
@@ -175,6 +216,12 @@ impl CompactionExecutor {
     }
 
     /// Read all input files in parallel, returning ordered (batch, embeddings) pairs.
+    ///
+    /// `read_parquet()` decodes the vector column straight from Parquet and never
+    /// touches the AILK footer, so a file missing its index (external-engine rewrite,
+    /// or still `IndexStatus::Indexing`) still holds real data — it must be read like
+    /// any other input, not dropped. The merged output rebuilds a fresh index for
+    /// every row regardless, so a missing per-file index costs nothing here.
     async fn read_files_parallel(
         &self,
         files: &[DataFileEntry],
@@ -188,17 +235,17 @@ impl CompactionExecutor {
                 let bytes: Bytes = store.get(&path).await?;
                 let reader = AilakeFileReader::new(bytes, &column, dim);
                 if !reader.is_ailake_file() {
-                    debug!("ailake: compaction skipping {} — not an AI-Lake file", path);
-                    return Ok::<Option<(RecordBatch, Vec<Vec<f32>>)>, ailake_core::AilakeError>(
-                        None,
+                    debug!(
+                        "ailake: compaction reading {} without an AI-Lake index \
+                         (external write or indexing in progress) — data still merged",
+                        path
                     );
                 }
                 let pair = reader.read_parquet()?;
-                Ok(Some(pair))
+                Ok::<(RecordBatch, Vec<Vec<f32>>), ailake_core::AilakeError>(pair)
             }
         });
-        let results = try_join_all(futs).await?;
-        Ok(results.into_iter().flatten().collect())
+        try_join_all(futs).await
     }
 
     /// Merge `files` into a single new file at `output_path`.
@@ -271,6 +318,12 @@ impl CompactionExecutor {
         let reader = AilakeFileReader::new(file_bytes, &self.policy.column_name, self.policy.dim);
         let header = reader.read_header()?;
         let ailk_start = reader.ailk_offset()?;
+
+        // Positional invariant check: parquet_count == hnsw_node_count == header.record_count.
+        // Catches a mismatched merge before it's committed to the catalog rather than
+        // surfacing as a wrong search result (or the invariant-violated error path in
+        // scanner.rs) later.
+        reader.verify_integrity()?;
 
         // Preserve row-ID continuity: merged file inherits the minimum first_row_id of
         // its sources so commit_snapshot doesn't allocate fresh IDs and grow next_row_id.
@@ -348,8 +401,14 @@ impl CompactionExecutor {
         let dim = self.policy.dim;
         let dom_path = files[dom_idx].path.clone();
 
-        // Read all files in parallel. Retain raw bytes only for the dominant file
-        // (needed to load its HNSW without a second round-trip).
+        // Read all files in parallel. `read_parquet()` decodes the vector column
+        // directly from Parquet and never touches the AILK footer, so every file's
+        // rows are read regardless of whether it has an AI-Lake index — a file
+        // missing its footer (external-engine rewrite, or still `IndexStatus::Indexing`)
+        // still holds real data and must not be dropped from the merge. Raw bytes are
+        // retained only for the dominant file, and only when it actually has an index
+        // to reuse (needed to load its HNSW without a second round-trip); otherwise the
+        // dominant-file match below falls back to a full rebuild via `compact()`.
         let futs: Vec<_> = files
             .iter()
             .map(|entry| {
@@ -360,19 +419,20 @@ impl CompactionExecutor {
                 async move {
                     let bytes: Bytes = store.get(&path).await?;
                     let reader = AilakeFileReader::new(bytes.clone(), &col, dim);
-                    if !reader.is_ailake_file() {
+                    let has_index = reader.is_ailake_file();
+                    if is_dom && !has_index {
                         debug!(
-                            "ailake: compact_incremental skipping {} — not an AI-Lake file",
+                            "ailake: compact_incremental — dominant candidate {} has no \
+                             AI-Lake index; will fall back to full rebuild if no HNSW to reuse",
                             path
                         );
-                        return Ok::<
-                            Option<(RecordBatch, Vec<Vec<f32>>, bool, Option<Bytes>)>,
-                            ailake_core::AilakeError,
-                        >(None);
                     }
                     let (batch, vecs) = reader.read_parquet()?;
-                    let retained = if is_dom { Some(bytes) } else { None };
-                    Ok(Some((batch, vecs, is_dom, retained)))
+                    let retained = if is_dom && has_index { Some(bytes) } else { None };
+                    Ok::<
+                        Option<(RecordBatch, Vec<Vec<f32>>, bool, Option<Bytes>)>,
+                        ailake_core::AilakeError,
+                    >(Some((batch, vecs, is_dom, retained)))
                 }
             })
             .collect();
@@ -473,6 +533,10 @@ impl CompactionExecutor {
         let reader = AilakeFileReader::new(file_bytes, &self.policy.column_name, self.policy.dim);
         let header = reader.read_header()?;
         let ailk_start = reader.ailk_offset()?;
+
+        // Positional invariant check — see `compact()` for rationale. Especially relevant
+        // here since the index is grown incrementally (insert_node) rather than rebuilt.
+        reader.verify_integrity()?;
 
         // Dominant file goes first in the merged output, so the merged file's first
         // logical row was the dominant file's first row.  Use its first_row_id so
@@ -614,11 +678,22 @@ impl CompactionExecutor {
             .compact_incremental(&to_compact, &output_path)
             .await?;
 
-        // Commit: add merged file, remove input files (via Replace snapshot)
+        // Commit: add merged file, remove input files (via Replace snapshot).
+        // `Replace` does not inherit the previous manifest (see HadoopCatalog::commit_snapshot),
+        // so files outside this pass (e.g. above target_file_size_bytes, or beyond
+        // max_files_per_pass) must be carried forward explicitly or they vanish from the table.
+        let compacted_paths: std::collections::HashSet<&str> =
+            to_compact.iter().map(|f| f.path.as_str()).collect();
+        let mut files: Vec<DataFileEntry> = all_files
+            .into_iter()
+            .filter(|f| !compacted_paths.contains(f.path.as_str()))
+            .collect();
+        files.push(merged.clone());
+
         let snapshot = NewSnapshot {
             snapshot_id: ailake_catalog::new_snapshot_id(),
             parent_snapshot_id: None,
-            files: vec![merged.clone()],
+            files,
             operation: SnapshotOperation::Replace,
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
@@ -671,10 +746,20 @@ impl CompactionExecutor {
             .await?;
 
         // Commit immediately: merged file in Indexing state replaces input files.
+        // See `run()` above — `Replace` doesn't inherit the previous manifest, so
+        // untouched files (outside `to_compact`) must be carried forward explicitly.
+        let compacted_paths: std::collections::HashSet<&str> =
+            to_compact.iter().map(|f| f.path.as_str()).collect();
+        let mut files: Vec<DataFileEntry> = all_files
+            .into_iter()
+            .filter(|f| !compacted_paths.contains(f.path.as_str()))
+            .collect();
+        files.push(merged.clone());
+
         let snapshot = NewSnapshot {
             snapshot_id: ailake_catalog::new_snapshot_id(),
             parent_snapshot_id: None,
-            files: vec![merged.clone()],
+            files,
             operation: SnapshotOperation::Replace,
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
@@ -731,7 +816,7 @@ mod tests {
                 path: format!("file-{i}.parquet"),
                 record_count: 10,
                 file_size_bytes: 100,
-                centroid_b64: None,
+                centroid_b64: Some("AAAA".into()),
                 radius: None,
                 hnsw_offset: None,
                 hnsw_len: None,
@@ -762,7 +847,7 @@ mod tests {
                 path: "small.parquet".into(),
                 record_count: 5,
                 file_size_bytes: 500,
-                centroid_b64: None,
+                centroid_b64: Some("AAAA".into()),
                 radius: None,
                 hnsw_offset: None,
                 hnsw_len: None,
@@ -781,7 +866,7 @@ mod tests {
                 path: "large.parquet".into(),
                 record_count: 5000,
                 file_size_bytes: 200_000_000,
-                centroid_b64: None,
+                centroid_b64: Some("AAAA".into()),
                 radius: None,
                 hnsw_offset: None,
                 hnsw_len: None,
@@ -800,7 +885,7 @@ mod tests {
                 path: "also-small.parquet".into(),
                 record_count: 5,
                 file_size_bytes: 800,
-                centroid_b64: None,
+                centroid_b64: Some("AAAA".into()),
                 radius: None,
                 hnsw_offset: None,
                 hnsw_len: None,
@@ -835,7 +920,7 @@ mod tests {
                 path: format!("f{i}.parquet"),
                 record_count: 10,
                 file_size_bytes: 100 + i as u64 * 100,
-                centroid_b64: None,
+                centroid_b64: Some("AAAA".into()),
                 radius: None,
                 hnsw_offset: None,
                 hnsw_len: None,
@@ -871,7 +956,7 @@ mod tests {
                 path: "c.parquet".into(),
                 record_count: 1,
                 file_size_bytes: 300,
-                centroid_b64: None,
+                centroid_b64: Some("AAAA".into()),
                 radius: None,
                 hnsw_offset: None,
                 hnsw_len: None,
@@ -890,7 +975,7 @@ mod tests {
                 path: "a.parquet".into(),
                 record_count: 1,
                 file_size_bytes: 100,
-                centroid_b64: None,
+                centroid_b64: Some("AAAA".into()),
                 radius: None,
                 hnsw_offset: None,
                 hnsw_len: None,
@@ -909,7 +994,7 @@ mod tests {
                 path: "b.parquet".into(),
                 record_count: 1,
                 file_size_bytes: 200,
-                centroid_b64: None,
+                centroid_b64: Some("AAAA".into()),
                 radius: None,
                 hnsw_offset: None,
                 hnsw_len: None,
@@ -929,6 +1014,73 @@ mod tests {
         assert_eq!(selected[0].file_size_bytes, 100);
         assert_eq!(selected[1].file_size_bytes, 200);
         assert_eq!(selected[2].file_size_bytes, 300);
+    }
+
+    fn make_plan_entry(path: &str, size: u64, centroid_b64: Option<String>) -> DataFileEntry {
+        DataFileEntry {
+            path: path.to_string(),
+            record_count: 10,
+            file_size_bytes: size,
+            centroid_b64,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: None,
+            vector_dim: None,
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            index_error: None,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+        }
+    }
+
+    #[test]
+    fn plan_prioritizes_foreign_written_files_regardless_of_size() {
+        let planner = CompactionPlanner::new(CompactionConfig {
+            min_files_to_compact: 4, // way more than the 1 native small file below
+            target_file_size_bytes: 1000,
+            max_files_per_pass: 20,
+            ..Default::default()
+        });
+        let files = vec![
+            // Native file, below target size, but alone — not enough to hit
+            // min_files_to_compact on its own.
+            make_plan_entry("native_small.parquet", 500, Some("AAAA".into())),
+            // Foreign file — no centroid — large (would never pass the size filter),
+            // but must still be selected because it has no AI-Lake index at all.
+            make_plan_entry("foreign_big.parquet", 200_000_000, None),
+        ];
+        let selected = planner.plan(&files);
+        assert_eq!(
+            selected.len(),
+            1,
+            "foreign file alone should trigger a pass even below min_files_to_compact"
+        );
+        assert_eq!(selected[0].path, "foreign_big.parquet");
+    }
+
+    #[test]
+    fn plan_merges_foreign_and_size_candidates_together() {
+        let planner = CompactionPlanner::new(CompactionConfig {
+            min_files_to_compact: 2,
+            target_file_size_bytes: 1000,
+            max_files_per_pass: 20,
+            ..Default::default()
+        });
+        let files = vec![
+            make_plan_entry("native_a.parquet", 300, Some("AAAA".into())),
+            make_plan_entry("native_b.parquet", 400, Some("AAAA".into())),
+            make_plan_entry("foreign.parquet", 200_000_000, None),
+        ];
+        let selected = planner.plan(&files);
+        let paths: Vec<&str> = selected.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(selected.len(), 3, "paths={paths:?}");
+        // Foreign file must be first (repair priority).
+        assert_eq!(selected[0].path, "foreign.parquet", "paths={paths:?}");
     }
 
     #[tokio::test]
@@ -1428,5 +1580,321 @@ mod tests {
         let pq_reader = ailake_parquet::ParquetVectorReader::new(merged_bytes, "embedding");
         let count = pq_reader.record_count().unwrap();
         assert_eq!(count, 4);
+    }
+
+    /// Regression test: `CompactionExecutor::run()` must not drop files that fall
+    /// outside the compaction pass (too large for `target_file_size_bytes`, or beyond
+    /// `max_files_per_pass`). `Replace` snapshots don't inherit the previous manifest
+    /// (see `HadoopCatalog::commit_snapshot`), so `run()` must explicitly carry forward
+    /// every untouched file alongside the merged output — mirroring the pattern already
+    /// used by the CLI `compact` command and `MemoryDecayJob::run`.
+    #[tokio::test]
+    async fn run_preserves_untouched_files_outside_compaction_pass() {
+        use ailake_catalog::HadoopCatalog;
+        use ailake_core::{VectorMetric, VectorPrecision};
+        use ailake_store::LocalStore;
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let catalog_dir = TempDir::new().unwrap();
+        let catalog_store = Arc::new(LocalStore::new(catalog_dir.path()));
+        let catalog = Arc::new(HadoopCatalog::new(catalog_store, ""));
+        let table = TableIdent {
+            namespace: "ns".into(),
+            name: "tbl".into(),
+        };
+
+        let policy = VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim: 4,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
+
+        use ailake_catalog::TableProperties;
+        catalog
+            .create_table(
+                &table,
+                &TableProperties {
+                    policy: policy.clone(),
+                    extra: std::collections::HashMap::new(),
+                    format_version: 2,
+                    partition_column_type: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+
+        // Two small files — eligible for compaction.
+        let write_file = |path: &str, ids: Vec<i32>, embs: Vec<Vec<f32>>| {
+            let batch =
+                RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(ids))])
+                    .unwrap();
+            let bytes = AilakeFileWriter::new(policy.clone())
+                .write(&batch, &embs)
+                .unwrap();
+            (path.to_string(), bytes)
+        };
+
+        let (path_a, bytes_a) = write_file(
+            "data/small_a.parquet",
+            vec![0, 1],
+            vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]],
+        );
+        let (path_b, bytes_b) = write_file(
+            "data/small_b.parquet",
+            vec![2, 3],
+            vec![vec![0.0, 0.0, 1.0, 0.0], vec![0.0, 0.0, 0.0, 1.0]],
+        );
+        // "Big" file — same tiny payload in this test, but its DataFileEntry reports a
+        // size above target_file_size_bytes so the planner must never select it.
+        let (path_big, bytes_big) = write_file(
+            "data/big.parquet",
+            vec![4, 5],
+            vec![vec![1.0, 1.0, 0.0, 0.0], vec![0.0, 1.0, 1.0, 0.0]],
+        );
+
+        for (path, bytes) in [
+            (&path_a, &bytes_a),
+            (&path_b, &bytes_b),
+            (&path_big, &bytes_big),
+        ] {
+            store.put(path, bytes.clone()).await.unwrap();
+        }
+
+        let make_entry = |path: &str, size: u64| DataFileEntry {
+            path: path.to_string(),
+            record_count: 2,
+            file_size_bytes: size,
+            // Non-None: all three files here are meant to represent normal,
+            // already-indexed AI-Lake files — only size should decide eligibility.
+            // `plan_prioritizes_foreign_written_files_regardless_of_size` covers
+            // the `centroid_b64: None` (foreign-write) case separately.
+            centroid_b64: Some("AAAA".into()),
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: None,
+            vector_dim: None,
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            index_error: None,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+        };
+
+        let initial_snapshot = NewSnapshot {
+            snapshot_id: ailake_catalog::new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![
+                make_entry(&path_a, 500),
+                make_entry(&path_b, 500),
+                make_entry(&path_big, 200_000_000), // far above target_file_size_bytes below
+            ],
+            operation: SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, initial_snapshot).await.unwrap();
+
+        let planner = CompactionPlanner::new(CompactionConfig {
+            min_files_to_compact: 2,
+            target_file_size_bytes: 1000,
+            index_strategy: CompactionIndexStrategy::ForceHnsw,
+            max_files_per_pass: 20,
+        });
+        let executor = CompactionExecutor::new(store.clone(), policy.clone());
+
+        let merged = executor
+            .run(&planner, &table, catalog.clone(), "data")
+            .await
+            .unwrap()
+            .expect("compaction should have run — 2 eligible small files");
+
+        let files_after = catalog.list_files(&table, None).await.unwrap();
+        let paths_after: Vec<&str> = files_after.iter().map(|f| f.path.as_str()).collect();
+
+        assert!(
+            paths_after.contains(&path_big.as_str()),
+            "BUG: untouched 'big.parquet' vanished after run() — files_after={paths_after:?}"
+        );
+        assert!(
+            paths_after.contains(&merged.path.as_str()),
+            "merged output file must be present — files_after={paths_after:?}"
+        );
+        assert!(
+            !paths_after.contains(&path_a.as_str()) && !paths_after.contains(&path_b.as_str()),
+            "compacted input files must no longer be listed — files_after={paths_after:?}"
+        );
+        assert_eq!(
+            files_after.len(),
+            2,
+            "expected exactly [big.parquet, merged] — files_after={paths_after:?}"
+        );
+    }
+
+    /// Regression test: a file with no AILK footer (e.g. rewritten by a generic
+    /// Iceberg engine — Spark/Trino `OPTIMIZE` — with no knowledge of AI-Lake) still
+    /// holds valid Parquet data. `read_parquet()` decodes the vector column directly
+    /// from Parquet and never touches the footer, so `compact()`/`compact_incremental()`
+    /// must include such a file's rows in the merge, not silently drop them.
+    #[tokio::test]
+    async fn compact_preserves_rows_from_footerless_file() {
+        use ailake_core::{VectorMetric, VectorPrecision};
+        use ailake_store::LocalStore;
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let policy = VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim: 4,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+
+        // Normal AI-Lake file, written the usual way (has an AILK footer).
+        let embs_native: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
+        let batch_native = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![0i32, 1]))],
+        )
+        .unwrap();
+        let bytes_native = AilakeFileWriter::new(policy.clone())
+            .write(&batch_native, &embs_native)
+            .unwrap();
+        store
+            .put("data/native.parquet", bytes_native.clone())
+            .await
+            .unwrap();
+
+        // "Foreign" file — plain Parquet, no AILK footer, same shape a generic
+        // Iceberg engine's rewrite would produce (`write_parquet_only` is the exact
+        // primitive `compact_deferred` uses for its Parquet-only fast path).
+        let embs_foreign: Vec<Vec<f32>> = vec![vec![0.0, 0.0, 1.0, 0.0], vec![0.0, 0.0, 0.0, 1.0]];
+        let batch_foreign = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![2i32, 3]))],
+        )
+        .unwrap();
+        let bytes_foreign = AilakeFileWriter::new(policy.clone())
+            .write_parquet_only(&batch_foreign, &embs_foreign)
+            .unwrap();
+        store
+            .put("data/foreign.parquet", bytes_foreign.clone())
+            .await
+            .unwrap();
+
+        let reader_foreign = AilakeFileReader::new(bytes_foreign.clone(), "embedding", 4);
+        assert!(
+            !reader_foreign.is_ailake_file(),
+            "sanity: write_parquet_only must not embed an AILK footer"
+        );
+
+        let entries = vec![
+            DataFileEntry {
+                path: "data/native.parquet".into(),
+                record_count: 2,
+                file_size_bytes: bytes_native.len() as u64,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                index_error: None,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
+            },
+            DataFileEntry {
+                path: "data/foreign.parquet".into(),
+                record_count: 2,
+                file_size_bytes: bytes_foreign.len() as u64,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                index_error: None,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
+            },
+        ];
+
+        // Full rebuild path (`compact`).
+        let executor = CompactionExecutor::new(store.clone(), policy.clone());
+        let merged = executor
+            .compact(&entries, "data/merged_full.parquet")
+            .await
+            .unwrap();
+        assert_eq!(
+            merged.record_count, 4,
+            "compact() must include all 4 rows — 2 native + 2 from the footerless file"
+        );
+        let merged_bytes = store.get("data/merged_full.parquet").await.unwrap();
+        let reader = AilakeFileReader::new(merged_bytes, "embedding", 4);
+        reader.verify_integrity().unwrap();
+
+        // Incremental path (`compact_incremental` — native file becomes dominant at 50/50,
+        // exercising the non-dominant-file read path where the bug lived).
+        let merged_inc = executor
+            .compact_incremental(&entries, "data/merged_inc.parquet")
+            .await
+            .unwrap();
+        assert_eq!(
+            merged_inc.record_count, 4,
+            "compact_incremental() must include all 4 rows — 2 native + 2 from the footerless file"
+        );
     }
 }
