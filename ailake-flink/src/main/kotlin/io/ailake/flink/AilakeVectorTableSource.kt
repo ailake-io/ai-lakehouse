@@ -16,6 +16,7 @@ import org.apache.flink.table.data.GenericRowData
 import org.apache.flink.table.data.RowData
 import org.apache.flink.table.data.StringData
 import org.apache.flink.table.expressions.ResolvedExpression
+import org.slf4j.LoggerFactory
 
 /**
  * AI-Lake Flink table source.  Executes ANN search and streams results as [RowData].
@@ -92,17 +93,36 @@ class AilakeInputFormat(
         val effectivePartition = partitionFilter ?: params["ailake.partition.filter"]
 
         val query = queryParam.split(",").map { it.trim().toFloat() }.toFloatArray()
-        results = AilakeNativeLoader.search(
-            warehouse       = warehouse,
-            namespace       = namespace,
-            table           = tableName,
-            vecCol          = vecCol,
-            dim             = dim,
-            query           = query,
-            topK            = topK,
-            efSearch        = efSearch,
-            partitionFilter = effectivePartition,
-        ).iterator()
+        // AilakeNativeLoader.lib throws (via getOrThrow()) when libailake_jni.so isn't on
+        // the library path, and every AilakeNativeLoader method reads it eagerly — unlike
+        // Spark/Trino/DuckDB, which all resolve the native handle to a nullable/Optional
+        // and degrade to empty results. Catch here so a missing native lib fails this
+        // source with empty results instead of crashing the whole Flink task.
+        results = try {
+            AilakeNativeLoader.search(
+                warehouse       = warehouse,
+                namespace       = namespace,
+                table           = tableName,
+                vecCol          = vecCol,
+                dim             = dim,
+                query           = query,
+                topK            = topK,
+                efSearch        = efSearch,
+                partitionFilter = effectivePartition,
+            ).iterator()
+        } catch (e: Throwable) {
+            // Broad by design: `Native.load()` failure surfaces as `UnsatisfiedLinkError`
+            // (a JVM Error, not Exception) and the exact wrapping can vary by JVM/JNA
+            // version — the contract this restores is "never crash the task", so every
+            // failure mode from the native call must degrade the same way.
+            log.warn("[ailake] native library unavailable — table={}.{} returns no rows: {}",
+                namespace, tableName, e.message)
+            emptyList<AilakeNativeLoader.SearchResultItem>().iterator()
+        }
+    }
+
+    companion object {
+        private val log = LoggerFactory.getLogger(AilakeInputFormat::class.java)
     }
 
     override fun reachedEnd(): Boolean = results?.hasNext()?.not() ?: true

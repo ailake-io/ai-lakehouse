@@ -112,7 +112,8 @@ public:
         const std::string        &partition_filter = "",
         const std::string        &hybrid_text      = "",
         const std::string        &text_column      = "chunk_text",
-        float                     bm25_weight      = 0.5f
+        float                     bm25_weight      = 0.5f,
+        const std::string        &ns               = "default"
     ) const;
 
     // Execute ailake_search_text_json. Tantivy O(log N) fast path when FTS blob
@@ -124,7 +125,8 @@ public:
         const std::string              &query_text,
         int                             top_k,
         const std::vector<std::string> &text_columns    = {"chunk_text"},
-        const std::string              &partition_filter = ""
+        const std::string              &partition_filter = "",
+        const std::string              &ns               = "default"
     ) const;
 
     // Execute ailake_scan_json. Returns pre-parsed columnar data.
@@ -134,7 +136,8 @@ public:
         const std::string        &vec_col,
         const std::vector<float> &query,
         int                       top_k,
-        int                       ef_search = 50
+        int                       ef_search = 50,
+        const std::string        &ns        = "default"
     ) const;
 
     // Execute ailake_search_multimodal_json. Returns empty on any error.
@@ -143,7 +146,8 @@ public:
         const std::string                 &table_name,
         const std::vector<ModalQueryArg>  &queries,
         int                                top_k,
-        const std::string                 &partition_filter = ""
+        const std::string                 &partition_filter = "",
+        const std::string                 &ns               = "default"
     ) const;
 
     // Execute ailake_write_batch_json. Returns snapshot_id or -1 on error.
@@ -181,7 +185,8 @@ public:
         const std::string              &warehouse,
         const std::string              &table_name,
         const std::string              &column,
-        const std::vector<std::string> &values
+        const std::vector<std::string> &values,
+        const std::string              &ns = "default"
     ) const;
 
     // Execute ailake_evolve_schema_json. Returns new schema_id or -1 on error.
@@ -191,7 +196,8 @@ public:
         const std::string &warehouse,
         const std::string &table_name,
         const std::string &add_columns_json,
-        const std::string &rename_columns_json
+        const std::string &rename_columns_json,
+        const std::string &ns = "default"
     ) const;
 
 private:

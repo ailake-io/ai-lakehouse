@@ -173,6 +173,14 @@ static void AilakeWriteExecFull(
     bool deferred = false;
     if ((idx_t)args.data.size() > 15 && !args.data[15].GetValue(0).IsNull())
         deferred              = BooleanValue::Get(args.data[15].GetValue(0));
+    // arity 17: namespace VARCHAR (default 'default')
+    std::string ns = "default";
+    if ((idx_t)args.data.size() > 16 && !args.data[16].GetValue(0).IsNull())
+        ns                    = StringValue::Get(args.data[16].GetValue(0));
+    // arity 18: table_name VARCHAR (default 'table')
+    std::string tbl_name = "table";
+    if ((idx_t)args.data.size() > 17 && !args.data[17].GetValue(0).IsNull())
+        tbl_name              = StringValue::Get(args.data[17].GetValue(0));
 
     auto ids        = extract_bigint_list(ids_v);
     auto embeddings = extract_float_list_list(emb_v);
@@ -189,11 +197,9 @@ static void AilakeWriteExecFull(
         return;
     }
 
-    std::string tbl_name = "table";
-
     int64_t snap = lib.write_batch(
         warehouse,
-        "default",
+        ns,
         tbl_name,
         vec_col,
         dim,
@@ -414,6 +420,55 @@ void RegisterAilakeWrite(duckdb::ExtensionLoader &loader) {
          LogicalType::INTEGER,
          LogicalType::BOOLEAN,
          LogicalType::BOOLEAN},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 17: + namespace VARCHAR (default 'default') — lets callers write to a
+    // non-default namespace instead of every write landing under <warehouse>/default/.
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::INTEGER,
+         LogicalType::BOOLEAN,
+         LogicalType::BOOLEAN,
+         LogicalType::VARCHAR},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 18: + table_name VARCHAR (default 'table') — lets callers write to a
+    // table other than the hardcoded name "table" under <warehouse>/<namespace>/.
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::INTEGER,
+         LogicalType::BOOLEAN,
+         LogicalType::BOOLEAN,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
         LogicalType::BIGINT,
         AilakeWriteExecFull
     ));

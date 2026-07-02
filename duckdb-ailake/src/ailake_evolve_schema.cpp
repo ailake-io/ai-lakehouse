@@ -54,6 +54,14 @@ static void AilakeEvolveSchemaExec(
     std::string add_cols_json   = add_cols_v.IsNull()    ? "[]" : StringValue::Get(add_cols_v);
     std::string rename_cols_json = rename_cols_v.IsNull() ? "[]" : StringValue::Get(rename_cols_v);
 
+    // arity 5: namespace VARCHAR (default 'default'), table_name VARCHAR (default 'table')
+    std::string ns = "default";
+    if ((idx_t)args.data.size() > 3 && !args.data[3].GetValue(0).IsNull())
+        ns = StringValue::Get(args.data[3].GetValue(0));
+    std::string table_name = "table";
+    if ((idx_t)args.data.size() > 4 && !args.data[4].GetValue(0).IsNull())
+        table_name = StringValue::Get(args.data[4].GetValue(0));
+
     auto is_empty_arr = [](const std::string &s) -> bool {
         std::string t;
         for (char c : s)
@@ -65,18 +73,33 @@ static void AilakeEvolveSchemaExec(
         return;
     }
 
-    int32_t schema_id = lib.evolve_schema(warehouse, "table", add_cols_json, rename_cols_json);
+    int32_t schema_id = lib.evolve_schema(warehouse, table_name, add_cols_json, rename_cols_json, ns);
     result.SetValue(0, Value::INTEGER(schema_id));
 }
 
 void RegisterAilakeEvolveSchema(duckdb::ExtensionLoader &loader) {
-    ScalarFunction fn(
-        "ailake_evolve_schema",
+    ScalarFunctionSet fn_set("ailake_evolve_schema");
+
+    // Arity 3: (table_path, add_columns_json, rename_columns_json) —
+    // namespace='default', table_name='table'
+    fn_set.AddFunction(ScalarFunction(
         {LogicalType::VARCHAR,
          LogicalType::VARCHAR,
          LogicalType::VARCHAR},
         LogicalType::INTEGER,
         AilakeEvolveSchemaExec
-    );
-    loader.RegisterFunction( fn);
+    ));
+
+    // Arity 5: + namespace VARCHAR, table_name VARCHAR
+    fn_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
+        LogicalType::INTEGER,
+        AilakeEvolveSchemaExec
+    ));
+
+    loader.RegisterFunction( fn_set);
 }

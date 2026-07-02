@@ -319,6 +319,54 @@ def test_write_with_fts_columns_and_tokenizer():
     print(f"PASS: arity-12 write_batch (fts_columns + fts_tokenizer) snap_id={row[0]}")
 
 
+def test_write_with_namespace_and_table_name():
+    """Arity-18: (... deferred, namespace, table_name).
+
+    Regression: `ailake_write_batch`'s header documented `namespace`/`table_name`
+    as overridable, but no registered arity included them and both were
+    hardcoded to 'default'/'table' in AilakeWriteExecFull — every write landed
+    at <warehouse>/default/table/ regardless of what the caller passed. Confirms
+    the file actually lands under the requested namespace/table_name path, not
+    under the old hardcoded default.
+    """
+    conn = setup_connection()
+    table_dir = make_table_dir()
+    n, dim = 2, 4
+    embs = small_embeddings(n, dim)
+
+    ids_sql = "[" + ", ".join(str(i) for i in range(n)) + "]::BIGINT[]"
+    emb_sql = "[" + ", ".join(
+        "[" + ", ".join(str(f) for f in row) + "]::FLOAT[]"
+        for row in embs
+    ) + "]"
+
+    row = conn.execute(f"""
+        SELECT ailake_write_batch(
+            'file://{table_dir}',
+            {ids_sql},
+            {emb_sql},
+            'embedding', 'cosine', 'f16',
+            '', '', '', 2, '', '', -1, -1, false, false,
+            'custom_ns', 'my_table'
+        )
+    """).fetchone()
+    require(row is not None, "arity-18 write_batch returned NULL")
+    require(row[0] != -1, f"arity-18 write_batch returned -1 (error); table_dir={table_dir}")
+
+    expected_dir = pathlib.Path(table_dir) / "custom_ns" / "my_table"
+    require(
+        expected_dir.is_dir(),
+        f"expected data under {expected_dir}, not found — namespace/table_name were ignored"
+    )
+    default_dir = pathlib.Path(table_dir) / "default" / "table"
+    require(
+        not default_dir.exists(),
+        f"data leaked into hardcoded default path {default_dir} despite explicit namespace/table_name"
+    )
+    print(f"PASS: arity-18 write_batch (namespace='custom_ns', table_name='my_table') snap_id={row[0]}, "
+          f"data correctly under {expected_dir}")
+
+
 if __name__ == "__main__":
     if not pathlib.Path(EXT_PATH).exists():
         print(f"SKIP: extension not found at {EXT_PATH} — build first with cmake")
@@ -333,5 +381,6 @@ if __name__ == "__main__":
     test_write_with_partition_by_and_value()
     test_write_with_fts_columns()
     test_write_with_fts_columns_and_tokenizer()
+    test_write_with_namespace_and_table_name()
 
     print("\nAll write tests passed.")

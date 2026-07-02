@@ -1278,11 +1278,18 @@ def compact(
         "compact", table_id,
         "--min-files", str(min_files),
         "--target-size", str(target_size_bytes),
+        "--max-files-per-pass", str(max_files_per_pass),
+        "--format", "json",
     ]
+    if deferred:
+        args.append("--deferred")
     try:
         result = subprocess.run(args, capture_output=True, text=True)
     except (FileNotFoundError, PermissionError) as exc:
         return {"ok": True, "files_compacted": 0, "warning": f"ailake CLI not executable: {exc}"}
     if result.returncode != 0:
         return {"ok": False, "error": result.stderr.strip() or result.stdout.strip()}
-    return {"ok": True, "files_compacted": 1}
+    try:
+        return json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        return {"ok": False, "error": f"unparseable CLI output: {result.stdout.strip()}"}

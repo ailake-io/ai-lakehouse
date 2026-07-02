@@ -707,9 +707,16 @@ impl CompactionExecutor {
 
         // Commit: add merged file, remove input files (via Replace snapshot).
         let files = build_replace_file_list(&catalog, table, &to_compact, merged.clone()).await?;
+        // Fetched fresh, right before the commit — same freshness rationale as the
+        // file-list re-list in `build_replace_file_list` above.
+        let parent_snapshot_id = catalog
+            .load_table(table)
+            .await
+            .ok()
+            .and_then(|m| m.current_snapshot_id);
         let snapshot = NewSnapshot {
             snapshot_id: ailake_catalog::new_snapshot_id(),
-            parent_snapshot_id: None,
+            parent_snapshot_id,
             files,
             operation: SnapshotOperation::Replace,
             iceberg_schema: None,
@@ -764,9 +771,16 @@ impl CompactionExecutor {
 
         // Commit immediately: merged file in Indexing state replaces input files.
         let files = build_replace_file_list(&catalog, table, &to_compact, merged.clone()).await?;
+        // Fetched fresh, right before the commit — same freshness rationale as the
+        // file-list re-list in `build_replace_file_list` above.
+        let parent_snapshot_id = catalog
+            .load_table(table)
+            .await
+            .ok()
+            .and_then(|m| m.current_snapshot_id);
         let snapshot = NewSnapshot {
             snapshot_id: ailake_catalog::new_snapshot_id(),
-            parent_snapshot_id: None,
+            parent_snapshot_id,
             files,
             operation: SnapshotOperation::Replace,
             iceberg_schema: None,
@@ -2004,8 +2018,9 @@ mod tests {
             first_row_id: None,
         };
 
+        let initial_snap_id = ailake_catalog::new_snapshot_id();
         let initial_snapshot = NewSnapshot {
-            snapshot_id: ailake_catalog::new_snapshot_id(),
+            snapshot_id: initial_snap_id,
             parent_snapshot_id: None,
             files: vec![
                 make_entry(&path_a, 500),
@@ -2047,6 +2062,28 @@ mod tests {
         assert!(
             paths_after.contains(&merged.path.as_str()),
             "merged output file must be present — files_after={paths_after:?}"
+        );
+
+        // Regression: `run()` used to hardcode `parent_snapshot_id: None` on the
+        // post-compaction Replace snapshot even though a current snapshot always exists
+        // here, breaking Iceberg snapshot lineage (`expire_snapshots`/`rollback_to_snapshot`)
+        // for any compacted table. Read the committed metadata.json directly (no public
+        // CatalogProvider method exposes snapshot lineage) and confirm the new snapshot's
+        // parent points at the snapshot committed before this compaction ran.
+        let meta_dir = catalog_dir.path().join("ns/tbl/metadata");
+        let latest_metadata = std::fs::read_dir(&meta_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .max_by_key(|e| e.metadata().unwrap().modified().unwrap())
+            .expect("metadata.json must exist after commit");
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(latest_metadata.path()).unwrap()).unwrap();
+        let last_snapshot = json["snapshots"].as_array().unwrap().last().unwrap();
+        assert_eq!(
+            last_snapshot["parent-snapshot-id"].as_i64(),
+            Some(initial_snap_id),
+            "compaction's Replace snapshot must chain to the pre-compaction snapshot, not be orphaned"
         );
         assert!(
             !paths_after.contains(&path_a.as_str()) && !paths_after.contains(&path_b.as_str()),

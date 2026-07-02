@@ -92,6 +92,35 @@ static void test_search_text_multi_column_comma_joined() {
     CHECK_EQ(cols, "chunk_text,title,summary");
 }
 
+// Regression: pclose() returns a POSIX wait-status, not a plain exit code — it must go
+// through WIFEXITED/WEXITSTATUS or a real exit code of 1 gets misreported as 256 (the
+// raw status value). Points AILAKE_BIN at a throwaway script that always exits 1 and
+// checks the thrown message reports the real code.
+static void test_search_text_reports_real_exit_code_not_raw_wait_status() {
+    const char* script_path = "/tmp/ailake_fake_cli_exit1.sh";
+    int rc = std::system(
+        ("printf '#!/bin/sh\\nexit 1\\n' > " + std::string(script_path) +
+         " && chmod +x " + script_path).c_str());
+    CHECK_EQ(rc, 0);
+
+    setenv("AILAKE_BIN", script_path, 1);
+    ailake::HadoopCatalog cat("/tmp/ailake_nonexistent_warehouse");
+    bool threw = false;
+    std::string msg;
+    try {
+        ailake::search_text(cat, "default", "table", "query", {"chunk_text"}, 5);
+    } catch (const std::runtime_error& e) {
+        threw = true;
+        msg = e.what();
+    }
+    CHECK(threw);
+    CHECK(msg.find("code 1\n") != std::string::npos);
+    CHECK(msg.find("code 256") == std::string::npos);
+
+    unsetenv("AILAKE_BIN");
+    std::remove(script_path);
+}
+
 // ── Integration (AILAKE_BIN required) ────────────────────────────────────────
 
 static void test_integration_search_text_no_bin_throws() {
@@ -126,6 +155,7 @@ int main() {
     test_search_text_default_cols_used_when_empty();
     test_search_text_single_column_used_as_is();
     test_search_text_multi_column_comma_joined();
+    test_search_text_reports_real_exit_code_not_raw_wait_status();
 
     test_integration_search_text_no_bin_throws();
 

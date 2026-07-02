@@ -13,8 +13,8 @@ use ailake_core::{
 };
 use ailake_query::{
     delete_rows as rs_delete_rows, CompactionConfig, CompactionExecutor, CompactionPlanner,
-    EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy, MultiVectorBatch, ProgressFn,
-    SearchConfig, TableWriter,
+    EmbedFn, HybridConfig, MigrationJob, MigrationProgress, MigrationStrategy, MultiVectorBatch,
+    ProgressFn, SearchConfig, TableWriter,
 };
 use ailake_store::store_from_url;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -140,6 +140,16 @@ enum Commands {
         /// Falls back to "chunk_text" if not specified.
         #[arg(long)]
         text_columns: Option<String>,
+        /// Enables hybrid BM25+vector search: text query fused with --query/--query-file
+        /// via Reciprocal Rank Fusion. Requires a vector query too.
+        #[arg(long)]
+        hybrid_text: Option<String>,
+        /// Parquet column BM25-scored for --hybrid-text (default: "chunk_text")
+        #[arg(long, default_value = "chunk_text")]
+        text_column: String,
+        /// BM25 weight in hybrid RRF fusion (0.0 = pure vector, 1.0 = pure BM25)
+        #[arg(long, default_value = "0.5")]
+        bm25_weight: f32,
         /// Number of results to return
         #[arg(long, default_value = "10")]
         top_k: usize,
@@ -160,6 +170,16 @@ enum Commands {
         /// Minimum number of small files required to trigger compaction
         #[arg(long, default_value = "4")]
         min_files: usize,
+        /// Maximum files merged in one pass (bounds peak RAM / HNSW rebuild cost)
+        #[arg(long, default_value = "20")]
+        max_files_per_pass: usize,
+        /// Write merged Parquet immediately and build the HNSW index in the
+        /// background instead of blocking until it's fully built
+        #[arg(long)]
+        deferred: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
     },
     /// Start an HTTP server exposing search, write, compact and info over JSON
     Serve {
@@ -722,6 +742,9 @@ async fn run(cli: Cli) -> Result<(), String> {
             query_file,
             text,
             text_columns,
+            hybrid_text,
+            text_column,
+            bm25_weight,
             top_k,
             pruning_threshold,
             format,
@@ -814,6 +837,13 @@ async fn run(cli: Cli) -> Result<(), String> {
                 Err(_) => "embedding".to_string(),
             };
 
+            let hybrid = hybrid_text.map(|txt| HybridConfig {
+                query_text: txt,
+                text_columns: vec![text_column],
+                bm25_weight,
+                ..Default::default()
+            });
+
             let config = SearchConfig {
                 top_k,
                 ef_search: top_k * 5,
@@ -821,7 +851,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 rerank_factor: None,
                 score_fn: None,
                 partition_filter: None,
-                hybrid: None,
+                hybrid,
             };
 
             let results = ailake_query::search(
@@ -874,6 +904,9 @@ async fn run(cli: Cli) -> Result<(), String> {
             table,
             target_size,
             min_files,
+            max_files_per_pass,
+            deferred,
+            format,
         } => {
             let ident = parse_table_ident(&table);
 
@@ -936,69 +969,60 @@ async fn run(cli: Cli) -> Result<(), String> {
                 partition_fields: vec![],
             };
 
-            let files = catalog
-                .list_files(&ident, None)
-                .await
-                .map_err(|e| e.to_string())?;
-
             let config = CompactionConfig {
                 min_files_to_compact: min_files,
                 target_file_size_bytes: target_size,
                 index_strategy: Default::default(),
-                max_files_per_pass: 20,
+                max_files_per_pass,
             };
             let planner = CompactionPlanner::new(config);
-            let to_compact = planner.plan(&files);
-
-            if to_compact.is_empty() {
-                println!("nothing to compact ({} files below threshold)", files.len());
-                return Ok(());
-            }
-
-            println!(
-                "compacting {} of {} files...",
-                to_compact.len(),
-                files.len()
-            );
-
             let executor = CompactionExecutor::new(Arc::clone(&store), policy);
-            let output_path = format!(
-                "data/compacted-{}.parquet",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            );
-            let new_entry = executor
-                .compact(&to_compact, &output_path)
-                .await
-                .map_err(|e| e.to_string())?;
 
-            // Build replacement file list: keep files not compacted + add merged.
-            let compacted_paths: std::collections::HashSet<&str> =
-                to_compact.iter().map(|f| f.path.as_str()).collect();
-            let mut remaining: Vec<_> = files
-                .into_iter()
-                .filter(|f| !compacted_paths.contains(f.path.as_str()))
-                .collect();
-            remaining.push(new_entry);
-
-            let snap = ailake_catalog::provider::NewSnapshot {
-                snapshot_id: ailake_catalog::provider::new_snapshot_id(),
-                parent_snapshot_id: meta.current_snapshot_id,
-                files: remaining,
-                operation: ailake_catalog::provider::SnapshotOperation::Replace,
-                iceberg_schema: None,
-                extra_properties: std::collections::HashMap::new(),
-                bloom_filters: vec![],
-                equality_delete_files: vec![],
+            let result = if deferred {
+                executor
+                    .run_deferred(
+                        &planner,
+                        &ident,
+                        catalog as Arc<dyn CatalogProvider>,
+                        "data",
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?
+            } else {
+                executor
+                    .run(
+                        &planner,
+                        &ident,
+                        catalog as Arc<dyn CatalogProvider>,
+                        "data",
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?
             };
-            catalog
-                .commit_snapshot(&ident, snap)
-                .await
-                .map_err(|e| e.to_string())?;
 
-            println!("compacted into {output_path}");
+            match format {
+                OutputFormat::Json => {
+                    let json = match &result {
+                        Some(entry) => serde_json::json!({
+                            "ok": true,
+                            "files_compacted": 1,
+                            "output_path": entry.path,
+                        }),
+                        None => serde_json::json!({
+                            "ok": true,
+                            "files_compacted": 0,
+                        }),
+                    };
+                    println!(
+                        "{}",
+                        serde_json::to_string(&json).map_err(|e| e.to_string())?
+                    );
+                }
+                OutputFormat::Text => match &result {
+                    Some(entry) => println!("compacted into {}", entry.path),
+                    None => println!("nothing to compact (no files eligible)"),
+                },
+            }
             Ok(())
         }
 

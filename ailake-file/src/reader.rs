@@ -113,10 +113,13 @@ impl AilakeFileReader {
 
     fn read_header_at_offset(&self, offset: u64) -> AilakeResult<AilakeHeader> {
         let offset = offset as usize;
-        if offset + HEADER_SIZE > self.bytes.len() {
+        let header_end = offset
+            .checked_add(HEADER_SIZE)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
+        if header_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
         }
-        let header_bytes: &[u8; HEADER_SIZE] = self.bytes[offset..offset + HEADER_SIZE]
+        let header_bytes: &[u8; HEADER_SIZE] = self.bytes[offset..header_end]
             .try_into()
             .map_err(|_| AilakeError::NotAnAilakeFile)?;
         AilakeHeader::from_bytes(header_bytes)
@@ -126,8 +129,12 @@ impl AilakeFileReader {
     pub fn get_centroid(&self) -> AilakeResult<Centroid> {
         let ailk_start = self.ailk_offset()? as usize;
         let header = self.read_header()?;
-        let centroid_start = ailk_start + header.centroid_offset as usize;
-        let centroid_end = centroid_start + header.centroid_len as usize;
+        let centroid_start = ailk_start
+            .checked_add(header.centroid_offset as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
+        let centroid_end = centroid_start
+            .checked_add(header.centroid_len as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
 
         if centroid_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
@@ -182,17 +189,14 @@ impl AilakeFileReader {
     /// multi-column files written with `AilakeFileWriter::write_multi`.
     pub fn load_index_for_column(&self, column: &str) -> AilakeResult<HnswIndex> {
         let ailk_start = self.ailk_offset_for_column(column)? as usize;
+        let header = self.read_header_at_offset(ailk_start as u64)?;
 
-        if ailk_start + HEADER_SIZE > self.bytes.len() {
-            return Err(AilakeError::NotAnAilakeFile);
-        }
-        let header_bytes: &[u8; HEADER_SIZE] = self.bytes[ailk_start..ailk_start + HEADER_SIZE]
-            .try_into()
-            .map_err(|_| AilakeError::NotAnAilakeFile)?;
-        let header = AilakeHeader::from_bytes(header_bytes)?;
-
-        let hnsw_start = ailk_start + header.hnsw_offset as usize;
-        let hnsw_end = hnsw_start + header.hnsw_len as usize;
+        let hnsw_start = ailk_start
+            .checked_add(header.hnsw_offset as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
+        let hnsw_end = hnsw_start
+            .checked_add(header.hnsw_len as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
 
         if hnsw_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
@@ -212,17 +216,14 @@ impl AilakeFileReader {
     /// Load index for a specific vector column as `AnyIndex`.
     pub fn load_any_index_for_column(&self, column: &str) -> AilakeResult<AnyIndex> {
         let ailk_start = self.ailk_offset_for_column(column)? as usize;
+        let header = self.read_header_at_offset(ailk_start as u64)?;
 
-        if ailk_start + HEADER_SIZE > self.bytes.len() {
-            return Err(AilakeError::NotAnAilakeFile);
-        }
-        let header_bytes: &[u8; HEADER_SIZE] = self.bytes[ailk_start..ailk_start + HEADER_SIZE]
-            .try_into()
-            .map_err(|_| AilakeError::NotAnAilakeFile)?;
-        let header = AilakeHeader::from_bytes(header_bytes)?;
-
-        let index_start = ailk_start + header.hnsw_offset as usize;
-        let index_end = index_start + header.hnsw_len as usize;
+        let index_start = ailk_start
+            .checked_add(header.hnsw_offset as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
+        let index_end = index_start
+            .checked_add(header.hnsw_len as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
 
         if index_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
@@ -410,6 +411,30 @@ mod tests {
         let (batch, embs) = reader.read_parquet().unwrap();
         assert_eq!(batch.num_rows(), 3);
         assert_eq!(embs.len(), 3);
+    }
+
+    /// Regression: header offset/length fields are parsed straight from file bytes with
+    /// no bound validation — a corrupted or hostile file with `hnsw_offset` near
+    /// `u64::MAX` used to overflow the `ailk_start + header.hnsw_offset` addition. In a
+    /// release build the wrapped result could slip past the `> self.bytes.len()` bounds
+    /// check and panic later on a backwards slice range instead of returning
+    /// `NotAnAilakeFile`. `checked_add` must reject this cleanly.
+    #[test]
+    fn corrupted_hnsw_offset_errors_instead_of_panicking() {
+        let file = write_file(3, 4);
+        let reader = AilakeFileReader::new(file.clone(), "embedding", 4);
+        let ailk_start = reader.ailk_offset().unwrap() as usize;
+
+        // hnsw_offset is a little-endian u64 at header bytes [40..48], per footer.rs.
+        let mut corrupted = file.to_vec();
+        let field_start = ailk_start + 40;
+        corrupted[field_start..field_start + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        let corrupted = Bytes::from(corrupted);
+
+        let r1 = AilakeFileReader::new(corrupted.clone(), "embedding", 4);
+        assert!(r1.load_index_for_column("embedding").is_err());
+        let r2 = AilakeFileReader::new(corrupted, "embedding", 4);
+        assert!(r2.load_any_index_for_column("embedding").is_err());
     }
 
     /// Regression: `ailk_offset_for_column("some_col_that_was_never_written")` used to

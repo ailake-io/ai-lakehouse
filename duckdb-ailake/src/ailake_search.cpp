@@ -46,6 +46,7 @@ using namespace duckdb;
 
 struct AilakeSearchBindData : public TableFunctionData {
     std::string        warehouse;
+    std::string        ns              = "default";
     std::string        table_name      = "table";
     std::string        vec_col         = "embedding";
     std::vector<float> query;
@@ -107,6 +108,8 @@ static unique_ptr<FunctionData> AilakeSearchBind(
             data->ef_search = IntegerValue::Get(named.second);
         } else if (named.first == "table_name") {
             data->table_name = StringValue::Get(named.second);
+        } else if (named.first == "namespace") {
+            data->ns = StringValue::Get(named.second);
         } else if (named.first == "partition_filter") {
             if (!named.second.IsNull())
                 data->partition_filter = StringValue::Get(named.second);
@@ -153,7 +156,8 @@ static unique_ptr<GlobalTableFunctionState> AilakeSearchInit(
         bind.partition_filter,
         bind.hybrid_text,
         bind.text_column,
-        bind.bm25_weight
+        bind.bm25_weight,
+        bind.ns
     );
 
     return std::move(state);
@@ -207,6 +211,7 @@ void RegisterAilakeSearch(duckdb::ExtensionLoader &loader) {
     func.named_parameters["vec_col"]          = LogicalType::VARCHAR;
     func.named_parameters["ef_search"]        = LogicalType::INTEGER;
     func.named_parameters["table_name"]       = LogicalType::VARCHAR;
+    func.named_parameters["namespace"]        = LogicalType::VARCHAR;
     func.named_parameters["partition_filter"] = LogicalType::VARCHAR;
     func.named_parameters["hybrid_text"]      = LogicalType::VARCHAR;
     func.named_parameters["text_column"]      = LogicalType::VARCHAR;
