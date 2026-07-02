@@ -1,14 +1,14 @@
 name: Release
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version_override:
         description: "Version to release (e.g. 0.1.0). Leave empty for automatic patch+1."
         required: false
         default: ""
-  # push:
-  #   branches: [main]
 
 env:
   CARGO_TERM_COLOR: always

@@ -113,11 +113,15 @@ impl MigrationJob {
         let new_policy = self.new_policy_from_metadata(&table_meta.properties)?;
 
         let mut parent_snap = table_meta.current_snapshot_id;
+        // Running view of every file currently in the table. `Replace` does not inherit
+        // the previous manifest (see `HadoopCatalog::commit_snapshot`), so each commit
+        // below must carry the complete current state — not just the one file that
+        // changed this iteration — or every file processed in a prior iteration (and
+        // every file not yet reached) would vanish from the table on this commit.
+        let mut current_files = old_files.clone();
 
         for (idx, old_entry) in old_files.iter().enumerate() {
-            let (batch, texts) = self
-                .read_file_texts(&old_entry.path, &store, &new_policy)
-                .await?;
+            let (batch, texts) = self.read_file_texts(old_entry, &store, &new_policy).await?;
             let new_embeddings = self.embed_in_batches(&texts)?;
 
             let new_entry = self
@@ -126,6 +130,10 @@ impl MigrationJob {
 
             rows_migrated += new_entry.record_count;
 
+            // Swap this file's entry in place; every other file (already migrated in a
+            // prior iteration, or not yet reached) is carried forward unchanged.
+            current_files[idx] = new_entry;
+
             let snap_id = new_snapshot_id();
             catalog
                 .commit_snapshot(
@@ -133,7 +141,7 @@ impl MigrationJob {
                     NewSnapshot {
                         snapshot_id: snap_id,
                         parent_snapshot_id: parent_snap,
-                        files: vec![new_entry],
+                        files: current_files.clone(),
                         operation: SnapshotOperation::Replace,
                         iceberg_schema: None,
                         extra_properties: std::collections::HashMap::new(),
@@ -180,9 +188,7 @@ impl MigrationJob {
         let mut new_entries: Vec<DataFileEntry> = Vec::with_capacity(total);
 
         for (idx, old_entry) in old_files.iter().enumerate() {
-            let (batch, texts) = self
-                .read_file_texts(&old_entry.path, &store, &new_policy)
-                .await?;
+            let (batch, texts) = self.read_file_texts(old_entry, &store, &new_policy).await?;
             let new_embeddings = self.embed_in_batches(&texts)?;
 
             let entry = self
@@ -232,19 +238,26 @@ impl MigrationJob {
         Ok(())
     }
 
-    /// Read Parquet bytes from store, decode the text column.
+    /// Read Parquet bytes from store, decode the text column, and drop DV-masked rows
+    /// (the migrated file is brand-new, so a deleted row must not be re-embedded and
+    /// resurrected — see `dv::filter_deleted_rows`).
     async fn read_file_texts(
         &self,
-        path: &str,
+        entry: &DataFileEntry,
         store: &Arc<dyn Store>,
         policy: &VectorStoragePolicy,
     ) -> AilakeResult<(RecordBatch, Vec<String>)> {
-        let bytes = store.get(path).await?;
+        let bytes = store.get(&entry.path).await?;
         let reader = AilakeFileReader::new(bytes, &self.old_column, policy.dim);
         let (batch, _) = reader.read_parquet()?;
 
         let texts = extract_string_column(&batch, &self.text_column)?;
-        Ok((batch, texts))
+        if let Some(dv) = &entry.deletion_vector {
+            let bitmap = crate::dv::load_deletion_vector(store, dv).await?;
+            crate::dv::filter_deleted_rows(batch, texts, &bitmap)
+        } else {
+            Ok((batch, texts))
+        }
     }
 
     /// Call embed_fn in chunks of batch_size.
@@ -387,4 +400,175 @@ fn extract_string_column(batch: &RecordBatch, column_name: &str) -> AilakeResult
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ailake_catalog::{HadoopCatalog, TableProperties};
+    use ailake_core::{VectorMetric, VectorPrecision};
+    use ailake_store::LocalStore;
+    use arrow_array::{Int32Array, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use tempfile::TempDir;
+
+    fn make_policy(dim: u32) -> VectorStoragePolicy {
+        VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        }
+    }
+
+    /// Regression test: `run_atomic_replace` used to commit `SnapshotOperation::Replace`
+    /// with `files: vec![new_entry]` per loop iteration. Since `Replace` doesn't inherit
+    /// the previous manifest, every iteration after the first wiped out every file
+    /// migrated (or not yet migrated) by every other iteration — a 3-file table ended up
+    /// with just its last-migrated file after `run()` completed. This test uses 3 files
+    /// specifically because the bug is invisible with 1 file (replacing "the only file"
+    /// with a partial list is coincidentally correct).
+    #[tokio::test]
+    async fn run_atomic_replace_preserves_all_files_not_just_the_last() {
+        let dir = TempDir::new().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog_dir = TempDir::new().unwrap();
+        let catalog_store = Arc::new(LocalStore::new(catalog_dir.path()));
+        let catalog: Arc<dyn CatalogProvider> = Arc::new(HadoopCatalog::new(catalog_store, ""));
+        let table = TableIdent::new("ns", "tbl");
+
+        let dim = 4u32;
+        let policy = make_policy(dim);
+        catalog
+            .create_table(
+                &table,
+                &TableProperties {
+                    policy: policy.clone(),
+                    extra: std::collections::HashMap::new(),
+                    format_version: 2,
+                    partition_column_type: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("chunk_text", DataType::Utf8, false),
+        ]));
+
+        // Three old files — each its own commit, so list_files() returns 3 entries.
+        let mut parent_snap = None;
+        for (i, (ids, texts)) in [
+            (vec![0i32, 1], vec!["a0", "a1"]),
+            (vec![2, 3], vec!["b0", "b1"]),
+            (vec![4, 5], vec!["c0", "c1"]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let embs: Vec<Vec<f32>> = ids.iter().map(|&v| vec![v as f32; dim as usize]).collect();
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int32Array::from(ids.clone())),
+                    Arc::new(StringArray::from(texts)),
+                ],
+            )
+            .unwrap();
+            let bytes = AilakeFileWriter::new(policy.clone())
+                .write(&batch, &embs)
+                .unwrap();
+            let path = format!("data/old_{i}.parquet");
+            store.put(&path, bytes.clone()).await.unwrap();
+
+            let centroid = compute_centroid_and_radius(&embs, VectorMetric::Cosine);
+            let reader = AilakeFileReader::new(bytes.clone(), "embedding", dim);
+            let header = reader.read_header().unwrap();
+            let ailk_start = reader.ailk_offset().unwrap();
+            let entry = make_data_file_entry(
+                &path,
+                ids.len() as u64,
+                bytes.len() as u64,
+                &centroid,
+                VectorIndexInfo {
+                    column: "embedding",
+                    dim,
+                    hnsw_offset: ailk_start + header.hnsw_offset,
+                    hnsw_len: header.hnsw_len,
+                },
+            );
+            let snap_id = new_snapshot_id();
+            catalog
+                .commit_snapshot(
+                    &table,
+                    NewSnapshot {
+                        snapshot_id: snap_id,
+                        parent_snapshot_id: parent_snap,
+                        files: vec![entry],
+                        operation: SnapshotOperation::Append,
+                        iceberg_schema: None,
+                        extra_properties: std::collections::HashMap::new(),
+                        bloom_filters: vec![],
+                        equality_delete_files: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+            parent_snap = Some(snap_id);
+        }
+
+        let files_before = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(
+            files_before.len(),
+            3,
+            "sanity: 3 files committed via Append"
+        );
+
+        let job = MigrationJob {
+            table: table.clone(),
+            old_column: "embedding".into(),
+            new_column: "embedding".into(),
+            text_column: "chunk_text".into(),
+            embed_fn: Arc::new(|texts: &[String]| {
+                Ok(texts.iter().map(|_| vec![9.0f32; 4]).collect())
+            }),
+            strategy: MigrationStrategy::AtomicReplace,
+            batch_size: 10,
+            new_model: None,
+            on_progress: None,
+        };
+        job.run(catalog.clone(), store.clone()).await.unwrap();
+
+        let files_after = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(
+            files_after.len(),
+            3,
+            "BUG: expected all 3 migrated files to remain visible, got {:?}",
+            files_after.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        let total_rows: u64 = files_after.iter().map(|f| f.record_count).sum();
+        assert_eq!(total_rows, 6, "all 6 original rows must survive migration");
+
+        // Every file must be independently readable with the re-embedded vectors.
+        for entry in &files_after {
+            let bytes = store.get(&entry.path).await.unwrap();
+            let reader = AilakeFileReader::new(bytes, "embedding", dim);
+            let (batch, embs) = reader.read_parquet().unwrap();
+            assert_eq!(batch.num_rows(), 2);
+            assert!(embs.iter().all(|v| v == &vec![9.0f32; 4]));
+        }
+    }
 }

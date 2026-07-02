@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -506,6 +507,220 @@ class TestStreamWriter:
         assert "format_version" not in call_kwargs, (
             f"format_version should be absent for default v2; kwargs={call_kwargs}"
         )
+
+    # ── extra_columns: non-text/non-embedding record fields survive the write ──
+
+    def test_extra_columns_default_includes_all_scalar_fields(self):
+        """Every scalar field besides text_field becomes a queryable extra column
+        by default — this is the bug: table.insert() used to be called with only
+        (texts, embeddings), silently dropping id/source_url/etc."""
+        cfg = _make_cfg()
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "hello", "id": 1, "source_url": "http://a"})
+            writer.add({"content": "world", "id": 2, "source_url": "http://b"})
+            writer.commit()
+
+        _, kwargs = mock_table.insert.call_args
+        assert kwargs.get("extra_columns") == {
+            "id": [1, 2],
+            "source_url": ["http://a", "http://b"],
+        }, f"extra_columns={kwargs.get('extra_columns')}"
+
+    def test_extra_columns_allowlist_filters_fields(self):
+        cfg = _make_cfg(extra_columns=["id"])
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "hello", "id": 1, "source_url": "http://a"})
+            writer.commit()
+
+        _, kwargs = mock_table.insert.call_args
+        assert kwargs.get("extra_columns") == {"id": [1]}
+
+    def test_extra_columns_skips_non_scalar_values(self):
+        cfg = _make_cfg()
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "hello", "id": 1, "meta": {"nested": True}})
+            writer.commit()
+
+        _, kwargs = mock_table.insert.call_args
+        extra = kwargs.get("extra_columns")
+        assert extra == {"id": [1]}, f"extra_columns={extra}"
+
+    def test_extra_columns_mixed_scalar_types_logs_warning(self, caplog):
+        """Regression: a column's type is inferred from the first non-null value only
+        (see ailake-py's write_batch); a later value of a different scalar type is
+        silently coerced/nulled downstream with no signal — unlike the non-scalar
+        case, which already warns. This must warn too."""
+        cfg = _make_cfg()
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            with caplog.at_level(logging.WARNING, logger="airbyte_destination_ailake.writer"):
+                writer.add({"content": "hello", "score": 5})
+                writer.add({"content": "world", "score": 5.5})
+                writer.commit()
+
+        _, kwargs = mock_table.insert.call_args
+        extra = kwargs.get("extra_columns")
+        assert extra == {"score": [5, 5.5]}, f"extra_columns={extra}"
+        assert any(
+            "mixed scalar types" in r.message and "score" in r.message for r in caplog.records
+        ), f"expected a mixed-scalar-type warning, got records={[r.message for r in caplog.records]}"
+
+    def test_extra_columns_same_scalar_type_no_warning(self, caplog):
+        """Sanity check: same type across all values must not trigger the mixed-type warning."""
+        cfg = _make_cfg()
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            with caplog.at_level(logging.WARNING, logger="airbyte_destination_ailake.writer"):
+                writer.add({"content": "hello", "score": 5})
+                writer.add({"content": "world", "score": 7})
+                writer.commit()
+
+        assert not any("mixed scalar types" in r.message for r in caplog.records)
+
+    def test_extra_columns_none_when_no_other_fields(self):
+        cfg = _make_cfg()
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "hello"})
+            writer.commit()
+
+        _, kwargs = mock_table.insert.call_args
+        assert kwargs.get("extra_columns") is None
+
+    # ── partition routing: per-record value opens a dedicated Table ────────────
+
+    def test_partition_by_groups_records_by_value(self):
+        """Records carrying the partition_by field's value are routed to a Table
+        per distinct value, with partition_value pinned on that Table."""
+        cfg = _make_cfg(partition_by="agent_id")
+        embedder = FakeEmbedder()
+        tables_by_key: dict[Any, MagicMock] = {}
+
+        def fake_open_table(path, **kwargs):
+            key = kwargs.get("partition_value")
+            m = MagicMock()
+            m.commit.return_value = 1
+            tables_by_key[key] = m
+            return m
+
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.side_effect = fake_open_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "a", "agent_id": "agent-1"})
+            writer.add({"content": "b", "agent_id": "agent-2"})
+            writer.add({"content": "c", "agent_id": "agent-1"})
+            writer.commit()
+
+        assert set(tables_by_key.keys()) == {"agent-1", "agent-2"}
+        agent1_texts = tables_by_key["agent-1"].insert.call_args[0][0]
+        agent2_texts = tables_by_key["agent-2"].insert.call_args[0][0]
+        assert agent1_texts == ["a", "c"]
+        assert agent2_texts == ["b"]
+
+    def test_partition_column_survives_as_extra_column(self):
+        cfg = _make_cfg(partition_by="agent_id")
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "a", "agent_id": "agent-1"})
+            writer.commit()
+
+        _, kwargs = mock_table.insert.call_args
+        assert kwargs.get("extra_columns", {}).get("agent_id") == ["agent-1"]
+
+    def test_record_missing_partition_field_falls_back_to_unpartitioned(self):
+        """A record without the configured partition_by field still gets written —
+        via a Table opened with the partition schema but no pinned value, matching
+        the pre-existing (pre-fix) single-writer behavior."""
+        cfg = _make_cfg(partition_by="agent_id")
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "no agent here"})
+            writer.commit()
+
+        assert fake_ailake.open_table.call_count == 1
+        _, kwargs = fake_ailake.open_table.call_args
+        assert kwargs.get("partition_by") == "agent_id"
+        assert "partition_value" not in kwargs
+
+    def test_partition_fields_groups_by_multi_column_value(self):
+        fields = [{"column": "agent_id", "transform": "identity", "column_type": "string"}]
+        cfg = _make_cfg(partition_fields=fields)
+        embedder = FakeEmbedder()
+        tables_by_key: dict[Any, MagicMock] = {}
+
+        def fake_open_table(path, **kwargs):
+            key = tuple(sorted(kwargs.get("partition_values", {}).items()))
+            m = MagicMock()
+            m.commit.return_value = 1
+            tables_by_key[key] = m
+            return m
+
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.side_effect = fake_open_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            writer.add({"content": "a", "agent_id": "agent-1"})
+            writer.add({"content": "b", "agent_id": "agent-2"})
+            writer.commit()
+
+        assert set(tables_by_key.keys()) == {
+            (("agent_id", "agent-1"),),
+            (("agent_id", "agent-2"),),
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@
 //! Integration layer. Depends on all data-plane crates.
 //! Public surface: TableWriter, search(), ContextAssembler, CompactionPlanner, CompactionExecutor.
 
+pub mod backfill;
 pub mod bloom;
 pub mod bm25;
 pub mod compaction;
@@ -20,6 +21,7 @@ pub mod schema_filler;
 pub mod writer;
 
 pub use ailake_index::IvfPqConfig;
+pub use backfill::{BackfillJob, BackfillProgress, BackfillProgressFn};
 pub use bloom::BloomFilter;
 pub use bm25::{BM25Scorer, HybridConfig, HybridFusion, IdfStats};
 pub use compaction::{CompactionConfig, CompactionExecutor, CompactionMode, CompactionPlanner};

@@ -58,6 +58,21 @@ impl AilakeFileReader {
         self.ailk_offset_from_trailer()
     }
 
+    /// True iff this file has its own AILK section specifically for `column` — i.e. a
+    /// `ailake.{column}.footer_offset` KV entry is present.
+    ///
+    /// Unlike `ailk_offset_for_column()`, this does **not** fall back to the primary
+    /// column's footer or the trailer bootstrap: those fallbacks make
+    /// `ailk_offset_for_column(...).is_ok()` return `true` for *any* AI-Lake file
+    /// regardless of `column`, which is correct for "give me an offset to read" but
+    /// wrong for "does this specific secondary column exist" — e.g. an idempotency
+    /// check before adding a new vector column to files that don't have it yet.
+    pub fn has_column_footer(&self, column: &str) -> bool {
+        let reader = ParquetVectorReader::new(self.bytes.clone(), column);
+        let col_key = format!("ailake.{column}.footer_offset");
+        matches!(reader.kv_metadata(&col_key), Ok(Some(_)))
+    }
+
     /// Bootstrap AILK offset from the `AilakeTrailer` embedded just before the Parquet footer.
     ///
     /// The `AilakeTrailer` (24 bytes) ends immediately before the Parquet footer thrift
@@ -98,10 +113,13 @@ impl AilakeFileReader {
 
     fn read_header_at_offset(&self, offset: u64) -> AilakeResult<AilakeHeader> {
         let offset = offset as usize;
-        if offset + HEADER_SIZE > self.bytes.len() {
+        let header_end = offset
+            .checked_add(HEADER_SIZE)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
+        if header_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
         }
-        let header_bytes: &[u8; HEADER_SIZE] = self.bytes[offset..offset + HEADER_SIZE]
+        let header_bytes: &[u8; HEADER_SIZE] = self.bytes[offset..header_end]
             .try_into()
             .map_err(|_| AilakeError::NotAnAilakeFile)?;
         AilakeHeader::from_bytes(header_bytes)
@@ -111,8 +129,12 @@ impl AilakeFileReader {
     pub fn get_centroid(&self) -> AilakeResult<Centroid> {
         let ailk_start = self.ailk_offset()? as usize;
         let header = self.read_header()?;
-        let centroid_start = ailk_start + header.centroid_offset as usize;
-        let centroid_end = centroid_start + header.centroid_len as usize;
+        let centroid_start = ailk_start
+            .checked_add(header.centroid_offset as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
+        let centroid_end = centroid_start
+            .checked_add(header.centroid_len as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
 
         if centroid_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
@@ -167,17 +189,14 @@ impl AilakeFileReader {
     /// multi-column files written with `AilakeFileWriter::write_multi`.
     pub fn load_index_for_column(&self, column: &str) -> AilakeResult<HnswIndex> {
         let ailk_start = self.ailk_offset_for_column(column)? as usize;
+        let header = self.read_header_at_offset(ailk_start as u64)?;
 
-        if ailk_start + HEADER_SIZE > self.bytes.len() {
-            return Err(AilakeError::NotAnAilakeFile);
-        }
-        let header_bytes: &[u8; HEADER_SIZE] = self.bytes[ailk_start..ailk_start + HEADER_SIZE]
-            .try_into()
-            .map_err(|_| AilakeError::NotAnAilakeFile)?;
-        let header = AilakeHeader::from_bytes(header_bytes)?;
-
-        let hnsw_start = ailk_start + header.hnsw_offset as usize;
-        let hnsw_end = hnsw_start + header.hnsw_len as usize;
+        let hnsw_start = ailk_start
+            .checked_add(header.hnsw_offset as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
+        let hnsw_end = hnsw_start
+            .checked_add(header.hnsw_len as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
 
         if hnsw_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
@@ -197,17 +216,14 @@ impl AilakeFileReader {
     /// Load index for a specific vector column as `AnyIndex`.
     pub fn load_any_index_for_column(&self, column: &str) -> AilakeResult<AnyIndex> {
         let ailk_start = self.ailk_offset_for_column(column)? as usize;
+        let header = self.read_header_at_offset(ailk_start as u64)?;
 
-        if ailk_start + HEADER_SIZE > self.bytes.len() {
-            return Err(AilakeError::NotAnAilakeFile);
-        }
-        let header_bytes: &[u8; HEADER_SIZE] = self.bytes[ailk_start..ailk_start + HEADER_SIZE]
-            .try_into()
-            .map_err(|_| AilakeError::NotAnAilakeFile)?;
-        let header = AilakeHeader::from_bytes(header_bytes)?;
-
-        let index_start = ailk_start + header.hnsw_offset as usize;
-        let index_end = index_start + header.hnsw_len as usize;
+        let index_start = ailk_start
+            .checked_add(header.hnsw_offset as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
+        let index_end = index_start
+            .checked_add(header.hnsw_len as usize)
+            .ok_or(AilakeError::NotAnAilakeFile)?;
 
         if index_end > self.bytes.len() {
             return Err(AilakeError::NotAnAilakeFile);
@@ -273,10 +289,13 @@ impl AilakeFileReader {
         Ok(Some(self.bytes.slice(blob_start..blob_end)))
     }
 
-    /// Verify the positional invariant: Parquet record_count == HNSW node_count.
+    /// Verify the positional invariant: Parquet record_count == index node_count.
+    ///
+    /// Dispatches via `load_any_index()` (HNSW or IVF-PQ, per `header.flags`) — unlike
+    /// `load_index()`, which always assumes HNSW and errors out on an IVF-PQ-indexed file.
     pub fn verify_integrity(&self) -> AilakeResult<()> {
         let header = self.read_header()?;
-        let index = self.load_index()?;
+        let index = self.load_any_index()?;
         let reader = ParquetVectorReader::new(self.bytes.clone(), &self.vector_column);
         let parquet_count = reader.record_count()?;
 
@@ -392,5 +411,93 @@ mod tests {
         let (batch, embs) = reader.read_parquet().unwrap();
         assert_eq!(batch.num_rows(), 3);
         assert_eq!(embs.len(), 3);
+    }
+
+    /// Regression: header offset/length fields are parsed straight from file bytes with
+    /// no bound validation — a corrupted or hostile file with `hnsw_offset` near
+    /// `u64::MAX` used to overflow the `ailk_start + header.hnsw_offset` addition. In a
+    /// release build the wrapped result could slip past the `> self.bytes.len()` bounds
+    /// check and panic later on a backwards slice range instead of returning
+    /// `NotAnAilakeFile`. `checked_add` must reject this cleanly.
+    #[test]
+    fn corrupted_hnsw_offset_errors_instead_of_panicking() {
+        let file = write_file(3, 4);
+        let reader = AilakeFileReader::new(file.clone(), "embedding", 4);
+        let ailk_start = reader.ailk_offset().unwrap() as usize;
+
+        // hnsw_offset is a little-endian u64 at header bytes [40..48], per footer.rs.
+        let mut corrupted = file.to_vec();
+        let field_start = ailk_start + 40;
+        corrupted[field_start..field_start + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        let corrupted = Bytes::from(corrupted);
+
+        let r1 = AilakeFileReader::new(corrupted.clone(), "embedding", 4);
+        assert!(r1.load_index_for_column("embedding").is_err());
+        let r2 = AilakeFileReader::new(corrupted, "embedding", 4);
+        assert!(r2.load_any_index_for_column("embedding").is_err());
+    }
+
+    /// Regression: `ailk_offset_for_column("some_col_that_was_never_written")` used to
+    /// be misused as an existence check (e.g. `BackfillJob`'s idempotency skip) — but it
+    /// falls back to the *primary* column's footer when no per-column KV key exists, so
+    /// `.is_ok()` is `true` for any AI-Lake file regardless of `column`, silently
+    /// skipping every file on the very first backfill run. `has_column_footer` checks
+    /// the per-column KV key directly, with no such fallback.
+    #[test]
+    fn has_column_footer_does_not_false_positive_on_primary_fallback() {
+        let file = write_file(3, 4);
+        let reader = AilakeFileReader::new(file, "embedding", 4);
+
+        // A column that was never written must NOT be reported as present, even though
+        // ailk_offset_for_column() incorrectly succeeds via the primary-column fallback
+        // (the exact behavior has_column_footer exists to avoid).
+        assert!(!reader.has_column_footer("embedding_v2"));
+        assert!(
+            reader.ailk_offset_for_column("embedding_v2").is_ok(),
+            "sanity: ailk_offset_for_column's primary-fallback behavior is what \
+             has_column_footer exists to avoid — if this assert ever fails, the \
+             fallback was removed and has_column_footer may be redundant"
+        );
+    }
+
+    /// True-positive counterpart: a genuine extra column written via `write_multi`
+    /// (its own `ailake.{column}.footer_offset` KV entry, per the per-column convention)
+    /// must be detected as present.
+    #[test]
+    fn has_column_footer_detects_genuine_extra_column() {
+        use crate::writer::VectorColumnBatch;
+
+        let dim = 4u32;
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![0i32, 1, 2]))])
+                .unwrap();
+        let primary_embs: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0]; 3];
+        let extra_embs: Vec<Vec<f32>> = vec![vec![0.0, 1.0, 0.0, 0.0]; 3];
+        let extra_policy = make_policy(dim);
+        let mut extra_policy = extra_policy.clone();
+        extra_policy.column_name = "embedding_v2".to_string();
+
+        let primary_policy = make_policy(dim);
+        let file_bytes = AilakeFileWriter::new(primary_policy.clone())
+            .write_multi(
+                &batch,
+                &[
+                    VectorColumnBatch {
+                        policy: &primary_policy,
+                        embeddings: &primary_embs,
+                    },
+                    VectorColumnBatch {
+                        policy: &extra_policy,
+                        embeddings: &extra_embs,
+                    },
+                ],
+            )
+            .unwrap();
+
+        let reader = AilakeFileReader::new(file_bytes, "embedding", dim);
+        assert!(reader.has_column_footer("embedding_v2"));
+        // Still correctly absent for a column that really was never written.
+        assert!(!reader.has_column_footer("embedding_v3"));
     }
 }

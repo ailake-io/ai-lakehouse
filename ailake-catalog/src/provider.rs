@@ -114,6 +114,23 @@ pub struct DataFileEntry {
     pub first_row_id: Option<i64>,
 }
 
+impl DataFileEntry {
+    /// True iff this file was never written by the AI-Lake SDK — most likely rewritten
+    /// by a generic Iceberg engine (Spark/Trino `OPTIMIZE`/`rewrite_data_files`, DuckDB)
+    /// with no knowledge of AI-Lake.
+    ///
+    /// Every AI-Lake write path (`make_data_file_entry`, `make_data_file_entry_indexing`)
+    /// computes and stores a centroid unconditionally, even for `IndexStatus::Indexing`
+    /// files — before the HNSW build itself completes. A missing centroid is therefore a
+    /// reliable "not ours" signal, distinct from `IndexStatus::Failed` (an internal
+    /// indexing failure on a file the SDK *did* write — see `writer.rs::patch_index_failed`,
+    /// which never touches `centroid_b64`). Shared by `CompactionPlanner::plan()`,
+    /// `scanner.rs::search`, and `ailake info` so the three can't drift on the definition.
+    pub fn is_foreign(&self) -> bool {
+        self.centroid_b64.is_none()
+    }
+}
+
 /// One field from the current Iceberg table schema (Phase G).
 ///
 /// Parsed from `schemas[current-schema-id].fields` in `metadata.json`.
@@ -317,6 +334,68 @@ pub trait CatalogProvider: Send + Sync {
         _snapshot_id: Option<SnapshotId>,
     ) -> AilakeResult<Vec<EqualityDeleteFile>> {
         Ok(vec![])
+    }
+
+    /// Add a new vector column to the table schema without rewriting data files.
+    ///
+    /// - Adds the column as Iceberg type `binary` (maps to `FIXED_LEN_BYTE_ARRAY` in Parquet).
+    /// - Stores `ailake.dim-<col>`, `ailake.metric-<col>`, `ailake.precision-<col>` in properties.
+    /// - Old files missing the column return `null` at read time (`initial-default = null`).
+    /// - Does NOT commit a snapshot or backfill embeddings — use `BackfillJob` for that.
+    ///
+    /// Returns the new `schema-id`.
+    async fn add_vector_column(
+        &self,
+        table: &TableIdent,
+        spec: &ailake_core::VectorColSpec,
+    ) -> AilakeResult<i32> {
+        use crate::schema_evolution::{AddColumnRequest, SchemaEvolution};
+        use std::collections::HashMap;
+
+        let mut props: HashMap<String, String> = HashMap::new();
+        props.insert(
+            format!("ailake.dim-{}", spec.column_name),
+            spec.dim.to_string(),
+        );
+        props.insert(
+            format!("ailake.metric-{}", spec.column_name),
+            format!("{:?}", spec.metric).to_lowercase(),
+        );
+        props.insert(
+            format!("ailake.precision-{}", spec.column_name),
+            format!("{:?}", spec.precision).to_lowercase(),
+        );
+        if spec.pre_normalize {
+            props.insert(
+                format!("ailake.pre-normalize-{}", spec.column_name),
+                "true".to_string(),
+            );
+        }
+        if let Some(m) = spec.hnsw_m {
+            props.insert(format!("ailake.hnsw-m-{}", spec.column_name), m.to_string());
+        }
+        if let Some(ef) = spec.hnsw_ef_construction {
+            props.insert(
+                format!("ailake.hnsw-ef-construction-{}", spec.column_name),
+                ef.to_string(),
+            );
+        }
+
+        let evolution = SchemaEvolution::new()
+            .add_column(AddColumnRequest {
+                name: spec.column_name.clone(),
+                iceberg_type: "binary".to_string(),
+                required: false,
+                initial_default: None,
+                write_default: None,
+                doc: Some(format!(
+                    "Vector column {} dim={} metric={:?}",
+                    spec.column_name, spec.dim, spec.metric
+                )),
+            })
+            .with_properties(props);
+
+        self.evolve_schema(table, evolution).await
     }
 }
 

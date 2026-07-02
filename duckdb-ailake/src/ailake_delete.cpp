@@ -63,23 +63,45 @@ static void AilakeDeleteWhereExec(
     std::string column    = StringValue::Get(column_v);
     auto        values    = extract_varchar_list(values_v);
 
+    // arity 5: namespace VARCHAR (default 'default'), table_name VARCHAR (default 'table')
+    std::string ns = "default";
+    if ((idx_t)args.data.size() > 3 && !args.data[3].GetValue(0).IsNull())
+        ns = StringValue::Get(args.data[3].GetValue(0));
+    std::string table_name = "table";
+    if ((idx_t)args.data.size() > 4 && !args.data[4].GetValue(0).IsNull())
+        table_name = StringValue::Get(args.data[4].GetValue(0));
+
     if (values.empty()) {
         result.SetValue(0, Value::BOOLEAN(true));
         return;
     }
 
-    bool ok = lib.delete_where(warehouse, "table", column, values);
+    bool ok = lib.delete_where(warehouse, table_name, column, values, ns);
     result.SetValue(0, Value::BOOLEAN(ok));
 }
 
 void RegisterAilakeDeleteWhere(duckdb::ExtensionLoader &loader) {
-    ScalarFunction fn(
-        "ailake_delete_where",
+    ScalarFunctionSet fn_set("ailake_delete_where");
+
+    // Arity 3: (table_path, column, values) — namespace='default', table_name='table'
+    fn_set.AddFunction(ScalarFunction(
         {LogicalType::VARCHAR,
          LogicalType::VARCHAR,
          LogicalType::LIST(LogicalType::VARCHAR)},
         LogicalType::BOOLEAN,
         AilakeDeleteWhereExec
-    );
-    loader.RegisterFunction( fn);
+    ));
+
+    // Arity 5: + namespace VARCHAR, table_name VARCHAR
+    fn_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::VARCHAR),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
+        LogicalType::BOOLEAN,
+        AilakeDeleteWhereExec
+    ));
+
+    loader.RegisterFunction( fn_set);
 }

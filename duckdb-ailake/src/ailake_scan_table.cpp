@@ -29,6 +29,7 @@ using namespace duckdb;
 struct AilakeScanBindData : public TableFunctionData {
     // Query params (stored for potential re-execution).
     std::string        warehouse;
+    std::string        ns         = "default";
     std::string        table_name = "table";
     std::string        vec_col    = "embedding";
     std::vector<float> query;
@@ -87,6 +88,8 @@ static unique_ptr<FunctionData> AilakeScanBind(
             data->ef_search = IntegerValue::Get(named.second);
         } else if (named.first == "table_name") {
             data->table_name = StringValue::Get(named.second);
+        } else if (named.first == "namespace") {
+            data->ns = StringValue::Get(named.second);
         }
     }
 
@@ -105,7 +108,8 @@ static unique_ptr<FunctionData> AilakeScanBind(
         data->vec_col,
         data->query,
         data->top_k,
-        data->ef_search
+        data->ef_search,
+        data->ns
     );
 
     if (!data->result.ok || data->result.columns.empty()) {
@@ -297,6 +301,7 @@ void RegisterAilakeScan(duckdb::ExtensionLoader &loader) {
     func.named_parameters["vec_col"]    = LogicalType::VARCHAR;
     func.named_parameters["ef_search"]  = LogicalType::INTEGER;
     func.named_parameters["table_name"] = LogicalType::VARCHAR;
+    func.named_parameters["namespace"]  = LogicalType::VARCHAR;
 
     loader.RegisterFunction( func);
 }

@@ -19,6 +19,6 @@ pub use schema::{
     VectorStoragePolicy,
 };
 pub use types::{
-    ByteLen, ByteOffset, Centroid, Dim, EmbeddingModelInfo, RowId, VectorMetric, VectorModality,
-    VectorPrecision,
+    ByteLen, ByteOffset, Centroid, Dim, EmbeddingModelInfo, RowId, VectorColSpec, VectorMetric,
+    VectorModality, VectorPrecision,
 };

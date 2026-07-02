@@ -81,10 +81,14 @@ pub struct IcebergStatisticsRef {
     pub file_size_in_bytes: u64,
     #[serde(rename = "file-footer-size-in-bytes")]
     pub file_footer_size_in_bytes: u64,
-    /// Blob descriptors within the Puffin file. May be empty — readers can
-    /// always parse the Puffin footer directly for full blob metadata.
+    /// Blob descriptors within the Puffin file. Iceberg spec §"Table Statistics"
+    /// requires this key to be named `blob-metadata` (NOT `blob-file-references` —
+    /// iceberg-java's `TableMetadataParser` looks up that exact key and treats a
+    /// missing/null value as a parse error: "Cannot parse blob metadata from
+    /// non-array: null", which previously broke every Spark/Trino read of a V3
+    /// table with vector stats, even when partition specs were otherwise valid).
     #[serde(
-        rename = "blob-file-references",
+        rename = "blob-metadata",
         default,
         skip_serializing_if = "Vec::is_empty"
     )]
@@ -92,12 +96,17 @@ pub struct IcebergStatisticsRef {
 }
 
 /// Describes one blob within an Iceberg Puffin statistics file.
+/// `offset`/`length` are AI-Lake extensions (ignored by spec-compliant
+/// readers) carried alongside the spec-required fields so the AI-Lake SDK
+/// can locate the blob without re-parsing the Puffin footer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobRef {
     #[serde(rename = "type")]
     pub blob_type: String,
     #[serde(rename = "snapshot-id")]
     pub snapshot_id: i64,
+    #[serde(rename = "sequence-number")]
+    pub sequence_number: i64,
     #[serde(default)]
     pub fields: Vec<i32>,
     pub offset: u64,
@@ -172,6 +181,9 @@ impl IcebergMetadata {
         }
         if let Some(ef) = policy.hnsw_ef_construction {
             properties.insert("ailake.hnsw-ef-construction".to_string(), ef.to_string());
+        }
+        if policy.pre_normalize {
+            properties.insert("ailake.pre-normalize".to_string(), "true".to_string());
         }
         if let Some(model) = &policy.embedding_model {
             properties.insert(

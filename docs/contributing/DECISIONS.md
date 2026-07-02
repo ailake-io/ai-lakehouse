@@ -431,4 +431,37 @@ Exposed in: Rust (`TableWriter::write_batch_auto_deferred`), Python (`Table.writ
 **Rejected alternatives**:
 - Full Arrow Flight adoption: operational complexity (daemon lifecycle, TLS, service discovery) outweighs benefits at current scale.
 - gRPC without Arrow: same daemon overhead, loses zero-copy columnar benefit.
+
+---
+
+## ADR-018: Read compatibility with generic Iceberg engines does not imply write compatibility
+
+**Date**: 2026-07
+**Status**: Accepted
+
+**Context**: The AI-Lake file format guarantees that any standard Parquet/Iceberg reader (DuckDB, Spark, Trino, PyIceberg) can read AI-Lake tables without a plugin — the AILK footer sits after the Parquet footer and is invisible to standard readers (§2, §12 of `CLAUDE.md`). This was informally read as "any Iceberg-compliant engine can safely operate on AI-Lake tables." It cannot: if a generic engine's own maintenance operation (Spark/Trino `OPTIMIZE` / `rewrite_data_files`, or any Iceberg-standard compaction) rewrites an AI-Lake data file, the output is valid Parquet with no AILK footer and no `centroid`/`radius` in the manifest entry it produces — because that field piggybacks on Iceberg's `key_metadata` (reserved for encryption metadata) and generic writers never populate it. The AI-Lake SDK does not treat this as corruption; it degrades gracefully. This ADR documents the actual (not assumed) behavior and the fixes needed to make that degradation safe and visible.
+
+**Findings from investigation** (see `ailake-query/src/scanner.rs`, `ailake-query/src/compaction.rs`, `ailake-file/src/reader.rs`):
+
+1. **Query-time**: `VectorPruner::prune` keeps files with no centroid rather than dropping them (`pruner.rs`). `scanner.rs::search` detects a missing AILK footer via `AilakeFileReader::is_ailake_file()` and falls back to an exact O(N) flat scan — correct results, degraded latency. This path was silent (`debug!`-level log only) prior to this ADR.
+2. **Compaction-time — the actual risk**: `CompactionExecutor::compact()`/`compact_incremental()` read every input file's data via `read_parquet()`, which decodes the vector column straight from Parquet independent of the AILK footer. Two related bugs meant a foreign-rewritten file's rows could be **silently dropped** during the next compaction pass that swept it up: (a) the per-file read loops treated "no AILK footer" as "skip this file entirely" instead of "no index to reuse, but still read its data"; (b) `CompactionExecutor::run()`/`run_deferred()` committed `SnapshotOperation::Replace` with only the *compacted* subset of files, and `Replace` does not inherit the previous manifest (`HadoopCatalog::commit_snapshot`) — so files outside a partial compaction pass (too large, or beyond `max_files_per_pass`) vanished from the table entirely, whether or not they were AI-Lake-native. Both are fixed as part of this ADR (see Consequences).
+3. **No production wiring for the existing invariant check**: `AilakeFileReader::verify_integrity()` (`parquet_count == hnsw_node_count == header.record_count`) existed but was only ever called from tests.
+
+**Decision**: Treat "generic engine rewrote this file" as an expected, recoverable condition, not an error state — but make it loud and self-healing:
+
+1. **Detect**: a `DataFileEntry` with no `centroid_b64` was never produced by the AI-Lake SDK (every write path — inline, deferred, incremental-merge — computes and stores a centroid before the HNSW build itself completes). `CompactionPlanner::plan()` now treats any such file as a priority repair candidate, bypassing both the size filter and `min_files_to_compact` — a single foreign file is worth compacting on its own rather than waiting for a batch.
+2. **Warn**: `scanner.rs::search` distinguishes the *expected* transient case (`IndexStatus::Indexing`, our own deferred write still building its index — `debug!`) from the *unexpected* case (no footer, not `Indexing` — `warn!`, with an aggregate summary at the end of each search call). `ailake info` reports foreign-file paths so operators can see drift without waiting for a slow query.
+3. **Never lose data on repair**: compaction must read and preserve every row from every input file regardless of index presence, and `Replace`/`Overwrite` commits must always carry the complete resulting file list (untouched files included), never a partial one.
+4. **Verify**: `verify_integrity()` now runs after every compaction merge, before the result is committed to the catalog — catching a mismatched merge as a build-time error instead of a query-time surprise.
+
+**Consequences**:
+- Vector search over a table touched by a generic engine remains **correct** at all times (flat scan is exact) — never silently wrong.
+- Search over such files is **slower** (O(N) instead of O(log N)) until the next compaction pass, which is now guaranteed to happen promptly (bypasses batching thresholds) and to be **visible** (`warn!` logs, `ailake info`).
+- `CompactionExecutor::run()`/`run_deferred()` (used by `ailake-jni` — the Spark/Trino/Flink plugins) no longer risk dropping untouched files from a table on a partial compaction pass; `compact()`/`compact_incremental()` no longer risk dropping rows from a file that lost its AI-Lake index. Both were live bugs, not hypothetical — reproduced with regression tests (`ailake-catalog/src/hadoop.rs::replace_does_not_inherit_previous_manifest`, `ailake-query/src/compaction.rs::run_preserves_untouched_files_outside_compaction_pass`, `::compact_preserves_rows_from_footerless_file`).
+- At the time this ADR was written, the CLI (`ailake compact`) and `ailake serve`'s `/compact` endpoint already built the correct (full) file list independently of `CompactionExecutor::run()`, so neither was exposed to the Replace bug. The CLI's `Compact` command was later refactored to call `CompactionExecutor::run()`/`run_deferred()` directly instead of duplicating that file-list logic — it now also inherits `run()`'s correct `parent_snapshot_id` (a separate, smaller bug: hardcoded `None` even though a current snapshot always exists at compaction time, breaking Iceberg lineage/`expire_snapshots` for compacted tables), and gained `--deferred`/`--max-files-per-pass`/`--format json` in the process. `ailake serve`'s `/compact` endpoint still builds its own file list independently and was not touched.
+
+**Rejected alternatives**:
+- Refuse to open / hard-error on a file with no AILK footer: would turn a recoverable, correctly-served-degraded state into a hard outage for any table ever touched by a standard Iceberg maintenance job — unacceptable given §12's explicit promise that generic engines can operate on AI-Lake tables.
+- Encode centroid/HNSW offset in a first-class Iceberg V3 field instead of `key_metadata`: would make foreign writes detectable without the `centroid_b64.is_none()` heuristic, but requires the V3 manifest schema migration tracked separately in `CLAUDE.md` §10 Fase 5 ("Iceberg V3 — Column Statistics estendidas"); the heuristic is correct today because every AI-Lake write path populates centroid unconditionally.
+- A file lock / marker to block generic engines from writing to AI-Lake tables at all: not enforceable — Iceberg has no such mechanism, and the whole point of Iceberg compatibility is that generic engines are allowed to operate on the table.
 - Protobuf at the JNI boundary: additional schema maintenance without Arrow ecosystem benefits.

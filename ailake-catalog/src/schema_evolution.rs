@@ -44,6 +44,9 @@ pub struct RenameColumnRequest {
 pub struct SchemaEvolution {
     pub renames: Vec<RenameColumnRequest>,
     pub adds: Vec<AddColumnRequest>,
+    /// Additional table-level properties to merge into `metadata.json` on commit.
+    /// Used by `add_vector_column` to persist `ailake.dim-<col>`, `ailake.metric-<col>`, etc.
+    pub extra_properties: std::collections::HashMap<String, String>,
 }
 
 impl SchemaEvolution {
@@ -65,6 +68,11 @@ impl SchemaEvolution {
             old_name: old_name.into(),
             new_name: new_name.into(),
         });
+        self
+    }
+
+    pub fn with_properties(mut self, props: std::collections::HashMap<String, String>) -> Self {
+        self.extra_properties = props;
         self
     }
 }

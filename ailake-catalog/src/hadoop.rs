@@ -285,6 +285,34 @@ impl CatalogProvider for HadoopCatalog {
         meta.snapshots.push(iceberg_snap);
 
         if let Some(schema_update) = snapshot.iceberg_schema {
+            // Bootstrap metadata (IcebergMetadata::new, for partition_by /
+            // partition_fields tables) assigns the partition column field-id
+            // assuming it is the *only* schema field at table-creation time.
+            // The real first write replaces that bootstrap schema with the
+            // full column set in actual Arrow order, so the partition column
+            // can land at a different field-id (e.g. "topic_id" written
+            // second behind "text" ends up id=2, not id=1). Remap every
+            // partition-spec's source-id to whatever id the matching column
+            // name now has — otherwise readers (Trino/Spark iceberg-java)
+            // reject the table with "Cannot create identity partition
+            // sourced from different field in schema".
+            let new_id_by_name: std::collections::HashMap<&str, i64> = schema_update
+                .fields
+                .iter()
+                .filter_map(|f| Some((f["name"].as_str()?, f["id"].as_i64()?)))
+                .collect();
+            for spec in meta.partition_specs.iter_mut() {
+                if let Some(fields) = spec["fields"].as_array_mut() {
+                    for pf in fields.iter_mut() {
+                        if let Some(name) = pf["name"].as_str() {
+                            if let Some(&new_id) = new_id_by_name.get(name) {
+                                pf["source-id"] = serde_json::json!(new_id);
+                            }
+                        }
+                    }
+                }
+            }
+
             if let Some(schema) = meta.schemas.first_mut() {
                 schema["fields"] = serde_json::Value::Array(schema_update.fields);
             }
@@ -328,6 +356,7 @@ impl CatalogProvider for HadoopCatalog {
                             let mut blob_refs = vec![BlobRef {
                                 blob_type: crate::puffin::BLOB_TYPE_VECTOR_STATS.to_string(),
                                 snapshot_id: snap_id,
+                                sequence_number: seq,
                                 fields: vec![],
                                 offset: result.vector_stats_blob.0,
                                 length: result.vector_stats_blob.1,
@@ -336,6 +365,7 @@ impl CatalogProvider for HadoopCatalog {
                                 blob_refs.push(BlobRef {
                                     blob_type: crate::puffin::BLOB_TYPE_BM25_BLOOM.to_string(),
                                     snapshot_id: snap_id,
+                                    sequence_number: seq,
                                     fields: vec![],
                                     offset: off,
                                     length: len,
@@ -576,6 +606,10 @@ impl CatalogProvider for HadoopCatalog {
             .unwrap_or_default()
             .as_millis() as i64;
 
+        for (k, v) in evolution.extra_properties {
+            meta.properties.insert(k, v);
+        }
+
         self.save_metadata(table, &meta).await?;
         tracing::info!(
             "ailake: schema evolved — table={}/{}, new schema-id={new_schema_id}, \
@@ -703,6 +737,98 @@ mod tests {
         let files = catalog.list_files(&table, Some(snap_id)).await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "data/part-00001.parquet");
+    }
+
+    fn make_entry(path: &str) -> DataFileEntry {
+        DataFileEntry {
+            path: path.to_string(),
+            record_count: 10,
+            file_size_bytes: 1024,
+            centroid_b64: None,
+            radius: Some(0.3),
+            hnsw_offset: Some(512),
+            hnsw_len: Some(256),
+            vector_column: Some("embedding".to_string()),
+            vector_dim: Some(4),
+            extra_vector_indexes: vec![],
+            index_status: crate::provider::IndexStatus::Ready,
+            index_error: None,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+        }
+    }
+
+    /// Documents the `Replace`/`Overwrite` contract: the new manifest becomes the
+    /// *complete* file list, with no inheritance from the previous snapshot (see the
+    /// comment above `all_manifests` in `commit_snapshot`). Callers that commit a
+    /// partial file list under `Replace` — instead of first fetching `list_files()`
+    /// and carrying forward untouched entries — silently lose those files. This bit
+    /// `CompactionExecutor::run()`/`run_deferred()` in `ailake-query`, which is why
+    /// they now rebuild the full file list before committing. `TableWriter`
+    /// (deferred index Ready-swap) and `MemoryDecayJob::run()` already followed this
+    /// contract correctly.
+    #[tokio::test]
+    async fn replace_does_not_inherit_previous_manifest() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let catalog = HadoopCatalog::new(store, "warehouse");
+        let table = TableIdent::new("default", "docs");
+        catalog.create_table(&table, &make_props()).await.unwrap();
+
+        // Snapshot 1 (Append): two files present — "small.parquet" (compaction candidate)
+        // and "big.parquet" (above target size, planner would never select it).
+        let snap1 = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![
+                make_entry("data/small.parquet"),
+                make_entry("data/big.parquet"),
+            ],
+            operation: crate::provider::SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap1).await.unwrap();
+
+        let files_before = catalog.list_files(&table, None).await.unwrap();
+        assert_eq!(
+            files_before.len(),
+            2,
+            "sanity: both files visible after Append"
+        );
+
+        // Snapshot 2 (Replace): mirrors CompactionExecutor::run() — commits ONLY the
+        // merged output of the compacted subset ("small.parquet" → "merged.parquet"),
+        // never re-listing "big.parquet" because it was outside `to_compact`.
+        let snap2 = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: None,
+            files: vec![make_entry("data/merged.parquet")],
+            operation: crate::provider::SnapshotOperation::Replace,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        catalog.commit_snapshot(&table, snap2).await.unwrap();
+
+        let files_after = catalog.list_files(&table, None).await.unwrap();
+        let paths_after: Vec<&str> = files_after.iter().map(|f| f.path.as_str()).collect();
+
+        // By design, `Replace` does NOT inherit "big.parquet" from the previous
+        // snapshot — the committing caller is responsible for including it if it
+        // should remain visible. This is the sharp edge that bit compaction.rs.
+        assert_eq!(
+            paths_after,
+            vec!["data/merged.parquet"],
+            "Replace must reflect exactly the file list it was given, nothing inherited — \
+             files_after={paths_after:?}"
+        );
     }
 
     #[tokio::test]

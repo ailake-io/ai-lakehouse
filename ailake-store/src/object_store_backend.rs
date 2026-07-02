@@ -31,6 +31,16 @@ impl ObjectStoreBackend {
     }
 
     fn resolve(&self, path: &str) -> Path {
+        // Absolute URI (e.g. "s3://bucket/warehouse/ns/table/data/part.parquet", the shape
+        // HadoopCatalog stores in DataFileEntry.path when the warehouse root itself is
+        // absolute — see hadoop.rs's `warehouse_prefix` logic) — the object key is
+        // everything after "scheme://bucket/". `self.prefix` must NOT be prepended again,
+        // it's already encoded in the URI. This mirrors the override behavior
+        // `LocalStore::full_path` gets for free from `PathBuf::join` with an absolute path.
+        if let Some((_, after_scheme)) = path.split_once("://") {
+            let key = after_scheme.split_once('/').map_or("", |(_, key)| key);
+            return Path::from(key);
+        }
         let full = format!("{}{}", self.prefix, path.trim_start_matches('/'));
         Path::from(full.as_str())
     }
@@ -112,5 +122,54 @@ impl Store for ObjectStoreBackend {
             .delete(&p)
             .await
             .map_err(|e| AilakeError::Store(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::memory::InMemory;
+
+    fn backend(prefix: &str) -> ObjectStoreBackend {
+        ObjectStoreBackend::new(Arc::new(InMemory::new()), prefix)
+    }
+
+    #[test]
+    fn relative_path_gets_configured_prefix() {
+        let b = backend("warehouse");
+        assert_eq!(
+            b.resolve("data/part.parquet").as_ref(),
+            "warehouse/data/part.parquet"
+        );
+    }
+
+    /// Regression: an absolute URI (the shape `HadoopCatalog` stores in `DataFileEntry.path`
+    /// when the warehouse root itself is absolute — see `hadoop.rs`'s `warehouse_prefix`
+    /// logic) used to be concatenated onto `prefix` verbatim, producing a garbage
+    /// double-prefixed key like `"warehouse/s3://my-bucket/ns/table/data/part.parquet"`
+    /// instead of resolving to the real object key.
+    #[test]
+    fn absolute_uri_ignores_configured_prefix() {
+        let b = backend("warehouse");
+        let abs = "s3://my-bucket/ns/table/data/part.parquet";
+        assert_eq!(b.resolve(abs).as_ref(), "ns/table/data/part.parquet");
+    }
+
+    #[test]
+    fn absolute_uri_variants() {
+        let b = backend("warehouse");
+        assert_eq!(b.resolve("gs://bucket/a/b.parquet").as_ref(), "a/b.parquet");
+        assert_eq!(
+            b.resolve("az://container/x/y.parquet").as_ref(),
+            "x/y.parquet"
+        );
+    }
+
+    #[tokio::test]
+    async fn absolute_uri_round_trips_through_get_put() {
+        let b = backend("warehouse");
+        let abs = "s3://my-bucket/ns/table/data/part.parquet";
+        b.put(abs, Bytes::from_static(b"hello")).await.unwrap();
+        assert_eq!(b.get(abs).await.unwrap(), Bytes::from_static(b"hello"));
     }
 }

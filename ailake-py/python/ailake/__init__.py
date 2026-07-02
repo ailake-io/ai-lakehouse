@@ -341,6 +341,12 @@ class Table:
         bm25_text_column: str | None = None,
         fts_text_columns: list[str] | None = None,
         fts_tokenizer: str = "default",
+        partition_by: str | None = None,
+        partition_value: str | None = None,
+        partition_column_type: str | None = None,
+        partition_fields: list[tuple[str, str, str]] | None = None,
+        partition_values: dict[str, str] | None = None,
+        format_version: int = 2,
     ) -> None:
         self._path = path
         self._vector_column = vector_column
@@ -370,6 +376,12 @@ class Table:
             bm25_text_column=bm25_text_column,
             fts_text_columns=fts_text_columns,
             fts_tokenizer=fts_tokenizer,
+            partition_by=partition_by,
+            partition_value=partition_value,
+            partition_column_type=partition_column_type,
+            partition_fields=partition_fields,
+            partition_values=partition_values,
+            format_version=format_version,
         )
 
     # ── write ─────────────────────────────────────────────────────────────────
@@ -378,6 +390,7 @@ class Table:
         self,
         texts: list[str],
         embeddings: Optional[_Embeddings] = None,
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> "Table":
         """Buffer a batch for writing.  Call ``commit()`` to persist.
 
@@ -386,6 +399,9 @@ class Table:
             embeddings: ``list[list[float]]`` or any array with a ``.tolist()``
                         method (numpy, torch, etc.).  May be omitted when
                         *embed_fn* was passed to ``__init__``.
+            extra_columns: additional tabular columns, e.g.
+                           ``{"id": [...], "category": [...]}``. Column type is
+                           inferred from the first element (bool/float/int/str).
         """
         if embeddings is not None:
             _emb: list[list[float]] | None = (
@@ -395,7 +411,7 @@ class Table:
             )
         else:
             _emb = None
-        self._writer.write_batch(texts, _emb)
+        self._writer.write_batch(texts, _emb, extra_columns)
         return self
 
     def commit(self) -> int:
@@ -409,6 +425,7 @@ class Table:
         self,
         texts: list[str],
         embeddings: _Embeddings,
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> "Table":
         """Deferred-index write — Parquet persisted immediately (~200k vec/s).
 
@@ -419,19 +436,21 @@ class Table:
         Args:
             texts: one string per row.
             embeddings: ``list[list[float]]`` or any array with a ``.tolist()`` method.
+            extra_columns: additional tabular columns — see :meth:`insert`.
         """
         _emb: list[list[float]] = (
             embeddings.tolist()  # type: ignore[union-attr]
             if hasattr(embeddings, "tolist")
             else [list(row) for row in embeddings]
         )
-        self._writer.write_batch_auto_deferred(texts, _emb)
+        self._writer.write_batch_auto_deferred(texts, _emb, extra_columns)
         return self
 
     async def write_batch_auto_deferred_async(
         self,
         texts: list[str],
         embeddings: _Embeddings,
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> "Table":
         """Async variant of :meth:`write_batch_auto_deferred`."""
         _emb: list[list[float]] = (
@@ -440,13 +459,16 @@ class Table:
             else [list(row) for row in embeddings]
         )
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._writer.write_batch_auto_deferred, texts, _emb)
+        await loop.run_in_executor(
+            None, self._writer.write_batch_auto_deferred, texts, _emb, extra_columns
+        )
         return self
 
     async def insert_async(
         self,
         texts: list[str],
         embeddings: _Embeddings,
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> "Table":
         """Async variant of :meth:`insert` — runs write_batch in a thread executor."""
         _emb: list[list[float]] = (
@@ -455,7 +477,7 @@ class Table:
             else [list(row) for row in embeddings]
         )
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._writer.write_batch, texts, _emb)
+        await loop.run_in_executor(None, self._writer.write_batch, texts, _emb, extra_columns)
         return self
 
     async def commit_async(self) -> int:
@@ -599,6 +621,12 @@ def open_table(
     bm25_text_column: str | None = None,
     fts_text_columns: list[str] | None = None,
     fts_tokenizer: str = "default",
+    partition_by: str | None = None,
+    partition_value: str | None = None,
+    partition_column_type: str | None = None,
+    partition_fields: list[tuple[str, str, str]] | None = None,
+    partition_values: dict[str, str] | None = None,
+    format_version: int = 2,
 ) -> Table:
     """Open or create an AI-Lake table at *path*.
 
@@ -619,6 +647,22 @@ def open_table(
         bm25_text_column: Column name for BM25 scoring (Phase 5 hybrid search).
         fts_text_columns: Columns to index with Tantivy FTS (Phase T).
         fts_tokenizer: Tokenizer for Tantivy FTS (default ``"default"``).
+        partition_by: Single-column Iceberg identity partition (e.g. ``"agent_id"``).
+                      Every row written through this ``Table`` instance is tagged with
+                      *partition_value* — open a separate ``Table`` per distinct value.
+        partition_value: The partition value for this ``Table`` instance when
+                         *partition_by* (or *partition_fields*) is set.
+        partition_column_type: Iceberg type of the *partition_by* column (e.g. ``"string"``).
+        partition_fields: Multi-column partition spec as a list of
+                          ``(column, transform, column_type)`` tuples, e.g.
+                          ``[("agent_id", "identity", "string")]``. Defines the table's
+                          partition schema; takes precedence over *partition_by* at
+                          table creation.
+        partition_values: ``{column: value}`` for this ``Table`` instance's multi-column
+                          partition value, matching *partition_fields*. Ignored when
+                          *partition_value* is also set.
+        format_version: Iceberg format version — ``2`` (default) or ``3`` (deletion
+                        vectors, row lineage).
     """
     return Table(
         path,
@@ -636,6 +680,12 @@ def open_table(
         bm25_text_column=bm25_text_column,
         fts_text_columns=fts_text_columns,
         fts_tokenizer=fts_tokenizer,
+        partition_by=partition_by,
+        partition_value=partition_value,
+        partition_column_type=partition_column_type,
+        partition_fields=partition_fields,
+        partition_values=partition_values,
+        format_version=format_version,
     )
 
 
@@ -1228,11 +1278,18 @@ def compact(
         "compact", table_id,
         "--min-files", str(min_files),
         "--target-size", str(target_size_bytes),
+        "--max-files-per-pass", str(max_files_per_pass),
+        "--format", "json",
     ]
+    if deferred:
+        args.append("--deferred")
     try:
         result = subprocess.run(args, capture_output=True, text=True)
     except (FileNotFoundError, PermissionError) as exc:
         return {"ok": True, "files_compacted": 0, "warning": f"ailake CLI not executable: {exc}"}
     if result.returncode != 0:
         return {"ok": False, "error": result.stderr.strip() or result.stdout.strip()}
-    return {"ok": True, "files_compacted": 1}
+    try:
+        return json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        return {"ok": False, "error": f"unparseable CLI output: {result.stdout.strip()}"}

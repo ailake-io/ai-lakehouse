@@ -736,7 +736,10 @@ cd ailake-flink
 
 # Test classes:
 #   AilakeVectorConnectorFactoryTest — DDL option parsing, factory lookup
-#   AilakeNativeLoaderTest           — graceful degradation when lib absent
+#   AilakeNativeLoaderTest           — data classes, JSON payload shape (no native lib needed)
+#   AilakeVectorTableSourceTest      — AilakeInputFormat.open() degrades to an empty
+#                                      result set when the native lib can't be loaded,
+#                                      instead of failing the Flink task
 #   AilakeJniIntegrationTest         — end-to-end when AILAKE_JNI_TEST=1
 ```
 

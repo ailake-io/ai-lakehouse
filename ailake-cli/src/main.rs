@@ -13,8 +13,8 @@ use ailake_core::{
 };
 use ailake_query::{
     delete_rows as rs_delete_rows, CompactionConfig, CompactionExecutor, CompactionPlanner,
-    EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy, MultiVectorBatch, ProgressFn,
-    SearchConfig, TableWriter,
+    EmbedFn, HybridConfig, MigrationJob, MigrationProgress, MigrationStrategy, MultiVectorBatch,
+    ProgressFn, SearchConfig, TableWriter,
 };
 use ailake_store::store_from_url;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -140,6 +140,16 @@ enum Commands {
         /// Falls back to "chunk_text" if not specified.
         #[arg(long)]
         text_columns: Option<String>,
+        /// Enables hybrid BM25+vector search: text query fused with --query/--query-file
+        /// via Reciprocal Rank Fusion. Requires a vector query too.
+        #[arg(long)]
+        hybrid_text: Option<String>,
+        /// Parquet column BM25-scored for --hybrid-text (default: "chunk_text")
+        #[arg(long, default_value = "chunk_text")]
+        text_column: String,
+        /// BM25 weight in hybrid RRF fusion (0.0 = pure vector, 1.0 = pure BM25)
+        #[arg(long, default_value = "0.5")]
+        bm25_weight: f32,
         /// Number of results to return
         #[arg(long, default_value = "10")]
         top_k: usize,
@@ -160,6 +170,16 @@ enum Commands {
         /// Minimum number of small files required to trigger compaction
         #[arg(long, default_value = "4")]
         min_files: usize,
+        /// Maximum files merged in one pass (bounds peak RAM / HNSW rebuild cost)
+        #[arg(long, default_value = "20")]
+        max_files_per_pass: usize,
+        /// Write merged Parquet immediately and build the HNSW index in the
+        /// background instead of blocking until it's fully built
+        #[arg(long)]
+        deferred: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
     },
     /// Start an HTTP server exposing search, write, compact and info over JSON
     Serve {
@@ -257,6 +277,57 @@ enum Commands {
         /// May be specified multiple times.
         #[arg(long = "rename", value_name = "OLD:NEW")]
         renames: Vec<String>,
+    },
+    /// Add a new vector column to an existing table schema (no data files rewritten).
+    ///
+    /// Stores ailake.dim-<col>, ailake.metric-<col>, ailake.precision-<col> in metadata.json.
+    /// Old files return null for the new column until BackfillVectorColumn is run.
+    AddVectorColumn {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// New vector column name
+        #[arg(long)]
+        column: String,
+        /// Vector dimensionality for the new column
+        #[arg(long)]
+        dim: u32,
+        /// Distance metric for the new column
+        #[arg(long, value_enum, default_value = "cosine")]
+        metric: Metric,
+        /// Vector precision for the new column
+        #[arg(long, value_enum, default_value = "f16")]
+        precision: Precision,
+        /// Normalize vectors to unit L2 at write time (enables NormalizedCosine fast path)
+        #[arg(long, default_value_t = false)]
+        pre_normalize: bool,
+        /// HNSW M — connections per node (default: 16)
+        #[arg(long)]
+        hnsw_m: Option<u32>,
+        /// HNSW ef_construction — candidate pool during build (default: 150)
+        #[arg(long)]
+        hnsw_ef: Option<u32>,
+    },
+    /// Backfill a new vector column in all existing files (rewrite each file with new embeddings).
+    ///
+    /// Reads text from --text-column, calls an embed command for each batch, and rewrites
+    /// files to include both the original vector column and the new one (via write_multi).
+    /// Idempotent: files already containing the column are skipped.
+    BackfillVectorColumn {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// New vector column to backfill (must already exist via add-vector-column)
+        #[arg(long)]
+        column: String,
+        /// Parquet column that holds the raw text to embed
+        #[arg(long, default_value = "chunk_text")]
+        text_column: String,
+        /// Shell command that reads a JSON array of strings from stdin and writes
+        /// a JSON array of float arrays to stdout.
+        #[arg(long)]
+        embed_cmd: String,
+        /// How many texts to embed per embed-cmd call
+        #[arg(long, default_value = "512")]
+        batch_size: usize,
     },
     /// Estimate storage usage before writing (no I/O — pure math)
     Estimate {
@@ -671,6 +742,9 @@ async fn run(cli: Cli) -> Result<(), String> {
             query_file,
             text,
             text_columns,
+            hybrid_text,
+            text_column,
+            bm25_weight,
             top_k,
             pruning_threshold,
             format,
@@ -754,6 +828,22 @@ async fn run(cli: Cli) -> Result<(), String> {
 
             let dim = query_vec.len() as u32;
 
+            let column = match catalog.load_table(&ident).await {
+                Ok(meta) => meta
+                    .properties
+                    .get("ailake.vector-column")
+                    .cloned()
+                    .unwrap_or_else(|| "embedding".to_string()),
+                Err(_) => "embedding".to_string(),
+            };
+
+            let hybrid = hybrid_text.map(|txt| HybridConfig {
+                query_text: txt,
+                text_columns: vec![text_column],
+                bm25_weight,
+                ..Default::default()
+            });
+
             let config = SearchConfig {
                 top_k,
                 ef_search: top_k * 5,
@@ -761,14 +851,14 @@ async fn run(cli: Cli) -> Result<(), String> {
                 rerank_factor: None,
                 score_fn: None,
                 partition_filter: None,
-                hybrid: None,
+                hybrid,
             };
 
             let results = ailake_query::search(
                 &ident,
                 &query_vec,
                 config,
-                "embedding",
+                &column,
                 dim,
                 catalog as Arc<dyn CatalogProvider>,
                 store,
@@ -814,6 +904,9 @@ async fn run(cli: Cli) -> Result<(), String> {
             table,
             target_size,
             min_files,
+            max_files_per_pass,
+            deferred,
+            format,
         } => {
             let ident = parse_table_ident(&table);
 
@@ -832,17 +925,41 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .get("ailake.vector-column")
                 .cloned()
                 .unwrap_or_else(|| "embedding".to_string());
+            let metric = match meta
+                .properties
+                .get("ailake.vector-metric")
+                .map(|s| s.as_str())
+                .unwrap_or("cosine")
+            {
+                "euclidean" => VectorMetric::Euclidean,
+                "dotproduct" | "dot_product" => VectorMetric::DotProduct,
+                "normalizedcosine" | "normalized_cosine" => VectorMetric::NormalizedCosine,
+                _ => VectorMetric::Cosine,
+            };
+            let pre_normalize = meta
+                .properties
+                .get("ailake.pre-normalize")
+                .map(|s| s == "true")
+                .unwrap_or(false);
+            let hnsw_m = meta
+                .properties
+                .get("ailake.hnsw-m")
+                .and_then(|s| s.parse().ok());
+            let hnsw_ef_construction = meta
+                .properties
+                .get("ailake.hnsw-ef-construction")
+                .and_then(|s| s.parse().ok());
 
             let policy = VectorStoragePolicy {
                 column_name: column,
                 dim,
-                metric: VectorMetric::Cosine,
+                metric,
                 precision: VectorPrecision::F16,
                 pq: None,
                 keep_raw_for_reranking: true,
-                pre_normalize: false,
-                hnsw_m: None,
-                hnsw_ef_construction: None,
+                pre_normalize,
+                hnsw_m,
+                hnsw_ef_construction,
                 ivf_residual: false,
                 embedding_model: None,
                 modality: None,
@@ -852,69 +969,60 @@ async fn run(cli: Cli) -> Result<(), String> {
                 partition_fields: vec![],
             };
 
-            let files = catalog
-                .list_files(&ident, None)
-                .await
-                .map_err(|e| e.to_string())?;
-
             let config = CompactionConfig {
                 min_files_to_compact: min_files,
                 target_file_size_bytes: target_size,
                 index_strategy: Default::default(),
-                max_files_per_pass: 20,
+                max_files_per_pass,
             };
             let planner = CompactionPlanner::new(config);
-            let to_compact = planner.plan(&files);
-
-            if to_compact.is_empty() {
-                println!("nothing to compact ({} files below threshold)", files.len());
-                return Ok(());
-            }
-
-            println!(
-                "compacting {} of {} files...",
-                to_compact.len(),
-                files.len()
-            );
-
             let executor = CompactionExecutor::new(Arc::clone(&store), policy);
-            let output_path = format!(
-                "data/compacted-{}.parquet",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            );
-            let new_entry = executor
-                .compact(&to_compact, &output_path)
-                .await
-                .map_err(|e| e.to_string())?;
 
-            // Build replacement file list: keep files not compacted + add merged.
-            let compacted_paths: std::collections::HashSet<&str> =
-                to_compact.iter().map(|f| f.path.as_str()).collect();
-            let mut remaining: Vec<_> = files
-                .into_iter()
-                .filter(|f| !compacted_paths.contains(f.path.as_str()))
-                .collect();
-            remaining.push(new_entry);
-
-            let snap = ailake_catalog::provider::NewSnapshot {
-                snapshot_id: ailake_catalog::provider::new_snapshot_id(),
-                parent_snapshot_id: meta.current_snapshot_id,
-                files: remaining,
-                operation: ailake_catalog::provider::SnapshotOperation::Replace,
-                iceberg_schema: None,
-                extra_properties: std::collections::HashMap::new(),
-                bloom_filters: vec![],
-                equality_delete_files: vec![],
+            let result = if deferred {
+                executor
+                    .run_deferred(
+                        &planner,
+                        &ident,
+                        catalog as Arc<dyn CatalogProvider>,
+                        "data",
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?
+            } else {
+                executor
+                    .run(
+                        &planner,
+                        &ident,
+                        catalog as Arc<dyn CatalogProvider>,
+                        "data",
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?
             };
-            catalog
-                .commit_snapshot(&ident, snap)
-                .await
-                .map_err(|e| e.to_string())?;
 
-            println!("compacted into {output_path}");
+            match format {
+                OutputFormat::Json => {
+                    let json = match &result {
+                        Some(entry) => serde_json::json!({
+                            "ok": true,
+                            "files_compacted": 1,
+                            "output_path": entry.path,
+                        }),
+                        None => serde_json::json!({
+                            "ok": true,
+                            "files_compacted": 0,
+                        }),
+                    };
+                    println!(
+                        "{}",
+                        serde_json::to_string(&json).map_err(|e| e.to_string())?
+                    );
+                }
+                OutputFormat::Text => match &result {
+                    Some(entry) => println!("compacted into {}", entry.path),
+                    None => println!("nothing to compact (no files eligible)"),
+                },
+            }
             Ok(())
         }
 
@@ -993,6 +1101,15 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .iter()
                 .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Failed)
                 .count();
+            // Files with no centroid were never written by the AI-Lake SDK — likely a
+            // generic Iceberg engine (Spark/Trino OPTIMIZE, DuckDB) rewrote them with no
+            // knowledge of AI-Lake. Every query against these degrades to an O(N) flat
+            // scan until `ailake compact` repairs them (see CompactionPlanner::plan).
+            let foreign: Vec<&str> = files
+                .iter()
+                .filter(|f| f.is_foreign())
+                .map(|f| f.path.as_str())
+                .collect();
 
             let location = meta
                 .properties
@@ -1031,6 +1148,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                             "files": file_count,
                             "indexed_files": ready,
                             "failed_files": failed,
+                            "foreign_files": foreign.len(),
+                            "foreign_file_paths": foreign,
                             "rows": row_count,
                             "size_bytes": size_bytes,
                             "snapshot_id": meta.current_snapshot_id,
@@ -1048,6 +1167,16 @@ async fn run(cli: Cli) -> Result<(), String> {
                         println!("files:       {file_count} ({ready} indexed, {failed} failed — compaction will rebuild)");
                     } else {
                         println!("files:       {file_count} ({ready} indexed)");
+                    }
+                    if !foreign.is_empty() {
+                        println!(
+                            "foreign:     {} file(s) with no AI-Lake index (external rewrite \
+                             suspected) — degraded to flat scan, run `ailake compact` to repair",
+                            foreign.len()
+                        );
+                        for path in &foreign {
+                            println!("               - {path}");
+                        }
                     }
                     println!("rows:        {row_count}");
                     println!("size:        {}", format_bytes(size_bytes));
@@ -1242,6 +1371,150 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
 
             println!("new_schema_id: {new_schema_id}");
+            Ok(())
+        }
+
+        Commands::AddVectorColumn {
+            table,
+            column,
+            dim,
+            metric,
+            precision,
+            pre_normalize,
+            hnsw_m,
+            hnsw_ef,
+        } => {
+            use ailake_core::VectorColSpec;
+            let ident = parse_table_ident(&table);
+            let spec = VectorColSpec {
+                column_name: column,
+                dim,
+                metric: metric.into(),
+                precision: precision.into(),
+                pre_normalize,
+                hnsw_m,
+                hnsw_ef_construction: hnsw_ef,
+            };
+            let new_schema_id = catalog
+                .add_vector_column(&ident, &spec)
+                .await
+                .map_err(|e| e.to_string())?;
+            println!(
+                "vector column '{}' added — new_schema_id: {new_schema_id}",
+                spec.column_name
+            );
+            Ok(())
+        }
+
+        Commands::BackfillVectorColumn {
+            table,
+            column,
+            text_column,
+            embed_cmd,
+            batch_size,
+        } => {
+            use ailake_core::VectorColSpec;
+            use ailake_query::{BackfillJob, EmbedFn};
+            let ident = parse_table_ident(&table);
+
+            // Load new column spec from table properties.
+            let table_meta = catalog
+                .load_table(&ident)
+                .await
+                .map_err(|e| e.to_string())?;
+            let dim_key = format!("ailake.dim-{column}");
+            let metric_key = format!("ailake.metric-{column}");
+            let precision_key = format!("ailake.precision-{column}");
+
+            let dim: u32 = table_meta
+                .properties
+                .get(&dim_key)
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| {
+                    format!("column '{column}' not found — run add-vector-column first")
+                })?;
+
+            let metric: VectorMetric = match table_meta
+                .properties
+                .get(&metric_key)
+                .map(|s| s.as_str())
+                .unwrap_or("cosine")
+            {
+                "euclidean" => VectorMetric::Euclidean,
+                "dotproduct" | "dot_product" => VectorMetric::DotProduct,
+                "normalizedcosine" | "normalized_cosine" => VectorMetric::NormalizedCosine,
+                _ => VectorMetric::Cosine,
+            };
+
+            let precision: VectorPrecision = match table_meta
+                .properties
+                .get(&precision_key)
+                .map(|s| s.as_str())
+                .unwrap_or("f16")
+            {
+                "f32" => VectorPrecision::F32,
+                "i8" => VectorPrecision::I8,
+                _ => VectorPrecision::F16,
+            };
+
+            let new_col = VectorColSpec {
+                column_name: column.clone(),
+                dim,
+                metric,
+                precision,
+                pre_normalize: false,
+                hnsw_m: None,
+                hnsw_ef_construction: None,
+            };
+
+            let cmd = embed_cmd.clone();
+            let embed_fn: EmbedFn = Arc::new(move |texts: &[String]| {
+                use std::io::Write;
+                use std::process::{Command, Stdio};
+                let input = serde_json::to_string(texts)
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+                let mut child = Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(input.as_bytes())
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+                let out = child
+                    .wait_with_output()
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+                serde_json::from_slice::<Vec<Vec<f32>>>(&out.stdout).map_err(|e| {
+                    ailake_core::AilakeError::InvalidArgument(format!(
+                        "embed-cmd output parse error: {e}"
+                    ))
+                })
+            });
+
+            let job = BackfillJob {
+                table: ident,
+                text_column,
+                new_col,
+                embed_fn,
+                batch_size,
+                on_progress: Some(Arc::new(|p: ailake_query::BackfillProgress| {
+                    eprintln!(
+                        "backfill: {}/{} files done ({} skipped), {} rows",
+                        p.files_done, p.files_total, p.files_skipped, p.rows_backfilled
+                    );
+                })),
+            };
+
+            job.run(catalog as Arc<dyn CatalogProvider>, store)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            println!("backfill complete for column '{column}'");
             Ok(())
         }
 

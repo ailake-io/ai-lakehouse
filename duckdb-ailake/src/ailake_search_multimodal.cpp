@@ -27,6 +27,8 @@ using namespace duckdb;
 
 struct AilakeMultimodalBindData : public TableFunctionData {
     std::string                        warehouse;
+    std::string                        ns         = "default";
+    std::string                        table_name = "table";
     std::vector<ailake::ModalQueryArg> queries;
     int                                top_k = 10;
     std::string                        partition_filter;
@@ -120,6 +122,12 @@ static unique_ptr<FunctionData> AilakeMultimodalBind(
         if (named.first == "partition_filter") {
             if (!named.second.IsNull())
                 data->partition_filter = StringValue::Get(named.second);
+        } else if (named.first == "table_name") {
+            if (!named.second.IsNull())
+                data->table_name = StringValue::Get(named.second);
+        } else if (named.first == "namespace") {
+            if (!named.second.IsNull())
+                data->ns = StringValue::Get(named.second);
         }
     }
 
@@ -145,10 +153,11 @@ static unique_ptr<GlobalTableFunctionState> AilakeMultimodalInit(
 
     state->results = lib.search_multimodal(
         bind.warehouse,
-        "table",
+        bind.table_name,
         bind.queries,
         bind.top_k,
-        bind.partition_filter
+        bind.partition_filter,
+        bind.ns
     );
 
     return std::move(state);
@@ -208,6 +217,8 @@ void RegisterAilakeSearchMultimodal(duckdb::ExtensionLoader &loader) {
     );
 
     func.named_parameters["partition_filter"] = LogicalType::VARCHAR;
+    func.named_parameters["table_name"]       = LogicalType::VARCHAR;
+    func.named_parameters["namespace"]        = LogicalType::VARCHAR;
 
     loader.RegisterFunction( func);
 }

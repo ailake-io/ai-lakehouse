@@ -282,17 +282,34 @@ async fn jdbc_4_concurrent_commits_no_lost_update() {
         snap_ids.len()
     );
 
-    // Each snap_id must be individually findable — verifies no lost update
-    for snap_id in snap_ids {
-        let files = catalog
+    // Each snap_id must be individually findable — a concurrent commit must not corrupt
+    // or drop a sibling commit's manifest pointer.
+    for &snap_id in &snap_ids {
+        catalog
             .list_files(&table, Some(snap_id))
             .await
             .unwrap_or_else(|e| panic!("snap {snap_id} not findable after commit: {e}"));
-        assert_eq!(
-            files.len(),
-            1,
-            "snap {snap_id} must have exactly 1 file, got {}",
-            files.len()
-        );
     }
+
+    // The real "no lost update" check: Append inherits the previous snapshot's file list
+    // (see `JdbcCatalog::commit_snapshot`), so the *current* state after all 4 concurrent
+    // Appends land must contain all 4 files — not just whichever commit's manifest happened
+    // to write last. (A per-snapshot manifest legitimately holds fewer files the earlier it
+    // was committed in the retry race — that's expected, not a lost update.)
+    let current_files = catalog.list_files(&table, None).await.unwrap();
+    assert_eq!(
+        current_files.len(),
+        TASKS,
+        "expected {TASKS} files in the current snapshot after {TASKS} concurrent appends, got {}",
+        current_files.len()
+    );
+    let mut paths: Vec<&str> = current_files.iter().map(|f| f.path.as_str()).collect();
+    paths.sort();
+    paths.dedup();
+    assert_eq!(
+        paths.len(),
+        TASKS,
+        "expected {TASKS} distinct file paths, got {} (duplicate or overwritten entry?)",
+        paths.len()
+    );
 }

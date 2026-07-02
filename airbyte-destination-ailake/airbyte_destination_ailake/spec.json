@@ -227,6 +227,21 @@
         "description": "Build HNSW/IVF-PQ index asynchronously (~200k vec/s for Parquet write, index attached in background). Recommended for large batch ingestion. IndexStatus transitions Indexing → Ready.",
         "default": false,
         "order": 27
+      },
+      "partition_by": {
+        "type": "string",
+        "title": "Partition Column (Single)",
+        "description": "Single-column Iceberg identity partition. Records are grouped by this field's per-record value and routed to a dedicated partition (Hive-style, one physical location per value) — e.g. \"agent_id\" or \"tenant_id\". Records missing this field are written unpartitioned. Ignored when Multi-column Partition Fields is set.",
+        "examples": ["agent_id", "tenant_id"],
+        "order": 28
+      },
+      "extra_columns": {
+        "type": "array",
+        "title": "Extra Columns",
+        "description": "Record fields (besides Text Field) written as queryable Parquet columns alongside the embedding — e.g. [\"id\", \"source_url\", \"created_at\"]. Empty (default) = every scalar top-level field the record has. Only str/int/float/bool values are supported; nested objects/arrays are skipped.",
+        "items": { "type": "string" },
+        "default": [],
+        "order": 29
       }
     }
   }

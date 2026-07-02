@@ -79,17 +79,12 @@ class AilakeWriteOperator(BaseOperator):
     def execute(self, context: Context) -> None:
         hook = AilakeHook(ailake_conn_id=self.ailake_conn_id)
 
-        # Check idempotency before any I/O: if batch_id already committed, skip.
-        info = hook.get_table_info(self.table)
-        snapshot_id = info.get("snapshot_id")
-        if snapshot_id is not None:
-            self.log.info(
-                "table %s has snapshot %s; inserting with batch_id=%s",
-                self.table,
-                snapshot_id,
-                self.batch_id,
-            )
-
+        # Idempotency is enforced downstream by the CLI's --batch-id flag
+        # (write_batch_idempotent): a retry with the same batch_id is a safe no-op.
+        # No pre-check is done here — there is no CLI-exposed way to ask "was this
+        # exact batch_id already committed" ahead of time, and get_table_info()'s
+        # snapshot_id only reports whether the table has *any* snapshot, which says
+        # nothing about this batch_id specifically.
         extra_args: list[str] = []
         if self.partition_by:
             extra_args += ["--partition-by", self.partition_by]

@@ -849,5 +849,114 @@ with tempfile.TemporaryDirectory() as tmp:
     print(f"PASS (fts multi-term): row_id=3 in top-{len(results_sql)} for 'sql optimization'")
 
 
+# ── 22. Table.insert(extra_columns=...) — fluent API tabular metadata ────────
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = str(pathlib.Path(tmp) / "extra_cols_test")
+
+    table = ailake.open_table(path, dim=DIM, metric="cosine")
+    ids = list(range(N))
+    categories = [f"cat_{i % 3}" for i in range(N)]
+    scores = [float(i) * 1.5 for i in range(N)]
+    table.insert(
+        [f"doc_{i}" for i in range(N)],
+        [make_embedding(i) for i in range(N)],
+        extra_columns={"id": ids, "category": categories, "score": scores},
+    )
+    snap_ec = table.commit()
+    assert snap_ec >= 0, f"FAIL: Table.insert(extra_columns=...) commit returned {snap_ec}"
+    print(f"PASS (Table.insert extra_columns): snapshot_id={snap_ec}")
+
+    if HAS_PYARROW:
+        arr_ec = ailake.search(path, make_embedding(0), top_k=N, fetch_data=True).to_arrow()
+        col_names_ec = arr_ec.schema.names
+        for col in ("id", "category", "score"):
+            assert col in col_names_ec, f"FAIL: extra column '{col}' missing from {col_names_ec}"
+        print(f"PASS (extra_columns visible via fetch_data=True): columns={col_names_ec}")
+
+    # DuckDB reads the extra columns as plain Parquet columns — no ailake plugin needed
+    try:
+        import duckdb
+        HAS_DUCKDB = True
+    except ImportError:
+        HAS_DUCKDB = False
+
+    if HAS_DUCKDB:
+        parquet_glob = str(pathlib.Path(path) / "**" / "data" / "*.parquet")
+        con = duckdb.connect()
+        row = con.execute(
+            f"SELECT id, category, score FROM read_parquet('{parquet_glob}') WHERE id = 7"
+        ).fetchone()
+        assert row is not None, "FAIL: DuckDB found no row with id=7"
+        assert row[0] == 7, f"FAIL: DuckDB id={row[0]}, expected 7"
+        assert row[1] == "cat_1", f"FAIL: DuckDB category={row[1]!r}, expected 'cat_1'"
+        assert abs(row[2] - 10.5) < 1e-6, f"FAIL: DuckDB score={row[2]}, expected 10.5"
+        count = con.execute(f"SELECT COUNT(*) FROM read_parquet('{parquet_glob}')").fetchone()[0]
+        assert count == N, f"FAIL: DuckDB row count={count}, expected {N}"
+        con.close()
+        print(f"PASS (extra_columns via DuckDB, no ailake plugin): id=7 → {row}, total rows={count}")
+    else:
+        print("SKIP (extra_columns via DuckDB): duckdb not installed")
+
+    # insert_async also accepts extra_columns
+    async def _extra_cols_async(p: str) -> None:
+        t = ailake.open_table(p, dim=DIM, metric="cosine")
+        await t.insert_async(
+            [f"async_{i}" for i in range(N)],
+            [make_embedding(i) for i in range(N)],
+            extra_columns={"id": ids},
+        )
+        s = await t.commit_async()
+        assert s >= 0, f"FAIL: insert_async(extra_columns=...) commit returned {s}"
+
+    with tempfile.TemporaryDirectory() as tmp2:
+        path2 = str(pathlib.Path(tmp2) / "extra_cols_async_test")
+        asyncio.run(_extra_cols_async(path2))
+    print("PASS (insert_async extra_columns): commit succeeded")
+
+
+# ── 23. open_table(partition_by=..., partition_fields=..., format_version=...) ─
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = str(pathlib.Path(tmp) / "open_table_partition_test")
+
+    # open_table() used to silently drop partition_by/partition_value/
+    # partition_column_type/partition_fields/partition_values/format_version —
+    # TableWriter (raw binding) already accepted them, but Table.__init__/open_table
+    # never passed them through, raising TypeError for any caller that used them.
+    table = ailake.open_table(
+        path,
+        dim=DIM,
+        metric="cosine",
+        partition_by="agent_id",
+        partition_value="agent-42",
+        partition_column_type="string",
+        format_version=3,
+    )
+    table.insert([f"doc_{i}" for i in range(N)], [make_embedding(i) for i in range(N)])
+    snap_pt = table.commit()
+    assert snap_pt >= 0, f"FAIL: open_table partition_by commit returned {snap_pt}"
+    print(f"PASS (open_table partition_by/partition_value/format_version=3): snapshot_id={snap_pt}")
+
+    results_pt = ailake.search(path, make_embedding(0), top_k=3).to_list()
+    assert len(results_pt) > 0, "FAIL: search on partitioned open_table returned empty"
+    print(f"PASS (search on open_table-created partitioned table): {len(results_pt)} results")
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = str(pathlib.Path(tmp) / "open_table_partition_fields_test")
+
+    table_mc = ailake.open_table(
+        path,
+        dim=DIM,
+        metric="cosine",
+        partition_fields=[("agent_id", "identity", "string")],
+        partition_values={"agent_id": "agent-7"},
+    )
+    table_mc.insert([f"doc_{i}" for i in range(N)], [make_embedding(i) for i in range(N)])
+    snap_mc = table_mc.commit()
+    assert snap_mc >= 0, f"FAIL: open_table partition_fields commit returned {snap_mc}"
+    print(f"PASS (open_table partition_fields/partition_values): snapshot_id={snap_mc}")
+
+
 print()
 print("PASS: ailake Python SDK — all checks passed.")

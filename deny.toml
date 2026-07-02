@@ -66,6 +66,14 @@ ignore = [
     # instant 0.1.13 — unmaintained, via measure_time → tantivy 0.22; no tantivy release drops this dep yet
     { id = "RUSTSEC-2024-0384", reason = "instant unmaintained, transitive via tantivy 0.22/measure_time; no fix available upstream" },
 
+    # quick-xml 0.36.2 — via object_store's S3/GCS XML parsing; fix requires quick-xml >=0.41.0,
+    # but object_store's latest release (0.14.0) only pins quick-xml ^0.40.1. No object_store
+    # release satisfies the fix yet. AI-Lake doesn't parse untrusted XML directly — these
+    # attributes-iteration/namespace-resolver DoS paths only trigger inside object_store's own
+    # S3/GCS response parsing, not on data we accept from external callers.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic attribute parsing, transitive via object_store; no object_store release pins quick-xml >=0.41.0 yet" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml unbounded namespace-decl allocation, transitive via object_store; no object_store release pins quick-xml >=0.41.0 yet" },
+
 ]
 
 # ---------------------------------------------------------------------------

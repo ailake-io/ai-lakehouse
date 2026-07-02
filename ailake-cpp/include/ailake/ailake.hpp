@@ -437,8 +437,18 @@ search_text(HadoopCatalog& catalog,
     std::array<char, 256> buf{};
     while (fgets(buf.data(), (int)buf.size(), pipe)) out += buf.data();
     int rc = pclose(pipe);
-    if (rc != 0)
-        throw std::runtime_error("ailake::search_text: CLI exited with code " + std::to_string(rc) + "\n" + out);
+    // pclose() returns a POSIX wait-status, not a plain exit code — it must go through
+    // WIFEXITED/WEXITSTATUS to extract the real code, or failures report bogus values
+    // (e.g. 256 for a real exit code of 1). write.hpp::detail::run_cmd already does this
+    // correctly; this call site had its own independent popen/pclose block that never got
+    // the same fix.
+#ifndef _WIN32
+    int exit_code = WIFEXITED(rc) ? WEXITSTATUS(rc) : rc;
+#else
+    int exit_code = rc;
+#endif
+    if (exit_code != 0)
+        throw std::runtime_error("ailake::search_text: CLI exited with code " + std::to_string(exit_code) + "\n" + out);
 
     // Minimal JSON parse: extract array under "results" key.
     // Format: {"results":[{"row_id":N,"score":F,"file_path":"..."},...]}

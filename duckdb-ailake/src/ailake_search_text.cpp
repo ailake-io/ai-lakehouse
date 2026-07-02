@@ -39,6 +39,7 @@ using namespace duckdb;
 
 struct AilakeSearchTextBindData : public TableFunctionData {
     std::string              warehouse;
+    std::string              ns              = "default";
     std::string              table_name      = "table";
     std::string              query_text;
     int                      top_k           = 10;
@@ -105,6 +106,8 @@ static unique_ptr<FunctionData> AilakeSearchTextBind(
                 data->partition_filter = StringValue::Get(named.second);
         } else if (named.first == "table_name") {
             data->table_name = StringValue::Get(named.second);
+        } else if (named.first == "namespace") {
+            data->ns = StringValue::Get(named.second);
         }
     }
 
@@ -135,7 +138,8 @@ static unique_ptr<GlobalTableFunctionState> AilakeSearchTextInit(
         bind.query_text,
         bind.top_k,
         bind.text_columns,
-        bind.partition_filter
+        bind.partition_filter,
+        bind.ns
     );
 
     return std::move(state);
@@ -190,6 +194,7 @@ void RegisterAilakeSearchText(duckdb::ExtensionLoader &loader) {
     func.named_parameters["text_column"]      = LogicalType::VARCHAR;  // legacy compat
     func.named_parameters["partition_filter"] = LogicalType::VARCHAR;
     func.named_parameters["table_name"]       = LogicalType::VARCHAR;
+    func.named_parameters["namespace"]        = LogicalType::VARCHAR;
 
     loader.RegisterFunction( func);
 }

@@ -20,6 +20,7 @@ import pathlib
 import struct
 import math
 import ctypes
+import tempfile
 
 # Force _duckdb.so to load with RTLD_GLOBAL so DuckDB extensions can resolve
 # its C++ typeinfo symbols (TableFunction → SimpleNamedParameterFunction).
@@ -290,6 +291,61 @@ def test_search_text_legacy_text_column_param():
     print(f"PASS: ailake_search_text legacy text_column VARCHAR param accepted")
 
 
+def test_search_namespace_named_param_isolation():
+    """Regression: `ailake_search`'s request JSON hardcoded `"namespace":"default"`,
+    so a table written under a non-default namespace (via `ailake_write_batch`'s
+    `namespace` arg) could never be found by `ailake_search` no matter what
+    `namespace :=` was passed — the named param didn't exist at all before this fix.
+
+    Writes to <dir>/custom_ns/my_table, then confirms:
+    - search WITH namespace:='custom_ns', table_name:='my_table' finds it
+    - search WITHOUT namespace (defaults) does NOT find it (proves real isolation,
+      not just "the param is accepted but ignored")
+    """
+    conn = setup_connection()
+    table_dir = tempfile.mkdtemp(prefix="ailake_search_ns_")
+    n, dim = 3, 4
+    embs = [[float(i * dim + j) / (n * dim) for j in range(dim)] for i in range(n)]
+
+    ids_sql = "[" + ", ".join(str(i) for i in range(n)) + "]::BIGINT[]"
+    emb_sql = "[" + ", ".join(
+        "[" + ", ".join(str(f) for f in row) + "]::FLOAT[]" for row in embs
+    ) + "]"
+
+    write_row = conn.execute(f"""
+        SELECT ailake_write_batch(
+            'file://{table_dir}',
+            {ids_sql},
+            {emb_sql},
+            'embedding', 'cosine', 'f16',
+            '', '', '', 2, '', '', -1, -1, false, false,
+            'custom_ns', 'my_table'
+        )
+    """).fetchone()
+    require(write_row is not None and write_row[0] != -1, "setup write_batch failed")
+
+    q_sql = "[" + ", ".join(str(f) for f in embs[0]) + "]::FLOAT[]"
+
+    matched = conn.execute(f"""
+        SELECT row_id FROM ailake_search(
+            'file://{table_dir}', {q_sql}, 5,
+            namespace := 'custom_ns', table_name := 'my_table'
+        )
+    """).fetchall()
+    require(len(matched) > 0, "search with correct namespace/table_name found 0 rows")
+
+    unmatched = conn.execute(f"""
+        SELECT row_id FROM ailake_search('file://{table_dir}', {q_sql}, 5)
+    """).fetchall()
+    require(
+        len(unmatched) == 0,
+        f"search with default namespace/table_name unexpectedly found {len(unmatched)} rows "
+        "— namespace isolation broken"
+    )
+    print(f"PASS: ailake_search namespace named param — found {len(matched)} row(s) in "
+          f"custom_ns/my_table, 0 rows under default namespace")
+
+
 if __name__ == "__main__":
     if not pathlib.Path(EXT_PATH).exists():
         print(f"SKIP: extension not found at {EXT_PATH} — build first with cmake")
@@ -307,5 +363,6 @@ if __name__ == "__main__":
     test_search_text_no_lib_returns_empty()
     test_search_text_text_columns_named_param()
     test_search_text_legacy_text_column_param()
+    test_search_namespace_named_param_isolation()
 
     print("\nAll search tests passed.")

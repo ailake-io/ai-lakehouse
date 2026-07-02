@@ -198,6 +198,8 @@ impl HadoopCatalog {
 
 If the background index build fails permanently (e.g. k-means did not converge, OOM), `patch_index_failed` transitions `IndexStatus::Indexing → Failed` and stores the reason in `DataFileEntry::index_error`. Files in `Failed` state serve reads via flat scan until the next compaction run, which rebuilds their index and resets the status.
 
+`JdbcCatalog`/`GlueCatalog`/`RestCatalog` (below) reach the same observable `Append`/`Delete`/`Replace`/`Overwrite` semantics as this table, but via a different mechanism: they store one flat JSON manifest per snapshot rather than an Iceberg manifest chain, so `commit_snapshot` explicitly rebuilds the effective file list from the previous snapshot on every `Append`/`Delete` (fetched fresh on each OCC retry attempt, so a concurrent writer's prior commit is never lost) instead of getting inheritance for free from a referenced manifest list.
+
 ```rust
 // Local dev
 let store = Arc::new(LocalStore::new("/tmp/warehouse"));

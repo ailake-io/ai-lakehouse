@@ -74,7 +74,8 @@ std::vector<MultimodalRow> AilakeLib::search_multimodal(
     const std::string                 &table_name,
     const std::vector<ModalQueryArg>  &queries,
     int                                top_k,
-    const std::string                 &partition_filter
+    const std::string                 &partition_filter,
+    const std::string                 &ns
 ) const {
     if (!multimodal_fn_ || !free_fn_ || queries.empty()) return {};
 
@@ -97,7 +98,7 @@ std::vector<MultimodalRow> AilakeLib::search_multimodal(
 
     std::string req =
         "{\"warehouse\":"  + json_escape(warehouse)  +
-        ",\"namespace\":\"default\""                 +
+        ",\"namespace\":"  + json_escape(ns)          +
         ",\"table\":"      + json_escape(table_name) +
         ",\"queries\":"    + queries_json             +
         ",\"top_k\":"      + std::to_string(top_k);
@@ -138,7 +139,8 @@ std::vector<SearchRow> AilakeLib::search(
     const std::string        &partition_filter,
     const std::string        &hybrid_text,
     const std::string        &text_column,
-    float                     bm25_weight
+    float                     bm25_weight,
+    const std::string        &ns
 ) const {
     if (!search_fn_ || !free_fn_ || query.empty()) return {};
 
@@ -152,7 +154,7 @@ std::vector<SearchRow> AilakeLib::search(
 
     std::string req =
         "{\"warehouse\":"  + json_escape(warehouse)   +
-        ",\"namespace\":\"default\""                  +
+        ",\"namespace\":"  + json_escape(ns)          +
         ",\"table\":"      + json_escape(table_name)  +
         ",\"vec_col\":"    + json_escape(vec_col)      +
         ",\"dim\":"        + std::to_string(query.size()) +
@@ -198,7 +200,8 @@ std::vector<SearchRow> AilakeLib::search_text(
     const std::string              &query_text,
     int                             top_k,
     const std::vector<std::string> &text_columns,
-    const std::string              &partition_filter
+    const std::string              &partition_filter,
+    const std::string              &ns
 ) const {
     if (!search_text_fn_ || !free_fn_ || query_text.empty()) return {};
 
@@ -215,7 +218,7 @@ std::vector<SearchRow> AilakeLib::search_text(
 
     std::string req =
         "{\"warehouse\":"    + json_escape(warehouse)   +
-        ",\"namespace\":\"default\""                    +
+        ",\"namespace\":"    + json_escape(ns)          +
         ",\"table\":"        + json_escape(table_name)  +
         ",\"query_text\":"   + json_escape(query_text)  +
         ",\"top_k\":"        + std::to_string(top_k)    +
@@ -345,7 +348,8 @@ bool AilakeLib::delete_where(
     const std::string              &warehouse,
     const std::string              &table_name,
     const std::string              &column,
-    const std::vector<std::string> &values
+    const std::vector<std::string> &values,
+    const std::string              &ns
 ) const {
     if (!delete_where_fn_ || !free_fn_ || values.empty()) return false;
 
@@ -358,7 +362,7 @@ bool AilakeLib::delete_where(
 
     std::string req =
         "{\"warehouse\":"  + json_escape(warehouse)  +
-        ",\"namespace\":\"default\""                  +
+        ",\"namespace\":"  + json_escape(ns)          +
         ",\"table\":"      + json_escape(table_name)  +
         ",\"column\":"     + json_escape(column)      +
         ",\"values\":"     + vals_json +
@@ -381,13 +385,14 @@ int32_t AilakeLib::evolve_schema(
     const std::string &warehouse,
     const std::string &table_name,
     const std::string &add_columns_json,
-    const std::string &rename_columns_json
+    const std::string &rename_columns_json,
+    const std::string &ns
 ) const {
     if (!evolve_schema_fn_ || !free_fn_) return -1;
 
     std::string req =
         "{\"warehouse\":"         + json_escape(warehouse)      +
-        ",\"namespace\":\"default\""                             +
+        ",\"namespace\":"         + json_escape(ns)              +
         ",\"table\":"             + json_escape(table_name)     +
         ",\"add_columns\":"       + (add_columns_json.empty()    ? "[]" : add_columns_json) +
         ",\"rename_columns\":"    + (rename_columns_json.empty() ? "[]" : rename_columns_json) +
@@ -414,7 +419,8 @@ ScanResult AilakeLib::scan(
     const std::string        &vec_col,
     const std::vector<float> &query,
     int                       top_k,
-    int                       ef_search
+    int                       ef_search,
+    const std::string        &ns
 ) const {
     ScanResult result;
     if (!scan_fn_ || !free_fn_ || query.empty()) {
@@ -432,7 +438,7 @@ ScanResult AilakeLib::scan(
 
     std::string req =
         "{\"warehouse\":"  + json_escape(warehouse)   +
-        ",\"namespace\":\"default\""                  +
+        ",\"namespace\":"  + json_escape(ns)          +
         ",\"table\":"      + json_escape(table_name)  +
         ",\"vec_col\":"    + json_escape(vec_col)      +
         ",\"dim\":"        + std::to_string(query.size()) +

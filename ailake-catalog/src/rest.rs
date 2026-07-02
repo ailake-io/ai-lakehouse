@@ -24,10 +24,10 @@ use tokio::sync::Mutex;
 
 use crate::metadata::IcebergMetadata;
 use crate::provider::{
-    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, TableIdent, TableMetadata,
-    TableProperties,
+    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, SnapshotOperation, TableIdent,
+    TableMetadata, TableProperties,
 };
-use crate::snapshot::{build_manifest, manifest_path};
+use crate::snapshot::{manifest_path, Manifest};
 use ailake_store::Store;
 
 // ── Public configuration types ───────────────────────────────────────────────
@@ -302,11 +302,40 @@ impl CatalogProvider for RestCatalog {
     ) -> AilakeResult<SnapshotId> {
         let snap_id = snapshot.snapshot_id;
 
+        // Append/Delete inherit the previous snapshot's full file list (this catalog writes
+        // one flat manifest per snapshot, not an Iceberg manifest chain, so the new manifest
+        // must already contain the complete resulting file list). Replace/Overwrite treat
+        // `snapshot.files` as the complete state — callers already rebuild it (see
+        // hadoop.rs's identical contract). No local OCC retry here: the REST server owns
+        // conflict resolution for the metadata pointer itself (`requirements`, unused today).
+        let effective_files: Vec<DataFileEntry> = if matches!(
+            snapshot.operation,
+            SnapshotOperation::Append | SnapshotOperation::Delete
+        ) {
+            let resp = self.get(&self.table_url(table)).await?;
+            let resp = Self::require_ok(resp, "commit_snapshot (read current state)").await?;
+            let result: LoadTableResult = resp
+                .json()
+                .await
+                .map_err(|e| AilakeError::Catalog(format!("commit_snapshot parse: {e}")))?;
+            let mut prev = match result.metadata.current_snapshot_id {
+                Some(id) => self.list_files(table, Some(id)).await?,
+                None => vec![],
+            };
+            prev.extend(snapshot.files.iter().cloned());
+            prev
+        } else {
+            snapshot.files.clone()
+        };
+
         // 1. Write manifest JSON to object storage
         let root = self.table_storage_root(table);
         let rel_path = manifest_path(snap_id);
         let abs_path = format!("{root}/{rel_path}");
-        let manifest = build_manifest(&snapshot);
+        let manifest = Manifest {
+            snapshot_id: snap_id,
+            files: effective_files,
+        };
         self.store
             .put(&abs_path, Bytes::from(manifest.to_json()?.into_bytes()))
             .await?;

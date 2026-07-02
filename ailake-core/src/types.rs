@@ -244,3 +244,18 @@ pub struct Centroid {
     pub radius: f32,
     pub metric: VectorMetric,
 }
+
+/// Specification for a vector column to add to an existing table.
+///
+/// Used by `CatalogProvider::add_vector_column` and `BackfillJob`.
+/// Converts to `VectorStoragePolicy` for writing.
+#[derive(Debug, Clone)]
+pub struct VectorColSpec {
+    pub column_name: String,
+    pub dim: u32,
+    pub metric: VectorMetric,
+    pub precision: VectorPrecision,
+    pub pre_normalize: bool,
+    pub hnsw_m: Option<u32>,
+    pub hnsw_ef_construction: Option<u32>,
+}

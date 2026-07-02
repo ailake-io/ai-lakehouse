@@ -1323,6 +1323,198 @@ fn delete_where(table_path: &str, column: &str, values: Vec<String>) -> PyResult
     .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Add a new vector column to an existing table schema without rewriting data files.
+///
+/// Registers the new column in `metadata.json` (Iceberg schema + ailake properties).
+/// Old files return `null` for this column until `backfill_vector_column` is run.
+///
+/// Args:
+///     table_path: path to the table (local dir or s3://... URI)
+///     column: new vector column name
+///     dim: vector dimensionality
+///     metric: distance metric — "cosine" (default), "euclidean", "dot_product"
+///     precision: storage precision — "f16" (default), "f32", "i8"
+///     pre_normalize: if True, vectors are normalized to unit L2 at write time
+///     hnsw_m: HNSW M parameter (connections per node, default 16)
+///     hnsw_ef_construction: HNSW ef_construction (default 150)
+///
+/// Returns:
+///     new schema-id (int)
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (table_path, column, dim, metric="cosine", precision="f16", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None))]
+fn add_vector_column(
+    table_path: &str,
+    column: &str,
+    dim: u32,
+    metric: &str,
+    precision: &str,
+    pre_normalize: bool,
+    hnsw_m: Option<u32>,
+    hnsw_ef_construction: Option<u32>,
+) -> PyResult<i32> {
+    use ailake_core::{VectorColSpec as RsVectorColSpec, VectorMetric, VectorPrecision};
+
+    let rt = rt()?;
+    let (catalog, _store) = local_catalog_store(table_path);
+    let table = TableIdent::new("default", "table");
+
+    let metric_val = match metric {
+        "euclidean" => VectorMetric::Euclidean,
+        "dotproduct" | "dot_product" => VectorMetric::DotProduct,
+        "normalizedcosine" | "normalized_cosine" => VectorMetric::NormalizedCosine,
+        _ => VectorMetric::Cosine,
+    };
+    let precision_val = match precision {
+        "f32" => VectorPrecision::F32,
+        "i8" => VectorPrecision::I8,
+        _ => VectorPrecision::F16,
+    };
+
+    let spec = RsVectorColSpec {
+        column_name: column.to_string(),
+        dim,
+        metric: metric_val,
+        precision: precision_val,
+        pre_normalize,
+        hnsw_m,
+        hnsw_ef_construction,
+    };
+
+    rt.block_on(catalog.add_vector_column(&table, &spec))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Backfill a new vector column in all existing files of a table.
+///
+/// Reads each file, calls `embed_fn` on `text_column`, and rewrites the file
+/// with both the original vector column and the new one. Idempotent: files that
+/// already contain the new column are skipped.
+///
+/// Args:
+///     table_path: path to the table (local dir or s3://... URI)
+///     column: name of the new vector column (must already exist via add_vector_column)
+///     text_column: Parquet column with text to embed (default: "chunk_text")
+///     embed_fn: callable(list[str]) -> list[list[float]] — your embedding function
+///     batch_size: number of texts per embed_fn call (default: 512)
+///
+/// Example::
+///
+///     from openai import OpenAI
+///     client = OpenAI()
+///
+///     def embed(texts):
+///         resp = client.embeddings.create(model="text-embedding-3-small", input=texts)
+///         return [e.embedding for e in resp.data]
+///
+///     ailake.backfill_vector_column(
+///         "s3://my-lake/docs",
+///         column="embedding_v2",
+///         text_column="chunk_text",
+///         embed_fn=embed,
+///     )
+#[pyfunction]
+#[pyo3(signature = (table_path, column, embed_fn, text_column="chunk_text", batch_size=512))]
+fn backfill_vector_column(
+    py: Python<'_>,
+    table_path: &str,
+    column: &str,
+    embed_fn: Py<PyAny>,
+    text_column: &str,
+    batch_size: usize,
+) -> PyResult<()> {
+    use ailake_core::{VectorColSpec as RsVectorColSpec, VectorMetric, VectorPrecision};
+    use ailake_query::BackfillJob;
+
+    let rt = rt()?;
+    let (catalog, store) = local_catalog_store(table_path);
+    let table_ident = TableIdent::new("default", "table");
+
+    // Load new column properties from the catalog to build VectorColSpec.
+    let table_meta = rt
+        .block_on(catalog.load_table(&table_ident))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let dim_key = format!("ailake.dim-{column}");
+    let metric_key = format!("ailake.metric-{column}");
+    let precision_key = format!("ailake.precision-{column}");
+
+    let dim: u32 = table_meta
+        .properties
+        .get(&dim_key)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "column '{column}' not found — call add_vector_column first"
+            ))
+        })?;
+
+    let metric = match table_meta
+        .properties
+        .get(&metric_key)
+        .map(|s| s.as_str())
+        .unwrap_or("cosine")
+    {
+        "euclidean" => VectorMetric::Euclidean,
+        "dotproduct" | "dot_product" => VectorMetric::DotProduct,
+        "normalizedcosine" | "normalized_cosine" => VectorMetric::NormalizedCosine,
+        _ => VectorMetric::Cosine,
+    };
+
+    let precision = match table_meta
+        .properties
+        .get(&precision_key)
+        .map(|s| s.as_str())
+        .unwrap_or("f16")
+    {
+        "f32" => VectorPrecision::F32,
+        "i8" => VectorPrecision::I8,
+        _ => VectorPrecision::F16,
+    };
+
+    let new_col = RsVectorColSpec {
+        column_name: column.to_string(),
+        dim,
+        metric,
+        precision,
+        pre_normalize: false,
+        hnsw_m: None,
+        hnsw_ef_construction: None,
+    };
+
+    // Wrap Python callable as EmbedFn (same pattern as migrate_embeddings).
+    let embed_fn_arc: ailake_query::EmbedFn = {
+        let embed_fn = embed_fn.clone_ref(py);
+        Arc::new(move |texts: &[String]| {
+            Python::attach(|py| {
+                let py_texts = PyList::new(py, texts)
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+                let result = embed_fn
+                    .call1(py, (py_texts,))
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+                let vecs: Vec<Vec<f32>> = result.bind(py).extract().map_err(|e| {
+                    ailake_core::AilakeError::InvalidArgument(format!(
+                        "embed_fn must return list[list[float]]: {e}"
+                    ))
+                })?;
+                Ok(vecs)
+            })
+        })
+    };
+
+    let job = BackfillJob {
+        table: table_ident,
+        text_column: text_column.to_string(),
+        new_col,
+        embed_fn: embed_fn_arc,
+        batch_size,
+        on_progress: None,
+    };
+
+    rt.block_on(job.run(catalog, store))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
@@ -1341,6 +1533,8 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rename_column, m)?)?;
     m.add_function(wrap_pyfunction!(delete_where, m)?)?;
     m.add_function(wrap_pyfunction!(hardware_info, m)?)?;
+    m.add_function(wrap_pyfunction!(add_vector_column, m)?)?;
+    m.add_function(wrap_pyfunction!(backfill_vector_column, m)?)?;
     Ok(())
 }
 
