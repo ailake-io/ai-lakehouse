@@ -26,10 +26,10 @@ use uuid::Uuid;
 
 use crate::metadata::{IcebergMetadata, IcebergSnapshot};
 use crate::provider::{
-    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, TableIdent, TableMetadata,
-    TableProperties,
+    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, SnapshotOperation, TableIdent,
+    TableMetadata, TableProperties,
 };
-use crate::snapshot::{build_manifest, manifest_path};
+use crate::snapshot::{manifest_path, Manifest};
 use ailake_store::Store;
 
 // ── JdbcCatalog ───────────────────────────────────────────────────────────────
@@ -177,24 +177,50 @@ impl CatalogProvider for JdbcCatalog {
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
         let snap_id = snapshot.snapshot_id;
-        let files_count = snapshot.files.len();
         let operation_str = format!("{:?}", snapshot.operation).to_lowercase();
-
-        // 1. Write manifest once — orphaned manifests are benign in Iceberg.
         let root = self.table_root(table);
         let abs_manifest = format!("{root}/{}", manifest_path(snap_id));
-        let manifest = build_manifest(&snapshot);
-        self.store
-            .put(&abs_manifest, Bytes::from(manifest.to_json()?.into_bytes()))
-            .await?;
 
-        // 2–4. OCC retry: read metadata → mutate → write new metadata.json → CAS UPDATE.
-        // The UPDATE includes AND metadata_location = old_location; rows_affected == 0 means
-        // a concurrent writer won the race — re-read and retry.
+        // OCC retry: read metadata → rebuild effective file list → write manifest +
+        // new metadata.json → CAS UPDATE. The UPDATE includes AND metadata_location =
+        // old_location; rows_affected == 0 means a concurrent writer won the race —
+        // re-read and retry. The effective file list is recomputed from the freshly-read
+        // metadata on every attempt so a concurrent Append/Delete that won a prior
+        // iteration isn't lost by an in-flight retry that captured a stale file list.
         const MAX_RETRIES: u32 = 5;
         for attempt in 0..MAX_RETRIES {
             let old_location = self.get_metadata_location(table).await?;
             let mut meta = self.load_iceberg_metadata(&old_location).await?;
+
+            // Append/Delete inherit the previous snapshot's full file list (this catalog
+            // stores one flat manifest per snapshot, not an Iceberg manifest chain, so
+            // the new manifest must already contain the complete resulting file list).
+            // Replace/Overwrite treat `snapshot.files` as the complete state — callers
+            // already rebuild it (see hadoop.rs's identical contract).
+            let effective_files: Vec<DataFileEntry> = if matches!(
+                snapshot.operation,
+                SnapshotOperation::Append | SnapshotOperation::Delete
+            ) {
+                let mut prev = if meta.current_snapshot_id.is_some() {
+                    self.list_files(table, meta.current_snapshot_id).await?
+                } else {
+                    vec![]
+                };
+                prev.extend(snapshot.files.iter().cloned());
+                prev
+            } else {
+                snapshot.files.clone()
+            };
+            let files_count = effective_files.len();
+
+            let manifest = Manifest {
+                snapshot_id: snap_id,
+                files: effective_files,
+            };
+            self.store
+                .put(&abs_manifest, Bytes::from(manifest.to_json()?.into_bytes()))
+                .await?;
+
             let now_ms = now_ms();
             let iceberg_snap = IcebergSnapshot {
                 snapshot_id: snap_id,
@@ -408,6 +434,53 @@ mod tests {
         let files = catalog.list_files(&table, Some(snap_id)).await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "data/part-00001.parquet");
+
+        // second incremental Append must inherit the first file, not replace it
+        // (regression: commit_snapshot previously wrote only `snapshot.files` verbatim,
+        // silently losing every file from prior commits on the very first Append after
+        // table creation)
+        let meta_before_second = catalog.load_table(&table).await.unwrap();
+        let snap2 = NewSnapshot {
+            snapshot_id: new_snapshot_id(),
+            parent_snapshot_id: meta_before_second.current_snapshot_id,
+            files: vec![DataFileEntry {
+                path: "data/part-00002.parquet".into(),
+                record_count: 20,
+                file_size_bytes: 2048,
+                centroid_b64: None,
+                radius: Some(0.4),
+                hnsw_offset: Some(1024),
+                hnsw_len: Some(512),
+                vector_column: Some("embedding".into()),
+                vector_dim: Some(4),
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                index_error: None,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
+            }],
+            operation: SnapshotOperation::Append,
+            iceberg_schema: None,
+            extra_properties: std::collections::HashMap::new(),
+            bloom_filters: vec![],
+            equality_delete_files: vec![],
+        };
+        let snap2_id = catalog.commit_snapshot(&table, snap2).await.unwrap();
+        let mut files_after = catalog
+            .list_files(&table, Some(snap2_id))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect::<Vec<_>>();
+        files_after.sort();
+        assert_eq!(
+            files_after,
+            vec!["data/part-00001.parquet", "data/part-00002.parquet"]
+        );
 
         // drop
         catalog.drop_table(&table).await.unwrap();

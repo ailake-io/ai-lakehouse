@@ -10,6 +10,7 @@
 use ailake_catalog::provider::DeletionVector;
 use ailake_core::{AilakeError, AilakeResult};
 use ailake_store::Store;
+use arrow_array::RecordBatch;
 use roaring::RoaringBitmap;
 use std::sync::Arc;
 
@@ -38,6 +39,36 @@ pub async fn load_deletion_vector(
             dv.path, dv.offset, dv.length
         )))
     })
+}
+
+/// Removes DV-masked rows from a Parquet-read `(batch, parallel)` pair, where
+/// `parallel[i]` corresponds positionally to `batch` row `i` (embeddings, texts, ...).
+///
+/// Used by rewrite jobs (compaction, migration, backfill) that read a file's raw rows
+/// and write them into a brand-new physical file: since the new file has fresh row
+/// positions, a deleted row can't just be re-masked with the old bitmap after the fact —
+/// it must be dropped from the input before the merge, or it silently reappears (no DV
+/// on the new `DataFileEntry`, or a DV bitmap that no longer lines up with the new
+/// row order).
+pub fn filter_deleted_rows<T>(
+    batch: RecordBatch,
+    parallel: Vec<T>,
+    bitmap: &RoaringBitmap,
+) -> AilakeResult<(RecordBatch, Vec<T>)> {
+    if bitmap.is_empty() {
+        return Ok((batch, parallel));
+    }
+    let n = batch.num_rows();
+    let keep: Vec<bool> = (0..n).map(|i| !bitmap.contains(i as u32)).collect();
+    let filtered_parallel: Vec<T> = parallel
+        .into_iter()
+        .zip(keep.iter())
+        .filter_map(|(v, &k)| k.then_some(v))
+        .collect();
+    let mask = arrow_array::BooleanArray::from(keep);
+    let filtered_batch = arrow_select::filter::filter_record_batch(&batch, &mask)
+        .map_err(|e| AilakeError::Arrow(e.to_string()))?;
+    Ok((filtered_batch, filtered_parallel))
 }
 
 /// Returns true when any row in `row_ids` is deleted according to `bitmap`.

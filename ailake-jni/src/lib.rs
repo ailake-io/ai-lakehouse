@@ -1642,6 +1642,19 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
                 .map(|s| s.as_str())
                 .unwrap_or("cosine"),
         );
+        let pre_normalize = meta
+            .properties
+            .get("ailake.pre-normalize")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let hnsw_m = meta
+            .properties
+            .get("ailake.hnsw-m")
+            .and_then(|s| s.parse().ok());
+        let hnsw_ef_construction = meta
+            .properties
+            .get("ailake.hnsw-ef-construction")
+            .and_then(|s| s.parse().ok());
 
         let policy = ailake_core::VectorStoragePolicy {
             column_name: vec_col,
@@ -1650,9 +1663,9 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
             precision: ailake_core::VectorPrecision::F16,
             pq: None,
             keep_raw_for_reranking: true,
-            pre_normalize: false,
-            hnsw_m: None,
-            hnsw_ef_construction: None,
+            pre_normalize,
+            hnsw_m,
+            hnsw_ef_construction,
             ivf_residual: false,
             embedding_model: None,
             modality: None,

@@ -228,6 +228,7 @@ impl CompactionExecutor {
             let path = entry.path.clone();
             let column = self.policy.column_name.clone();
             let dim = self.policy.dim;
+            let dv = entry.deletion_vector.clone();
             async move {
                 let bytes: Bytes = store.get(&path).await?;
                 let reader = AilakeFileReader::new(bytes, &column, dim);
@@ -238,7 +239,16 @@ impl CompactionExecutor {
                         path
                     );
                 }
-                let pair = reader.read_parquet()?;
+                let (batch, embeddings) = reader.read_parquet()?;
+                // Drop DV-masked rows before they're merged into a new physical file —
+                // row positions are about to change, so the old bitmap can't just be
+                // carried forward (see dv::filter_deleted_rows).
+                let pair = if let Some(dv) = dv {
+                    let bitmap = crate::dv::load_deletion_vector(&store, &dv).await?;
+                    crate::dv::filter_deleted_rows(batch, embeddings, &bitmap)?
+                } else {
+                    (batch, embeddings)
+                };
                 Ok::<(RecordBatch, Vec<Vec<f32>>), ailake_core::AilakeError>(pair)
             }
         });
@@ -380,6 +390,21 @@ impl CompactionExecutor {
             .unwrap_or(0);
         let dom_rows = files[dom_idx].record_count;
 
+        // The dominant file's existing HNSW graph is reused as-is (only non-dominant
+        // vectors are inserted into it) — its node IDs are tied to the dominant file's
+        // current row positions. If it has DV-masked rows, filtering them out of the
+        // Parquet data would desync the reused graph's node-to-row mapping (and HNSW
+        // doesn't support cheap node removal). Fall back to a full rebuild, which
+        // filters correctly via `read_files_parallel`.
+        if files[dom_idx].deletion_vector.is_some() {
+            debug!(
+                "ailake: compact_incremental — dominant file {} has DV-masked rows, \
+                 falling back to full rebuild (graph reuse would desync row positions)",
+                files[dom_idx].path
+            );
+            return self.compact(files, output_path).await;
+        }
+
         if (dom_rows as f64 / total_rows as f64) < DOMINANT_RATIO {
             debug!(
                 "ailake: compact_incremental — no dominant file ({}/{} rows < {:.0}% threshold), \
@@ -411,6 +436,7 @@ impl CompactionExecutor {
                     let path = entry.path.clone();
                     let col = column.clone();
                     let is_dom = path == dom_path;
+                    let dv = entry.deletion_vector.clone();
                     async move {
                         let bytes: Bytes = store.get(&path).await?;
                         let reader = AilakeFileReader::new(bytes.clone(), &col, dim);
@@ -422,7 +448,16 @@ impl CompactionExecutor {
                                 path
                             );
                         }
-                        let (batch, vecs) = reader.read_parquet()?;
+                        let (raw_batch, raw_vecs) = reader.read_parquet()?;
+                        // Non-dominant rows are freshly inserted into the graph below, so
+                        // DV-masked rows must be dropped here (dominant is guaranteed
+                        // DV-free by the caller's earlier fallback check).
+                        let (batch, vecs) = if let Some(dv) = dv {
+                            let bitmap = crate::dv::load_deletion_vector(&store, &dv).await?;
+                            crate::dv::filter_deleted_rows(raw_batch, raw_vecs, &bitmap)?
+                        } else {
+                            (raw_batch, raw_vecs)
+                        };
                         let retained = if is_dom && has_index {
                             Some(bytes)
                         } else {
@@ -1218,6 +1253,144 @@ mod tests {
         let (batch, embs) = reader.read_parquet().unwrap();
         assert_eq!(batch.num_rows(), 4);
         assert_eq!(embs.len(), 4);
+    }
+
+    /// Regression test: `compact()`/`read_files_parallel` used to read every input file's
+    /// rows unconditionally, ignoring any `deletion_vector` on the entry — so a row deleted
+    /// via `delete_rows()` before compaction reappeared in the merged output (new physical
+    /// file, fresh row positions, no DV carried over — the row was never actually removed).
+    #[tokio::test]
+    async fn compact_drops_deletion_vector_masked_rows() {
+        use ailake_catalog::provider::DeletionVector;
+        use ailake_core::{VectorMetric, VectorPrecision};
+        use ailake_store::LocalStore;
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use roaring::RoaringBitmap;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let policy = VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim: 4,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        // File A: row 0 (id=0) will be marked deleted; row 1 (id=1) survives.
+        let embs_a: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
+        let embs_b: Vec<Vec<f32>> = vec![vec![0.0, 0.0, 1.0, 0.0]];
+
+        let batch_a = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![0i32, 1]))],
+        )
+        .unwrap();
+        let batch_b =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![2i32]))])
+                .unwrap();
+
+        let bytes_a = AilakeFileWriter::new(policy.clone())
+            .write(&batch_a, &embs_a)
+            .unwrap();
+        let bytes_b = AilakeFileWriter::new(policy.clone())
+            .write(&batch_b, &embs_b)
+            .unwrap();
+        store.put("data/a.parquet", bytes_a.clone()).await.unwrap();
+        store.put("data/b.parquet", bytes_b.clone()).await.unwrap();
+
+        // Puffin DV marking row 0 of file A as deleted.
+        let mut bitmap = RoaringBitmap::new();
+        bitmap.insert(0);
+        let (puffin_bytes, offset, length) =
+            crate::delete::PuffinWriter::write_single_dv(&bitmap, 1).unwrap();
+        store.put("metadata/dv-1.dvd", puffin_bytes).await.unwrap();
+
+        let entry_a = DataFileEntry {
+            path: "data/a.parquet".into(),
+            record_count: 2,
+            file_size_bytes: bytes_a.len() as u64,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: None,
+            vector_dim: None,
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            index_error: None,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: Some(DeletionVector {
+                path: "metadata/dv-1.dvd".into(),
+                offset,
+                length,
+                cardinality: 1,
+            }),
+            first_row_id: None,
+        };
+        let entry_b = DataFileEntry {
+            path: "data/b.parquet".into(),
+            record_count: 1,
+            file_size_bytes: bytes_b.len() as u64,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: None,
+            vector_dim: None,
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            index_error: None,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+        };
+
+        let executor = CompactionExecutor::new(store.clone(), policy.clone());
+        let merged = executor
+            .compact(&[entry_a, entry_b], "data/merged.parquet")
+            .await
+            .unwrap();
+
+        // 2 rows in A + 1 in B, minus 1 deleted from A = 2 surviving rows.
+        assert_eq!(merged.record_count, 2);
+        let merged_bytes = store.get("data/merged.parquet").await.unwrap();
+        let reader = AilakeFileReader::new(merged_bytes, "embedding", 4);
+        let (batch, embs) = reader.read_parquet().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(embs.len(), 2);
+        let ids: Vec<i32> = batch
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .values()
+            .to_vec();
+        assert_eq!(
+            ids,
+            vec![1, 2],
+            "id=0 (deleted) must not survive compaction"
+        );
     }
 
     /// Regression test: `verify_integrity()` used to always call `load_index()`, which

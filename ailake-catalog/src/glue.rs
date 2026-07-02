@@ -24,10 +24,10 @@ use uuid::Uuid;
 
 use crate::metadata::{IcebergMetadata, IcebergSnapshot};
 use crate::provider::{
-    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, TableIdent, TableMetadata,
-    TableProperties,
+    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, SnapshotOperation, TableIdent,
+    TableMetadata, TableProperties,
 };
-use crate::snapshot::{build_manifest, manifest_path};
+use crate::snapshot::{manifest_path, Manifest};
 use ailake_store::Store;
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -103,17 +103,13 @@ impl GlueCatalog {
         table_name: &str,
         table_root: &str,
         metadata_location: &str,
-        version_id: Option<&str>,
     ) -> AilakeResult<TableInput> {
         let sd = StorageDescriptor::builder().location(table_root).build();
-        let mut b = TableInput::builder()
+        TableInput::builder()
             .name(table_name)
             .storage_descriptor(sd)
-            .set_parameters(Some(Self::table_params(metadata_location)));
-        if let Some(vid) = version_id {
-            b = b.version_id(vid);
-        }
-        b.build()
+            .set_parameters(Some(Self::table_params(metadata_location)))
+            .build()
             .map_err(|e| AilakeError::Catalog(format!("GlueCatalog TableInput: {e}")))
     }
 
@@ -212,8 +208,7 @@ impl CatalogProvider for GlueCatalog {
             .put(&metadata_location, Bytes::from(json.into_bytes()))
             .await?;
 
-        let table_input =
-            Self::build_table_input(&name.name, &table_root, &metadata_location, None)?;
+        let table_input = Self::build_table_input(&name.name, &table_root, &metadata_location)?;
         self.client
             .create_table()
             .database_name(&self.config.database)
@@ -237,25 +232,51 @@ impl CatalogProvider for GlueCatalog {
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
         let snap_id = snapshot.snapshot_id;
-        let files_count = snapshot.files.len();
         let operation_str = format!("{:?}", snapshot.operation).to_lowercase();
-
-        // 1. Write manifest once — orphaned manifests are benign in Iceberg.
         let root = self.table_root(table);
         let abs_manifest = format!("{root}/{}", manifest_path(snap_id));
-        let manifest = build_manifest(&snapshot);
-        self.store
-            .put(&abs_manifest, Bytes::from(manifest.to_json()?.into_bytes()))
-            .await?;
 
-        // 2–4. OCC retry: read → mutate → write metadata → update_table with version_id.
-        // Glue rejects update_table when version_id doesn't match (ConcurrentModificationException),
-        // so we re-read and retry with the fresh version_id.
+        // OCC retry: read → rebuild effective file list → write manifest + metadata →
+        // update_table with version_id. Glue rejects update_table when version_id doesn't
+        // match (ConcurrentModificationException), so we re-read and retry with the fresh
+        // version_id. The effective file list is recomputed from the freshly-read metadata
+        // on every attempt so a concurrent Append/Delete that won a prior iteration isn't
+        // lost by an in-flight retry that captured a stale file list.
         const MAX_RETRIES: u32 = 5;
         let table_root = self.table_root(table);
         for attempt in 0..MAX_RETRIES {
             let (old_location, version_id) = self.get_table_state(table).await?;
             let mut meta = self.load_iceberg_metadata(&old_location).await?;
+
+            // Append/Delete inherit the previous snapshot's full file list (this catalog
+            // stores one flat manifest per snapshot, not an Iceberg manifest chain, so
+            // the new manifest must already contain the complete resulting file list).
+            // Replace/Overwrite treat `snapshot.files` as the complete state — callers
+            // already rebuild it (see hadoop.rs's identical contract).
+            let effective_files: Vec<DataFileEntry> = if matches!(
+                snapshot.operation,
+                SnapshotOperation::Append | SnapshotOperation::Delete
+            ) {
+                let mut prev = if meta.current_snapshot_id.is_some() {
+                    self.list_files(table, meta.current_snapshot_id).await?
+                } else {
+                    vec![]
+                };
+                prev.extend(snapshot.files.iter().cloned());
+                prev
+            } else {
+                snapshot.files.clone()
+            };
+            let files_count = effective_files.len();
+
+            let manifest = Manifest {
+                snapshot_id: snap_id,
+                files: effective_files,
+            };
+            self.store
+                .put(&abs_manifest, Bytes::from(manifest.to_json()?.into_bytes()))
+                .await?;
+
             let now_ms = now_ms();
             let iceberg_snap = IcebergSnapshot {
                 snapshot_id: snap_id,
@@ -281,17 +302,17 @@ impl CatalogProvider for GlueCatalog {
                 .put(&new_location, Bytes::from(json.into_bytes()))
                 .await?;
 
-            let table_input = Self::build_table_input(
-                &table.name,
-                &table_root,
-                &new_location,
-                version_id.as_deref(),
-            )?;
+            let table_input = Self::build_table_input(&table.name, &table_root, &new_location)?;
+            // `version_id` is a param of the UpdateTable *request*, not of TableInput —
+            // Glue compares it against the table's current version server-side and
+            // rejects the call with ConcurrentModificationException on mismatch, giving
+            // us the OCC guard this retry loop relies on.
             match self
                 .client
                 .update_table()
                 .database_name(&self.config.database)
                 .table_input(table_input)
+                .set_version_id(version_id.clone())
                 .send()
                 .await
             {
@@ -385,7 +406,6 @@ mod tests {
 
     #[test]
     fn metadata_path_format() {
-        use ailake_store::LocalStore;
         let config = GlueCatalogConfig {
             database: "prod_db".into(),
             warehouse: "s3://my-bucket/warehouse".into(),
@@ -412,7 +432,13 @@ mod tests {
         let ws = warehouse.trim_end_matches('/');
         let table = TableIdent::new("ns", "tbl");
         let root = format!("{}/{}/{}", ws, table.namespace, table.name);
-        assert!(!root.contains("//"), "double slash in root: {root}");
+        // The `s3://` scheme separator legitimately contains "//" — only the part
+        // after it must be free of a doubled slash from an untrimmed trailing '/'.
+        let path_after_scheme = root.split_once("://").map_or(root.as_str(), |x| x.1);
+        assert!(
+            !path_after_scheme.contains("//"),
+            "double slash in root: {root}"
+        );
         assert_eq!(root, "s3://my-bucket/warehouse/ns/tbl");
     }
 }

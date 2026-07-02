@@ -121,9 +121,7 @@ impl MigrationJob {
         let mut current_files = old_files.clone();
 
         for (idx, old_entry) in old_files.iter().enumerate() {
-            let (batch, texts) = self
-                .read_file_texts(&old_entry.path, &store, &new_policy)
-                .await?;
+            let (batch, texts) = self.read_file_texts(old_entry, &store, &new_policy).await?;
             let new_embeddings = self.embed_in_batches(&texts)?;
 
             let new_entry = self
@@ -190,9 +188,7 @@ impl MigrationJob {
         let mut new_entries: Vec<DataFileEntry> = Vec::with_capacity(total);
 
         for (idx, old_entry) in old_files.iter().enumerate() {
-            let (batch, texts) = self
-                .read_file_texts(&old_entry.path, &store, &new_policy)
-                .await?;
+            let (batch, texts) = self.read_file_texts(old_entry, &store, &new_policy).await?;
             let new_embeddings = self.embed_in_batches(&texts)?;
 
             let entry = self
@@ -242,19 +238,26 @@ impl MigrationJob {
         Ok(())
     }
 
-    /// Read Parquet bytes from store, decode the text column.
+    /// Read Parquet bytes from store, decode the text column, and drop DV-masked rows
+    /// (the migrated file is brand-new, so a deleted row must not be re-embedded and
+    /// resurrected — see `dv::filter_deleted_rows`).
     async fn read_file_texts(
         &self,
-        path: &str,
+        entry: &DataFileEntry,
         store: &Arc<dyn Store>,
         policy: &VectorStoragePolicy,
     ) -> AilakeResult<(RecordBatch, Vec<String>)> {
-        let bytes = store.get(path).await?;
+        let bytes = store.get(&entry.path).await?;
         let reader = AilakeFileReader::new(bytes, &self.old_column, policy.dim);
         let (batch, _) = reader.read_parquet()?;
 
         let texts = extract_string_column(&batch, &self.text_column)?;
-        Ok((batch, texts))
+        if let Some(dv) = &entry.deletion_vector {
+            let bitmap = crate::dv::load_deletion_vector(store, dv).await?;
+            crate::dv::filter_deleted_rows(batch, texts, &bitmap)
+        } else {
+            Ok((batch, texts))
+        }
     }
 
     /// Call embed_fn in chunks of batch_size.

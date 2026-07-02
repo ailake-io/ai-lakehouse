@@ -197,7 +197,7 @@ impl MemoryDecayJob {
                 })
                 .collect();
 
-            let new_entry = make_multi_column_data_file_entry(
+            let mut new_entry = make_multi_column_data_file_entry(
                 &file_entry.path,
                 updated_batch.num_rows() as u64,
                 new_size,
@@ -210,6 +210,11 @@ impl MemoryDecayJob {
                 },
                 &new_extra,
             );
+            // Decay rewrites the file in place (same row count/order — `apply_decay` only
+            // replaces/adds a column, never filters rows), so any existing DV bitmap is
+            // still positionally valid and must be carried forward, or the rows it masks
+            // reappear on the very next search.
+            new_entry.deletion_vector = file_entry.deletion_vector.clone();
             new_entries.push(new_entry);
             updated += 1;
         }

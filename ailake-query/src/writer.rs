@@ -20,6 +20,42 @@ use bytes::Bytes;
 use serde_json;
 use tracing::{error, info, warn};
 
+/// Merges `new`'s fields into `existing`, preserving `existing`'s field order and only
+/// appending fields whose name isn't already present.
+///
+/// A `TableWriter` can receive several `write_batch*` calls before `commit()` (e.g. one
+/// Airbyte destination flush per batch within a sync's commit window). Record shape can
+/// vary batch-to-batch when extra columns are inferred from whatever fields happen to be
+/// present (no fixed allowlist) — a column absent from the first batch but present in a
+/// later one must still end up in the committed Iceberg schema, or it's written into the
+/// Parquet file but invisible to any standard Iceberg reader (which projects only
+/// declared schema fields).
+fn merge_schema(existing: Option<SchemaRef>, new: &SchemaRef) -> SchemaRef {
+    match existing {
+        None => new.clone(),
+        Some(existing)
+            if existing.fields().len() >= new.fields().len()
+                && new
+                    .fields()
+                    .iter()
+                    .all(|f| existing.field_with_name(f.name()).is_ok()) =>
+        {
+            // Fast path: `new` has no fields absent from `existing` — skip a rebuild.
+            existing
+        }
+        Some(existing) => {
+            let mut fields: Vec<arrow_schema::FieldRef> =
+                existing.fields().iter().cloned().collect();
+            for f in new.fields() {
+                if existing.field_with_name(f.name()).is_err() {
+                    fields.push(f.clone());
+                }
+            }
+            Arc::new(arrow_schema::Schema::new(fields))
+        }
+    }
+}
+
 /// Apply partition transforms and return the final stored value.
 /// For multi-column specs, raw must be \x1f-separated; each part is transformed
 /// independently and the result is rejoined with \x1f.
@@ -144,9 +180,7 @@ impl TableWriter {
         embeddings: &[Vec<f32>],
     ) -> AilakeResult<()> {
         self.validate_embedding_dim(embeddings)?;
-        if self.captured_schema.is_none() {
-            self.captured_schema = Some(batch.schema());
-        }
+        self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = format!("data/part-{:05}.parquet", part_num);
 
@@ -219,9 +253,7 @@ impl TableWriter {
         embeddings: &[Vec<f32>],
         ivf_config: IvfPqConfig,
     ) -> AilakeResult<()> {
-        if self.captured_schema.is_none() {
-            self.captured_schema = Some(batch.schema());
-        }
+        self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = format!("data/part-{:05}.parquet", part_num);
 
@@ -348,9 +380,7 @@ impl TableWriter {
         batch_id: Option<String>,
     ) -> AilakeResult<()> {
         self.validate_embedding_dim(embeddings)?;
-        if self.captured_schema.is_none() {
-            self.captured_schema = Some(batch.schema());
-        }
+        self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = format!("data/part-{:05}.parquet", part_num);
 
@@ -470,9 +500,7 @@ impl TableWriter {
         embeddings: &[Vec<f32>],
         ivf_config: IvfPqConfig,
     ) -> AilakeResult<()> {
-        if self.captured_schema.is_none() {
-            self.captured_schema = Some(batch.schema());
-        }
+        self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = format!("data/part-{:05}.parquet", part_num);
 
@@ -550,9 +578,7 @@ impl TableWriter {
         columns: &[MultiVectorBatch<'_>],
     ) -> AilakeResult<()> {
         use ailake_core::AilakeError;
-        if self.captured_schema.is_none() {
-            self.captured_schema = Some(batch.schema());
-        }
+        self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
         if self.extra_vec_policies.is_empty() && columns.len() > 1 {
             self.extra_vec_policies = columns[1..].iter().map(|c| c.policy.clone()).collect();
         }
@@ -679,9 +705,7 @@ impl TableWriter {
                 "write_batch_multi_deferred requires at least one column".into(),
             ));
         }
-        if self.captured_schema.is_none() {
-            self.captured_schema = Some(batch.schema());
-        }
+        self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
         if self.extra_vec_policies.is_empty() && columns.len() > 1 {
             self.extra_vec_policies = columns[1..].iter().map(|c| c.policy.clone()).collect();
         }
@@ -1792,6 +1816,45 @@ mod tests {
 
         // Nested element ID must be > 3
         assert!(upd.fields[1]["type"]["element-id"].as_i64().unwrap() > 3);
+    }
+
+    /// Regression: `captured_schema` used to be "first batch wins" — any column absent
+    /// from the first `write_batch*` call but present in a later one within the same
+    /// commit window was written into that later file's Parquet bytes but never declared
+    /// in the committed Iceberg schema, making it invisible to standard readers.
+    #[test]
+    fn merge_schema_accumulates_columns_across_batches() {
+        let first = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("text", DataType::Utf8, false),
+        ]));
+        let second = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("text", DataType::Utf8, false),
+            Field::new("author", DataType::Utf8, true),
+        ]));
+
+        let merged = merge_schema(None, &first);
+        assert_eq!(merged.fields().len(), 2);
+        let merged = merge_schema(Some(merged), &second);
+
+        assert_eq!(
+            merged.fields().len(),
+            3,
+            "author from the second batch must survive"
+        );
+        assert!(merged.field_with_name("id").is_ok());
+        assert!(merged.field_with_name("text").is_ok());
+        assert!(merged.field_with_name("author").is_ok());
+
+        // A third batch with a subset of columns must not drop what was already accumulated.
+        let third = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let merged = merge_schema(Some(merged), &third);
+        assert_eq!(
+            merged.fields().len(),
+            3,
+            "shrinking batch must not drop prior columns"
+        );
     }
 
     /// Smoke-test write_batch_auto_deferred: verifies that it completes without error

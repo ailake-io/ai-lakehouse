@@ -182,6 +182,9 @@ impl IcebergMetadata {
         if let Some(ef) = policy.hnsw_ef_construction {
             properties.insert("ailake.hnsw-ef-construction".to_string(), ef.to_string());
         }
+        if policy.pre_normalize {
+            properties.insert("ailake.pre-normalize".to_string(), "true".to_string());
+        }
         if let Some(model) = &policy.embedding_model {
             properties.insert(
                 EmbeddingModelInfo::property_key().to_string(),

@@ -134,6 +134,20 @@ impl BackfillJob {
                 &self.text_column,
             )?;
 
+            // Drop DV-masked rows before re-embedding — the backfilled file is brand-new,
+            // so a deleted row must not get a fresh new-column embedding and resurrect.
+            let (batch, texts, primary_embeddings) = if let Some(dv) = &entry.deletion_vector {
+                let bitmap = crate::dv::load_deletion_vector(&store, dv).await?;
+                let combined: Vec<(String, Vec<f32>)> =
+                    texts.into_iter().zip(primary_embeddings).collect();
+                let (batch, combined) = crate::dv::filter_deleted_rows(batch, combined, &bitmap)?;
+                let (texts, primary_embeddings): (Vec<String>, Vec<Vec<f32>>) =
+                    combined.into_iter().unzip();
+                (batch, texts, primary_embeddings)
+            } else {
+                (batch, texts, primary_embeddings)
+            };
+
             // Generate embeddings for new column in batches.
             let new_embeddings = embed_in_batches(&self.embed_fn, &texts, self.batch_size)?;
 

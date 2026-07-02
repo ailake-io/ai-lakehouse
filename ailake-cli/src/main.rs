@@ -805,6 +805,15 @@ async fn run(cli: Cli) -> Result<(), String> {
 
             let dim = query_vec.len() as u32;
 
+            let column = match catalog.load_table(&ident).await {
+                Ok(meta) => meta
+                    .properties
+                    .get("ailake.vector-column")
+                    .cloned()
+                    .unwrap_or_else(|| "embedding".to_string()),
+                Err(_) => "embedding".to_string(),
+            };
+
             let config = SearchConfig {
                 top_k,
                 ef_search: top_k * 5,
@@ -819,7 +828,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 &ident,
                 &query_vec,
                 config,
-                "embedding",
+                &column,
                 dim,
                 catalog as Arc<dyn CatalogProvider>,
                 store,
@@ -883,17 +892,41 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .get("ailake.vector-column")
                 .cloned()
                 .unwrap_or_else(|| "embedding".to_string());
+            let metric = match meta
+                .properties
+                .get("ailake.vector-metric")
+                .map(|s| s.as_str())
+                .unwrap_or("cosine")
+            {
+                "euclidean" => VectorMetric::Euclidean,
+                "dotproduct" | "dot_product" => VectorMetric::DotProduct,
+                "normalizedcosine" | "normalized_cosine" => VectorMetric::NormalizedCosine,
+                _ => VectorMetric::Cosine,
+            };
+            let pre_normalize = meta
+                .properties
+                .get("ailake.pre-normalize")
+                .map(|s| s == "true")
+                .unwrap_or(false);
+            let hnsw_m = meta
+                .properties
+                .get("ailake.hnsw-m")
+                .and_then(|s| s.parse().ok());
+            let hnsw_ef_construction = meta
+                .properties
+                .get("ailake.hnsw-ef-construction")
+                .and_then(|s| s.parse().ok());
 
             let policy = VectorStoragePolicy {
                 column_name: column,
                 dim,
-                metric: VectorMetric::Cosine,
+                metric,
                 precision: VectorPrecision::F16,
                 pq: None,
                 keep_raw_for_reranking: true,
-                pre_normalize: false,
-                hnsw_m: None,
-                hnsw_ef_construction: None,
+                pre_normalize,
+                hnsw_m,
+                hnsw_ef_construction,
                 ivf_residual: false,
                 embedding_model: None,
                 modality: None,
