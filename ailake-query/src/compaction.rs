@@ -380,6 +380,22 @@ impl CompactionExecutor {
             ));
         }
 
+        // This method only ever produces an HNSW index (dominant-file graph extended via
+        // `insert_node`) — it never builds IVF-PQ. `ForceIvfPq` is an explicit caller
+        // request for a specific index type, so it must never be silently satisfied with
+        // HNSW instead; fall back to `compact()`, which does respect it. `Auto`/`ForceHnsw`
+        // are unaffected: `Auto` treats "the dominant file already has a valid HNSW"
+        // as a legitimate reason to keep reusing HNSW rather than pay for a fresh
+        // hardware-picked rebuild, and `ForceHnsw` is satisfied by this method by
+        // construction either way.
+        if matches!(self.index_strategy, CompactionIndexStrategy::ForceIvfPq) {
+            debug!(
+                "ailake: compact_incremental — index_strategy=ForceIvfPq, which this method \
+                 can never produce (HNSW graph extension only); falling back to full rebuild"
+            );
+            return self.compact(files, output_path).await;
+        }
+
         // Find the dominant file by record_count.
         let total_rows: u64 = files.iter().map(|f| f.record_count).sum();
         let dom_idx = files
@@ -1657,6 +1673,120 @@ mod tests {
         // inserted at position 6 in the merged file).
         let results = hnsw.search(&[0.0, 0.0, 0.0, 1.0], 1, 50);
         assert_eq!(results[0].0, RowId::new(6));
+    }
+
+    /// Regression: `compact_incremental()` only ever produces HNSW (it extends the
+    /// dominant file's existing graph) — with a dominant file present, it never checked
+    /// `self.index_strategy` before taking that path, so an explicit `ForceIvfPq` request
+    /// was silently satisfied with HNSW instead. Reachable from `CompactionExecutor::run()`/
+    /// `run_deferred()` (used by the CLI `compact` command and every JNI/Spark/Trino/Flink/
+    /// DuckDB compact call), which always try `compact_incremental()` first — including on
+    /// a GPU machine where `Auto` would pick IVF-PQ for a fresh build, or where a caller
+    /// explicitly forces IVF-PQ. Same dominant/small file shape as
+    /// `compact_incremental_merges_dominant_plus_small`, but with `ForceIvfPq` set.
+    #[tokio::test]
+    async fn compact_incremental_respects_force_ivf_pq_even_with_dominant_file() {
+        use ailake_core::{VectorMetric, VectorPrecision};
+        use ailake_store::LocalStore;
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let dim = 8;
+        let policy = VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let make_file = |path: &str, offset: i32, n: usize| {
+            let ids: Vec<i32> = (offset..offset + n as i32).collect();
+            let embs: Vec<Vec<f32>> = ids
+                .iter()
+                .map(|&i| {
+                    (0..dim as i32)
+                        .map(|j| ((i * 31 + j * 7) % 97) as f32 / 97.0)
+                        .collect()
+                })
+                .collect();
+            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(ids))])
+                .unwrap();
+            // Dominant file already has a real, loadable HNSW index — the exact
+            // condition that used to make compact_incremental() bypass ForceIvfPq.
+            let bytes = AilakeFileWriter::new(policy.clone())
+                .write(&batch, &embs)
+                .unwrap();
+            (path.to_string(), bytes, n as u64)
+        };
+
+        // Dominant: 90 rows (75% of 120 total — comfortably above the dominant-file
+        // threshold), small: 30 rows.
+        let (path_dom, bytes_dom, n_dom) = make_file("data/dom.parquet", 0, 90);
+        let (path_small, bytes_small, n_small) = make_file("data/small.parquet", 999, 30);
+
+        for (path, bytes) in [(&path_dom, &bytes_dom), (&path_small, &bytes_small)] {
+            store.put(path, bytes.clone()).await.unwrap();
+        }
+
+        let make_entry = |path: &str, record_count: u64, size: u64| DataFileEntry {
+            path: path.to_string(),
+            record_count,
+            file_size_bytes: size,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: None,
+            vector_dim: None,
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            index_error: None,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+        };
+        let entries = vec![
+            make_entry(&path_dom, n_dom, bytes_dom.len() as u64),
+            make_entry(&path_small, n_small, bytes_small.len() as u64),
+        ];
+
+        let executor = CompactionExecutor::new(store.clone(), policy.clone())
+            .with_index_strategy(CompactionIndexStrategy::ForceIvfPq);
+        let merged = executor
+            .compact_incremental(&entries, "data/merged_force_ivfpq.parquet")
+            .await
+            .expect("compact_incremental() with ForceIvfPq must fall back to compact() cleanly");
+
+        let merged_bytes = store.get("data/merged_force_ivfpq.parquet").await.unwrap();
+        let reader = AilakeFileReader::new(merged_bytes, "embedding", dim);
+        reader.verify_integrity().unwrap();
+
+        match reader.load_any_index().unwrap() {
+            ailake_index::AnyIndex::IvfPq(_) => {}
+            ailake_index::AnyIndex::Hnsw(_) => panic!(
+                "ForceIvfPq was silently satisfied with HNSW instead — merged.record_count={}",
+                merged.record_count
+            ),
+        }
     }
 
     #[tokio::test]
