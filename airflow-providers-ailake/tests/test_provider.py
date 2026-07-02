@@ -179,6 +179,20 @@ class TestAilakeWriteOperator:
         op = self._op()
         assert "run_id" in op.batch_id or "task" in op.batch_id
 
+    def test_execute_does_not_call_get_table_info(self):
+        """Regression: execute() used to call hook.get_table_info() and log a
+        misleading "checking idempotency" message without ever actually skipping —
+        real dedup happens downstream via the CLI's --batch-id flag. That call was
+        pure overhead (one extra `ailake info` subprocess per task run); it must
+        not happen."""
+        op = self._op(batch_id="run1_write")
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "get_table_info") as mock_info:
+                with patch.object(hook, "run_cli", return_value=_completed()):
+                    op.execute(context={})
+        mock_info.assert_not_called()
+
     def test_write_operator_partition_by_passed_to_cli(self):
         op = self._op(partition_by="agent_id", partition_value="agent-A")
         hook = _make_hook()

@@ -83,11 +83,31 @@ def _extract_extra_columns(
     for key in keys:
         values: list[Any] = []
         skip = False
+        first_type: type | None = None
+        warned_mixed_type = False
         for record in records:
             v = record.get(key)
             if v is not None and not isinstance(v, _SCALAR_TYPES):
                 skip = True
                 break
+            if v is not None:
+                if first_type is None:
+                    first_type = type(v)
+                elif type(v) is not first_type and not warned_mixed_type:
+                    # The underlying column type is inferred from the first non-null
+                    # value only (see ailake-py's write_batch); a later value of a
+                    # different scalar type is silently coerced/nulled downstream with
+                    # no other signal, unlike the non-scalar case above which does warn.
+                    logger.warning(
+                        "ailake destination: field '%s' has mixed scalar types "
+                        "(%s then %s) — the column type is inferred from the first "
+                        "value seen; later values of a different type may be "
+                        "silently nulled",
+                        key,
+                        first_type.__name__,
+                        type(v).__name__,
+                    )
+                    warned_mixed_type = True
             values.append(v)
         if skip:
             logger.warning(

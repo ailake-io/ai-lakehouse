@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -564,6 +565,50 @@ class TestStreamWriter:
         _, kwargs = mock_table.insert.call_args
         extra = kwargs.get("extra_columns")
         assert extra == {"id": [1]}, f"extra_columns={extra}"
+
+    def test_extra_columns_mixed_scalar_types_logs_warning(self, caplog):
+        """Regression: a column's type is inferred from the first non-null value only
+        (see ailake-py's write_batch); a later value of a different scalar type is
+        silently coerced/nulled downstream with no signal — unlike the non-scalar
+        case, which already warns. This must warn too."""
+        cfg = _make_cfg()
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            with caplog.at_level(logging.WARNING, logger="airbyte_destination_ailake.writer"):
+                writer.add({"content": "hello", "score": 5})
+                writer.add({"content": "world", "score": 5.5})
+                writer.commit()
+
+        _, kwargs = mock_table.insert.call_args
+        extra = kwargs.get("extra_columns")
+        assert extra == {"score": [5, 5.5]}, f"extra_columns={extra}"
+        assert any(
+            "mixed scalar types" in r.message and "score" in r.message for r in caplog.records
+        ), f"expected a mixed-scalar-type warning, got records={[r.message for r in caplog.records]}"
+
+    def test_extra_columns_same_scalar_type_no_warning(self, caplog):
+        """Sanity check: same type across all values must not trigger the mixed-type warning."""
+        cfg = _make_cfg()
+        embedder = FakeEmbedder()
+        mock_table = MagicMock()
+        mock_table.commit.return_value = 1
+        fake_ailake = MagicMock()
+        fake_ailake.open_table.return_value = mock_table
+
+        with patch.dict("sys.modules", {"ailake": fake_ailake}):
+            writer = StreamWriter("s", cfg, embedder)
+            with caplog.at_level(logging.WARNING, logger="airbyte_destination_ailake.writer"):
+                writer.add({"content": "hello", "score": 5})
+                writer.add({"content": "world", "score": 7})
+                writer.commit()
+
+        assert not any("mixed scalar types" in r.message for r in caplog.records)
 
     def test_extra_columns_none_when_no_other_fields(self):
         cfg = _make_cfg()

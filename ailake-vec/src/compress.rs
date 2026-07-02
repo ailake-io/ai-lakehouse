@@ -47,15 +47,26 @@ impl BlockCompressor {
         }
     }
 
-    pub fn decompress(&self, data: &[u8]) -> Vec<u8> {
+    /// Decompresses `data` written by [`compress`](Self::compress) with the same codec.
+    ///
+    /// Returns an error on truncated/corrupted input instead of silently substituting
+    /// the still-compressed bytes as if they were the decompressed payload — a caller
+    /// has no way to detect corruption if a failed decompress looks like success.
+    pub fn decompress(&self, data: &[u8]) -> ailake_core::AilakeResult<Vec<u8>> {
         match self.codec {
-            CompressionCodec::None => data.to_vec(),
-            CompressionCodec::Lz4 => {
-                lz4_flex::decompress_size_prepended(data).unwrap_or_else(|_| data.to_vec())
-            }
-            CompressionCodec::Zstd => {
-                zstd::bulk::decompress(data, 64 * 1024 * 1024).unwrap_or_else(|_| data.to_vec())
-            }
+            CompressionCodec::None => Ok(data.to_vec()),
+            CompressionCodec::Lz4 => lz4_flex::decompress_size_prepended(data).map_err(|e| {
+                ailake_core::AilakeError::Io(std::io::Error::other(format!(
+                    "ailake: LZ4 block decompression failed ({} bytes input): {e}",
+                    data.len()
+                )))
+            }),
+            CompressionCodec::Zstd => zstd::bulk::decompress(data, 64 * 1024 * 1024).map_err(|e| {
+                ailake_core::AilakeError::Io(std::io::Error::other(format!(
+                    "ailake: Zstd block decompression failed ({} bytes input): {e}",
+                    data.len()
+                )))
+            }),
         }
     }
 }
@@ -72,7 +83,7 @@ mod tests {
 
     fn roundtrip(codec: BlockCompressor, data: &[u8]) {
         let compressed = codec.compress(data);
-        let decompressed = codec.decompress(&compressed);
+        let decompressed = codec.decompress(&compressed).unwrap();
         assert_eq!(decompressed, data);
     }
 
@@ -92,6 +103,23 @@ mod tests {
     fn none_passthrough() {
         let data = b"hello ailake";
         roundtrip(BlockCompressor::none(), data);
+    }
+
+    /// Regression: `decompress()` used to swallow the error and return the still-compressed
+    /// bytes verbatim on truncated/corrupted input, masking corruption as if it were a
+    /// successful decompress instead of surfacing it to the caller.
+    #[test]
+    fn lz4_decompress_of_corrupt_data_errors() {
+        let c = BlockCompressor::lz4();
+        let garbage = vec![0xFFu8; 8];
+        assert!(c.decompress(&garbage).is_err());
+    }
+
+    #[test]
+    fn zstd_decompress_of_corrupt_data_errors() {
+        let c = BlockCompressor::zstd(3);
+        let garbage = vec![0xFFu8; 8];
+        assert!(c.decompress(&garbage).is_err());
     }
 
     #[test]
