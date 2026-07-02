@@ -390,6 +390,8 @@ Flink SQL DDL
 AilakeCatalogFactory  →  AilakeCatalog  (Flink catalog API, delegates to ailake-catalog Rust)
 ```
 
+`AilakeInputFormat.open()` degrades gracefully when the native lib can't be loaded — same contract as the Spark/Trino/DuckDB bridges — returning an empty result set instead of failing the Flink task. The write path (`AilakeVectorTableSink`) intentionally does not degrade: a missing native lib fails the sink loudly rather than silently dropping a write batch.
+
 ### Version support
 
 | Dependency | Version |
@@ -544,12 +546,15 @@ val results = AilakeNative.search(
 
 | Function | Signature | Description |
 |---|---|---|
-| `ailake_search` | `(table_path VARCHAR, query FLOAT[], top_k INTEGER [, vec_col VARCHAR, ef_search INTEGER, partition_filter VARCHAR, hybrid_text VARCHAR, text_column VARCHAR, bm25_weight FLOAT]) → TABLE(row_id BIGINT, distance FLOAT, file_path VARCHAR)` | Vector nearest-neighbor search (with optional BM25 hybrid) |
-| `ailake_search_multimodal` | `(table_path VARCHAR, queries LIST(STRUCT(...)), top_k INTEGER [, partition_filter VARCHAR]) → TABLE(row_id BIGINT, rrf_score FLOAT, file_path VARCHAR)` | Cross-modal RRF search |
-| `ailake_search_text` | `(table_path VARCHAR, query_text VARCHAR, top_k INTEGER [, text_column VARCHAR, partition_filter VARCHAR]) → TABLE(row_id BIGINT, score FLOAT, file_path VARCHAR)` | Pure BM25 full-text search (Tantivy O(log N) when FTS index present; brute-force fallback) |
-| `ailake_write_batch` | `(table_path VARCHAR, ids BIGINT[], embeddings FLOAT[][] [, vec_col, metric, precision, partition_by, partition_value, partition_fields, format_version, fts_columns]) → BIGINT` | Write a batch; returns snapshot ID or -1 on error |
+| `ailake_search` | `(table_path VARCHAR, query FLOAT[], top_k INTEGER [, vec_col VARCHAR, ef_search INTEGER, table_name VARCHAR, namespace VARCHAR, partition_filter VARCHAR, hybrid_text VARCHAR, text_column VARCHAR, bm25_weight FLOAT]) → TABLE(row_id BIGINT, distance FLOAT, file_path VARCHAR)` | Vector nearest-neighbor search (with optional BM25 hybrid) |
+| `ailake_search_multimodal` | `(table_path VARCHAR, queries LIST(STRUCT(...)), top_k INTEGER [, partition_filter VARCHAR, table_name VARCHAR, namespace VARCHAR]) → TABLE(row_id BIGINT, rrf_score FLOAT, file_path VARCHAR)` | Cross-modal RRF search |
+| `ailake_search_text` | `(table_path VARCHAR, query_text VARCHAR, top_k INTEGER [, text_columns VARCHAR[], text_column VARCHAR, partition_filter VARCHAR, table_name VARCHAR, namespace VARCHAR]) → TABLE(row_id BIGINT, score FLOAT, file_path VARCHAR)` | Pure BM25 full-text search (Tantivy O(log N) when FTS index present; brute-force fallback) |
+| `ailake_scan` | `(table_path VARCHAR, query FLOAT[], top_k INTEGER [, vec_col VARCHAR, ef_search INTEGER, table_name VARCHAR, namespace VARCHAR]) → TABLE(<all Parquet columns>, _distance FLOAT)` | Vector search + full row fetch in one call (no JOIN required) |
+| `ailake_write_batch` | `(table_path VARCHAR, ids BIGINT[], embeddings FLOAT[][] [, vec_col, metric, precision, partition_by, partition_value, partition_fields, format_version, fts_columns, fts_tokenizer, hnsw_m, hnsw_ef_construction, pre_normalize, deferred, namespace, table_name]) → BIGINT` | Write a batch; returns snapshot ID or -1 on error |
+| `ailake_delete_where` | `(table_path VARCHAR, column VARCHAR, values VARCHAR[] [, namespace VARCHAR, table_name VARCHAR]) → BOOLEAN` | Equality-delete matching rows |
+| `ailake_evolve_schema` | `(table_path VARCHAR, add_columns_json VARCHAR, rename_columns_json VARCHAR [, namespace VARCHAR, table_name VARCHAR]) → INTEGER` | Metadata-only schema evolution; returns new schema_id |
 
-`partition_filter` (search) and `partition_by`/`partition_value` (write, single-column identity) are optional named parameters for per-agent/per-tenant file pruning (Phase 9). `partition_fields` accepts a JSON array (`[{"column":"topic_id","transform":"identity","column_type":"int"}]`) for multi-column Iceberg partition specs with any transform (identity, bucket, truncate, year, month, day, hour) — Phase L/R. `format_version` (default 2) enables Iceberg v3 when set to `3`. All functions degrade gracefully when `libailake_jni.so` is not loaded.
+`namespace` (default `'default'`) and `table_name` (default `'table'`) are optional trailing parameters on every function above — pass them (as named params on the table functions, or positionally on the scalar functions) to address a table other than the warehouse root's default. `partition_filter` (search) and `partition_by`/`partition_value` (write, single-column identity) are optional named parameters for per-agent/per-tenant file pruning (Phase 9). `partition_fields` accepts a JSON array (`[{"column":"topic_id","transform":"identity","column_type":"int"}]`) for multi-column Iceberg partition specs with any transform (identity, bucket, truncate, year, month, day, hour) — Phase L/R. `format_version` (default 2) enables Iceberg v3 when set to `3`. `hnsw_m`/`hnsw_ef_construction` (default -1 = use table default) tune the HNSW index; `pre_normalize` (default false) normalizes vectors to unit L2 at write time; `deferred` (default false) builds the index asynchronously. All functions degrade gracefully when `libailake_jni.so` is not loaded — `ailake_search`/`ailake_search_text`/`ailake_search_multimodal`/`ailake_scan` return 0 rows, `ailake_write_batch` returns -1, `ailake_delete_where` returns false, `ailake_evolve_schema` returns -1.
 
 The extension uses the same JSON-envelope C-ABI protocol as the Spark and Trino plugins — no additional Rust code required.
 
@@ -561,8 +566,16 @@ cargo build --release -p ailake-jni          # build native lib first
 
 cmake -S duckdb-ailake -B duckdb-ailake/build \
   -DCMAKE_BUILD_TYPE=Release \
-  -DDUCKDB_VERSION=v1.1.3
+  -DDUCKDB_VERSION=v1.5.3
 cmake --build duckdb-ailake/build --parallel
+
+# No network access to git protocol? Fetch the source tarball directly and
+# point FetchContent at the extracted directory instead of letting it git-clone:
+#   curl -sL https://codeload.github.com/duckdb/duckdb/tar.gz/refs/tags/v1.5.3 -o duckdb.tar.gz
+#   tar xzf duckdb.tar.gz
+#   cmake -S duckdb-ailake -B duckdb-ailake/build -DCMAKE_BUILD_TYPE=Release \
+#     -DFETCHCONTENT_SOURCE_DIR_DUCKDB=$(pwd)/duckdb-1.5.3 \
+#     -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=$(pwd)/nlohmann_json_src/json
 
 # Artifact: duckdb-ailake/build/ailake.duckdb_extension
 ```
@@ -641,6 +654,26 @@ SELECT ailake_write_batch(
     'embedding',   -- vec_col
     'cosine',      -- metric
     'f16'          -- precision
+);
+
+-- non-default namespace/table_name (table functions: named params)
+SELECT * FROM ailake_search(
+    '/path/to/warehouse',
+    [0.1, 0.2, 0.3]::FLOAT[],
+    5,
+    namespace='analytics',
+    table_name='embeddings'
+);
+
+-- non-default namespace/table_name (ailake_write_batch: trailing positional args,
+-- arity 18 — every arg from vec_col onward must be supplied up to this point)
+SELECT ailake_write_batch(
+    '/path/to/warehouse',
+    [0, 1]::BIGINT[],
+    [[0.1, 0.2], [0.3, 0.4]],
+    'embedding', 'cosine', 'f16',
+    '', '', '', 2, '', '', -1, -1, false, false,
+    'analytics', 'embeddings'
 );
 ```
 
