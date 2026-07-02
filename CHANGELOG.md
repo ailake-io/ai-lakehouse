@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-07-02
+
 ### Added
 
 - **Foreign-write detection and repair prioritization** (ADR-018, `docs/contributing/DECISIONS.md`) — a generic Iceberg engine (Spark/Trino `OPTIMIZE`/`rewrite_data_files`, DuckDB) can legally rewrite an AI-Lake data file with no knowledge of AI-Lake, producing valid Parquet with no AILK footer and no `centroid`/`radius` in its manifest entry. This degrades affected files to an exact O(N) flat scan at query time (already the existing fallback in `scanner.rs`) rather than corrupting data, but was previously silent. `CompactionPlanner::plan()` now detects any file with no `centroid_b64` (never written by the AI-Lake SDK) and prioritizes it for reindex, bypassing `min_files_to_compact`/size thresholds — a single foreign file triggers repair on its own. `scanner.rs::search` now distinguishes expected deferred-indexing fallback (`debug!`) from unexpected foreign-write fallback (`warn!`, with an aggregate summary per search call). `ailake info` reports foreign-file paths (`foreign_files`/`foreign_file_paths` in `--format json`) for proactive drift detection without needing a slow query to notice
