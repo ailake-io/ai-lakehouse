@@ -28,6 +28,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # full history needed to read latest tag
+          # main is protected by a ruleset requiring PRs; the default GITHUB_TOKEN
+          # pushes as github-actions[bot], which isn't in the ruleset's bypass list.
+          # ACTIONS_PAT belongs to a bypass-listed user, so the version-bump commit
+          # and release tag can be pushed directly.
+          token: ${{ secrets.ACTIONS_PAT }}
 
       - name: Bump patch version from latest tag
         id: version
