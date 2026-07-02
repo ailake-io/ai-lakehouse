@@ -4,8 +4,17 @@
 //! Output path: $COMPAT_FIXTURE_PATH or ./compat-fixture/
 //! Table: default.compat_test — 1 000 rows, dim=8, cosine, F16
 //!
+//! Env overrides (opt-in, for V3 read-back coverage in compat-heavy.yml):
+//!   COMPAT_TABLE_NAME=compat_test        — Iceberg table name under the `default` namespace
+//!   COMPAT_FORMAT_VERSION=2              — 2 (default) or 3
+//!   COMPAT_PARTITION_BY_ID=false         — when "true", declares a single-column identity
+//!                                          partition on `id` (int) — exercises the V3
+//!                                          partition-spec source-id remap in commit_snapshot.
+//!
 //! Usage:
 //!   cargo run --example write_fixture -p ailake-query
+//!   COMPAT_TABLE_NAME=compat_test_v3 COMPAT_FORMAT_VERSION=3 COMPAT_PARTITION_BY_ID=true \
+//!     cargo run --example write_fixture -p ailake-query
 
 use std::sync::Arc;
 
@@ -78,9 +87,29 @@ async fn main() {
     let abs_out = std::fs::canonicalize(&out).unwrap_or_else(|_| std::path::PathBuf::from(&out));
     let abs_out_str = abs_out.to_string_lossy().to_string();
 
+    let table_name =
+        std::env::var("COMPAT_TABLE_NAME").unwrap_or_else(|_| "compat_test".to_string());
+    let format_version: u8 = std::env::var("COMPAT_FORMAT_VERSION")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
+    let partition_by_id = std::env::var("COMPAT_PARTITION_BY_ID")
+        .map(|s| s == "true")
+        .unwrap_or(false);
+
     let store: Arc<dyn Store> = Arc::new(LocalStore::new(&abs_out_str));
     let catalog = Arc::new(HadoopCatalog::new(Arc::clone(&store), &abs_out_str));
-    let table = TableIdent::new("default", "compat_test");
+    let table = TableIdent::new("default", &table_name);
+
+    let partition_fields = if partition_by_id {
+        vec![ailake_core::PartitionDef {
+            column: "id".to_string(),
+            transform: "identity".to_string(),
+            column_type: "int".to_string(),
+        }]
+    } else {
+        vec![]
+    };
 
     let policy = VectorStoragePolicy {
         column_name: "embedding".to_string(),
@@ -98,15 +127,19 @@ async fn main() {
         partition_by: None,
         partition_value: None,
         partition_column_type: None,
-        partition_fields: vec![],
+        partition_fields,
     };
+
+    println!(
+        "table={table_name} format_version={format_version} partition_by_id={partition_by_id}"
+    );
 
     let mut writer = TableWriter::create_or_open(
         Arc::clone(&catalog) as Arc<dyn CatalogProvider>,
         Arc::clone(&store),
         policy,
         table.clone(),
-        2,
+        format_version,
     )
     .await
     .expect("create writer");
@@ -131,7 +164,7 @@ async fn main() {
 
     // Patch metadata: add schema fields + name-mapping so PyIceberg can scan without field-ids
     {
-        let meta_dir = format!("{}/default/compat_test/metadata", abs_out_str);
+        let meta_dir = format!("{}/default/{}/metadata", abs_out_str, table_name);
         let hint_path = format!("{}/version-hint.text", meta_dir);
         let version: u32 = std::fs::read_to_string(&hint_path)
             .unwrap_or_else(|_| "1".to_string())

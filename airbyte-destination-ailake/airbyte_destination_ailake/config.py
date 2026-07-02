@@ -38,6 +38,13 @@ class AilakeDestinationConfig:
     text_field: str = "content"
     """Record field whose value is the text to embed. Nested paths: ``meta.body``."""
 
+    # --- Extra tabular columns ---
+    extra_columns: list[str] = field(default_factory=list)
+    """Record fields (besides ``text_field``) written as queryable Parquet columns
+    alongside the embedding. Empty (default) = every scalar (str/int/float/bool)
+    top-level field the record has, other than ``text_field``. Non-scalar values
+    (nested objects/arrays) are never included — flatten them upstream if needed."""
+
     # --- cmd mode ---
     embed_cmd: str = ""
     """Shell command. Receives JSON array of strings on stdin; writes JSON array of
@@ -125,6 +132,7 @@ class AilakeDestinationConfig:
             embedding_model=raw.get("embedding_model", ""),
             embedding_model_version=raw.get("embedding_model_version", ""),
             text_field=raw.get("text_field", "content"),
+            extra_columns=raw.get("extra_columns", []),
             embed_cmd=raw.get("embed_cmd", ""),
             openai_api_key=raw.get("openai_api_key", ""),
             openai_model=raw.get("openai_model", "text-embedding-3-small"),

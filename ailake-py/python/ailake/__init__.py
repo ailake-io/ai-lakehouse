@@ -341,6 +341,12 @@ class Table:
         bm25_text_column: str | None = None,
         fts_text_columns: list[str] | None = None,
         fts_tokenizer: str = "default",
+        partition_by: str | None = None,
+        partition_value: str | None = None,
+        partition_column_type: str | None = None,
+        partition_fields: list[tuple[str, str, str]] | None = None,
+        partition_values: dict[str, str] | None = None,
+        format_version: int = 2,
     ) -> None:
         self._path = path
         self._vector_column = vector_column
@@ -370,6 +376,12 @@ class Table:
             bm25_text_column=bm25_text_column,
             fts_text_columns=fts_text_columns,
             fts_tokenizer=fts_tokenizer,
+            partition_by=partition_by,
+            partition_value=partition_value,
+            partition_column_type=partition_column_type,
+            partition_fields=partition_fields,
+            partition_values=partition_values,
+            format_version=format_version,
         )
 
     # ── write ─────────────────────────────────────────────────────────────────
@@ -609,6 +621,12 @@ def open_table(
     bm25_text_column: str | None = None,
     fts_text_columns: list[str] | None = None,
     fts_tokenizer: str = "default",
+    partition_by: str | None = None,
+    partition_value: str | None = None,
+    partition_column_type: str | None = None,
+    partition_fields: list[tuple[str, str, str]] | None = None,
+    partition_values: dict[str, str] | None = None,
+    format_version: int = 2,
 ) -> Table:
     """Open or create an AI-Lake table at *path*.
 
@@ -629,6 +647,22 @@ def open_table(
         bm25_text_column: Column name for BM25 scoring (Phase 5 hybrid search).
         fts_text_columns: Columns to index with Tantivy FTS (Phase T).
         fts_tokenizer: Tokenizer for Tantivy FTS (default ``"default"``).
+        partition_by: Single-column Iceberg identity partition (e.g. ``"agent_id"``).
+                      Every row written through this ``Table`` instance is tagged with
+                      *partition_value* — open a separate ``Table`` per distinct value.
+        partition_value: The partition value for this ``Table`` instance when
+                         *partition_by* (or *partition_fields*) is set.
+        partition_column_type: Iceberg type of the *partition_by* column (e.g. ``"string"``).
+        partition_fields: Multi-column partition spec as a list of
+                          ``(column, transform, column_type)`` tuples, e.g.
+                          ``[("agent_id", "identity", "string")]``. Defines the table's
+                          partition schema; takes precedence over *partition_by* at
+                          table creation.
+        partition_values: ``{column: value}`` for this ``Table`` instance's multi-column
+                          partition value, matching *partition_fields*. Ignored when
+                          *partition_value* is also set.
+        format_version: Iceberg format version — ``2`` (default) or ``3`` (deletion
+                        vectors, row lineage).
     """
     return Table(
         path,
@@ -646,6 +680,12 @@ def open_table(
         bm25_text_column=bm25_text_column,
         fts_text_columns=fts_text_columns,
         fts_tokenizer=fts_tokenizer,
+        partition_by=partition_by,
+        partition_value=partition_value,
+        partition_column_type=partition_column_type,
+        partition_fields=partition_fields,
+        partition_values=partition_values,
+        format_version=format_version,
     )
 
 

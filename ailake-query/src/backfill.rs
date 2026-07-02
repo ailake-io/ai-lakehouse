@@ -109,8 +109,11 @@ impl BackfillJob {
             // `ailk_offset_for_column`, it doesn't fall back to the primary column's
             // footer, which would make every AI-Lake file look like it already has
             // the new column and skip backfilling entirely.
-            let reader =
-                AilakeFileReader::new(file_bytes.clone(), &primary_policy.column_name, primary_policy.dim);
+            let reader = AilakeFileReader::new(
+                file_bytes.clone(),
+                &primary_policy.column_name,
+                primary_policy.dim,
+            );
             if reader.has_column_footer(&self.new_col.column_name) {
                 files_skipped += 1;
                 info!(
@@ -264,7 +267,6 @@ async fn write_backfilled_file(
     store: &Arc<dyn Store>,
     idx: usize,
 ) -> AilakeResult<DataFileEntry> {
-
     let file_path = format!("data/backfill-{:05}.parquet", idx);
 
     let writer = AilakeFileWriter::new(primary_policy.clone());
@@ -273,7 +275,7 @@ async fn write_backfilled_file(
         &[
             VectorColumnBatch {
                 policy: primary_policy,
-                embeddings: &primary_embeddings,
+                embeddings: primary_embeddings,
             },
             VectorColumnBatch {
                 policy: new_policy,
@@ -294,7 +296,7 @@ async fn write_backfilled_file(
     let new_header = reader.read_header_for_column(&new_policy.column_name)?;
     let new_hnsw_abs = new_ailk_offset + new_header.hnsw_offset;
 
-    let primary_centroid = compute_centroid_and_radius(&primary_embeddings, primary_policy.metric);
+    let primary_centroid = compute_centroid_and_radius(primary_embeddings, primary_policy.metric);
     let new_centroid = compute_centroid_and_radius(new_embeddings, new_policy.metric);
 
     let extra = vec![ExtraVectorIndex {
@@ -513,7 +515,11 @@ mod tests {
         }
 
         let files_before = catalog.list_files(&table, None).await.unwrap();
-        assert_eq!(files_before.len(), 3, "sanity: 3 files committed via Append");
+        assert_eq!(
+            files_before.len(),
+            3,
+            "sanity: 3 files committed via Append"
+        );
 
         let job = BackfillJob {
             table: table.clone(),

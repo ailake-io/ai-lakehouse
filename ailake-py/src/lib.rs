@@ -1341,6 +1341,7 @@ fn delete_where(table_path: &str, column: &str, values: Vec<String>) -> PyResult
 /// Returns:
 ///     new schema-id (int)
 #[pyfunction]
+#[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (table_path, column, dim, metric="cosine", precision="f16", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None))]
 fn add_vector_column(
     table_path: &str,

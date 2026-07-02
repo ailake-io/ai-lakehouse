@@ -783,7 +783,10 @@ mod tests {
         let snap1 = NewSnapshot {
             snapshot_id: new_snapshot_id(),
             parent_snapshot_id: None,
-            files: vec![make_entry("data/small.parquet"), make_entry("data/big.parquet")],
+            files: vec![
+                make_entry("data/small.parquet"),
+                make_entry("data/big.parquet"),
+            ],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
             extra_properties: std::collections::HashMap::new(),
@@ -793,7 +796,11 @@ mod tests {
         catalog.commit_snapshot(&table, snap1).await.unwrap();
 
         let files_before = catalog.list_files(&table, None).await.unwrap();
-        assert_eq!(files_before.len(), 2, "sanity: both files visible after Append");
+        assert_eq!(
+            files_before.len(),
+            2,
+            "sanity: both files visible after Append"
+        );
 
         // Snapshot 2 (Replace): mirrors CompactionExecutor::run() — commits ONLY the
         // merged output of the compacted subset ("small.parquet" → "merged.parquet"),

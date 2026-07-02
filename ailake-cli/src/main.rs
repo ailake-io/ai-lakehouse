@@ -1342,7 +1342,10 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .add_vector_column(&ident, &spec)
                 .await
                 .map_err(|e| e.to_string())?;
-            println!("vector column '{}' added — new_schema_id: {new_schema_id}", spec.column_name);
+            println!(
+                "vector column '{}' added — new_schema_id: {new_schema_id}",
+                spec.column_name
+            );
             Ok(())
         }
 
@@ -1411,9 +1414,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             let embed_fn: EmbedFn = Arc::new(move |texts: &[String]| {
                 use std::io::Write;
                 use std::process::{Command, Stdio};
-                let input = serde_json::to_string(texts).map_err(|e| {
-                    ailake_core::AilakeError::InvalidArgument(e.to_string())
-                })?;
+                let input = serde_json::to_string(texts)
+                    .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
                 let mut child = Command::new("sh")
                     .arg("-c")
                     .arg(&cmd)
