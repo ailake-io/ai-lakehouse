@@ -4,6 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/ailake-core.svg)](https://crates.io/crates/ailake-core)
 [![PyPI](https://img.shields.io/pypi/v/ailake.svg)](https://pypi.org/p/ailake)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
+[![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2.svg)](https://github.com/sponsors/ThiagoLange)
 
 > 🇧🇷 [Leia em Português brasileiro →](./README.pt-BR.md)
 
@@ -451,3 +452,7 @@ cargo check --workspace
 | **Phase 9** | ✅ Complete | Agent memory — `ToolCallSchema` (searchable tool call history), `EpisodicMemorySchema` (recency decay, access count, importance score), injectable `ScoreFn` for hybrid scoring (distance × recency × importance), `partition_by`/`partition_value` Iceberg identity partitioning for per-agent file isolation, `partition_filter` manifest-level pruning before centroid check and HNSW load, Python `ailake.Agent` helper (LangChain/CrewAI/AutoGen). Propagated to all SDKs and connectors: Spark, Trino, Flink, Go, C++, DuckDB (`ailake_search` + `ailake_search_multimodal` + `ailake_write_batch`), Airbyte destination, Airflow provider. Fix: `TableWriter::create_or_open` part_counter initialized from existing file count (prevents file path collision on multi-writer tables). |
 
 See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the full phase breakdown.
+
+## Support
+
+If AI-Lake is useful to you, consider [sponsoring on GitHub](https://github.com/sponsors/ThiagoLange) — it funds ongoing development and maintenance.

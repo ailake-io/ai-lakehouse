@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **GitHub Sponsors** — `.github/FUNDING.yml` (`github: [ThiagoLange]`) enables the native "Sponsor" button on the repo sidebar. Sponsor badge and a "Support"/"Apoie o projeto" section added to `README.md` and `README.pt-BR.md`, linking to `github.com/sponsors/ThiagoLange`
+
 ## [0.1.1] — 2026-07-02
 
 ### Added
