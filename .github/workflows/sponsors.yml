@@ -18,10 +18,14 @@ jobs:
         with:
           ref: main
 
+      # ACTIONS_PAT is reused from release.yml (bypass-listed on main's ruleset,
+      # already used to push directly to main). Also needs `read:user` scope for
+      # this step's GraphQL sponsors query — if it lacks that scope, add it at
+      # github.com/settings/tokens without regenerating the token.
       - name: Update sponsors in README.md
         uses: JamesIves/github-sponsors-readme-action@v1
         with:
-          token: ${{ secrets.SPONSORS_PAT }}
+          token: ${{ secrets.ACTIONS_PAT }}
           file: "README.md"
           minimum: 0
           active-only: true
@@ -30,7 +34,7 @@ jobs:
       - name: Update sponsors in README.pt-BR.md
         uses: JamesIves/github-sponsors-readme-action@v1
         with:
-          token: ${{ secrets.SPONSORS_PAT }}
+          token: ${{ secrets.ACTIONS_PAT }}
           file: "README.pt-BR.md"
           minimum: 0
           active-only: true
@@ -38,7 +42,7 @@ jobs:
 
       - name: Commit, open PR, and admin-merge into main
         env:
-          GH_TOKEN: ${{ secrets.SPONSORS_PAT }}
+          GH_TOKEN: ${{ secrets.ACTIONS_PAT }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
