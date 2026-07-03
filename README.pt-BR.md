@@ -317,4 +317,8 @@ cargo check --workspace
 
 Se o AI-Lake é útil pra você, considera [apoiar via GitHub Sponsors](https://github.com/sponsors/ThiagoLange) — financia o desenvolvimento e manutenção contínua.
 
+## Sponsors
+
+_Seja o primeiro a patrocinar este projeto! → [github.com/sponsors/ThiagoLange](https://github.com/sponsors/ThiagoLange)_
+
 Veja [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) para o detalhamento completo das fases.

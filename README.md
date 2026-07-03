@@ -456,3 +456,7 @@ See [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) for the
 ## Support
 
 If AI-Lake is useful to you, consider [sponsoring on GitHub](https://github.com/sponsors/ThiagoLange) — it funds ongoing development and maintenance.
+
+## Sponsors
+
+_Be the first to sponsor this project! → [github.com/sponsors/ThiagoLange](https://github.com/sponsors/ThiagoLange)_

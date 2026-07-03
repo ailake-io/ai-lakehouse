@@ -12,6 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **GitHub Sponsors** — `.github/FUNDING.yml` (`github: [ThiagoLange]`) enables the native "Sponsor" button on the repo sidebar. Sponsor badge and a "Support"/"Apoie o projeto" section added to `README.md` and `README.pt-BR.md`, linking to `github.com/sponsors/ThiagoLange`
+- **Sponsors placeholder section** — `README.md`/`README.pt-BR.md` gained a "Sponsors" section with a call-to-action link; to be swapped for an auto-generated sponsor list (e.g. `github-sponsors-readme-action`) once the first sponsor signs up
 
 ## [0.1.1] — 2026-07-02
 
