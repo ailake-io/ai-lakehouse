@@ -459,4 +459,4 @@ If AI-Lake is useful to you, consider [sponsoring on GitHub](https://github.com/
 
 ## Sponsors
 
-_Be the first to sponsor this project! → [github.com/sponsors/ThiagoLange](https://github.com/sponsors/ThiagoLange)_
+<!-- sponsors --><em>Be the first to sponsor this project! → <a href="https://github.com/sponsors/ThiagoLange">github.com/sponsors/ThiagoLange</a></em><!-- sponsors -->
