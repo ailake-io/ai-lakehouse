@@ -319,6 +319,6 @@ Se o AI-Lake é útil pra você, considera [apoiar via GitHub Sponsors](https://
 
 ## Sponsors
 
-_Seja o primeiro a patrocinar este projeto! → [github.com/sponsors/ThiagoLange](https://github.com/sponsors/ThiagoLange)_
+<!-- sponsors --><em>Seja o primeiro a patrocinar este projeto! → <a href="https://github.com/sponsors/ThiagoLange">github.com/sponsors/ThiagoLange</a></em><!-- sponsors -->
 
 Veja [`docs/architecture/WORKSPACE.md`](./docs/architecture/WORKSPACE.md) para o detalhamento completo das fases.
