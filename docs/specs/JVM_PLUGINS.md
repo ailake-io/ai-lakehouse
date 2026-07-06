@@ -63,19 +63,20 @@ Reference guide for the two JVM query-engine plugins that expose AI-Lake vector 
 Each GitHub Release includes pre-built artifacts uploaded by the `publish-jvm.yml` workflow. No Rust toolchain or Gradle required.
 
 ```bash
-VERSION=0.0.27   # replace with desired release
+TAG=v0.1.1          # GitHub release tag — replace with desired release (Rust/PyPI version)
+JAR_VERSION=0.1.0   # JVM plugin version — gradle, versioned independently of TAG; check the release page
 
 # Spark plugin
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/spark-plugin-${JAR_VERSION}-plugin.jar
 
 # Trino plugin
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/trino-plugin-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/trino-plugin-${JAR_VERSION}-plugin.jar
 
 # Flink connector
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/ailake-flink-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/ailake-flink-${JAR_VERSION}-plugin.jar
 
 # Native library (required by all three)
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/libailake_jni.so
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/libailake_jni.so
 ```
 
 Place `libailake_jni.so` in a directory accessible to the JVM (see [Native library deployment](#native-library-deployment)).

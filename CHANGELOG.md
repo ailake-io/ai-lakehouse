@@ -15,6 +15,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Sponsors placeholder section** — `README.md`/`README.pt-BR.md` gained a "Sponsors" section with a call-to-action link; to be swapped for an auto-generated sponsor list (e.g. `github-sponsors-readme-action`) once the first sponsor signs up
 - **`.github/workflows/sponsors.yml`** — weekly (+ manual) job that regenerates the `<!-- sponsors -->` block in `README.md`/`README.pt-BR.md` via `JamesIves/github-sponsors-readme-action`, then commits via a throwaway branch → PR → `gh pr merge --admin --squash` straight into `main` (bypasses the PR-required branch protection the same way an admin manual merge does). Commit/PR title carries `[skip ci]` so neither the PR nor the resulting push triggers the regular CI/release workflows. Reuses the existing `ACTIONS_PAT` secret (already bypass-listed on `main`'s ruleset for `release.yml`); needs `read:user` scope added to that token if not already present
 
+### Fixed
+
+- **Docs — stale `0.0.27` version references across `README.md`, `README.pt-BR.md`, `ailake-py/README.md`, `docs/guides/JVM_INTEGRATION.md`, `docs/specs/JVM_PLUGINS.md`, `docs/specs/CLOUD_DEPLOY.md`** — the repo has three independently-versioned artifacts (Rust crates/PyPI `ailake` at `0.1.1`, JVM plugin JARs built by gradle at `0.1.0`, `apache-airflow-providers-ailake` at `0.0.10`), but install snippets used a single `VERSION` shell var to template both the GitHub release tag and the JAR filename — broken for any value once the two diverged, since the tag (`v0.1.1`) and the actual JAR asset name (`spark-plugin-0.1.0-plugin.jar`) no longer match. Split into `TAG` (release tag) and `JAR_VERSION` (gradle plugin version) in every JVM install snippet; bumped Cargo/PyPI dependency examples and `pip` version pins to `0.1.1`
+
 ## [0.1.1] — 2026-07-02
 
 ### Added

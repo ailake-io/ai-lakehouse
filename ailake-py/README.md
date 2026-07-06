@@ -1,6 +1,6 @@
 # ailake — AI-Lake Format Python SDK
 
-**Version**: 0.0.27 — Unified storage for tabular data, embeddings, and HNSW vector index in a single Parquet-compatible file. Apache Iceberg Spec v2/v3 compatible.
+**Version**: 0.1.1 — Unified storage for tabular data, embeddings, and HNSW vector index in a single Parquet-compatible file. Apache Iceberg Spec v2/v3 compatible.
 
 ## Install
 
