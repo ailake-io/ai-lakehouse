@@ -10,30 +10,38 @@ import io.trino.spi.connector.ConnectorPageSink
 import io.trino.spi.connector.ConnectorPageSink.NOT_BLOCKED
 import io.trino.spi.type.BigintType.BIGINT
 import io.trino.spi.type.DoubleType.DOUBLE
+import io.trino.spi.type.VarcharType.VARCHAR
 import org.slf4j.LoggerFactory
 import java.util.concurrent.CompletableFuture
 
 /**
  * Buffers rows from INSERT INTO and flushes to AI-Lake via JNI on [finish].
  *
- * Expected page layout (matches INGEST_COLUMNS in VectorScanMetadata):
- *   channel 0 — id BIGINT
- *   channel 1 — embedding ARRAY<DOUBLE>
+ * Expected page layout (matches VectorScanMetadata.ingestColumns()):
+ *   channel 0        — id BIGINT
+ *   channel 1        — embedding ARRAY<DOUBLE>
+ *   channel 2..N     — handle.textColumns, VARCHAR, same order
  */
 class AilakePageSink(private val handle: AilakeIngestTableHandle) : ConnectorPageSink {
 
     private val log = LoggerFactory.getLogger(AilakePageSink::class.java)
     private val ids = mutableListOf<Long>()
     private val embeddings = mutableListOf<List<Float>>()
+    private val textValues: Map<String, MutableList<String>> =
+        handle.textColumns.associateWith { mutableListOf<String>() }
     private var autoId = 0L
 
     override fun appendPage(page: Page): CompletableFuture<*> {
         val idBlock  = page.getBlock(0)
         val vecBlock = page.getBlock(1)
+        val textBlocks = handle.textColumns.mapIndexed { i, name -> name to page.getBlock(2 + i) }
 
         for (pos in 0 until page.positionCount) {
             ids += if (!idBlock.isNull(pos)) BIGINT.getLong(idBlock, pos) else autoId
             embeddings += extractVector(vecBlock, pos)
+            textBlocks.forEach { (name, block) ->
+                textValues.getValue(name) += if (block.isNull(pos)) "" else VARCHAR.getSlice(block, pos).toStringUtf8()
+            }
             autoId++
         }
         return NOT_BLOCKED
@@ -60,6 +68,7 @@ class AilakePageSink(private val handle: AilakeIngestTableHandle) : ConnectorPag
             embeddingModel  = handle.embeddingModel,
             partitionFields = handle.partitionFields,
             formatVersion   = handle.formatVersion,
+            columns         = textValues,
         )
 
         if (snapshotId == null) {
@@ -75,5 +84,6 @@ class AilakePageSink(private val handle: AilakeIngestTableHandle) : ConnectorPag
     override fun abort() {
         ids.clear()
         embeddings.clear()
+        textValues.values.forEach { it.clear() }
     }
 }

@@ -12,7 +12,7 @@ import io.trino.spi.connector.ConnectorTableHandle
  *  - [ConnectorTableHandle]  — returned by getTableHandle for `ailake.default.ingest`
  *  - [ConnectorInsertTableHandle] — passed through beginInsert → AilakePageSink
  *
- * Schema exposed to Trino: (id BIGINT, embedding ARRAY<DOUBLE>)
+ * Schema exposed to Trino: (id BIGINT, embedding ARRAY<DOUBLE>, ...textColumns VARCHAR)
  */
 data class AilakeIngestTableHandle @JsonCreator constructor(
     @JsonProperty("tableUri")        val tableUri:        String,
@@ -25,4 +25,7 @@ data class AilakeIngestTableHandle @JsonCreator constructor(
     @JsonProperty("embeddingModel")  val embeddingModel:  String? = null,
     @JsonProperty("partitionFields") val partitionFields: List<AilakeNative.PartitionFieldDef> = emptyList(),
     @JsonProperty("formatVersion")   val formatVersion:   Int = 2,
+    // Extra VARCHAR column names, in Page-channel order starting at index 2
+    // (0=id, 1=embedding) — see VectorScanMetadata.ingestColumns().
+    @JsonProperty("textColumns")     val textColumns:     List<String> = emptyList(),
 ) : ConnectorTableHandle, ConnectorInsertTableHandle

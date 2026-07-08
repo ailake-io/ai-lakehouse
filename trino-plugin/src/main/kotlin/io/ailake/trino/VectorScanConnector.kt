@@ -23,9 +23,10 @@ class VectorScanConnector(
     private val embeddingModel: String? = null,
     private val partitionFields: List<AilakeNative.PartitionFieldDef> = emptyList(),
     private val formatVersion: Int = 2,
+    private val textColumns: List<String> = emptyList(),
 ) : Connector {
 
-    private val metadata = VectorScanMetadata(tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel, partitionFields, formatVersion)
+    private val metadata = VectorScanMetadata(tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel, partitionFields, formatVersion, textColumns)
     private val splitManager = VectorScanSplitManager()
     private val recordSetProvider = VectorScanRecordSetProvider()
     private val pageSinkProvider = AilakePageSinkProvider()

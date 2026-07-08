@@ -35,6 +35,8 @@ class VectorScanConnectorFactory : ConnectorFactory {
             }
         }
         val formatVersion = config.getOrDefault("ailake.format-version", "2").toInt()
-        return VectorScanConnector(tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel, partitionFields, formatVersion)
+        val textColumns = config.getOrDefault("ailake.text-columns", "")
+            .split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        return VectorScanConnector(tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel, partitionFields, formatVersion, textColumns)
     }
 }
