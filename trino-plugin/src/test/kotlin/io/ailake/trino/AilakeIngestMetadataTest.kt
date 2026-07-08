@@ -133,4 +133,48 @@ class AilakeIngestMetadataTest {
         assertNotNull(handle)
         assertNull((handle as AilakeIngestTableHandle).embeddingModel)
     }
+
+    // ── textColumns (extra metadata columns) ──────────────────────────────────
+
+    private val metadataWithTextColumns = VectorScanMetadata(
+        tableUri     = "file:///tmp/test-table",
+        vectorColumn = "embedding",
+        dim          = 4,
+        metric       = "cosine",
+        precision    = "f16",
+        namespace    = "default",
+        tableName    = "docs",
+        textColumns  = listOf("text", "source", "page"),
+    )
+
+    @Test
+    fun ingestTableHasExtraTextColumnsWhenConfigured() {
+        val handle = metadataWithTextColumns.getTableHandle(session, SchemaTableName("default", "ingest"))!!
+        val meta = metadataWithTextColumns.getTableMetadata(session, handle)
+        assertEquals(5, meta.columns.size)
+        assertEquals(listOf("id", "embedding", "text", "source", "page"), meta.columns.map { it.name })
+    }
+
+    @Test
+    fun ingestColumnHandlesIncludeTextColumnsAtCorrectOrdinals() {
+        val handle = metadataWithTextColumns.getTableHandle(session, SchemaTableName("default", "ingest"))!!
+        val cols = metadataWithTextColumns.getColumnHandles(session, handle) as Map<String, VectorScanColumnHandle>
+        assertEquals(0, cols.getValue("id").ordinal)
+        assertEquals(1, cols.getValue("embedding").ordinal)
+        assertEquals(2, cols.getValue("text").ordinal)
+        assertEquals(3, cols.getValue("source").ordinal)
+        assertEquals(4, cols.getValue("page").ordinal)
+    }
+
+    @Test
+    fun textColumnsPropagatedToIngestHandle() {
+        val handle = metadataWithTextColumns.getTableHandle(session, SchemaTableName("default", "ingest"))
+        assertEquals(listOf("text", "source", "page"), (handle as AilakeIngestTableHandle).textColumns)
+    }
+
+    @Test
+    fun textColumnsEmptyByDefault() {
+        val handle = metadata.getTableHandle(session, SchemaTableName("default", "ingest"))
+        assertTrue((handle as AilakeIngestTableHandle).textColumns.isEmpty())
+    }
 }

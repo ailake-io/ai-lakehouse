@@ -31,6 +31,12 @@ class VectorScanMetadata(
     private val embeddingModel: String? = null,
     private val partitionFields: List<AilakeNative.PartitionFieldDef> = emptyList(),
     private val formatVersion: Int = 2,
+    // Extra VARCHAR columns (e.g. chunk text, source, page) written alongside
+    // id + embedding via AilakeNative.writeBatch's `columns` map — see
+    // ingestColumns() doc. Configured catalog-wide via ailake.text-columns
+    // (VectorScanConnectorFactory); Trino's connector schema is fixed per
+    // catalog, so there's no per-INSERT way to vary this.
+    private val textColumns: List<String> = emptyList(),
 ) : ConnectorMetadata {
 
     companion object {
@@ -48,16 +54,20 @@ class VectorScanMetadata(
             "distance"  to VectorScanColumnHandle("distance", 1),
             "file_path" to VectorScanColumnHandle("file_path", 2),
         )
-
-        val INGEST_COLUMNS = listOf(
-            ColumnMetadata("id", BIGINT),
-            ColumnMetadata("embedding", ArrayType(DOUBLE)),
-        )
-        val INGEST_COLUMN_HANDLES: Map<String, ColumnHandle> = mapOf(
-            "id"        to VectorScanColumnHandle("id", 0),
-            "embedding" to VectorScanColumnHandle("embedding", 1),
-        )
     }
+
+    /**
+     * `(id BIGINT, embedding ARRAY<DOUBLE>, ...textColumns VARCHAR)` — extra
+     * columns are appended in the order configured via `ailake.text-columns`
+     * on the catalog. `AilakePageSink` relies on this exact ordering (id=0,
+     * vector=1, text columns starting at 2) to read the right Page channels.
+     */
+    private fun ingestColumns(): List<ColumnMetadata> =
+        listOf(ColumnMetadata("id", BIGINT), ColumnMetadata("embedding", ArrayType(DOUBLE))) +
+            textColumns.map { ColumnMetadata(it, VARCHAR) }
+
+    private fun ingestColumnHandles(): Map<String, ColumnHandle> =
+        ingestColumns().mapIndexed { i, c -> c.name to (VectorScanColumnHandle(c.name, i) as ColumnHandle) }.toMap()
 
     override fun listSchemaNames(session: ConnectorSession): List<String> = listOf(SCHEMA)
 
@@ -68,7 +78,7 @@ class VectorScanMetadata(
         if (schemaTableName.schemaName != SCHEMA) return null
         return when (schemaTableName.tableName) {
             TABLE_SEARCH -> VectorScanTableHandle(tableUri, vectorColumn, dim)
-            TABLE_INGEST -> AilakeIngestTableHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel, partitionFields, formatVersion)
+            TABLE_INGEST -> AilakeIngestTableHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel, partitionFields, formatVersion, textColumns)
             else -> null
         }
     }
@@ -77,7 +87,7 @@ class VectorScanMetadata(
         session: ConnectorSession,
         table: ConnectorTableHandle,
     ): ConnectorTableMetadata = when (table) {
-        is AilakeIngestTableHandle -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_INGEST), INGEST_COLUMNS)
+        is AilakeIngestTableHandle -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_INGEST), ingestColumns())
         else -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_SEARCH), SEARCH_COLUMNS)
     }
 
@@ -93,7 +103,7 @@ class VectorScanMetadata(
         session: ConnectorSession,
         tableHandle: ConnectorTableHandle,
     ): Map<String, ColumnHandle> = when (tableHandle) {
-        is AilakeIngestTableHandle -> INGEST_COLUMN_HANDLES
+        is AilakeIngestTableHandle -> ingestColumnHandles()
         else -> SEARCH_COLUMN_HANDLES
     }
 
@@ -104,7 +114,7 @@ class VectorScanMetadata(
     ): ColumnMetadata {
         val ordinal = (columnHandle as VectorScanColumnHandle).ordinal
         return when (tableHandle) {
-            is AilakeIngestTableHandle -> INGEST_COLUMNS[ordinal]
+            is AilakeIngestTableHandle -> ingestColumns()[ordinal]
             else -> SEARCH_COLUMNS[ordinal]
         }
     }
