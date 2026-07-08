@@ -232,12 +232,20 @@ class AilakeNativeTest extends AnyFunSuite {
       UTF8String.fromString("doc-a"),
     )
     writer.write(row)
-    // commit() calls into AilakeNative.writeBatch, which no-ops (returns None)
-    // without libailake_jni.so on java.library.path in the test env — this
-    // only verifies write() accumulates the right per-column buffers without
-    // throwing, not the native call itself (covered by the integration tests).
-    val msg = writer.commit().asInstanceOf[AilakeCommitMessage]
-    assert(msg.snapshotId.isEmpty)
+
+    // Inspect the accumulated per-column buffers directly via reflection
+    // instead of calling commit() — whether libailake_jni.so is on
+    // java.library.path varies by environment (absent locally, present in
+    // CI with AILAKE_LIB_PATH set), so commit() against this fake tableUri
+    // would either no-op (native lib absent) or attempt a real write that
+    // may throw (native lib present, no such bucket). Either way this test
+    // only needs to prove write() accumulates the right values; the native
+    // call itself is covered by the integration tests further down this file.
+    val field = classOf[AilakeDataWriter].getDeclaredField("textValues")
+    field.setAccessible(true)
+    val textValues = field.get(writer).asInstanceOf[Map[String, scala.collection.mutable.ArrayBuffer[String]]]
+    assert(textValues("text").toList == List("hello world"))
+    assert(textValues("source").toList == List("doc-a"))
   }
 
   // ── Phase T: FTS ──────────────────────────────────────────────────────────
