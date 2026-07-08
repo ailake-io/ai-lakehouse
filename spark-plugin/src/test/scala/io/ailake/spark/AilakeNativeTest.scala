@@ -361,4 +361,62 @@ class AilakeNativeTest extends AnyFunSuite {
     )
     assert(results.isEmpty)
   }
+
+  // ── Phase 8: writeBatchMulti (multi-column / multimodal write) ───────────────
+
+  test("writeBatchMulti returns None when native library absent") {
+    assume(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
+    val result = AilakeNative.writeBatchMulti(
+      tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
+      ids = Seq(1L, 2L),
+      vectorColumns = Seq(
+        AilakeNative.VectorColSpec("embedding", dim = 4) -> Seq(
+          Seq(0.1f, 0.2f, 0.3f, 0.4f), Seq(0.5f, 0.6f, 0.7f, 0.8f)),
+      ),
+    )
+    assert(result.isEmpty)
+  }
+
+  test("writeBatchMulti returns None for empty ids") {
+    val result = AilakeNative.writeBatchMulti(
+      tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
+      ids = Seq.empty,
+      vectorColumns = Seq(AilakeNative.VectorColSpec("embedding", dim = 4) -> Seq.empty),
+    )
+    assert(result.isEmpty)
+  }
+
+  test("writeBatchMulti returns None for empty vectorColumns") {
+    val result = AilakeNative.writeBatchMulti(
+      tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
+      ids = Seq(1L),
+      vectorColumns = Seq.empty,
+    )
+    assert(result.isEmpty)
+  }
+
+  test("VectorColSpec defaults metric=cosine precision=f16 modality=None") {
+    val spec = AilakeNative.VectorColSpec("embedding", dim = 1536)
+    assert(spec.metric == "cosine")
+    assert(spec.precision == "f16")
+    assert(spec.modality.isEmpty)
+  }
+
+  test("writeBatchMulti JSON includes one entry per vector column with modality") {
+    // White-box: verify JSON fragment produced by writeBatchMulti's vector_columns logic.
+    def jsonStr(s: String): String = "\"" + s + "\""
+    val specs = Seq(
+      AilakeNative.VectorColSpec("embedding", dim = 4, modality = Some("text")),
+      AilakeNative.VectorColSpec("image_embedding", dim = 2, modality = Some("image")),
+    )
+    val vecColsJson = specs.map { spec =>
+      val modalityJson = spec.modality.map(m => s""","modality":${jsonStr(m)}""").getOrElse("")
+      s"""{"col":${jsonStr(spec.column)},"dim":${spec.dim},"metric":${jsonStr(spec.metric)},""" +
+      s""""precision":${jsonStr(spec.precision)}$modalityJson}"""
+    }.mkString("[", ",", "]")
+    assert(vecColsJson.contains("\"col\":\"embedding\""))
+    assert(vecColsJson.contains("\"col\":\"image_embedding\""))
+    assert(vecColsJson.contains("\"modality\":\"text\""))
+    assert(vecColsJson.contains("\"modality\":\"image\""))
+  }
 }

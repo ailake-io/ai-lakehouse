@@ -121,5 +121,114 @@ object implicits {
         .option("format-version",    formatVersion.toString)
         .save()
     }
+
+    /**
+     * Write a DataFrame with N independent vector columns to an AI-Lake table
+     * (Phase 8 multimodal — e.g. text + image embeddings on the same row,
+     * searchable via [[ailakeSearchMultimodal]]-style calls to
+     * `AilakeNative.searchMultimodal`). Each column gets its own HNSW index.
+     *
+     * Unlike [[ailakeWrite]] (a distributed DataSourceV2 writer — one native
+     * call per Spark partition), this collects `df` to the driver and issues a
+     * single native `writeBatchMulti` call: the JNI multi-column write contract
+     * produces one AI-Lake file per call with N HNSW sections built together,
+     * so there's no partitioning strategy available without either a shared
+     * cross-executor HNSW build (not supported) or a later multi-file merge
+     * across partial column sets (not implemented). Suitable for batch sizes
+     * that fit in driver memory; for larger multimodal ingest, write from the
+     * Python SDK (`TableWriter.write_batch_multi`) instead.
+     *
+     * @param vectorColumns  one or more specs; `column` must name an ArrayType
+     *                       column in `df`. First entry is primary (used for
+     *                       geometric pruning in the manifest).
+     * @param idColumn       id column name (default: "id"), must be LongType.
+     *                       Every other column not named by `idColumn` or a
+     *                       `vectorColumns` entry must be StringType (written
+     *                       as AI-Lake extra metadata, same rule as [[ailakeWrite]]).
+     * @return the snapshot id on success, None if the native library is absent
+     *         or the write failed (see driver logs for the reason).
+     */
+    def ailakeWriteMulti(
+      tableUri:       String,
+      df:             DataFrame,
+      vectorColumns:  Seq[AilakeNative.VectorColSpec],
+      idColumn:       String = "id",
+      namespace:      String = "default",
+      tableName:      String = "",
+      embeddingModel: Option[String] = None,
+      formatVersion:  Int = 2,
+      ftsColumns:     Seq[String] = Seq.empty,
+      ftsTokenizer:   String = "default",
+      deferred:       Boolean = false,
+    ): Option[Long] = {
+      import org.apache.spark.sql.types.{ArrayType, LongType, StringType}
+      require(vectorColumns.nonEmpty, "ailakeWriteMulti requires at least one VectorColSpec")
+
+      val resolvedName = if (tableName.nonEmpty) tableName
+                         else tableUri.stripSuffix("/").split("/").last
+      val schema = df.schema
+
+      val idField = schema.find(_.name == idColumn).getOrElse(
+        throw new IllegalArgumentException(s"Column '$idColumn' not found in DataFrame"))
+      if (idField.dataType != LongType)
+        throw new IllegalArgumentException(
+          s"Column '$idColumn' must be LongType, got ${idField.dataType.simpleString}")
+
+      val vecColNames = vectorColumns.map(_.column).toSet
+      vectorColumns.foreach { spec =>
+        schema.find(_.name == spec.column) match {
+          case Some(f) if f.dataType.isInstanceOf[ArrayType] => // ok
+          case Some(f) =>
+            throw new IllegalArgumentException(
+              s"Vector column '${spec.column}' must be ArrayType, got ${f.dataType.simpleString}")
+          case None =>
+            throw new IllegalArgumentException(s"Vector column '${spec.column}' not found in DataFrame")
+        }
+      }
+
+      val extraFields = schema.fields.filter(f => f.name != idColumn && !vecColNames.contains(f.name))
+      extraFields.foreach { f =>
+        if (f.dataType != StringType)
+          throw new IllegalArgumentException(
+            s"Column '${f.name}' must be StringType to be written as AI-Lake extra metadata " +
+            s"(got ${f.dataType.simpleString}). Cast other columns to string first, " +
+            s"e.g. col('${f.name}').cast('string').")
+      }
+
+      val rows = df.collect()
+      val ids  = rows.map(_.getAs[Long](idColumn)).toSeq
+
+      def toFloat(v: Any): Float = v match {
+        case d: java.lang.Double => d.floatValue()
+        case f: java.lang.Float  => f.floatValue()
+        case n: Number           => n.floatValue()
+      }
+
+      val vectorColumnData: Seq[(AilakeNative.VectorColSpec, Seq[Seq[Float]])] = vectorColumns.map { spec =>
+        val embs = rows.map { row =>
+          row.getAs[Seq[Any]](spec.column).map(toFloat)
+        }.toSeq
+        spec -> embs
+      }
+
+      val extraColumnData: Map[String, Seq[String]] = extraFields.map { f =>
+        val idx = df.schema.fieldIndex(f.name)
+        f.name -> rows.map(row => if (row.isNullAt(idx)) "" else row.getAs[String](f.name)).toSeq
+      }.toMap
+
+      AilakeNative.writeBatchMulti(
+        tableUri       = tableUri,
+        namespace      = namespace,
+        tableName      = resolvedName,
+        ids            = ids,
+        vectorColumns  = vectorColumnData,
+        embeddingModel = embeddingModel,
+        formatVersion  = formatVersion,
+        ftsColumns     = ftsColumns,
+        ftsTokenizer   = ftsTokenizer,
+        deferred       = deferred,
+        columns        = extraColumnData,
+      )
+    }
   }
 }

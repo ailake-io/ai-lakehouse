@@ -286,14 +286,13 @@ class AilakeWriteBatchIntegrationTest extends AnyFunSuite {
 
   // ── searchMultimodal ──────────────────────────────────────────────────────
   //
-  // NOTE: this only proves the JNI call and RRF response parsing work against
-  // a single real vector column — Spark (like Trino/Flink) has no write path
-  // for a *second* vector column on the same table at all. ailake_write_batch_json
-  // takes a single `vec_col`; multi-column vector write (`write_multi`) exists
-  // only in the Python SDK via PyO3, with no equivalent exposed through the
-  // ailake-jni C-ABI. So a genuine multi-column cross-modal search can only be
-  // exercised from Spark against a table that was first populated by Python —
-  // searchMultimodal is reachable from Spark but not self-sufficient there.
+  // Historical note: until AilakeNative.writeBatchMulti (backed by the new
+  // ailake_write_batch_multi_json JNI export) was added, Spark had no write
+  // path for a *second* vector column on the same table — ailake_write_batch_json
+  // only ever took a single `vec_col`, so multi-column vector write existed
+  // only in the Python SDK (PyO3's TableWriter.write_batch_multi), and a
+  // genuine multi-column cross-modal search could only be exercised against a
+  // table a Python job populated first. writeBatchMulti closes that gap.
 
   test("searchMultimodal returns real results against a single real vector column") {
     assume(libPath.isDefined,  "AILAKE_LIB_PATH not set — skipping")
@@ -327,6 +326,56 @@ class AilakeWriteBatchIntegrationTest extends AnyFunSuite {
     assert(results.nonEmpty, "searchMultimodal returned empty — RRF fusion path not functional")
     assert(results.head.rowId == 0L, s"expected rowId=0 top result, got rowId=${results.head.rowId}")
     println(s"[test] searchMultimodal OK: rowId=${results.head.rowId} rrfScore=${results.head.rrfScore}")
+  }
+
+  // ── writeBatchMulti + searchMultimodal (real cross-modal fusion) ─────────
+
+  test("writeBatchMulti and searchMultimodal roundtrip across two real vector columns") {
+    assume(libPath.isDefined,  "AILAKE_LIB_PATH not set — skipping")
+    assume(writeDir.isDefined, "AILAKE_WRITE_DIR not set — skipping")
+    assume(libPresent,         "libailake_jni.so not found — skipping")
+
+    val tableUri = s"${writeDir.get}/integration-multimodal-multi-spark"
+    // Two independent vector columns: "embedding" (text, dim=4) and
+    // "image_embedding" (image, dim=2) — row i has its spike at position i in
+    // both columns, so both columns agree on the nearest neighbor for a given
+    // query, letting RRF fusion be checked deterministically.
+    val textEmbeddings = Seq(
+      Seq(1.0f, 0.0f, 0.0f, 0.0f),
+      Seq(0.0f, 1.0f, 0.0f, 0.0f),
+      Seq(0.0f, 0.0f, 1.0f, 0.0f),
+    )
+    val imageEmbeddings = Seq(
+      Seq(1.0f, 0.0f),
+      Seq(0.0f, 1.0f),
+      Seq(0.0f, 0.0f),
+    )
+    val snap = AilakeNative.writeBatchMulti(
+      tableUri      = tableUri,
+      namespace     = "default",
+      tableName     = "integration_multimodal_multi_spark",
+      ids           = Seq(0L, 1L, 2L),
+      vectorColumns = Seq(
+        AilakeNative.VectorColSpec("embedding",       dim = 4, modality = Some("text"))  -> textEmbeddings,
+        AilakeNative.VectorColSpec("image_embedding",  dim = 2, modality = Some("image")) -> imageEmbeddings,
+      ),
+    )
+    assert(snap.isDefined, "writeBatchMulti returned None — check JNI and table path")
+    println(s"[test] writeBatchMulti OK: snapshotId=${snap.get}")
+
+    val results = AilakeNative.searchMultimodal(
+      tableUri  = tableUri,
+      queries   = Seq(
+        ("embedding",       Array(1.0f, 0.0f, 0.0f, 0.0f), 1.0f),
+        ("image_embedding", Array(1.0f, 0.0f),             1.0f),
+      ),
+      topK      = 3,
+      tableName = "integration_multimodal_multi_spark",
+    )
+    assert(results.nonEmpty, "searchMultimodal returned empty — cross-modal fusion path not functional")
+    assert(results.head.rowId == 0L, s"expected rowId=0 top result (both columns agree), got rowId=${results.head.rowId}")
+    println(s"[test] searchMultimodal (2 columns) OK: rowId=${results.head.rowId} rrfScore=${results.head.rrfScore}")
+    println("PASS (Spark): writeBatchMulti+searchMultimodal cross-modal fusion functional with real library.")
   }
 
   // ── AilakeDataWriterFactory ───────────────────────────────────────────────
