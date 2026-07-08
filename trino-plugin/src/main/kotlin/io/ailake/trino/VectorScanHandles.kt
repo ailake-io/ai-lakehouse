@@ -16,6 +16,8 @@ data class VectorScanTableHandle @JsonCreator constructor(
     @JsonProperty("tableUri") val tableUri: String,
     @JsonProperty("vectorColumn") val vectorColumn: String,
     @JsonProperty("dim") val dim: Int,
+    @JsonProperty("namespace") val namespace: String,
+    @JsonProperty("tableName") val tableName: String,
 ) : ConnectorTableHandle
 
 data class VectorScanColumnHandle @JsonCreator constructor(
@@ -36,6 +38,11 @@ data class VectorScanSplit @JsonCreator constructor(
     @JsonProperty("tableUri") val tableUri: String,
     @JsonProperty("queryBytes") val queryBytes: String,
     @JsonProperty("topK") val topK: Int,
+    @JsonProperty("namespace") val namespace: String,
+    @JsonProperty("tableName") val tableName: String,
+    @JsonProperty("vectorColumn") val vectorColumn: String,
+    @JsonProperty("queryText") val queryText: String = "",
+    @JsonProperty("hybridWeight") val hybridWeight: Float = 0.5f,
 ) : ConnectorSplit {
     override fun isRemotelyAccessible(): Boolean = true
     override fun getAddresses(): List<HostAddress> = emptyList()

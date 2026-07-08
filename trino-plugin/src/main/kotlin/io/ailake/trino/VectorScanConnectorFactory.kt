@@ -37,6 +37,17 @@ class VectorScanConnectorFactory : ConnectorFactory {
         val formatVersion = config.getOrDefault("ailake.format-version", "2").toInt()
         val textColumns = config.getOrDefault("ailake.text-columns", "")
             .split(",").map { it.trim() }.filter { it.isNotEmpty() }
-        return VectorScanConnector(tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel, partitionFields, formatVersion, textColumns)
+        val hnswM = config["ailake.hnsw-m"]?.toInt()
+        val hnswEfConstruction = config["ailake.hnsw-ef-construction"]?.toInt()
+        val preNormalize = config.getOrDefault("ailake.pre-normalize", "false").toBoolean()
+        val deferred = config.getOrDefault("ailake.deferred", "false").toBoolean()
+        val ftsColumns = config.getOrDefault("ailake.fts-columns", "")
+            .split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        val ftsTokenizer = config.getOrDefault("ailake.fts-tokenizer", "default")
+        return VectorScanConnector(
+            tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel,
+            partitionFields, formatVersion, textColumns,
+            hnswM, hnswEfConstruction, preNormalize, deferred, ftsColumns, ftsTokenizer,
+        )
     }
 }

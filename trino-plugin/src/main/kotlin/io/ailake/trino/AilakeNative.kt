@@ -423,6 +423,10 @@ object AilakeNative {
      * @param hybridText     when non-null, enables hybrid BM25+vector RRF fusion
      * @param textColumn     Parquet column for BM25 scoring (default "chunk_text")
      * @param bm25Weight     BM25 weight in RRF (0.0 = pure vector, 1.0 = pure BM25)
+     * @param vectorColumn   vector column name to search — must match the column the
+     *                       table was written with (defaults to "embedding", the native
+     *                       side's own default, but should be passed explicitly whenever
+     *                       the caller knows the catalog's configured vector-column)
      */
     fun search(
         tableUri: String,
@@ -434,6 +438,7 @@ object AilakeNative {
         bm25Weight: Float = 0.5f,
         namespace: String = "default",
         tableName: String = "",
+        vectorColumn: String = "embedding",
     ): List<SearchRow> {
         val native = lib ?: return emptyList()
         if (queryBytes.isBlank()) return emptyList()
@@ -453,6 +458,7 @@ object AilakeNative {
             "warehouse" to tableUri,
             "namespace" to namespace,
             "table" to effectiveTable,
+            "vec_col" to vectorColumn,
             "query" to floats,
             "dim" to floats.size,
             "top_k" to topK,

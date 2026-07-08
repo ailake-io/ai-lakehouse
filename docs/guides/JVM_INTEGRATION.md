@@ -499,6 +499,15 @@ ailake.vector-dim=1536
 ailake.metric=cosine
 ailake.precision=f16
 ailake.embedding-model=text-embedding-3-small@v1
+ailake.namespace=default
+ailake.table-name=docs
+ailake.text-columns=chunk_text,source     # extra VARCHAR columns on the ingest table
+ailake.fts-columns=chunk_text             # subset of text-columns to Tantivy-index (default: none)
+ailake.fts-tokenizer=default
+ailake.hnsw-m=                            # unset = table/HnswConfig default
+ailake.hnsw-ef-construction=
+ailake.pre-normalize=false
+ailake.deferred=false
 ```
 
 Multiple tables → multiple catalog files with different names:
@@ -541,6 +550,37 @@ LIMIT  10;
 |---|---|---|---|
 | `query_vector` | `varchar` | `""` | Comma-separated f32 values |
 | `top_k` | `integer` | `10` | Nearest neighbors to return |
+| `query_text` | `varchar` | `""` | Query text. Alone → pure full-text search (Tantivy O(log N) if `ailake.fts-columns` indexed, else O(N) BM25). With `query_vector` → hybrid BM25+vector RRF fusion |
+| `hybrid_weight` | `double` | `0.5` | BM25 weight in RRF fusion when both `query_vector` and `query_text` are set (`0.0` = pure vector, `1.0` = pure BM25) |
+
+```sql
+-- Pure full-text search
+SET SESSION ailake.query_text = 'rust programming';
+SELECT row_id, file_path FROM ailake.default.search ORDER BY distance LIMIT 10;
+
+-- Hybrid BM25+vector
+SET SESSION ailake.query_vector = '0.1,0.2,...';
+SET SESSION ailake.query_text = 'rust programming';
+SET SESSION ailake.hybrid_weight = 0.3;
+```
+
+**DELETE, ALTER TABLE, and maintenance:**
+
+```sql
+-- Equality/IN deletes only — no row-level scan-and-delete
+DELETE FROM ailake.default.ingest WHERE id = 5;
+DELETE FROM ailake.default.ingest WHERE id IN (1, 2, 3);
+
+-- Adds/renames the column in the table's Iceberg schema on disk immediately.
+-- The running Trino worker's own schema (ailake.text-columns) is fixed at
+-- catalog startup — add the new column to ailake.text-columns and restart
+-- Trino (or reload the catalog) before INSERT/SELECT can see it.
+ALTER TABLE ailake.default.ingest ADD COLUMN source VARCHAR;
+ALTER TABLE ailake.default.ingest RENAME COLUMN source TO doc_source;
+
+-- Compacts small files in the catalog's configured table
+CALL ailake.system.compact();
+```
 
 ### 5D — Nessie catalog (demo stack)
 
@@ -571,11 +611,12 @@ cd trino-plugin
 ./gradlew test --info
 
 # Test classes:
-#   VectorScanMetadataTest     — schema discovery
+#   VectorScanMetadataTest     — schema discovery, DELETE pushdown, ADD/RENAME COLUMN
 #   VectorScanConnectorTest    — session properties, transaction handle
 #   VectorScanSplitManagerTest — split creation from session
 #   VectorScanRecordSetTest    — cursor iteration, column types
 #   AilakeNativeTest           — graceful degradation, CSV parsing
+#   AilakeProceduresTest       — CALL ailake.system.compact()
 ```
 
 ---

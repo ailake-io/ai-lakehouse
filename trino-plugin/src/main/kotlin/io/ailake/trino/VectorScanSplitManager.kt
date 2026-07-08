@@ -25,9 +25,22 @@ class VectorScanSplitManager : ConnectorSplitManager {
         val handle = table as VectorScanTableHandle
         val queryVectorCsv = session.getProperty("query_vector", String::class.java) ?: ""
         val topK = session.getProperty("top_k", Int::class.java) ?: 10
+        val queryText = session.getProperty("query_text", String::class.java) ?: ""
+        val hybridWeight = session.getProperty("hybrid_weight", Double::class.java)?.toFloat() ?: 0.5f
         // Parse CSV→bytes once at planning; split carries compact Base64 binary.
         val queryBytes = csvFloatsToBase64(queryVectorCsv)
-        return FixedSplitSource(VectorScanSplit(handle.tableUri, queryBytes, topK))
+        return FixedSplitSource(
+            VectorScanSplit(
+                tableUri     = handle.tableUri,
+                queryBytes   = queryBytes,
+                topK         = topK,
+                namespace    = handle.namespace,
+                tableName    = handle.tableName,
+                vectorColumn = handle.vectorColumn,
+                queryText    = queryText,
+                hybridWeight = hybridWeight,
+            )
+        )
     }
 
     companion object {

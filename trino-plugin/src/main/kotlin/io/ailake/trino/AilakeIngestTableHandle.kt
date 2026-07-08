@@ -28,4 +28,21 @@ data class AilakeIngestTableHandle @JsonCreator constructor(
     // Extra VARCHAR column names, in Page-channel order starting at index 2
     // (0=id, 1=embedding) — see VectorScanMetadata.ingestColumns().
     @JsonProperty("textColumns")     val textColumns:     List<String> = emptyList(),
+    // Write-tuning knobs — see VectorScanConnectorFactory's ailake.hnsw-m /
+    // ailake.hnsw-ef-construction / ailake.pre-normalize / ailake.deferred /
+    // ailake.fts-columns / ailake.fts-tokenizer catalog properties. All were
+    // already supported by AilakeNative.writeBatch but never reachable from
+    // Trino before — AilakePageSink.finish() always passed the defaults.
+    @JsonProperty("hnswM")            val hnswM:            Int? = null,
+    @JsonProperty("hnswEfConstruction") val hnswEfConstruction: Int? = null,
+    @JsonProperty("preNormalize")     val preNormalize:     Boolean = false,
+    @JsonProperty("deferred")         val deferred:         Boolean = false,
+    @JsonProperty("ftsColumns")       val ftsColumns:       List<String> = emptyList(),
+    @JsonProperty("ftsTokenizer")     val ftsTokenizer:     String = "default",
+    // DELETE pushdown state — set by VectorScanMetadata.applyFilter when the
+    // WHERE clause is a single-column equality/IN predicate (the only shape
+    // AilakeNative.deleteWhere supports); read back by applyDelete/executeDelete.
+    // null = no delete predicate captured yet (the normal INSERT-path state).
+    @JsonProperty("deleteColumn")     val deleteColumn:     String? = null,
+    @JsonProperty("deleteValues")     val deleteValues:     List<String>? = null,
 ) : ConnectorTableHandle, ConnectorInsertTableHandle

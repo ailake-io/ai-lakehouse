@@ -162,4 +162,66 @@ class AilakePageSinkTest {
         val textValues: Map<String, List<String>> = privateField(sink, "textValues")
         assertEquals(listOf("hello"), textValues.getValue("text"))
     }
+
+    // ── null embedding guard ───────────────────────────────────────────────────
+    //
+    // Regression: appendPage null-checked id and text columns (auto-generated
+    // id fallback, empty-string text fallback) but not the vector column —
+    // a NULL embedding either threw an obscure exception from extractVector's
+    // unchecked getObject/positionCount, or silently produced a wrong-length
+    // vector that would corrupt the whole native writeBatch call for every row
+    // in the same INSERT. Now fails fast with a clear message. The ingest
+    // table's embedding column is also declared NOT NULL in
+    // VectorScanMetadata.ingestColumns(), so Trino itself should reject this
+    // before a page ever reaches the sink — this is defense in depth for
+    // whatever internal engine path might still construct one.
+
+    @Test
+    fun appendPageThrowsClearErrorOnNullEmbedding() {
+        val idBuilder = BIGINT.createBlockBuilder(null, 1)
+        BIGINT.writeLong(idBuilder, 1L)
+        val vecBuilder = ArrayType(DOUBLE).createBlockBuilder(null, 1) as ArrayBlockBuilder
+        vecBuilder.appendNull()
+        val page = Page(idBuilder.build(), vecBuilder.build())
+
+        val sink = AilakePageSink(handle())
+        val ex = assertThrows(IllegalStateException::class.java) { sink.appendPage(page).get() }
+        assertTrue(ex.message!!.contains("embedding"), "expected message to mention the vector column, got: ${ex.message}")
+    }
+
+    // ── write-tuning knobs (hnsw_m / hnsw_ef_construction / pre_normalize / deferred / fts_columns) ──
+    //
+    // Regression: AilakeNative.writeBatch already supported these six params,
+    // but AilakePageSink.finish() never passed any of them, and there was no
+    // catalog property to configure them — see VectorScanConnectorFactory's
+    // ailake.hnsw-m / ailake.hnsw-ef-construction / ailake.pre-normalize /
+    // ailake.deferred / ailake.fts-columns / ailake.fts-tokenizer.
+
+    @Test
+    fun handleCarriesWriteTuningKnobsThroughToDefaults() {
+        // No knobs configured — defaults must match writeBatch's own historical defaults.
+        val h = handle()
+        assertNull(h.hnswM)
+        assertNull(h.hnswEfConstruction)
+        assertFalse(h.preNormalize)
+        assertFalse(h.deferred)
+        assertTrue(h.ftsColumns.isEmpty())
+        assertEquals("default", h.ftsTokenizer)
+    }
+
+    @Test
+    fun handleCarriesConfiguredWriteTuningKnobs() {
+        val h = AilakeIngestTableHandle(
+            tableUri = "file:///tmp/test-table", namespace = "default", tableName = "docs",
+            vectorColumn = "embedding", dim = 4, metric = "cosine", precision = "f16",
+            hnswM = 32, hnswEfConstruction = 200, preNormalize = true, deferred = true,
+            ftsColumns = listOf("chunk_text"), ftsTokenizer = "en_stem",
+        )
+        assertEquals(32, h.hnswM)
+        assertEquals(200, h.hnswEfConstruction)
+        assertTrue(h.preNormalize)
+        assertTrue(h.deferred)
+        assertEquals(listOf("chunk_text"), h.ftsColumns)
+        assertEquals("en_stem", h.ftsTokenizer)
+    }
 }
