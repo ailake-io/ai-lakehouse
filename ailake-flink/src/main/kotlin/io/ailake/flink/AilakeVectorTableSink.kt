@@ -14,6 +14,7 @@ import org.apache.flink.table.connector.ProviderContext
 import org.apache.flink.table.connector.sink.DataStreamSinkProvider
 import org.apache.flink.table.connector.sink.DynamicTableSink
 import org.apache.flink.table.data.RowData
+import org.apache.flink.table.types.logical.LogicalTypeRoot
 
 /**
  * AI-Lake Flink table sink.  Buffers rows in memory and flushes each batch to the
@@ -22,7 +23,10 @@ import org.apache.flink.table.data.RowData
  * Expected row schema:
  *   - One BIGINT column named "id" (configurable via id_col index, default 0)
  *   - One ARRAY<FLOAT> or BYTES column for the embedding vector
- *   - Any number of additional columns (currently ignored — future: stored in Parquet)
+ *   - Any number of additional STRING columns — persisted as AI-Lake extra
+ *     metadata (`columns=` in the native writeBatch call) regardless of
+ *     whether they're also listed in `fts.columns`; `fts.columns` only
+ *     controls which of them additionally get a Tantivy FTS index.
  *
  * Flush is triggered when [BUFFER_SIZE] rows have accumulated or when the job finishes.
  */
@@ -44,6 +48,32 @@ class AilakeVectorTableSink(
 
     companion object {
         const val BUFFER_SIZE = 10_000
+
+        /**
+         * Every declared STRING column except id/vector is persisted as
+         * AI-Lake extra metadata — not just the fts.columns subset (columns=
+         * is a general persisted-metadata mechanism on the native side, not
+         * FTS-only). Non-string extras (e.g. a "_distance FLOAT" column
+         * shared with the source side of the same table) are skipped — the
+         * native side's columns= is Map<String, List<String>>, there's
+         * nowhere to put a non-string value.
+         *
+         * `internal` (not `private`) so it's independently unit-testable
+         * without spinning up the full DataStreamSinkProvider/DataStream
+         * machinery.
+         */
+        internal fun computeExtraColumnIndices(schema: ResolvedSchema, idIdx: Int, vecIdx: Int): Map<String, Int> {
+            val colNames = schema.columnNames
+            val dataTypes = schema.columnDataTypes
+            return colNames
+                .withIndex()
+                .filter { (i, _) -> i != idIdx && i != vecIdx }
+                .filter { (i, _) ->
+                    val root = dataTypes[i].logicalType.typeRoot
+                    root == LogicalTypeRoot.VARCHAR || root == LogicalTypeRoot.CHAR
+                }
+                .associate { (i, name) -> name to i }
+        }
     }
 
     override fun getChangelogMode(requestedMode: ChangelogMode): ChangelogMode =
@@ -53,9 +83,7 @@ class AilakeVectorTableSink(
         val colNames = schema.columnNames
         val idIdx = colNames.indexOfFirst { it == "id" }.takeIf { it >= 0 } ?: 0
         val vecIdx = colNames.indexOfFirst { it == vecCol }.takeIf { it >= 0 } ?: 1
-        val ftsColumnIndices: Map<String, Int> = ftsColumns
-            .associateWith { col -> colNames.indexOf(col) }
-            .filterValues { it >= 0 }
+        val extraColumnIndices = computeExtraColumnIndices(schema, idIdx, vecIdx)
         return object : DataStreamSinkProvider {
             override fun consumeDataStream(
                 context: ProviderContext,
@@ -77,7 +105,7 @@ class AilakeVectorTableSink(
                         formatVersion      = formatVersion,
                         ftsColumns         = ftsColumns,
                         ftsTokenizer       = ftsTokenizer,
-                        ftsColumnIndices   = ftsColumnIndices,
+                        extraColumnIndices = extraColumnIndices,
                     )
                 )
             }
@@ -107,20 +135,20 @@ class AilakeSinkFunction(
     private val formatVersion: Int = 2,
     private val ftsColumns: List<String> = emptyList(),
     private val ftsTokenizer: String = "default",
-    private val ftsColumnIndices: Map<String, Int> = emptyMap(),
+    private val extraColumnIndices: Map<String, Int> = emptyMap(),
 ) : RichSinkFunction<RowData>() {
 
     private val idsBuffer = mutableListOf<Long>()
     private val embeddingsBuffer = mutableListOf<FloatArray>()
     private val textBuffers: Map<String, MutableList<String>> =
-        ftsColumnIndices.keys.associateWith { mutableListOf() }
+        extraColumnIndices.keys.associateWith { mutableListOf() }
 
     override fun invoke(row: RowData, context: SinkFunction.Context) {
         val id = row.getLong(idIdx)
         val embedding = row.getArray(vecIdx).toFloatArray()
         idsBuffer.add(id)
         embeddingsBuffer.add(embedding)
-        for ((col, idx) in ftsColumnIndices) {
+        for ((col, idx) in extraColumnIndices) {
             val text = if (row.isNullAt(idx)) "" else row.getString(idx).toString()
             textBuffers[col]?.add(text)
         }
