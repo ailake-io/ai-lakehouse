@@ -41,18 +41,8 @@ class AilakeCatalog extends CatalogPlugin with TableCatalog {
 
   // ── TableCatalog ──────────────────────────────────────────────────────────
 
-  override def loadTable(ident: Identifier): Table = {
-    val tableUri       = requireOpt("table-uri")
-    val vectorColumn   = opts.getOrDefault("vector-column", "embedding")
-    val dim            = opts.getOrDefault("vector-dim", "1536").toInt
-    val metric         = opts.getOrDefault("metric", "cosine")
-    val precision      = opts.getOrDefault("precision", "f16")
-    val namespace      = if (ident.namespace().nonEmpty) ident.namespace()(0) else "default"
-    val tableName      = ident.name()
-    val embeddingModel = Option(opts.get("embedding-model")).filter(_.nonEmpty)
-
-    new AilakeTable(AilakeWriteHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel = embeddingModel))
-  }
+  override def loadTable(ident: Identifier): Table =
+    buildTable(ident, AilakeTable.WRITE_SCHEMA)
 
   override def listTables(namespace: Array[String]): Array[Identifier] = Array.empty
 
@@ -61,7 +51,7 @@ class AilakeCatalog extends CatalogPlugin with TableCatalog {
     schema: StructType,
     partitions: Array[Transform],
     properties: util.Map[String, String],
-  ): Table = loadTable(ident)
+  ): Table = buildTable(ident, schema)
 
   override def alterTable(ident: Identifier, changes: TableChange*): Table =
     throw new UnsupportedOperationException("ALTER TABLE not supported by AI-Lake catalog")
@@ -72,6 +62,34 @@ class AilakeCatalog extends CatalogPlugin with TableCatalog {
     throw new UnsupportedOperationException("RENAME TABLE not supported by AI-Lake catalog")
 
   // ── helpers ───────────────────────────────────────────────────────────────
+
+  /**
+   * `loadTable` (called for bare `INSERT INTO ailake.ns.table VALUES (...)`
+   * with no known DataFrame schema) falls back to the bare `id, embedding`
+   * schema. `createTable` (called with a `CREATE TABLE ... AS SELECT`-shaped
+   * schema, or any other schema Spark already resolved) passes it through,
+   * so extra string columns (chunk text, source, page, ...) get written as
+   * AI-Lake metadata instead of silently dropped — see
+   * [[AilakeWriteHandle.resolveColumns]].
+   */
+  private def buildTable(ident: Identifier, schema: StructType): Table = {
+    val tableUri       = requireOpt("table-uri")
+    val vectorColumn   = opts.getOrDefault("vector-column", "embedding")
+    val dim            = opts.getOrDefault("vector-dim", "1536").toInt
+    val metric         = opts.getOrDefault("metric", "cosine")
+    val precision      = opts.getOrDefault("precision", "f16")
+    val namespace      = if (ident.namespace().nonEmpty) ident.namespace()(0) else "default"
+    val tableName      = ident.name()
+    val embeddingModel = Option(opts.get("embedding-model")).filter(_.nonEmpty)
+    val (idIdx, vecIdx, textCols) = AilakeWriteHandle.resolveColumns(schema, vectorColumn)
+
+    new AilakeTable(
+      AilakeWriteHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision,
+        idColIndex = idIdx, vecColIndex = vecIdx, textColIndices = textCols,
+        embeddingModel = embeddingModel),
+      tableSchema = schema,
+    )
+  }
 
   private def requireOpt(key: String): String =
     Option(opts.get(key)).getOrElse(
