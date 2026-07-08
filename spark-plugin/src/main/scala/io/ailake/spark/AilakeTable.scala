@@ -8,9 +8,12 @@ import org.apache.spark.sql.types._
 import java.util
 
 object AilakeTable {
-  val WRITE_SCHEMA: StructType = StructType(Array(
-    StructField("id",        LongType,              nullable = true),
-    StructField("embedding", ArrayType(DoubleType), nullable = false),
+  val WRITE_SCHEMA: StructType = defaultSchema("embedding")
+
+  /** Bare (id, vectorColumn) schema, named after whatever `vector-column` the catalog is configured with. */
+  def defaultSchema(vectorColumn: String): StructType = StructType(Array(
+    StructField("id",          LongType,              nullable = true),
+    StructField(vectorColumn,  ArrayType(DoubleType), nullable = false),
   ))
 }
 

@@ -69,4 +69,120 @@ class AilakeSparkExtensionsTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(df.schema.fieldNames sameElements Array("row_id", "distance", "file_path"))
     assert(df.count() == 0)
   }
+
+  // Regression: ailakeSearch used to have no namespace/tableName parameters at
+  // all, always searching AilakeNative.search's hardcoded defaults
+  // (namespace="default") regardless of what ailakeWrite actually wrote to —
+  // a write to a non-default namespace was unfindable via search, silently
+  // returning empty results. These params now exist and are threaded through
+  // to AilakeNative.search; with no native lib present this still degrades to
+  // an empty result, but the signature/plumbing itself is what's under test.
+  test("ailakeSearch accepts namespace and tableName parameters") {
+    import io.ailake.spark.implicits._
+    val query = Array(0.1f, 0.2f, 0.3f)
+    val df = spark.ailakeSearch("s3://test-bucket/table/", query, topK = 5, namespace = "prod", tableName = "docs")
+    assert(df.schema.fieldNames sameElements Array("row_id", "distance", "file_path"))
+    assert(df.count() == 0)
+  }
+
+  // ── ailakeWriteMulti (Phase 8 multimodal write) ───────────────────────────
+  //
+  // Closes the "searchMultimodal has no write path from Spark" gap: previously
+  // only the Python SDK (TableWriter.write_batch_multi via PyO3) could write a
+  // table with 2+ vector columns; there was no ailake-jni C-ABI export for it
+  // at all, so searchMultimodal was reachable from Spark but never
+  // self-sufficient. ailakeWriteMulti + AilakeNative.writeBatchMulti (backed
+  // by the new ailake_write_batch_multi_json JNI export) close that gap.
+
+  import org.apache.spark.sql.Row
+  import org.apache.spark.sql.types.ArrayType
+
+  private def multiModalRow(id: Long, text: Seq[Double], image: Seq[Double]): Row =
+    Row(id, text, image)
+
+  private val multiModalSchema = StructType(Seq(
+    StructField("id",              LongType,                          nullable = true),
+    StructField("embedding",       ArrayType(DoubleType), nullable = false),
+    StructField("image_embedding", ArrayType(DoubleType), nullable = false),
+  ))
+
+  test("ailakeWriteMulti returns None when native library absent") {
+    // Guarded like AilakeNativeTest's lib-absent tests: with the real lib on
+    // the classpath (CI's test-jvm job, or this session's manual verification
+    // run), "s3://test-bucket/multimodal/" resolves to a real local path via
+    // LocalStore (no scheme validation) and the write actually succeeds.
+    assume(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
+    import io.ailake.spark.implicits._
+    val rows = Seq(
+      multiModalRow(1L, Seq(0.1, 0.2), Seq(0.5, 0.6)),
+      multiModalRow(2L, Seq(0.3, 0.4), Seq(0.7, 0.8)),
+    )
+    val df = spark.createDataFrame(spark.sparkContext.parallelize(rows), multiModalSchema)
+    val result = spark.ailakeWriteMulti(
+      tableUri      = "s3://test-bucket/multimodal/",
+      df            = df,
+      vectorColumns = Seq(
+        AilakeNative.VectorColSpec("embedding", dim = 2),
+        AilakeNative.VectorColSpec("image_embedding", dim = 2),
+      ),
+    )
+    assert(result.isEmpty)
+  }
+
+  test("ailakeWriteMulti requires at least one VectorColSpec") {
+    import io.ailake.spark.implicits._
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(multiModalRow(1L, Seq(0.1, 0.2), Seq(0.5, 0.6)))),
+      multiModalSchema,
+    )
+    intercept[IllegalArgumentException] {
+      spark.ailakeWriteMulti("s3://test-bucket/multimodal/", df, vectorColumns = Seq.empty)
+    }
+  }
+
+  test("ailakeWriteMulti rejects missing id column") {
+    import io.ailake.spark.implicits._
+    val schema = StructType(Seq(StructField("embedding", ArrayType(DoubleType), nullable = false)))
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row(Seq(0.1, 0.2)))),
+      schema,
+    )
+    val ex = intercept[IllegalArgumentException] {
+      spark.ailakeWriteMulti("s3://test-bucket/multimodal/", df,
+        vectorColumns = Seq(AilakeNative.VectorColSpec("embedding", dim = 2)))
+    }
+    assert(ex.getMessage.contains("id"))
+  }
+
+  test("ailakeWriteMulti rejects unknown vector column") {
+    import io.ailake.spark.implicits._
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(multiModalRow(1L, Seq(0.1, 0.2), Seq(0.5, 0.6)))),
+      multiModalSchema,
+    )
+    val ex = intercept[IllegalArgumentException] {
+      spark.ailakeWriteMulti("s3://test-bucket/multimodal/", df,
+        vectorColumns = Seq(AilakeNative.VectorColSpec("nonexistent_col", dim = 2)))
+    }
+    assert(ex.getMessage.contains("nonexistent_col"))
+  }
+
+  test("ailakeWriteMulti rejects non-string extra column") {
+    import io.ailake.spark.implicits._
+    val schema = StructType(Seq(
+      StructField("id",        LongType,               nullable = true),
+      StructField("embedding", ArrayType(DoubleType), nullable = false),
+      StructField("page",      org.apache.spark.sql.types.IntegerType, nullable = true),
+    ))
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row(1L, Seq(0.1, 0.2), 7))),
+      schema,
+    )
+    val ex = intercept[IllegalArgumentException] {
+      spark.ailakeWriteMulti("s3://test-bucket/multimodal/", df,
+        vectorColumns = Seq(AilakeNative.VectorColSpec("embedding", dim = 2)))
+    }
+    assert(ex.getMessage.contains("page"))
+    assert(ex.getMessage.contains("StringType"))
+  }
 }

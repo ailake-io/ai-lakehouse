@@ -28,6 +28,19 @@ object AilakeNative {
   /** Column rename request for schema evolution. */
   case class RenameColReq(from: String, to: String)
 
+  /**
+   * One vector column in a multi-column (Phase 8 multimodal) write batch —
+   * e.g. text + image embeddings on the same row, each with its own HNSW index.
+   * See [[writeBatchMulti]].
+   */
+  case class VectorColSpec(
+    column:    String,
+    dim:       Int,
+    metric:    String         = "cosine",
+    precision: String         = "f16",
+    modality:  Option[String] = None,
+  )
+
   private trait Lib extends Library {
     /** Returns ailake-jni version string. Static — do NOT free this pointer. */
     def ailake_version(): String
@@ -40,6 +53,9 @@ object AilakeNative {
 
     /** JSON-envelope write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
     def ailake_write_batch_json(requestJson: String): Pointer
+
+    /** Multi-column (Phase 8 multimodal) write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
+    def ailake_write_batch_multi_json(requestJson: String): Pointer
 
     /** Logical delete via equality delete file. Returns `{"ok":true}`. Caller must free. */
     def ailake_delete_where_json(requestJson: String): Pointer
@@ -164,9 +180,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_write_batch_json returned null for table=$tableName")
           return None
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read writeBatch result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return None
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] writeBatch ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -176,8 +197,88 @@ object AilakeNative {
           if (sid.isMissingNode) None else Some(sid.asLong())
         } catch {
           case e: Exception =>
-            log.error(s"[ailake] Exception in writeBatch for table=$tableName: ${e.getMessage}", e)
+            log.error(s"[ailake] Exception parsing writeBatch response for table=$tableName: ${e.getMessage}", e)
+            None
+        }
+    }
+  }
+
+  /**
+   * Write a batch with N independent vector columns into a single AI-Lake file
+   * (Phase 8 multimodal tables — e.g. text + image embeddings on the same row,
+   * searchable via [[searchMultimodal]]). Each column gets its own HNSW section;
+   * the first entry in `vectorColumns` is the primary column used for geometric
+   * pruning in the manifest.
+   *
+   * @param vectorColumns  one or more (spec, embeddings) pairs; `embeddings(i)` must
+   *                       have `ids.size` rows for every column. First entry is primary.
+   * @param columns        extra string columns sent with the batch (same as [[writeBatch]]).
+   */
+  def writeBatchMulti(
+    tableUri:       String,
+    namespace:      String,
+    tableName:      String,
+    ids:            Seq[Long],
+    vectorColumns:  Seq[(VectorColSpec, Seq[Seq[Float]])],
+    embeddingModel: Option[String] = None,
+    formatVersion:  Int = 2,
+    ftsColumns:     Seq[String] = Seq.empty,
+    ftsTokenizer:   String = "default",
+    deferred:       Boolean = false,
+    columns:        Map[String, Seq[String]] = Map.empty,
+  ): Option[Long] = {
+    if (ids.isEmpty || vectorColumns.isEmpty) return None
+    lib match {
+      case None => None
+      case Some(native) =>
+        val idsJson = ids.mkString("[", ",", "]")
+        val vecColsJson = vectorColumns.map { case (spec, embeddings) =>
+          val embJson = embeddings.map(_.mkString("[", ",", "]")).mkString("[", ",", "]")
+          val modalityJson = spec.modality.map(m => s""","modality":${jsonStr(m)}""").getOrElse("")
+          s"""{"col":${jsonStr(spec.column)},"dim":${spec.dim},"metric":${jsonStr(spec.metric)},""" +
+          s""""precision":${jsonStr(spec.precision)}$modalityJson,"embeddings":$embJson}"""
+        }.mkString("[", ",", "]")
+        val modelJson = embeddingModel.map(m => s""","embedding_model":${jsonStr(m)}""").getOrElse("")
+        val fvJson  = s""","format_version":$formatVersion"""
+        val ftsJson = if (ftsColumns.nonEmpty) {
+          val arr = ftsColumns.map(c => jsonStr(c)).mkString("[", ",", "]")
+          s""","fts_columns":$arr,"fts_tokenizer":${jsonStr(ftsTokenizer)}"""
+        } else ""
+        val deferredJson = if (deferred) ""","deferred":true""" else ""
+        val colsJson = if (columns.nonEmpty) {
+          val inner = columns.map { case (col, vals) =>
+            val arr = vals.map(v => jsonStr(v)).mkString("[", ",", "]")
+            s"""${jsonStr(col)}:$arr"""
+          }.mkString("{", ",", "}")
+          s""","columns":$inner"""
+        } else ""
+        val requestJson =
+          s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
+          s""""table":${jsonStr(tableName)},"ids":$idsJson,"vector_columns":$vecColsJson""" +
+          s"""$modelJson$fvJson$ftsJson$deferredJson$colsJson}"""
+        val ptr = native.ailake_write_batch_multi_json(requestJson)
+        if (ptr == null) {
+          log.warn(s"[ailake] ailake_write_batch_multi_json returned null for table=$tableName")
+          return None
+        }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read writeBatchMulti result string for table=$tableName: ${e.getMessage}", e)
             Try(native.ailake_free_string(ptr))
+            return None
+        }
+        native.ailake_free_string(ptr)
+        try {
+          val root = mapper.readTree(json)
+          if (!root.path("ok").asBoolean(false)) {
+            log.warn(s"[ailake] writeBatchMulti ok=false for table=$tableName: ${root.path("error").asText()}")
+            return None
+          }
+          val sid = root.path("snapshot_id")
+          if (sid.isMissingNode) None else Some(sid.asLong())
+        } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Exception parsing writeBatchMulti response for table=$tableName: ${e.getMessage}", e)
             None
         }
     }
@@ -208,9 +309,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_delete_where_json returned null for table=$tableName")
           return false
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read deleteWhere result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return false
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] deleteWhere ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -218,8 +324,7 @@ object AilakeNative {
           } else true
         } catch {
           case e: Exception =>
-            log.error(s"[ailake] Exception in deleteWhere for table=$tableName: ${e.getMessage}", e)
-            Try(native.ailake_free_string(ptr))
+            log.error(s"[ailake] Exception parsing deleteWhere response for table=$tableName: ${e.getMessage}", e)
             false
         }
     }
@@ -258,9 +363,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_evolve_schema_json returned null for table=$tableName")
           return -1
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read evolveSchema result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return -1
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] evolveSchema ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -270,8 +380,7 @@ object AilakeNative {
           if (sid.isMissingNode) -1 else sid.asInt(-1)
         } catch {
           case e: Exception =>
-            log.error(s"[ailake] Exception in evolveSchema for table=$tableName: ${e.getMessage}", e)
-            Try(native.ailake_free_string(ptr))
+            log.error(s"[ailake] Exception parsing evolveSchema response for table=$tableName: ${e.getMessage}", e)
             -1
         }
     }
@@ -476,9 +585,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_compact_json returned null for table=$tableName")
           return None
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read compact result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return None
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] compact ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -491,7 +605,6 @@ object AilakeNative {
         } catch {
           case e: Exception =>
             log.error(s"[ailake] Failed to parse compact response for table=$tableName: ${e.getMessage}", e)
-            Try(native.ailake_free_string(ptr))
             None
         }
     }

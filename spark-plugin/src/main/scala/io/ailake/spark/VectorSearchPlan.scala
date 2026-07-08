@@ -9,8 +9,13 @@ import org.apache.spark.sql.types.{DoubleType, LongType, StringType}
 /**
  * Logical plan node for AI-Lake vector search.
  *
- * Created by [[AilakeImplicits.VectorSearchDataFrame.vectorSearch]] or by
- * `ailake_vector_search(tableUri, queryVector, topK)` SQL syntax.
+ * Not currently reachable via SQL — no parser/function is registered for an
+ * `ailake_vector_search(...)` syntax, only [[VectorScanStrategy]]'s planner
+ * injection exists ([[AilakeSparkExtensions]]). The only production caller,
+ * `implicits.AilakeSession.ailakeSearch`, builds this plan solely to borrow
+ * its `output` schema and calls [[AilakeNative.search]] directly rather than
+ * executing the plan through Spark's planner — see [[VectorScanStrategy]] and
+ * [[VectorScanExec]] for the (currently untriggered) strategy-conversion path.
  *
  * @param tableUri    AI-Lake table root URI
  * @param query       f32 query embedding

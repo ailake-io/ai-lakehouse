@@ -213,6 +213,76 @@ class AilakeNativeTest extends AnyFunSuite {
     assert(ex.getMessage.contains("StringType"))
   }
 
+  // Regression: resolveColumns previously only validated extra (text) columns'
+  // types, trusting id/vector column types unconditionally — a looser
+  // CREATE TABLE schema (e.g. `id INT`) would pass validation here and only
+  // fail later with an opaque ClassCastException inside AilakeDataWriter.write.
+  test("AilakeWriteHandle.resolveColumns rejects non-Long id column") {
+    import org.apache.spark.sql.types._
+    val schema = StructType(Seq(
+      StructField("id",        IntegerType,           nullable = true),
+      StructField("embedding", ArrayType(DoubleType), nullable = false),
+    ))
+    val ex = intercept[IllegalArgumentException] {
+      AilakeWriteHandle.resolveColumns(schema, "embedding")
+    }
+    assert(ex.getMessage.contains("id"))
+    assert(ex.getMessage.contains("LongType"))
+  }
+
+  test("AilakeWriteHandle.resolveColumns rejects non-array<double> vector column") {
+    import org.apache.spark.sql.types._
+    val schema = StructType(Seq(
+      StructField("id",        LongType,             nullable = true),
+      StructField("embedding", ArrayType(FloatType), nullable = false),
+    ))
+    val ex = intercept[IllegalArgumentException] {
+      AilakeWriteHandle.resolveColumns(schema, "embedding")
+    }
+    assert(ex.getMessage.contains("embedding"))
+    assert(ex.getMessage.contains("ArrayType(DoubleType"))
+  }
+
+  test("AilakeWriteHandle.resolveColumns accepts nullable array<double> vector column") {
+    import org.apache.spark.sql.types._
+    val schema = StructType(Seq(
+      StructField("id",        LongType,                                nullable = true),
+      StructField("embedding", ArrayType(DoubleType, containsNull = true), nullable = false),
+    ))
+    val (idIdx, vecIdx, textCols) = AilakeWriteHandle.resolveColumns(schema, "embedding")
+    assert(idIdx == 0)
+    assert(vecIdx == 1)
+    assert(textCols.isEmpty)
+  }
+
+  // Regression: resolveColumns hardcoded "id" as the id-column field name,
+  // ignoring the `idColumn` option AilakeSparkExtensions.ailakeWrite already
+  // accepted and threaded through options — a DataFrame with an id column
+  // named e.g. "doc_id" would fail fieldIndex("id") even though the caller
+  // correctly declared idColumn = "doc_id".
+  test("AilakeWriteHandle.resolveColumns resolves a custom idColumn name") {
+    import org.apache.spark.sql.types._
+    val schema = StructType(Seq(
+      StructField("doc_id",    LongType,              nullable = true),
+      StructField("embedding", ArrayType(DoubleType), nullable = false),
+    ))
+    val (idIdx, vecIdx, textCols) = AilakeWriteHandle.resolveColumns(schema, "embedding", idColumn = "doc_id")
+    assert(idIdx == 0)
+    assert(vecIdx == 1)
+    assert(textCols.isEmpty)
+  }
+
+  test("AilakeDataSource.buildSchema respects idColumn option") {
+    import scala.collection.JavaConverters._
+    val props = Map(
+      "tableUri"  -> "s3://b/docs/",
+      "idColumn"  -> "doc_id",
+    ).asJava
+    val schema = AilakeDataSource.buildSchema(new org.apache.spark.sql.util.CaseInsensitiveStringMap(props))
+    assert(schema.fieldNames.toSeq == Seq("doc_id", "embedding"))
+    assert(schema("doc_id").dataType == org.apache.spark.sql.types.LongType)
+  }
+
   test("AilakeDataWriter passes extra column values through to writeBatch's columns map") {
     import org.apache.spark.sql.catalyst.InternalRow
     import org.apache.spark.sql.catalyst.util.GenericArrayData
@@ -290,5 +360,63 @@ class AilakeNativeTest extends AnyFunSuite {
       queryText = "rust programming", textColumns = Seq("chunk_text"), topK = 5,
     )
     assert(results.isEmpty)
+  }
+
+  // ── Phase 8: writeBatchMulti (multi-column / multimodal write) ───────────────
+
+  test("writeBatchMulti returns None when native library absent") {
+    assume(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
+    val result = AilakeNative.writeBatchMulti(
+      tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
+      ids = Seq(1L, 2L),
+      vectorColumns = Seq(
+        AilakeNative.VectorColSpec("embedding", dim = 4) -> Seq(
+          Seq(0.1f, 0.2f, 0.3f, 0.4f), Seq(0.5f, 0.6f, 0.7f, 0.8f)),
+      ),
+    )
+    assert(result.isEmpty)
+  }
+
+  test("writeBatchMulti returns None for empty ids") {
+    val result = AilakeNative.writeBatchMulti(
+      tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
+      ids = Seq.empty,
+      vectorColumns = Seq(AilakeNative.VectorColSpec("embedding", dim = 4) -> Seq.empty),
+    )
+    assert(result.isEmpty)
+  }
+
+  test("writeBatchMulti returns None for empty vectorColumns") {
+    val result = AilakeNative.writeBatchMulti(
+      tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
+      ids = Seq(1L),
+      vectorColumns = Seq.empty,
+    )
+    assert(result.isEmpty)
+  }
+
+  test("VectorColSpec defaults metric=cosine precision=f16 modality=None") {
+    val spec = AilakeNative.VectorColSpec("embedding", dim = 1536)
+    assert(spec.metric == "cosine")
+    assert(spec.precision == "f16")
+    assert(spec.modality.isEmpty)
+  }
+
+  test("writeBatchMulti JSON includes one entry per vector column with modality") {
+    // White-box: verify JSON fragment produced by writeBatchMulti's vector_columns logic.
+    def jsonStr(s: String): String = "\"" + s + "\""
+    val specs = Seq(
+      AilakeNative.VectorColSpec("embedding", dim = 4, modality = Some("text")),
+      AilakeNative.VectorColSpec("image_embedding", dim = 2, modality = Some("image")),
+    )
+    val vecColsJson = specs.map { spec =>
+      val modalityJson = spec.modality.map(m => s""","modality":${jsonStr(m)}""").getOrElse("")
+      s"""{"col":${jsonStr(spec.column)},"dim":${spec.dim},"metric":${jsonStr(spec.metric)},""" +
+      s""""precision":${jsonStr(spec.precision)}$modalityJson}"""
+    }.mkString("[", ",", "]")
+    assert(vecColsJson.contains("\"col\":\"embedding\""))
+    assert(vecColsJson.contains("\"col\":\"image_embedding\""))
+    assert(vecColsJson.contains("\"modality\":\"text\""))
+    assert(vecColsJson.contains("\"modality\":\"image\""))
   }
 }

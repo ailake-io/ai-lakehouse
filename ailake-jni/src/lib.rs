@@ -721,6 +721,262 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     })
 }
 
+/// Write a batch with N independent vector columns into a single AI-Lake file.
+///
+/// Each column gets its own HNSW section in the file footer (Phase 8 multimodal
+/// tables — e.g. text + image embeddings on the same row). The first entry in
+/// `vector_columns` is the primary column, used for geometric pruning in the
+/// manifest. This is the JNI-surface equivalent of `ailake-py`'s
+/// `TableWriter.write_batch_multi` — previously only reachable from Python via
+/// PyO3, with no C-ABI path for Trino/Spark/Flink to populate a multi-vector
+/// table (they could call `ailake_search_multimodal_json` but never write the
+/// data it searches).
+///
+/// `request_json`:
+/// ```json
+/// {
+///   "warehouse": "...", "namespace": "default", "table": "docs",
+///   "ids": [1, 2, 3],
+///   "vector_columns": [
+///     {"col": "embedding", "dim": 1536, "metric": "cosine", "precision": "f16",
+///      "modality": "text", "embeddings": [[...], [...], [...]]},
+///     {"col": "image_embedding", "dim": 512, "metric": "cosine",
+///      "modality": "image", "embeddings": [[...], [...], [...]]}
+///   ],
+///   "columns": {"chunk_text": ["...", "...", "..."]},
+///   "format_version": 2, "deferred": false
+/// }
+/// ```
+/// Returns `{"ok":true,"snapshot_id":N}` on success, or `{"ok":false,"error":"..."}`.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_write_batch_multi_json(request_json: *const c_char) -> *mut c_char {
+    catch_ffi_panic("ailake_write_batch_multi_json", move || {
+        use ailake_core::{VectorModality, VectorPrecision, VectorStoragePolicy};
+        use ailake_query::{MultiVectorBatch, TableWriter};
+        use arrow_array::{Int64Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+
+        #[derive(serde::Deserialize)]
+        struct VecColReq {
+            col: String,
+            dim: u32,
+            #[serde(default)]
+            metric: Option<String>,
+            #[serde(default)]
+            precision: Option<String>,
+            #[serde(default)]
+            modality: Option<String>,
+            embeddings: Vec<Vec<f32>>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Req {
+            warehouse: String,
+            #[serde(default = "default_ns")]
+            namespace: String,
+            table: String,
+            ids: Vec<i64>,
+            vector_columns: Vec<VecColReq>,
+            #[serde(default)]
+            embedding_model: Option<String>,
+            #[serde(default = "default_format_version")]
+            format_version: u8,
+            #[serde(default)]
+            fts_columns: Vec<String>,
+            #[serde(default = "default_fts_tokenizer")]
+            fts_tokenizer: String,
+            #[serde(default)]
+            deferred: bool,
+            #[serde(default)]
+            columns: std::collections::HashMap<String, Vec<String>>,
+        }
+        fn default_ns() -> String {
+            "default".into()
+        }
+        fn default_format_version() -> u8 {
+            2
+        }
+        fn default_fts_tokenizer() -> String {
+            "default".into()
+        }
+
+        if request_json.is_null() {
+            return cstr_err_json("null request_json");
+        }
+        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    "ailake_write_batch_multi_json: invalid UTF-8 in request_json: {}",
+                    e
+                );
+                return cstr_err_json(e);
+            }
+        };
+        let req: Req = match serde_json::from_str(json_str) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("ailake_write_batch_multi_json: JSON parse error: {}", e);
+                return cstr_err_json(e);
+            }
+        };
+        if req.vector_columns.is_empty() {
+            return cstr_err_json("vector_columns must not be empty");
+        }
+        for vc in &req.vector_columns {
+            if vc.embeddings.len() != req.ids.len() {
+                warn!(
+                    "ailake_write_batch_multi_json: ids.len()={} != embeddings.len()={} for column='{}' warehouse={} table={}.{}",
+                    req.ids.len(), vc.embeddings.len(), vc.col, req.warehouse, req.namespace, req.table,
+                );
+                return cstr_err_json(format!(
+                    "ids.len() != embeddings.len() for vector column '{}'",
+                    vc.col
+                ));
+            }
+        }
+        debug!(
+            "ailake_write_batch_multi_json: warehouse={} table={}.{} rows={} vector_columns={}",
+            req.warehouse,
+            req.namespace,
+            req.table,
+            req.ids.len(),
+            req.vector_columns.len(),
+        );
+
+        let embedding_model = req
+            .embedding_model
+            .as_deref()
+            .map(EmbeddingModelInfo::from_property_value);
+
+        let policies: Vec<VectorStoragePolicy> = req
+            .vector_columns
+            .iter()
+            .map(|vc| {
+                let metric = parse_metric(vc.metric.as_deref().unwrap_or("euclidean"));
+                let precision = match vc.precision.as_deref().unwrap_or("f16") {
+                    "f32" => VectorPrecision::F32,
+                    "i8" => VectorPrecision::I8,
+                    _ => VectorPrecision::F16,
+                };
+                let modality = vc
+                    .modality
+                    .as_deref()
+                    .and_then(|s| s.parse::<VectorModality>().ok());
+                VectorStoragePolicy {
+                    column_name: vc.col.clone(),
+                    dim: vc.dim,
+                    metric,
+                    precision,
+                    pq: None,
+                    keep_raw_for_reranking: true,
+                    pre_normalize: false,
+                    hnsw_m: None,
+                    hnsw_ef_construction: None,
+                    ivf_residual: false,
+                    embedding_model: embedding_model.clone(),
+                    modality,
+                    partition_by: None,
+                    partition_value: None,
+                    partition_column_type: None,
+                    partition_fields: vec![],
+                }
+            })
+            .collect();
+
+        let mv_batches: Vec<MultiVectorBatch<'_>> = policies
+            .iter()
+            .zip(req.vector_columns.iter())
+            .map(|(policy, vc)| MultiVectorBatch {
+                policy: policy.clone(),
+                embeddings: &vc.embeddings,
+            })
+            .collect();
+
+        let format_version = req.format_version;
+        let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
+        let store: std::sync::Arc<dyn ailake_store::Store> =
+            std::sync::Arc::new(LocalStore::new(&req.warehouse));
+        let catalog = std::sync::Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+
+        use arrow_array::StringArray;
+        let mut fields = vec![Field::new("id", DataType::Int64, false)];
+        let mut arrays: Vec<std::sync::Arc<dyn arrow_array::Array>> =
+            vec![std::sync::Arc::new(Int64Array::from(req.ids))];
+        let mut ordered_cols: Vec<(String, Vec<String>)> = req.columns.into_iter().collect();
+        ordered_cols.sort_by(|a, b| a.0.cmp(&b.0));
+        for (col_name, values) in ordered_cols {
+            fields.push(Field::new(&col_name, DataType::Utf8, true));
+            arrays.push(std::sync::Arc::new(StringArray::from(values)));
+        }
+        let schema = std::sync::Arc::new(Schema::new(fields));
+        let batch = match RecordBatch::try_new(schema, arrays) {
+            Ok(b) => b,
+            Err(e) => return cstr_err_json(e),
+        };
+
+        let fts_cfg: Option<ailake_fts::FtsConfig> = if req.fts_columns.is_empty() {
+            None
+        } else {
+            Some(ailake_fts::FtsConfig {
+                text_columns: req.fts_columns,
+                tokenizer: req.fts_tokenizer,
+                writer_heap_bytes: 50 * 1024 * 1024,
+            })
+        };
+
+        let deferred = req.deferred;
+        let primary_policy = policies[0].clone();
+        let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
+        let _commit_guard = _table_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let result = rt().block_on(async {
+            let base =
+                TableWriter::create_or_open(catalog, store, primary_policy, table, format_version)
+                    .await?;
+            let mut writer = if let Some(cfg) = fts_cfg {
+                base.with_fts_config(cfg)
+            } else {
+                base
+            };
+            if deferred {
+                writer
+                    .write_batch_multi_deferred(&batch, &mv_batches)
+                    .await?;
+            } else {
+                writer.write_batch_multi(&batch, &mv_batches).await?;
+            }
+            writer.commit().await
+        });
+
+        #[derive(serde::Serialize)]
+        struct Resp {
+            ok: bool,
+            snapshot_id: i64,
+        }
+        match result {
+            Ok(snap) => {
+                info!(
+                    "ailake_write_batch_multi_json: committed snapshot_id={} table={}.{} columns={}",
+                    snap, req.namespace, req.table, req.vector_columns.len()
+                );
+                serde_json::to_string(&Resp {
+                    ok: true,
+                    snapshot_id: snap,
+                })
+                .map(cstr_json)
+                .unwrap_or_else(cstr_err_json)
+            }
+            Err(e) => {
+                warn!("ailake_write_batch_multi_json: write failed: {}", e);
+                cstr_err_json(e)
+            }
+        }
+    })
+}
+
 /// Free a string returned by `ailake_vector_search_json`.
 ///
 /// # Safety
@@ -1928,6 +2184,87 @@ mod tests {
         assert!(!ptr.is_null());
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         // Expect I/O error (not JSON parse error)
+        assert!(json.contains("error"), "expected error json, got: {}", json);
+        assert!(
+            !json.contains("JSON parse"),
+            "unexpected JSON parse error: {}",
+            json
+        );
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    // ── write_batch_multi_json ────────────────────────────────────────────────
+
+    #[test]
+    fn write_batch_multi_json_null_guard() {
+        let ptr = unsafe { ailake_write_batch_multi_json(std::ptr::null()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        assert!(json.contains("error") || json.contains("null"));
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    #[test]
+    fn write_batch_multi_json_rejects_empty_vector_columns() {
+        let req = r#"{
+            "warehouse": "/nonexistent/path",
+            "namespace": "default",
+            "table": "test",
+            "ids": [1],
+            "vector_columns": []
+        }"#;
+        let c = std::ffi::CString::new(req).unwrap();
+        let ptr = unsafe { ailake_write_batch_multi_json(c.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        assert!(json.contains("vector_columns"), "got: {json}");
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    #[test]
+    fn write_batch_multi_json_rejects_mismatched_embedding_length() {
+        let req = r#"{
+            "warehouse": "/nonexistent/path",
+            "namespace": "default",
+            "table": "test",
+            "ids": [1, 2],
+            "vector_columns": [
+                {"col": "embedding", "dim": 4, "embeddings": [[0.1, 0.2, 0.3, 0.4]]}
+            ]
+        }"#;
+        let c = std::ffi::CString::new(req).unwrap();
+        let ptr = unsafe { ailake_write_batch_multi_json(c.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        assert!(json.contains("ids.len()"), "got: {json}");
+        unsafe { ailake_free_string(ptr) };
+    }
+
+    #[test]
+    fn write_batch_multi_json_two_columns_parses() {
+        // Two vector columns (text + image), extra string column, fts_columns,
+        // deferred — all new fields must parse without panic. Nonexistent
+        // warehouse so it fails at I/O, not at JSON parsing.
+        let req = r#"{
+            "warehouse": "/nonexistent/path",
+            "namespace": "default",
+            "table": "test",
+            "ids": [1, 2],
+            "vector_columns": [
+                {"col": "embedding", "dim": 4, "metric": "cosine", "modality": "text",
+                 "embeddings": [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]},
+                {"col": "image_embedding", "dim": 2, "metric": "cosine", "modality": "image",
+                 "embeddings": [[0.1, 0.2], [0.3, 0.4]]}
+            ],
+            "columns": {"chunk_text": ["row0", "row1"]},
+            "fts_columns": ["chunk_text"],
+            "format_version": 3,
+            "deferred": true
+        }"#;
+        let c = std::ffi::CString::new(req).unwrap();
+        let ptr = unsafe { ailake_write_batch_multi_json(c.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         assert!(json.contains("error"), "expected error json, got: {}", json);
         assert!(
             !json.contains("JSON parse"),
