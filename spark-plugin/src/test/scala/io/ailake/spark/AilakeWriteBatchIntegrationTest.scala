@@ -245,6 +245,90 @@ class AilakeWriteBatchIntegrationTest extends AnyFunSuite {
     println("PASS (Spark): FTS write+searchText roundtrip functional with real library.")
   }
 
+  // ── compact ───────────────────────────────────────────────────────────────
+
+  test("compact merges small files") {
+    assume(libPath.isDefined,  "AILAKE_LIB_PATH not set — skipping")
+    assume(writeDir.isDefined, "AILAKE_WRITE_DIR not set — skipping")
+    assume(libPresent,         "libailake_jni.so not found — skipping")
+
+    val tableUri = s"${writeDir.get}/integration-compact-spark"
+    // Write several small batches so there's more than one file to compact.
+    (0 until 5).foreach { batch =>
+      val snap = AilakeNative.writeBatch(
+        tableUri     = tableUri,
+        namespace    = "default",
+        tableName    = "integration_compact_spark",
+        vectorColumn = "embedding",
+        dim          = 4,
+        metric       = "cosine",
+        precision    = "f16",
+        ids          = Seq(batch * 2L, batch * 2L + 1L),
+        embeddings   = Seq(Seq(1.0f, 0.0f, 0.0f, 0.0f), Seq(0.0f, 1.0f, 0.0f, 0.0f)),
+      )
+      assert(snap.isDefined, s"writeBatch (batch $batch) returned None")
+    }
+    val filesCompacted = AilakeNative.compact(
+      tableUri  = tableUri,
+      namespace = "default",
+      tableName = "integration_compact_spark",
+      minFiles  = 2,
+    )
+    assert(filesCompacted.isDefined, "compact returned None — check JNI and table path")
+    assert(filesCompacted.get >= 1, s"expected at least 1 file compacted, got ${filesCompacted.get}")
+    println(s"[test] compact OK: filesCompacted=${filesCompacted.get}")
+
+    // The table must still be searchable after compaction, with all rows intact.
+    val results = AilakeNative.search(tableUri, Array(1.0f, 0.0f, 0.0f, 0.0f), topK = 10, tableName = "integration_compact_spark")
+    assert(results.size == 10, s"expected 10 rows searchable post-compact, got ${results.size}")
+    println("PASS (Spark): compact functional with real library.")
+  }
+
+  // ── searchMultimodal ──────────────────────────────────────────────────────
+  //
+  // NOTE: this only proves the JNI call and RRF response parsing work against
+  // a single real vector column — Spark (like Trino/Flink) has no write path
+  // for a *second* vector column on the same table at all. ailake_write_batch_json
+  // takes a single `vec_col`; multi-column vector write (`write_multi`) exists
+  // only in the Python SDK via PyO3, with no equivalent exposed through the
+  // ailake-jni C-ABI. So a genuine multi-column cross-modal search can only be
+  // exercised from Spark against a table that was first populated by Python —
+  // searchMultimodal is reachable from Spark but not self-sufficient there.
+
+  test("searchMultimodal returns real results against a single real vector column") {
+    assume(libPath.isDefined,  "AILAKE_LIB_PATH not set — skipping")
+    assume(writeDir.isDefined, "AILAKE_WRITE_DIR not set — skipping")
+    assume(libPresent,         "libailake_jni.so not found — skipping")
+
+    val tableUri = s"${writeDir.get}/integration-multimodal-spark"
+    val snap = AilakeNative.writeBatch(
+      tableUri     = tableUri,
+      namespace    = "default",
+      tableName    = "integration_multimodal_spark",
+      vectorColumn = "embedding",
+      dim          = 4,
+      metric       = "cosine",
+      precision    = "f16",
+      ids          = Seq(0L, 1L, 2L),
+      embeddings   = Seq(
+        Seq(1.0f, 0.0f, 0.0f, 0.0f),
+        Seq(0.0f, 1.0f, 0.0f, 0.0f),
+        Seq(0.0f, 0.0f, 1.0f, 0.0f),
+      ),
+    )
+    assert(snap.isDefined, "writeBatch returned None")
+
+    val results = AilakeNative.searchMultimodal(
+      tableUri = tableUri,
+      queries  = Seq(("embedding", Array(1.0f, 0.0f, 0.0f, 0.0f), 1.0f)),
+      topK     = 3,
+      tableName = "integration_multimodal_spark",
+    )
+    assert(results.nonEmpty, "searchMultimodal returned empty — RRF fusion path not functional")
+    assert(results.head.rowId == 0L, s"expected rowId=0 top result, got rowId=${results.head.rowId}")
+    println(s"[test] searchMultimodal OK: rowId=${results.head.rowId} rrfScore=${results.head.rrfScore}")
+  }
+
   // ── AilakeDataWriterFactory ───────────────────────────────────────────────
 
   test("AilakeDataWriterFactory creates distinct writer instances") {
