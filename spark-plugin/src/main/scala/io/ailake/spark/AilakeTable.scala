@@ -17,16 +17,20 @@ object AilakeTable {
 /**
  * AI-Lake write table exposed by [[AilakeCatalog]] and [[AilakeDataSource]].
  *
- * Schema: (id BIGINT, embedding ARRAY<DOUBLE>)
+ * Minimum schema: (id BIGINT, embedding ARRAY<DOUBLE>). Any other columns in
+ * `tableSchema` are extra string metadata (see [[AilakeWriteHandle.resolveColumns]])
+ * — `tableSchema` defaults to the bare `WRITE_SCHEMA` for callers that don't
+ * resolve a real DataFrame schema (e.g. [[AilakeCatalog.loadTable]] today).
  *
  * Supports BATCH_WRITE only. Reads are handled by the Iceberg connector or
  * standard Parquet reader — AI-Lake files are valid Iceberg/Parquet.
  */
-class AilakeTable(val handle: AilakeWriteHandle) extends Table with SupportsWrite {
+class AilakeTable(val handle: AilakeWriteHandle, tableSchema: StructType = AilakeTable.WRITE_SCHEMA)
+    extends Table with SupportsWrite {
 
   override def name(): String = handle.tableName
 
-  override def schema(): StructType = AilakeTable.WRITE_SCHEMA
+  override def schema(): StructType = tableSchema
 
   override def capabilities(): util.Set[TableCapability] =
     util.EnumSet.of(TableCapability.BATCH_WRITE, TableCapability.TRUNCATE)

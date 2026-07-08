@@ -166,6 +166,88 @@ class AilakeNativeTest extends AnyFunSuite {
     assert(handle.formatVersion == 2)
   }
 
+  // ── extra text/metadata columns (id + embedding + arbitrary StringType cols) ──
+
+  test("AilakeDataSource wires textColumns option through to textColIndices") {
+    // Spark's TableProvider.inferSchema only ever sees write options, never
+    // the caller's DataFrame — so extra columns must be declared explicitly
+    // via .option("textColumns", ...), not auto-detected from the schema
+    // argument getTable() receives (see AilakeDataSource.buildSchema doc).
+    val ds = new AilakeDataSource()
+    val props = new java.util.HashMap[String, String]()
+    props.put("tableUri", "s3://b/docs/")
+    props.put("textColumns", "text, source, page")
+    val table = ds.getTable(new org.apache.spark.sql.types.StructType(), Array.empty[Transform], props)
+    val ailakeTable = table.asInstanceOf[AilakeTable]
+    val handle = ailakeTable.handle
+
+    assert(handle.idColIndex == 0)
+    assert(handle.vecColIndex == 1)
+    assert(handle.textColIndices == Seq("text" -> 2, "source" -> 3, "page" -> 4))
+    assert(ailakeTable.schema().fieldNames.toSeq == Seq("id", "embedding", "text", "source", "page"))
+    // inferSchema() and getTable() must agree — both derive from options alone.
+    assert(ds.inferSchema(new org.apache.spark.sql.util.CaseInsensitiveStringMap(props)) == ailakeTable.schema())
+  }
+
+  test("AilakeDataSource with no textColumns option keeps the historical id+embedding-only schema") {
+    val ds = new AilakeDataSource()
+    val props = new java.util.HashMap[String, String]()
+    props.put("tableUri", "s3://b/docs/")
+    val table = ds.getTable(new org.apache.spark.sql.types.StructType(), Array.empty[Transform], props)
+    val handle = table.asInstanceOf[AilakeTable].handle
+    assert(handle.textColIndices.isEmpty)
+    assert(table.schema().fieldNames.toSeq == Seq("id", "embedding"))
+  }
+
+  test("AilakeWriteHandle.resolveColumns rejects non-string extra columns") {
+    import org.apache.spark.sql.types._
+    val schema = StructType(Seq(
+      StructField("id",        LongType,              nullable = true),
+      StructField("embedding", ArrayType(DoubleType), nullable = false),
+      StructField("page",      IntegerType,           nullable = true),
+    ))
+    val ex = intercept[IllegalArgumentException] {
+      AilakeWriteHandle.resolveColumns(schema, "embedding")
+    }
+    assert(ex.getMessage.contains("page"))
+    assert(ex.getMessage.contains("StringType"))
+  }
+
+  test("AilakeDataWriter passes extra column values through to writeBatch's columns map") {
+    import org.apache.spark.sql.catalyst.InternalRow
+    import org.apache.spark.sql.catalyst.util.GenericArrayData
+    import org.apache.spark.unsafe.types.UTF8String
+
+    val handle = AilakeWriteHandle(
+      tableUri = "s3://b/docs/", namespace = "default", tableName = "docs",
+      vectorColumn = "embedding", dim = 2, metric = "cosine", precision = "f16",
+      idColIndex = 0, vecColIndex = 1,
+      textColIndices = Seq("text" -> 2, "source" -> 3),
+    )
+    val writer = new AilakeDataWriter(handle, partitionId = 0, taskId = 0L)
+    val row = InternalRow(
+      1L,
+      new GenericArrayData(Array(0.1, 0.2)),
+      UTF8String.fromString("hello world"),
+      UTF8String.fromString("doc-a"),
+    )
+    writer.write(row)
+
+    // Inspect the accumulated per-column buffers directly via reflection
+    // instead of calling commit() — whether libailake_jni.so is on
+    // java.library.path varies by environment (absent locally, present in
+    // CI with AILAKE_LIB_PATH set), so commit() against this fake tableUri
+    // would either no-op (native lib absent) or attempt a real write that
+    // may throw (native lib present, no such bucket). Either way this test
+    // only needs to prove write() accumulates the right values; the native
+    // call itself is covered by the integration tests further down this file.
+    val field = classOf[AilakeDataWriter].getDeclaredField("textValues")
+    field.setAccessible(true)
+    val textValues = field.get(writer).asInstanceOf[Map[String, scala.collection.mutable.ArrayBuffer[String]]]
+    assert(textValues("text").toList == List("hello world"))
+    assert(textValues("source").toList == List("doc-a"))
+  }
+
   // ── Phase T: FTS ──────────────────────────────────────────────────────────
 
   test("writeBatch with ftsColumns returns None when native library absent") {
