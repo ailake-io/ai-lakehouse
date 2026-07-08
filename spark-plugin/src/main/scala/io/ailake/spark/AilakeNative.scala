@@ -164,9 +164,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_write_batch_json returned null for table=$tableName")
           return None
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read writeBatch result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return None
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] writeBatch ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -176,8 +181,7 @@ object AilakeNative {
           if (sid.isMissingNode) None else Some(sid.asLong())
         } catch {
           case e: Exception =>
-            log.error(s"[ailake] Exception in writeBatch for table=$tableName: ${e.getMessage}", e)
-            Try(native.ailake_free_string(ptr))
+            log.error(s"[ailake] Exception parsing writeBatch response for table=$tableName: ${e.getMessage}", e)
             None
         }
     }
@@ -208,9 +212,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_delete_where_json returned null for table=$tableName")
           return false
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read deleteWhere result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return false
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] deleteWhere ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -218,8 +227,7 @@ object AilakeNative {
           } else true
         } catch {
           case e: Exception =>
-            log.error(s"[ailake] Exception in deleteWhere for table=$tableName: ${e.getMessage}", e)
-            Try(native.ailake_free_string(ptr))
+            log.error(s"[ailake] Exception parsing deleteWhere response for table=$tableName: ${e.getMessage}", e)
             false
         }
     }
@@ -258,9 +266,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_evolve_schema_json returned null for table=$tableName")
           return -1
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read evolveSchema result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return -1
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] evolveSchema ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -270,8 +283,7 @@ object AilakeNative {
           if (sid.isMissingNode) -1 else sid.asInt(-1)
         } catch {
           case e: Exception =>
-            log.error(s"[ailake] Exception in evolveSchema for table=$tableName: ${e.getMessage}", e)
-            Try(native.ailake_free_string(ptr))
+            log.error(s"[ailake] Exception parsing evolveSchema response for table=$tableName: ${e.getMessage}", e)
             -1
         }
     }
@@ -476,9 +488,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_compact_json returned null for table=$tableName")
           return None
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read compact result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return None
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] compact ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -491,7 +508,6 @@ object AilakeNative {
         } catch {
           case e: Exception =>
             log.error(s"[ailake] Failed to parse compact response for table=$tableName: ${e.getMessage}", e)
-            Try(native.ailake_free_string(ptr))
             None
         }
     }

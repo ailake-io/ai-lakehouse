@@ -4,7 +4,7 @@ package io.ailake.spark
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write._
-import org.apache.spark.sql.types.{StringType, StructType}
+import org.apache.spark.sql.types.{ArrayType, DoubleType, LongType, StringType, StructType}
 import org.slf4j.LoggerFactory
 import scala.collection.mutable.ArrayBuffer
 
@@ -41,16 +41,33 @@ object AilakeWriteHandle {
    *
    * Extra columns must be StringType — `columns` on the native side is
    * `Map[String, Seq[String]]`. Cast non-string columns (e.g. `page: Int`) to
-   * string before writing if you need them round-tripped.
+   * string before writing if you need them round-tripped. `id` must be
+   * LongType and the vector column must be ArrayType(DoubleType) — Spark
+   * would otherwise accept a write matching a looser CREATE TABLE schema
+   * (e.g. `id INT` or `embedding ARRAY<FLOAT>`) that later throws an opaque
+   * ClassCastException in AilakeDataWriter.write's unchecked getLong/getArray.
    *
    * An empty `schema` means no real DataFrame schema was resolved yet (e.g. a
    * caller only after option parsing) — falls back to the historical
    * `(id, embedding)`-only defaults instead of failing `fieldIndex` lookups.
    */
-  def resolveColumns(schema: StructType, vectorColumn: String): (Int, Int, Seq[(String, Int)]) = {
+  def resolveColumns(schema: StructType, vectorColumn: String, idColumn: String = "id"): (Int, Int, Seq[(String, Int)]) = {
     if (schema.isEmpty) return (0, 1, Seq.empty)
-    val idIdx  = schema.fieldIndex("id")
+    val idIdx  = schema.fieldIndex(idColumn)
     val vecIdx = schema.fieldIndex(vectorColumn)
+    val idField  = schema.fields(idIdx)
+    val vecField = schema.fields(vecIdx)
+    if (idField.dataType != LongType) {
+      throw new IllegalArgumentException(
+        s"Column '$idColumn' must be LongType (bigint), got ${idField.dataType.simpleString}. " +
+        s"Cast it first, e.g. col('$idColumn').cast('long').")
+    }
+    if (vecField.dataType != ArrayType(DoubleType, containsNull = false) &&
+        vecField.dataType != ArrayType(DoubleType, containsNull = true)) {
+      throw new IllegalArgumentException(
+        s"Vector column '$vectorColumn' must be ArrayType(DoubleType), got ${vecField.dataType.simpleString}. " +
+        s"Cast it first, e.g. col('$vectorColumn').cast('array<double>').")
+    }
     val textCols = schema.fields.zipWithIndex.collect {
       case (f, i) if i != idIdx && i != vecIdx =>
         if (f.dataType != StringType) {

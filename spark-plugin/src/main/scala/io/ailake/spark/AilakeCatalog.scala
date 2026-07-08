@@ -42,7 +42,7 @@ class AilakeCatalog extends CatalogPlugin with TableCatalog {
   // ── TableCatalog ──────────────────────────────────────────────────────────
 
   override def loadTable(ident: Identifier): Table =
-    buildTable(ident, AilakeTable.WRITE_SCHEMA)
+    buildTable(ident, AilakeTable.defaultSchema(opts.getOrDefault("vector-column", "embedding")))
 
   override def listTables(namespace: Array[String]): Array[Identifier] = Array.empty
 
@@ -65,12 +65,14 @@ class AilakeCatalog extends CatalogPlugin with TableCatalog {
 
   /**
    * `loadTable` (called for bare `INSERT INTO ailake.ns.table VALUES (...)`
-   * with no known DataFrame schema) falls back to the bare `id, embedding`
-   * schema. `createTable` (called with a `CREATE TABLE ... AS SELECT`-shaped
-   * schema, or any other schema Spark already resolved) passes it through,
-   * so extra string columns (chunk text, source, page, ...) get written as
-   * AI-Lake metadata instead of silently dropped — see
-   * [[AilakeWriteHandle.resolveColumns]].
+   * with no known DataFrame schema) falls back to the bare `id, <vector-column>`
+   * schema, named after the configured `vector-column` option (not hardcoded
+   * to `"embedding"` — a table configured with a different vector column name
+   * would otherwise fail `resolveColumns`' `fieldIndex` lookup). `createTable`
+   * (called with a `CREATE TABLE ... AS SELECT`-shaped schema, or any other
+   * schema Spark already resolved) passes it through, so extra string columns
+   * (chunk text, source, page, ...) get written as AI-Lake metadata instead of
+   * silently dropped — see [[AilakeWriteHandle.resolveColumns]].
    */
   private def buildTable(ident: Identifier, schema: StructType): Table = {
     val tableUri       = requireOpt("table-uri")

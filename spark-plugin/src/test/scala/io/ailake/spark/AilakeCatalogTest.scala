@@ -90,6 +90,31 @@ class AilakeCatalogTest extends AnyFunSuite {
     assert(table.handle.namespace == "default")
   }
 
+  // Regression: loadTable used to build against AilakeTable.WRITE_SCHEMA, which
+  // hardcodes the field name "embedding" — a catalog configured with a
+  // different `vector-column` name would fail resolveColumns' fieldIndex
+  // lookup on bare `INSERT INTO`, even though tableExists claims the table is
+  // always loadable. Fixed by deriving the default schema from the configured
+  // vector-column name instead of a fixed literal.
+  test("loadTable with custom vector-column name does not throw and uses that name in the schema") {
+    val catalog = new AilakeCatalog()
+    val props = Map(
+      "table-uri"     -> "file:///tmp/test-table",
+      "vector-column" -> "vec",
+      "vector-dim"    -> "4",
+      "metric"        -> "cosine",
+      "precision"     -> "f16",
+    ).asJava
+    catalog.initialize("ailake", new CaseInsensitiveStringMap(props))
+    val ident = Identifier.of(Array("default"), "docs")
+    val table = catalog.loadTable(ident).asInstanceOf[AilakeTable]
+    val schema = table.schema()
+    assert(schema.length == 2)
+    assert(schema.fieldNames.contains("vec"))
+    assert(!schema.fieldNames.contains("embedding"))
+    assert(table.handle.vecColIndex == 1)
+  }
+
   // ── tableExists ───────────────────────────────────────────────────────────
 
   test("tableExists returns true (catalog is open — loadTable never throws)") {

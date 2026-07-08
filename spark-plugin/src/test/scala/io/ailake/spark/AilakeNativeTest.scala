@@ -213,6 +213,76 @@ class AilakeNativeTest extends AnyFunSuite {
     assert(ex.getMessage.contains("StringType"))
   }
 
+  // Regression: resolveColumns previously only validated extra (text) columns'
+  // types, trusting id/vector column types unconditionally — a looser
+  // CREATE TABLE schema (e.g. `id INT`) would pass validation here and only
+  // fail later with an opaque ClassCastException inside AilakeDataWriter.write.
+  test("AilakeWriteHandle.resolveColumns rejects non-Long id column") {
+    import org.apache.spark.sql.types._
+    val schema = StructType(Seq(
+      StructField("id",        IntegerType,           nullable = true),
+      StructField("embedding", ArrayType(DoubleType), nullable = false),
+    ))
+    val ex = intercept[IllegalArgumentException] {
+      AilakeWriteHandle.resolveColumns(schema, "embedding")
+    }
+    assert(ex.getMessage.contains("id"))
+    assert(ex.getMessage.contains("LongType"))
+  }
+
+  test("AilakeWriteHandle.resolveColumns rejects non-array<double> vector column") {
+    import org.apache.spark.sql.types._
+    val schema = StructType(Seq(
+      StructField("id",        LongType,             nullable = true),
+      StructField("embedding", ArrayType(FloatType), nullable = false),
+    ))
+    val ex = intercept[IllegalArgumentException] {
+      AilakeWriteHandle.resolveColumns(schema, "embedding")
+    }
+    assert(ex.getMessage.contains("embedding"))
+    assert(ex.getMessage.contains("ArrayType(DoubleType"))
+  }
+
+  test("AilakeWriteHandle.resolveColumns accepts nullable array<double> vector column") {
+    import org.apache.spark.sql.types._
+    val schema = StructType(Seq(
+      StructField("id",        LongType,                                nullable = true),
+      StructField("embedding", ArrayType(DoubleType, containsNull = true), nullable = false),
+    ))
+    val (idIdx, vecIdx, textCols) = AilakeWriteHandle.resolveColumns(schema, "embedding")
+    assert(idIdx == 0)
+    assert(vecIdx == 1)
+    assert(textCols.isEmpty)
+  }
+
+  // Regression: resolveColumns hardcoded "id" as the id-column field name,
+  // ignoring the `idColumn` option AilakeSparkExtensions.ailakeWrite already
+  // accepted and threaded through options — a DataFrame with an id column
+  // named e.g. "doc_id" would fail fieldIndex("id") even though the caller
+  // correctly declared idColumn = "doc_id".
+  test("AilakeWriteHandle.resolveColumns resolves a custom idColumn name") {
+    import org.apache.spark.sql.types._
+    val schema = StructType(Seq(
+      StructField("doc_id",    LongType,              nullable = true),
+      StructField("embedding", ArrayType(DoubleType), nullable = false),
+    ))
+    val (idIdx, vecIdx, textCols) = AilakeWriteHandle.resolveColumns(schema, "embedding", idColumn = "doc_id")
+    assert(idIdx == 0)
+    assert(vecIdx == 1)
+    assert(textCols.isEmpty)
+  }
+
+  test("AilakeDataSource.buildSchema respects idColumn option") {
+    import scala.collection.JavaConverters._
+    val props = Map(
+      "tableUri"  -> "s3://b/docs/",
+      "idColumn"  -> "doc_id",
+    ).asJava
+    val schema = AilakeDataSource.buildSchema(new org.apache.spark.sql.util.CaseInsensitiveStringMap(props))
+    assert(schema.fieldNames.toSeq == Seq("doc_id", "embedding"))
+    assert(schema("doc_id").dataType == org.apache.spark.sql.types.LongType)
+  }
+
   test("AilakeDataWriter passes extra column values through to writeBatch's columns map") {
     import org.apache.spark.sql.catalyst.InternalRow
     import org.apache.spark.sql.catalyst.util.GenericArrayData

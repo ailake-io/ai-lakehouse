@@ -69,4 +69,19 @@ class AilakeSparkExtensionsTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(df.schema.fieldNames sameElements Array("row_id", "distance", "file_path"))
     assert(df.count() == 0)
   }
+
+  // Regression: ailakeSearch used to have no namespace/tableName parameters at
+  // all, always searching AilakeNative.search's hardcoded defaults
+  // (namespace="default") regardless of what ailakeWrite actually wrote to —
+  // a write to a non-default namespace was unfindable via search, silently
+  // returning empty results. These params now exist and are threaded through
+  // to AilakeNative.search; with no native lib present this still degrades to
+  // an empty result, but the signature/plumbing itself is what's under test.
+  test("ailakeSearch accepts namespace and tableName parameters") {
+    import io.ailake.spark.implicits._
+    val query = Array(0.1f, 0.2f, 0.3f)
+    val df = spark.ailakeSearch("s3://test-bucket/table/", query, topK = 5, namespace = "prod", tableName = "docs")
+    assert(df.schema.fieldNames sameElements Array("row_id", "distance", "file_path"))
+    assert(df.count() == 0)
+  }
 }

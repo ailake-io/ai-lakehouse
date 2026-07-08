@@ -17,6 +17,7 @@ import java.util
  * Enables:
  *   df.write.format("io.ailake.spark.AilakeDataSource")
  *     .option("tableUri", "s3://my-lake/docs/")
+ *     .option("idColumn", "id")              // default: id
  *     .option("vectorColumn", "embedding")   // default: embedding
  *     .option("dim", "1536")                 // default: inferred from schema
  *     .option("metric", "cosine")            // default: cosine
@@ -73,8 +74,9 @@ class AilakeDataSource extends TableProvider with DataSourceRegister {
     // this same options-driven flow, not the caller's DataFrame — deriving it
     // again here (rather than trusting `schema`) keeps inferSchema/getTable
     // guaranteed consistent regardless of how Spark plumbs the argument.
+    val idColumn      = opts.getOrDefault("idColumn", opts.getOrDefault("id-column", "id"))
     val resolvedSchema = AilakeDataSource.buildSchema(opts)
-    val (idIdx, vecIdx, textCols) = AilakeWriteHandle.resolveColumns(resolvedSchema, vectorColumn)
+    val (idIdx, vecIdx, textCols) = AilakeWriteHandle.resolveColumns(resolvedSchema, vectorColumn, idColumn)
     new AilakeTable(
       AilakeWriteHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision,
         idColIndex = idIdx, vecColIndex = vecIdx, textColIndices = textCols,
@@ -91,14 +93,15 @@ class AilakeDataSource extends TableProvider with DataSourceRegister {
 
 object AilakeDataSource {
 
-  /** Builds (id, vectorColumn, ...textColumns) from options alone — see class doc. */
+  /** Builds (idColumn, vectorColumn, ...textColumns) from options alone — see class doc. */
   def buildSchema(opts: CaseInsensitiveStringMap): StructType = {
+    val idColumn      = opts.getOrDefault("idColumn", opts.getOrDefault("id-column", "id"))
     val vectorColumn = opts.getOrDefault("vectorColumn", opts.getOrDefault("vector-column", "embedding"))
     val textColumns = opts.getOrDefault("textColumns", opts.getOrDefault("text-columns", ""))
       .split(",").map(_.trim).filter(_.nonEmpty).toSeq
     StructType(
       Seq(
-        StructField("id", LongType, nullable = true),
+        StructField(idColumn, LongType, nullable = true),
         StructField(vectorColumn, ArrayType(DoubleType), nullable = false),
       ) ++ textColumns.map(name => StructField(name, StringType, nullable = true))
     )

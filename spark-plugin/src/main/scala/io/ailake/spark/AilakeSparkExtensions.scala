@@ -38,9 +38,22 @@ class AilakeSparkExtensions extends (SparkSessionExtensions => Unit) {
  */
 object implicits {
   implicit class AilakeSession(private val spark: SparkSession) extends AnyVal {
-    def ailakeSearch(tableUri: String, queryVector: Array[Float], topK: Int): DataFrame = {
+    /**
+     * @param namespace  Iceberg namespace the table was written under (default: "default").
+     *                   Must match the `namespace` passed to [[ailakeWrite]] — otherwise this
+     *                   silently searches a different (likely empty) table location.
+     * @param tableName  table name; defaults to the last segment of `tableUri`, same
+     *                   resolution rule [[ailakeWrite]] uses.
+     */
+    def ailakeSearch(
+      tableUri:    String,
+      queryVector: Array[Float],
+      topK:        Int,
+      namespace:   String = "default",
+      tableName:   String = "",
+    ): DataFrame = {
       val plan = VectorSearchPlan(tableUri, queryVector, topK)
-      val rows = AilakeNative.search(tableUri, queryVector, topK)
+      val rows = AilakeNative.search(tableUri, queryVector, topK, namespace = namespace, tableName = tableName)
       val sparkRows = rows.map(r => Row(r.rowId, r.distance.toDouble, r.filePath))
       spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), plan.schema)
     }
