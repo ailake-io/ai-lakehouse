@@ -150,12 +150,16 @@ class AilakePageSinkTest {
             textCols = listOf("text" to listOf("hello")),
         )
         sink.appendPage(page).get()
-        // Native lib absent in test env → writeBatch returns null → empty
-        // fragments, same graceful-degradation contract as the other tests.
-        // This only proves finish() doesn't throw while textValues is
-        // populated — the actual columns= wiring is exercised by
+        // Inspect the accumulated per-column buffer directly via reflection
+        // instead of calling finish() — whether libailake_jni.so is on the
+        // classpath varies by environment (absent locally, present in CI via
+        // AILAKE_LIB_PATH), so finish() against this fake tableUri would
+        // either no-op (native lib absent) or attempt a real write (native
+        // lib present). Either way this test only needs to prove appendPage
+        // accumulates the right values into what finish() passes as
+        // columns=; the actual native wiring is exercised by
         // AilakeWriteBatchIntegrationTest against a real native lib.
-        val fragments = sink.finish().get()
-        assertTrue(fragments.isEmpty())
+        val textValues: Map<String, List<String>> = privateField(sink, "textValues")
+        assertEquals(listOf("hello"), textValues.getValue("text"))
     }
 }
