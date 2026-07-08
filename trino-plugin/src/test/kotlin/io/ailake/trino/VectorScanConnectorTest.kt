@@ -24,10 +24,12 @@ class VectorScanConnectorTest {
     @Test
     fun sessionPropertiesRegistersQueryVectorAndTopK() {
         val props = connector.getSessionProperties()
-        assertEquals(2, props.size)
+        assertEquals(4, props.size)
         val names = props.map { it.name }.toSet()
         assertTrue("query_vector" in names)
         assertTrue("top_k" in names)
+        assertTrue("query_text" in names)
+        assertTrue("hybrid_weight" in names)
     }
 
     @Test

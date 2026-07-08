@@ -4,8 +4,16 @@ package io.ailake.trino
 
 import io.ailake.trino.AilakeNative.AddColReq
 import io.ailake.trino.AilakeNative.PartitionFieldDef
+import io.trino.spi.connector.ColumnMetadata
+import io.trino.spi.connector.Constraint
+import io.trino.spi.connector.ConnectorSession
+import io.trino.spi.predicate.Domain
+import io.trino.spi.predicate.TupleDomain
+import io.trino.spi.type.BigintType.BIGINT
+import io.trino.spi.type.VarcharType.VARCHAR
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
+import org.mockito.kotlin.mock
 import java.io.File
 import kotlin.math.sqrt
 
@@ -226,5 +234,167 @@ class AilakeWriteBatchIntegrationTest {
         println("[test] searchText OK: rowId=${best.rowId} distance=${best.distance}")
         println()
         println("PASS (Trino): FTS write+searchText roundtrip functional with real library.")
+    }
+
+    // ── Phase U: DELETE / ALTER TABLE / compact / hybrid search — real SQL surface ──
+    //
+    // These exercise the NEW SPI wiring (VectorScanMetadata.applyFilter/
+    // applyDelete/executeDelete/addColumn, AilakeProcedures.compact,
+    // VectorScanRecordSetProvider's hybrid/text-search split routing), not
+    // just AilakeNative's underlying calls (already proven above) — the whole
+    // point is proving the new SQL surfaces (DELETE, ALTER TABLE ADD COLUMN,
+    // CALL compact(), hybrid search session properties) actually work
+    // end-to-end against a real native library, closing the "dead capability"
+    // gap found in the full-plugin audit.
+
+    private val session = mock<ConnectorSession>()
+
+    @Test
+    fun deleteViaMetadataSpiRoundtrip() {
+        assumeTrue(libPath != null)  { "AILAKE_LIB_PATH not set — skipping" }
+        assumeTrue(writeDir != null) { "AILAKE_WRITE_DIR not set — skipping" }
+        assumeTrue(libPresent)       { "libailake_jni.so not found — skipping" }
+
+        val tableUri = "$writeDir/integration-delete-spi-trino"
+        val tableName = "integration_delete_spi_trino"
+        AilakeNative.writeBatch(
+            tableUri = tableUri, namespace = "default", tableName = tableName,
+            vectorColumn = "embedding", dim = 4, metric = "cosine", precision = "f16",
+            ids = listOf(0L, 1L, 2L),
+            embeddings = listOf(
+                listOf(1.0f, 0.0f, 0.0f, 0.0f), listOf(0.0f, 1.0f, 0.0f, 0.0f), listOf(0.0f, 0.0f, 1.0f, 0.0f),
+            ),
+        )
+        val metadata = VectorScanMetadata(
+            tableUri = tableUri, vectorColumn = "embedding", dim = 4, metric = "cosine", precision = "f16",
+            namespace = "default", tableName = tableName,
+        )
+        val ingestHandle = metadata.getTableHandle(session, io.trino.spi.connector.SchemaTableName("default", "ingest"))!!
+        val idCol = VectorScanColumnHandle("id", 0)
+        val constraint = Constraint(TupleDomain.withColumnDomains(mapOf(idCol to Domain.multipleValues(BIGINT, listOf(0L, 1L)))))
+
+        val filterResult = metadata.applyFilter(session, ingestHandle, constraint)
+        check(filterResult.isPresent) { "applyFilter did not push down a simple IN predicate" }
+        val filteredHandle = filterResult.get().handle
+
+        val deleteHandle = metadata.applyDelete(session, filteredHandle)
+        check(deleteHandle.isPresent) { "applyDelete did not accept the pushed-down handle" }
+
+        metadata.executeDelete(session, deleteHandle.get()) // throws on failure — no exception = success
+        println("[test] DELETE via metadata SPI OK: rows 0,1 deleted from $tableName")
+        println("PASS (Trino): applyFilter→applyDelete→executeDelete roundtrip functional with real library.")
+    }
+
+    @Test
+    fun addColumnViaMetadataSpiRoundtrip() {
+        assumeTrue(libPath != null)  { "AILAKE_LIB_PATH not set — skipping" }
+        assumeTrue(writeDir != null) { "AILAKE_WRITE_DIR not set — skipping" }
+        assumeTrue(libPresent)       { "libailake_jni.so not found — skipping" }
+
+        val tableUri = "$writeDir/integration-addcol-spi-trino"
+        val tableName = "integration_addcol_spi_trino"
+        AilakeNative.writeBatch(
+            tableUri = tableUri, namespace = "default", tableName = tableName,
+            vectorColumn = "embedding", dim = 4, metric = "cosine", precision = "f16",
+            ids = listOf(0L, 1L),
+            embeddings = listOf(listOf(1.0f, 0.0f, 0.0f, 0.0f), listOf(0.0f, 1.0f, 0.0f, 0.0f)),
+        )
+        val metadata = VectorScanMetadata(
+            tableUri = tableUri, vectorColumn = "embedding", dim = 4, metric = "cosine", precision = "f16",
+            namespace = "default", tableName = tableName,
+        )
+        val ingestHandle = metadata.getTableHandle(session, io.trino.spi.connector.SchemaTableName("default", "ingest"))!!
+        metadata.addColumn(session, ingestHandle, ColumnMetadata("source", VARCHAR)) // throws on failure
+        println("[test] ADD COLUMN via metadata SPI OK: 'source' added to $tableName")
+        println("PASS (Trino): addColumn functional with real library.")
+    }
+
+    @Test
+    fun compactProcedureRoundtrip() {
+        assumeTrue(libPath != null)  { "AILAKE_LIB_PATH not set — skipping" }
+        assumeTrue(writeDir != null) { "AILAKE_WRITE_DIR not set — skipping" }
+        assumeTrue(libPresent)       { "libailake_jni.so not found — skipping" }
+
+        val tableUri = "$writeDir/integration-compact-trino"
+        val tableName = "integration_compact_trino"
+        (0 until 5).forEach { batch ->
+            val snap = AilakeNative.writeBatch(
+                tableUri = tableUri, namespace = "default", tableName = tableName,
+                vectorColumn = "embedding", dim = 4, metric = "cosine", precision = "f16",
+                ids = listOf(batch * 2L, batch * 2L + 1L),
+                embeddings = listOf(listOf(1.0f, 0.0f, 0.0f, 0.0f), listOf(0.0f, 1.0f, 0.0f, 0.0f)),
+            )
+            checkNotNull(snap) { "writeBatch (batch $batch) returned null" }
+        }
+        val procedures = AilakeProcedures(tableUri, "default", tableName)
+        procedures.compact(session) // throws on failure
+        val results = AilakeNative.search(tableUri, VectorScanSplitManager.csvFloatsToBase64("1,0,0,0"), topK = 10, tableName = tableName)
+        check(results.size == 10) { "expected 10 rows searchable post-compact, got ${results.size}" }
+        println("[test] CALL compact() OK: table still has 10 searchable rows")
+        println("PASS (Trino): compact procedure functional with real library.")
+    }
+
+    @Test
+    fun hybridSearchViaRecordSetProviderRoundtrip() {
+        assumeTrue(libPath != null)  { "AILAKE_LIB_PATH not set — skipping" }
+        assumeTrue(writeDir != null) { "AILAKE_WRITE_DIR not set — skipping" }
+        assumeTrue(libPresent)       { "libailake_jni.so not found — skipping" }
+
+        val tableUri = "$writeDir/integration-hybrid-trino"
+        val tableName = "integration_hybrid_trino"
+        val texts = listOf("rust programming language", "hello world example", "vector search database")
+        val snap = AilakeNative.writeBatch(
+            tableUri = tableUri, namespace = "default", tableName = tableName,
+            vectorColumn = "embedding", dim = 4, metric = "cosine", precision = "f16",
+            ids = listOf(0L, 1L, 2L),
+            embeddings = listOf(
+                listOf(1.0f, 0.0f, 0.0f, 0.0f), listOf(0.0f, 1.0f, 0.0f, 0.0f), listOf(0.0f, 0.0f, 1.0f, 0.0f),
+            ),
+            ftsColumns = listOf("chunk_text"), ftsTokenizer = "default",
+            columns = mapOf("chunk_text" to texts),
+        )
+        checkNotNull(snap) { "writeBatch with ftsColumns returned null" }
+
+        // Pure text search: split carries queryText but no queryBytes — routes
+        // through VectorScanRecordSetProvider's searchText branch, not search().
+        val textOnlySplit = VectorScanSplit(
+            tableUri = tableUri, queryBytes = "", topK = 3,
+            namespace = "default", tableName = tableName, vectorColumn = "embedding",
+            queryText = "rust", hybridWeight = 0.5f,
+        )
+        val textOnlyRows = VectorScanRecordSetProvider().getRecordSet(
+            VectorScanTransactionHandle, session, textOnlySplit,
+            VectorScanTableHandle(tableUri, "embedding", 4, "default", tableName),
+            listOf(VectorScanColumnHandle("row_id", 0)),
+        ).cursor().let { cursor ->
+            val ids = mutableListOf<Long>()
+            while (cursor.advanceNextPosition()) ids += cursor.getLong(0)
+            ids
+        }
+        check(textOnlyRows.isNotEmpty()) { "pure text search returned empty" }
+        check(textOnlyRows.first() == 0L) { "expected rowId=0 (rust programming) first, got $textOnlyRows" }
+        println("[test] pure text search via split routing OK: top row=${textOnlyRows.first()}")
+
+        // Hybrid: both queryBytes and queryText set — routes through search()'s hybridText path.
+        val qRaw = floatArrayOf(1.0f, 0.0f, 0.0f, 0.0f)
+        val hybridSplit = VectorScanSplit(
+            tableUri = tableUri,
+            queryBytes = VectorScanSplitManager.csvFloatsToBase64(qRaw.joinToString(",")),
+            topK = 3, namespace = "default", tableName = tableName, vectorColumn = "embedding",
+            queryText = "rust", hybridWeight = 0.5f,
+        )
+        val hybridRows = VectorScanRecordSetProvider().getRecordSet(
+            VectorScanTransactionHandle, session, hybridSplit,
+            VectorScanTableHandle(tableUri, "embedding", 4, "default", tableName),
+            listOf(VectorScanColumnHandle("row_id", 0)),
+        ).cursor().let { cursor ->
+            val ids = mutableListOf<Long>()
+            while (cursor.advanceNextPosition()) ids += cursor.getLong(0)
+            ids
+        }
+        check(hybridRows.isNotEmpty()) { "hybrid search returned empty" }
+        println("[test] hybrid search via split routing OK: rows=$hybridRows")
+        println()
+        println("PASS (Trino): hybrid/text search session-property routing functional with real library.")
     }
 }

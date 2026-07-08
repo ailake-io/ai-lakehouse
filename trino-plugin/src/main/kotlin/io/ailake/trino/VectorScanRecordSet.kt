@@ -25,7 +25,28 @@ class VectorScanRecordSetProvider : ConnectorRecordSetProvider {
         columns: List<ColumnHandle>,
     ): RecordSet {
         val s = split as VectorScanSplit
-        val rows = AilakeNative.search(s.tableUri, s.queryBytes, s.topK)
+        // Three modes, selected by which session properties are set (see
+        // VectorScanConnector.getSessionProperties): pure vector search
+        // (query_vector only), hybrid BM25+vector RRF fusion (both set —
+        // AilakeNative.search's hybridText path), or pure text search
+        // (query_text only, no query_vector — AilakeNative.searchText,
+        // O(log N) via Tantivy when the table has an FTS index, see
+        // ailake.fts-columns).
+        val rows = when {
+            s.queryBytes.isBlank() && s.queryText.isNotBlank() ->
+                AilakeNative.searchText(s.tableUri, s.namespace, s.tableName, s.queryText, topK = s.topK)
+            s.queryText.isNotBlank() ->
+                AilakeNative.search(
+                    s.tableUri, s.queryBytes, s.topK,
+                    hybridText = s.queryText, bm25Weight = s.hybridWeight,
+                    namespace = s.namespace, tableName = s.tableName, vectorColumn = s.vectorColumn,
+                )
+            else ->
+                AilakeNative.search(
+                    s.tableUri, s.queryBytes, s.topK,
+                    namespace = s.namespace, tableName = s.tableName, vectorColumn = s.vectorColumn,
+                )
+        }
         val cols = columns.map { it as VectorScanColumnHandle }
         return VectorScanRecordSet(rows, cols)
     }

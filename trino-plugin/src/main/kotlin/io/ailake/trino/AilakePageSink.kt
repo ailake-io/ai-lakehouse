@@ -38,6 +38,10 @@ class AilakePageSink(private val handle: AilakeIngestTableHandle) : ConnectorPag
 
         for (pos in 0 until page.positionCount) {
             ids += if (!idBlock.isNull(pos)) BIGINT.getLong(idBlock, pos) else autoId
+            check(!vecBlock.isNull(pos)) {
+                "Vector column '${handle.vectorColumn}' cannot be NULL (row with id-position=$pos in this page) " +
+                "— every row must carry a real embedding for AI-Lake to index it."
+            }
             embeddings += extractVector(vecBlock, pos)
             textBlocks.forEach { (name, block) ->
                 textValues.getValue(name) += if (block.isNull(pos)) "" else VARCHAR.getSlice(block, pos).toStringUtf8()
@@ -68,6 +72,12 @@ class AilakePageSink(private val handle: AilakeIngestTableHandle) : ConnectorPag
             embeddingModel  = handle.embeddingModel,
             partitionFields = handle.partitionFields,
             formatVersion   = handle.formatVersion,
+            hnswM              = handle.hnswM,
+            hnswEfConstruction = handle.hnswEfConstruction,
+            preNormalize       = handle.preNormalize,
+            deferred           = handle.deferred,
+            ftsColumns         = handle.ftsColumns,
+            ftsTokenizer       = handle.ftsTokenizer,
             columns         = textValues,
         )
 
