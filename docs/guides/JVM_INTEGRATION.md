@@ -641,34 +641,89 @@ echo 'env.java.opts.taskmanager: -Djava.library.path=/opt/ailake/lib' \
     >> /opt/flink/conf/flink-conf.yaml
 ```
 
-### 6B — SQL DDL (sink)
+### 6B — SQL DDL (sink and source)
+
+The `ailake` connector serves two DIFFERENT DDL shapes depending on direction —
+exactly like Spark/Trino's separate `ingest`/`search` tables, just modeled here
+as two Flink `CREATE TABLE` statements sharing the same `warehouse`/`namespace`/
+`table-name` (i.e. the same physical AI-Lake table). Mixing them up (e.g. trying
+to `SELECT` from a table declared with the write-shaped schema) fails at
+DDL-resolution time with a clear `ValidationException`, not a runtime crash.
 
 ```sql
--- Create AI-Lake sink table in Flink SQL
-CREATE TABLE ailake_docs (
-    id        STRING,
+-- Write (sink): id + vector + any number of extra STRING columns
+CREATE TABLE ailake_docs_ingest (
+    id        BIGINT,
     text      STRING,
     embedding ARRAY<FLOAT>
 ) WITH (
     'connector'        = 'ailake',
-    'table.uri'        = 's3://my-lake/docs/',
+    'warehouse'        = 's3://my-lake/',
+    'namespace'        = 'default',
+    'table-name'       = 'docs',
     'vector.column'    = 'embedding',
-    'dim'              = '1536',
-    'metric'           = 'cosine',
-    'precision'        = 'f16',
+    'vector.dim'       = '1536',
+    'vector.metric'    = 'cosine',
+    'vector.precision' = 'f16',
     'format.version'   = '2',
     -- Optional Iceberg partition fields (JSON array)
-    'partition.fields' = '[{"column":"topic_id","transform":"identity","column_type":"int"}]'
+    'partition.fields' = '[{"column":"topic_id","transform":"identity","column_type":"int"}]',
+    -- Optional write-tuning knobs
+    'hnsw.m'                = '32',
+    'hnsw.ef-construction'  = '200',
+    'pre-normalize'         = 'false',
+    'deferred'              = 'false'
 );
 
 -- Stream embeddings from Kafka source table to AI-Lake
-INSERT INTO ailake_docs
+INSERT INTO ailake_docs_ingest
 SELECT id, text, embedding
 FROM kafka_embeddings_source;
 
 -- Batch ingest from a Hive table
-INSERT INTO ailake_docs
+INSERT INTO ailake_docs_ingest
 SELECT id, text, embedding FROM hive_catalog.default.chunks;
+
+-- Equality/IN deletes only — no row-level scan-and-delete
+DELETE FROM ailake_docs_ingest WHERE id = 5;
+DELETE FROM ailake_docs_ingest WHERE id IN (1, 2, 3);
+
+-- Adds/renames the column in the table's Iceberg schema on disk immediately.
+-- This connector's own in-memory schema is fixed at table-creation time —
+-- restart the job (or reissue CREATE TABLE) before INSERT/SELECT can see it.
+ALTER TABLE ailake_docs_ingest ADD COLUMN source STRING;
+ALTER TABLE ailake_docs_ingest RENAME COLUMN source TO doc_source;
+
+-- Read (source): fixed 3-column search-result shape
+CREATE TABLE ailake_docs_search (
+    row_id    BIGINT,
+    distance  FLOAT,
+    file_path STRING
+) WITH (
+    'connector'     = 'ailake',
+    'warehouse'     = 's3://my-lake/',
+    'namespace'     = 'default',
+    'table-name'    = 'docs',
+    'vector.column' = 'embedding',
+    'vector.dim'    = '1536',
+    'search.top-k'  = '10',
+    'search.ef'     = '50'
+);
+
+-- Query vector passed via job parameters (Flink SQL has no per-query SET SESSION):
+--   flink run -pyfs ... -Dailake.query.vector='0.1,0.2,...' -Dailake.top-k=10
+-- or programmatically via ExecutionConfig.setGlobalJobParameters(...).
+--
+-- ailake.query.text alone -> pure full-text search (Tantivy O(log N) when the
+-- table has an FTS index via vector.column's fts.columns, else O(N) BM25).
+-- ailake.query.vector + ailake.query.text together -> hybrid BM25+vector RRF
+-- (weight via ailake.hybrid.weight, default 0.5).
+SELECT row_id, distance, file_path FROM ailake_docs_search ORDER BY distance;
+
+-- Compact small files — no CALL-equivalent for connectors in Flink SQL, exposed
+-- as a plain scalar function instead:
+CREATE TEMPORARY FUNCTION ailake_compact AS 'io.ailake.flink.AilakeCompactFunction';
+SELECT ailake_compact('s3://my-lake/', 'default', 'docs');
 ```
 
 ### 6C — Kotlin API (low-level)
@@ -705,19 +760,19 @@ val ftsHits = loader.searchText(
     partitionFilter = null,
 )
 
-// Cross-modal RRF (Phase 8)
+// Cross-modal RRF (Phase 8) — Triple is (column, query vector, weight), in that order
 val mmHits = loader.searchMultimodal(
     warehouse = "s3://my-lake/",
     namespace = "default",
     table     = "media",
     queries   = listOf(
-        Triple(0.7f, "embedding",       textVec),
-        Triple(0.3f, "image_embedding", imageVec),
+        Triple("embedding",       textVec,  0.7f),
+        Triple("image_embedding", imageVec, 0.3f),
     ),
     topK = 20,
 )
 
-// Write batch
+// Write batch — ids: LongArray, embeddings: Array<FloatArray>
 loader.writeBatch(
     warehouse        = "s3://my-lake/",
     namespace        = "default",
@@ -726,8 +781,8 @@ loader.writeBatch(
     dim              = 1536,
     metric           = "cosine",
     precision        = "f16",
-    ids              = listOf("doc-1", "doc-2"),
-    embeddings       = listOf(vec1, vec2),
+    ids              = longArrayOf(1L, 2L),
+    embeddings       = arrayOf(vec1, vec2),
     embeddingModel   = "text-embedding-3-small@v1",
     formatVersion    = 2,
     ftsColumns       = listOf("chunk_text"),
@@ -740,7 +795,7 @@ loader.deleteWhere(
     namespace = "default",
     table     = "docs",
     column    = "id",
-    values    = listOf("doc-1", "doc-2"),
+    values    = listOf("1", "2"),
 )
 
 // Schema evolution
@@ -762,13 +817,24 @@ loader.evolveSchema(
 | Option | Default | Description |
 |---|---|---|
 | `connector` | required | Must be `"ailake"` |
-| `table.uri` | required | AI-Lake table root URI |
+| `warehouse` | required | AI-Lake warehouse root URI |
+| `table-name` | required | Table name within the warehouse |
+| `vector.dim` | required | Embedding dimension |
+| `namespace` | `"default"` | Iceberg namespace |
 | `vector.column` | `"embedding"` | Column containing `ARRAY<FLOAT>` |
-| `dim` | required | Embedding dimension |
-| `metric` | `"cosine"` | `cosine` \| `euclidean` \| `dot_product` |
-| `precision` | `"f16"` | `f32` \| `f16` \| `i8` |
+| `vector.metric` | `"euclidean"` | `cosine` \| `euclidean` \| `dot_product` |
+| `vector.precision` | `"f16"` | `f32` \| `f16` \| `i8` |
+| `search.top-k` | `10` | Nearest neighbors to return (source tables) |
+| `search.ef` | `50` | HNSW `ef_search` (source tables) |
+| `embedding.model` | unset | Stored in `ailake.embedding-model` Iceberg property |
 | `partition.fields` | `"[]"` | JSON array of `{column, transform, column_type}` |
-| `format.version` | `"2"` | Iceberg format version (`2` or `3`) |
+| `format.version` | `2` | Iceberg format version (`2` or `3`) |
+| `fts.columns` | `""` | Comma-separated extra text columns, persisted as metadata (write path) |
+| `fts.tokenizer` | `"default"` | Tantivy tokenizer for `fts.columns` |
+| `hnsw.m` | unset | HNSW graph connectivity (M); unset = table default |
+| `hnsw.ef-construction` | unset | HNSW `ef_construction`; unset = table default |
+| `pre-normalize` | `false` | Normalize vectors to unit L2 at write time (recommended for cosine) |
+| `deferred` | `false` | Build index asynchronously; Parquet committed immediately |
 
 ### 6E — Running Flink tests
 
@@ -777,42 +843,54 @@ cd ailake-flink
 ./gradlew test
 
 # Test classes:
-#   AilakeVectorConnectorFactoryTest — DDL option parsing, factory lookup
+#   AilakeVectorConnectorFactoryTest — DDL option parsing, factory lookup, source schema validation
 #   AilakeNativeLoaderTest           — data classes, JSON payload shape (no native lib needed)
 #   AilakeVectorTableSourceTest      — AilakeInputFormat.open() degrades to an empty
 #                                      result set when the native lib can't be loaded,
-#                                      instead of failing the Flink task
-#   AilakeJniIntegrationTest         — end-to-end when AILAKE_JNI_TEST=1
+#                                      instead of failing the Flink task; query.vector/
+#                                      query.text job-parameter combinations
+#   AilakeVectorTableSinkTest        — extra-column capture, null id/vector guards,
+#                                      type validation, DELETE pushdown
+#   AilakeCatalogTest                — table-name/namespace injection, ALTER TABLE wiring
+#   AilakeCompactFunctionTest        — CALL-equivalent compact scalar function
+#   AilakeJniIntegrationTest         — end-to-end against a real libailake_jni.so when
+#                                      AILAKE_NATIVE_LIB is set (write+search, delete,
+#                                      schema evolution, DELETE/ALTER TABLE/compact/
+#                                      hybrid-search SQL-surface wiring)
 ```
 
 ---
 
-## 7. Cross-engine reference — delete and schema evolution
+## 7. Cross-engine reference — delete, schema evolution, compact
 
-All three JVM plugins expose the same operations via the JSON-envelope ABI.
+All three JVM plugins expose the same operations via the JSON-envelope ABI,
+and (as of this section's last update) all three also wire them into a real
+SQL surface, not just a Kotlin/Scala API — equality/IN pushdown only for
+delete, matching the native equality-delete-file mechanism.
 
 ### Delete (equality delete — no data rewrite)
 
-| Engine | Call |
-|---|---|
-| Spark | `AilakeNative.deleteWhere(tableUri, ns, table, col, values)` |
-| Trino | `AilakeNative.deleteWhere(tableUri, ns, table, col, values)` (Kotlin) |
-| Flink | `AilakeNativeLoader.deleteWhere(warehouse, ns, table, col, values)` |
+| Engine | SQL surface | Underlying call |
+|---|---|---|
+| Spark | `DELETE FROM ailake.default.ingest WHERE id = 5` (via catalog) | `AilakeNative.deleteWhere(tableUri, ns, table, col, values)` |
+| Trino | `DELETE FROM ailake.default.ingest WHERE id IN (1,2,3)` | `AilakeNative.deleteWhere(...)` (Kotlin) |
+| Flink | `DELETE FROM ailake_docs_ingest WHERE id = 5` (`SupportsDeletePushDown`) | `AilakeNativeLoader.deleteWhere(warehouse, ns, table, col, values)` |
 
 ### Schema evolution (metadata-only)
 
-| Engine | Call |
-|---|---|
-| Spark | `AilakeNative.evolveSchema(tableUri, ns, table, addCols, renameCols)` |
-| Trino | `AilakeNative.evolveSchema(...)` (Kotlin) |
-| Flink | `AilakeNativeLoader.evolveSchema(...)` |
+| Engine | SQL surface | Underlying call |
+|---|---|---|
+| Spark | — (Kotlin/Scala API only) | `AilakeNative.evolveSchema(tableUri, ns, table, addCols, renameCols)` |
+| Trino | `ALTER TABLE ailake.default.ingest ADD COLUMN`/`RENAME COLUMN` | `AilakeNative.evolveSchema(...)` (Kotlin) |
+| Flink | `ALTER TABLE ailake_docs_ingest ADD COLUMN`/`RENAME COLUMN` | `AilakeNativeLoader.evolveSchema(...)` |
 
 ### Compact
 
-| Engine | Call |
-|---|---|
-| Spark | `AilakeNative.compact(tableUri, ns, table, minFiles, targetSizeBytes)` |
-| Flink | `AilakeNativeLoader.compact(...)` |
+| Engine | SQL surface | Underlying call |
+|---|---|---|
+| Spark | — (Kotlin/Scala API only) | `AilakeNative.compact(tableUri, ns, table, minFiles, targetSizeBytes)` |
+| Trino | `CALL ailake.system.compact()` | `AilakeNative.compact(...)` (Kotlin) |
+| Flink | `SELECT ailake_compact(warehouse, ns, table)` (scalar function — Flink has no `CALL`-equivalent for connectors) | `AilakeNativeLoader.compact(...)` |
 | Python | `ailake.compact(path, min_files=4, target_size_bytes=128*1024*1024)` |
 
 ---

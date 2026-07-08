@@ -2,12 +2,14 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.flink
 
+import io.ailake.flink.internal.AilakeNativeLoader
 import org.apache.flink.table.catalog.*
 import org.apache.flink.table.catalog.exceptions.*
 import org.apache.flink.table.catalog.stats.CatalogColumnStatistics
 import org.apache.flink.table.catalog.stats.CatalogTableStatistics
 import org.apache.flink.table.expressions.Expression
 import org.apache.flink.table.factories.Factory
+import org.apache.flink.table.types.logical.LogicalTypeRoot
 import java.util.Optional
 
 /**
@@ -115,10 +117,19 @@ class AilakeCatalog(
             if (!ignoreIfExists) throw TableAlreadyExistException(name, tablePath)
             return
         }
-        // Inject 'connector' = 'ailake' and 'warehouse' if not already present
+        // Inject 'connector'/'warehouse'/'table-name'/'namespace' if not already present.
+        // Regression: 'table-name' is a *required* connector option with no default
+        // (AilakeVectorConnectorFactory.TABLE_NAME) — without this, any `CREATE TABLE`
+        // through this catalog failed FactoryUtil validation unless the user redundantly
+        // re-specified 'table-name' (and 'namespace') inside WITH(...), defeating the
+        // point of a catalog. 'namespace' also now respects this catalog's configured
+        // defaultNamespace instead of always silently falling back to the connector's
+        // own "default".
         val props = table.options.toMutableMap()
         props.putIfAbsent("connector", AilakeVectorConnectorFactory.IDENTIFIER)
         props.putIfAbsent("warehouse", warehouse)
+        props.putIfAbsent("table-name", tablePath.objectName)
+        props.putIfAbsent("namespace", tablePath.databaseName.takeIf { it.isNotBlank() } ?: defaultNamespace)
         tables[tablePath] = CatalogTableImpl(
             (table as CatalogTable).schema,
             props,
@@ -132,6 +143,80 @@ class AilakeCatalog(
             return
         }
         tables[tablePath] = newTable
+    }
+
+    /**
+     * `ALTER TABLE ... ADD COLUMN` / `RENAME COLUMN` — Flink calls this overload (not
+     * the 3-arg one above) when it has structured [TableChange]s available, which is
+     * exactly the case for `ADD COLUMN`/`RENAME COLUMN` DDL. Regression: this override
+     * didn't exist at all — the 3-arg `alterTable` only ever swapped Flink's in-memory
+     * `CatalogBaseTable`, so `ALTER TABLE` appeared to succeed while never touching the
+     * real AI-Lake/Iceberg table on disk. `AilakeNativeLoader.evolveSchema` was already
+     * fully implemented and tested; this just wires it in.
+     *
+     * Only [TableChange.AddColumn] and [TableChange.ModifyColumnName] map to
+     * `evolveSchema`'s capability (add/rename columns, metadata-only). Other change
+     * kinds (drop column, retype, reposition, comments, constraints, watermarks,
+     * table options) have no equivalent in `evolveSchema` and are silently accepted
+     * into Flink's in-memory catalog state only — same "static per-process schema"
+     * caveat as trino-plugin's `addColumn`/`renameColumn`: the change is real on disk,
+     * but this catalog's own DDL-derived table options don't auto-refresh, so a newly
+     * added column isn't visible to `INSERT`/`SELECT` through this same catalog
+     * instance until the table is re-created (session restart / catalog reload).
+     */
+    override fun alterTable(
+        tablePath: ObjectPath,
+        newTable: CatalogBaseTable,
+        tableChanges: List<TableChange>,
+        ignoreIfNotExists: Boolean,
+    ) {
+        val existing = tables[tablePath] ?: run {
+            if (!ignoreIfNotExists) throw TableNotExistException(name, tablePath)
+            return
+        }
+        val opts = existing.options
+        val tableWarehouse = opts["warehouse"] ?: warehouse
+        val ns = opts["namespace"] ?: tablePath.databaseName
+        val tbl = opts["table-name"] ?: tablePath.objectName
+
+        val addCols = mutableListOf<AilakeNativeLoader.AddColReq>()
+        val renameCols = mutableListOf<AilakeNativeLoader.RenameColReq>()
+        for (change in tableChanges) {
+            when (change) {
+                is TableChange.AddColumn ->
+                    addCols += AilakeNativeLoader.AddColReq(
+                        change.column.name,
+                        flinkTypeToIcebergType(change.column.dataType.logicalType.typeRoot),
+                    )
+                is TableChange.ModifyColumnName ->
+                    renameCols += AilakeNativeLoader.RenameColReq(change.oldColumnName, change.newColumnName)
+                else -> {} // no evolveSchema equivalent — see KDoc above
+            }
+        }
+        if (addCols.isNotEmpty() || renameCols.isNotEmpty()) {
+            AilakeNativeLoader.evolveSchema(tableWarehouse, ns, tbl, addCols, renameCols)
+        }
+        tables[tablePath] = newTable
+    }
+
+    /**
+     * Common Iceberg primitive types only — matches this connector's own minimal
+     * column type surface (id BIGINT, embedding ARRAY<FLOAT>, text columns VARCHAR).
+     * See ailake-catalog's `schema_evolution.rs` for the full set of Iceberg type
+     * strings the native side accepts.
+     */
+    private fun flinkTypeToIcebergType(root: LogicalTypeRoot): String = when (root) {
+        LogicalTypeRoot.BIGINT -> "long"
+        LogicalTypeRoot.INTEGER -> "int"
+        LogicalTypeRoot.DOUBLE -> "double"
+        LogicalTypeRoot.FLOAT -> "float"
+        LogicalTypeRoot.BOOLEAN -> "boolean"
+        LogicalTypeRoot.DATE -> "date"
+        LogicalTypeRoot.VARCHAR, LogicalTypeRoot.CHAR -> "string"
+        else -> throw IllegalArgumentException(
+            "Column type $root is not supported by ALTER TABLE ADD COLUMN for AI-Lake tables — " +
+            "supported types: BIGINT, INTEGER, DOUBLE, FLOAT, BOOLEAN, DATE, VARCHAR/CHAR",
+        )
     }
 
     // ── Partitions / Stats (not implemented) ──────────────────────────────

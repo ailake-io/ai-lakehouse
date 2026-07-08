@@ -84,32 +84,48 @@ class AilakeInputFormat(
 
     override fun open(split: GenericInputSplit) {
         val params = runtimeContext.executionConfig.globalJobParameters.toMap()
-        val queryParam = params["ailake.query.vector"]
-            ?: throw IllegalStateException(
-                "Job parameter 'ailake.query.vector' not set — " +
-                "provide comma-separated f32 values for the query vector"
+        val queryVectorParam = params["ailake.query.vector"]
+        // Hybrid BM25+vector RRF fusion (both set) or pure full-text search
+        // (query.text set, query.vector unset) — AilakeNativeLoader.search's
+        // hybridText path and .searchText were already fully implemented but
+        // unreachable from any Flink source before this.
+        val queryTextParam = params["ailake.query.text"]
+        val hybridWeight = params["ailake.hybrid.weight"]?.toFloatOrNull() ?: 0.5f
+        if (queryVectorParam == null && queryTextParam == null) {
+            throw IllegalStateException(
+                "Job parameter 'ailake.query.vector' and/or 'ailake.query.text' must be set — " +
+                "'ailake.query.vector': comma-separated f32 values for vector/hybrid search; " +
+                "'ailake.query.text' alone: pure full-text search"
             )
+        }
         // partition_filter from job params overrides constructor value (constructor wins if both set)
         val effectivePartition = partitionFilter ?: params["ailake.partition.filter"]
 
-        val query = queryParam.split(",").map { it.trim().toFloat() }.toFloatArray()
         // AilakeNativeLoader.lib throws (via getOrThrow()) when libailake_jni.so isn't on
         // the library path, and every AilakeNativeLoader method reads it eagerly — unlike
         // Spark/Trino/DuckDB, which all resolve the native handle to a nullable/Optional
         // and degrade to empty results. Catch here so a missing native lib fails this
         // source with empty results instead of crashing the whole Flink task.
         results = try {
-            AilakeNativeLoader.search(
-                warehouse       = warehouse,
-                namespace       = namespace,
-                table           = tableName,
-                vecCol          = vecCol,
-                dim             = dim,
-                query           = query,
-                topK            = topK,
-                efSearch        = efSearch,
-                partitionFilter = effectivePartition,
-            ).iterator()
+            when {
+                queryVectorParam == null -> AilakeNativeLoader.searchText(
+                    warehouse = warehouse, namespace = namespace, table = tableName,
+                    queryText = queryTextParam!!, topK = topK, partitionFilter = effectivePartition,
+                ).iterator()
+                queryTextParam != null -> AilakeNativeLoader.search(
+                    warehouse = warehouse, namespace = namespace, table = tableName,
+                    vecCol = vecCol, dim = dim,
+                    query = queryVectorParam.split(",").map { it.trim().toFloat() }.toFloatArray(),
+                    topK = topK, efSearch = efSearch, partitionFilter = effectivePartition,
+                    hybridText = queryTextParam, bm25Weight = hybridWeight,
+                ).iterator()
+                else -> AilakeNativeLoader.search(
+                    warehouse = warehouse, namespace = namespace, table = tableName,
+                    vecCol = vecCol, dim = dim,
+                    query = queryVectorParam.split(",").map { it.trim().toFloat() }.toFloatArray(),
+                    topK = topK, efSearch = efSearch, partitionFilter = effectivePartition,
+                ).iterator()
+            }
         } catch (e: Throwable) {
             // Broad by design: `Native.load()` failure surfaces as `UnsatisfiedLinkError`
             // (a JVM Error, not Exception) and the exact wrapping can vary by JVM/JNA
