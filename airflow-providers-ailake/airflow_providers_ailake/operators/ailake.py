@@ -159,11 +159,12 @@ class AilakeCompactOperator(BaseOperator):
 
 
 class AilakeSearchOperator(BaseOperator):
-    """Run a vector similarity search on an AI-Lake table and push results to XCom.
+    """Run a vector similarity search on an AI-Lake table and return the results.
 
     The query vector is read from ``query_vector`` (list of floats) or from
-    XCom via ``query_xcom_task_id`` + ``query_xcom_key``.  Results are pushed
-    to XCom under key ``search_results`` as a list of dicts::
+    XCom via ``query_xcom_task_id`` + ``query_xcom_key``.  Results are returned
+    as a list of dicts and, via Airflow's default ``do_xcom_push`` behavior,
+    land on XCom under the standard ``"return_value"`` key::
 
         [{"rank": 1, "row_id": 42, "distance": 0.003, "file_path": "data/part-0.parquet"}, ...]
 

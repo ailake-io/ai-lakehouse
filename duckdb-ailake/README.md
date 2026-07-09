@@ -34,7 +34,8 @@ SELECT row_id, distance, file_path
 FROM ailake_search('file:///data/my_table', [0.1, 0.2, 0.3]::FLOAT[], 10)
 ORDER BY distance;
 
--- Combine with parquet_scan for full row data
+-- Combine with parquet_scan for full row data (legacy — prefer ailake_scan() below,
+-- which does this in one call with no JOIN required)
 SELECT p.id, p.text, s.distance
 FROM ailake_search('file:///data/docs', my_query_vec, 20) s
 JOIN parquet_scan('file:///data/docs/data/*.parquet') p
@@ -58,6 +59,26 @@ SELECT * FROM ailake_search(
     10,
     partition_filter='agent-42'
 ) ORDER BY distance;
+```
+
+### `ailake_scan` — vector search + full row fetch, no JOIN required
+
+```sql
+SELECT * FROM ailake_scan(
+    table_path VARCHAR,    -- path/URI to AI-Lake table root
+    query      FLOAT[],    -- query embedding (LIST(FLOAT))
+    top_k      INTEGER     -- number of nearest neighbors
+) → TABLE(<all Parquet columns>, _distance FLOAT)
+```
+
+Unlike `ailake_search()`, which returns only `(row_id, distance, file_path)` pointers and needs a manual `JOIN` against `parquet_scan(...)` to get real columns, `ailake_scan()` performs the search and full-row fetch in one native call — every Parquet column comes back alongside `_distance`. Backed by `ailake_scan_json` C-ABI. The full result is fetched at bind time and cached, so `LIMIT` does not reduce Rust-side I/O — use `top_k` to control how many rows are fetched.
+
+**Example:**
+
+```sql
+SELECT id, chunk_text, _distance
+FROM ailake_scan('file:///data/my_table', [0.1, 0.2, 0.3]::FLOAT[], 10)
+ORDER BY _distance;
 ```
 
 ### `ailake_search_multimodal` — cross-modal RRF search (Phase 8)
@@ -226,6 +247,50 @@ SELECT ailake_write_batch(
 );
 ```
 
+### `ailake_delete_where` — logical delete
+
+```sql
+SELECT ailake_delete_where(
+    table_path VARCHAR,    -- path/URI to AI-Lake table root
+    column     VARCHAR,    -- column name to match against
+    values     VARCHAR[]   -- values to delete
+) → BOOLEAN                -- TRUE on success, FALSE on any error or if the lib isn't loaded
+```
+
+Writes an Iceberg equality delete file for all rows where `column` equals any value in `values`. No data files are rewritten. Backed by `ailake_delete_where_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_delete_where(
+    'file:///data/my_table',
+    'document_id',
+    ['doc-a', 'doc-b', 'doc-c']
+);
+```
+
+### `ailake_evolve_schema` — metadata-only ADD/RENAME COLUMN
+
+```sql
+SELECT ailake_evolve_schema(
+    table_path          VARCHAR,  -- path/URI to AI-Lake table root
+    add_columns_json    VARCHAR,  -- JSON array: [{"name":"col","type":"string","initial_default":null}]
+    rename_columns_json VARCHAR   -- JSON array: [{"from":"old_name","to":"new_name"}]
+) → INTEGER               -- new schema_id on success, -1 on any error
+```
+
+Either argument may be `'[]'` or `''` to skip. No data files are rewritten. Backed by `ailake_evolve_schema_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_evolve_schema(
+    'file:///data/my_table',
+    '[{"name":"score","type":"float","initial_default":0.0}]',
+    '[{"from":"old_col","to":"new_col"}]'
+);
+```
+
 ## Build
 
 ```bash
@@ -281,7 +346,7 @@ D SELECT * FROM ailake_search('file:///data/docs', [0.1, 0.2]::FLOAT[], 5);
 
 ## Design
 
-- C-ABI bridge: `dlopen("libailake_jni.so")` → `ailake_search_json` / `ailake_search_multimodal_json` / `ailake_write_batch_json`
+- C-ABI bridge: `dlopen("libailake_jni.so")` → `ailake_search_json` / `ailake_scan_json` / `ailake_search_multimodal_json` / `ailake_search_text_json` / `ailake_write_batch_json` / `ailake_delete_where_json` / `ailake_evolve_schema_json`
 - Same JSON-envelope protocol as Spark (`AilakeNative.scala`) and Trino (`AilakeNative.kt`)
 - `ailake_search` executes the full search (pruning + HNSW) inside Rust; DuckDB sees a virtual table
 - Graceful degradation: if `libailake_jni.so` is not found, search returns 0 rows instead of aborting
