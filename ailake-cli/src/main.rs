@@ -106,6 +106,18 @@ enum Commands {
         /// Name of the embeddings column in the source file (single-column mode)
         #[arg(long, default_value = "embedding")]
         embeddings: String,
+        /// Distance metric (single-column mode only; default: table's existing metric,
+        /// or cosine for a brand-new table). Multi-column mode carries metric per
+        /// column in --vector-cols instead.
+        #[arg(long, value_enum)]
+        metric: Option<Metric>,
+        /// Vector precision (single-column mode only; default: f16).
+        #[arg(long, value_enum)]
+        precision: Option<Precision>,
+        /// Model identifier stored in ailake.embedding-model Iceberg property
+        /// (single-column mode only).
+        #[arg(long)]
+        embedding_model: Option<String>,
         /// Multi-column mode: comma-separated column specs, each as col:dim:metric[:modality].
         /// Example: "embedding:1536:cosine,image_embedding:512:cosine:image"
         /// When set, --embeddings is ignored.
@@ -572,6 +584,9 @@ async fn run(cli: Cli) -> Result<(), String> {
             table,
             file,
             embeddings,
+            metric,
+            precision,
+            embedding_model,
             vector_cols,
             batch_id,
             fts_columns,
@@ -720,28 +735,34 @@ async fn run(cli: Cli) -> Result<(), String> {
                     ));
                 }
 
+                let embedding_model_info = embedding_model.map(EmbeddingModelInfo::new);
+
                 // Load existing policy from catalog, or default to cosine/f16.
                 let policy = match catalog.load_table(&ident).await {
                     Ok(meta) => VectorStoragePolicy {
                         column_name: embeddings.clone(),
                         dim,
-                        metric: meta
-                            .properties
-                            .get("ailake.vector-metric")
-                            .map(|m| match m.as_str() {
-                                "euclidean" => VectorMetric::Euclidean,
-                                "dot" => VectorMetric::DotProduct,
-                                _ => VectorMetric::Cosine,
-                            })
-                            .unwrap_or(VectorMetric::Cosine),
-                        precision: VectorPrecision::F16,
+                        metric: metric.clone().map(VectorMetric::from).unwrap_or_else(|| {
+                            meta.properties
+                                .get("ailake.vector-metric")
+                                .map(|m| match m.as_str() {
+                                    "euclidean" => VectorMetric::Euclidean,
+                                    "dot" => VectorMetric::DotProduct,
+                                    _ => VectorMetric::Cosine,
+                                })
+                                .unwrap_or(VectorMetric::Cosine)
+                        }),
+                        precision: precision
+                            .clone()
+                            .map(VectorPrecision::from)
+                            .unwrap_or(VectorPrecision::F16),
                         pq: None,
                         keep_raw_for_reranking: true,
                         pre_normalize,
                         hnsw_m,
                         hnsw_ef_construction: hnsw_ef,
                         ivf_residual: false,
-                        embedding_model: None,
+                        embedding_model: embedding_model_info.clone(),
                         modality: None,
                         partition_by: partition_by.clone(),
                         partition_value: partition_value.clone(),
@@ -751,15 +772,19 @@ async fn run(cli: Cli) -> Result<(), String> {
                     Err(_) => VectorStoragePolicy {
                         column_name: embeddings.clone(),
                         dim,
-                        metric: VectorMetric::Cosine,
-                        precision: VectorPrecision::F16,
+                        metric: metric
+                            .map(VectorMetric::from)
+                            .unwrap_or(VectorMetric::Cosine),
+                        precision: precision
+                            .map(VectorPrecision::from)
+                            .unwrap_or(VectorPrecision::F16),
                         pq: None,
                         keep_raw_for_reranking: true,
                         pre_normalize,
                         hnsw_m,
                         hnsw_ef_construction: hnsw_ef,
                         ivf_residual: false,
-                        embedding_model: None,
+                        embedding_model: embedding_model_info,
                         modality: None,
                         partition_by,
                         partition_value,
