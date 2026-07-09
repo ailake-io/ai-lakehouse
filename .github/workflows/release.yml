@@ -69,7 +69,68 @@ jobs:
             sed -i -E "s/(${INTERNAL}[[:space:]]*=[[:space:]]*\{[^}]*version[[:space:]]*=[[:space:]]*\")[^\"]*/\1${NEW_VERSION}/" Cargo.toml
           done
 
-          git add $(find . -name "Cargo.toml" -not -path "*/target/*")
+          # Every other independently-versioned artifact in the monorepo — kept
+          # in lockstep with the Rust/PyPI version by explicit project policy
+          # (all artifacts share one version number). ailake-py's own
+          # pyproject.toml is excluded: it's `dynamic = ["version"]`, sourced
+          # from ailake-py/Cargo.toml by maturin, already covered above.
+          for GRADLE in spark-plugin/build.gradle.kts trino-plugin/build.gradle.kts \
+                        ailake-flink/build.gradle.kts; do
+            sed -i "s/^version = \"$OLD_VERSION\"/version = \"$NEW_VERSION\"/" "$GRADLE"
+          done
+          for CMAKE in duckdb-ailake/CMakeLists.txt ailake-cpp/CMakeLists.txt; do
+            sed -i -E "s/(project\([a-zA-Z0-9_-]+ VERSION )$OLD_VERSION/\1$NEW_VERSION/" "$CMAKE"
+          done
+          for PYPROJECT in airflow-providers-ailake/pyproject.toml \
+                          airbyte-destination-ailake/pyproject.toml; do
+            sed -i "s/^version = \"$OLD_VERSION\"/version = \"$NEW_VERSION\"/" "$PYPROJECT"
+          done
+
+          # Doc-example version placeholders: JVM plugin JAR filenames (the
+          # actual JAR name `publish-jvm` produces below is
+          # `<plugin>-$NEW_VERSION-plugin.jar`, driven by the build.gradle.kts
+          # version just bumped above), the `JAR_VERSION=`/`TAG=v` install-
+          # snippet placeholders, the `ailake==X` PyPI pip-install examples, and
+          # the `ailake-core/-query/-store = "X"` crates.io dependency examples.
+          # CHANGELOG.md is a historical record of each past release and must
+          # never be rewritten.
+          DOC_FILES=$(grep -rl \
+            -e "spark-plugin-$OLD_VERSION-plugin\.jar" \
+            -e "trino-plugin-$OLD_VERSION-plugin\.jar" \
+            -e "ailake-flink-$OLD_VERSION-plugin\.jar" \
+            -e "JAR_VERSION=$OLD_VERSION" \
+            -e "TAG=v$OLD_VERSION" \
+            -e "ailake==$OLD_VERSION" \
+            -e "ailake-core[[:space:]]*=[[:space:]]*\"$OLD_VERSION\"" \
+            -e "ailake-query[[:space:]]*=[[:space:]]*\"$OLD_VERSION\"" \
+            -e "ailake-store[[:space:]]*=[[:space:]]*\"$OLD_VERSION\"" \
+            --include="*.md" . 2>/dev/null | grep -v "CHANGELOG.md" || true)
+          for f in $DOC_FILES; do
+            sed -i -E \
+              -e "s/spark-plugin-$OLD_VERSION-plugin\.jar/spark-plugin-$NEW_VERSION-plugin.jar/g" \
+              -e "s/trino-plugin-$OLD_VERSION-plugin\.jar/trino-plugin-$NEW_VERSION-plugin.jar/g" \
+              -e "s/ailake-flink-$OLD_VERSION-plugin\.jar/ailake-flink-$NEW_VERSION-plugin.jar/g" \
+              -e "s/JAR_VERSION=$OLD_VERSION/JAR_VERSION=$NEW_VERSION/g" \
+              -e "s/TAG=v$OLD_VERSION/TAG=v$NEW_VERSION/g" \
+              -e "s/ailake==$OLD_VERSION/ailake==$NEW_VERSION/g" \
+              -e "s/(ailake-core[[:space:]]*=[[:space:]]*\")$OLD_VERSION(\")/\1$NEW_VERSION\2/g" \
+              -e "s/(ailake-query[[:space:]]*=[[:space:]]*\")$OLD_VERSION(\")/\1$NEW_VERSION\2/g" \
+              -e "s/(ailake-store[[:space:]]*=[[:space:]]*\")$OLD_VERSION(\")/\1$NEW_VERSION\2/g" \
+              "$f"
+          done
+
+          # ailake-fts workspace-dependency example — mirrors root Cargo.toml.
+          if [ -f docs/architecture/WORKSPACE.md ]; then
+            sed -i -E "s/(ailake-fts[[:space:]]*=[[:space:]]*\{ path = \"ailake-fts\", version = \")$OLD_VERSION(\" \})/\1$NEW_VERSION\2/" \
+              docs/architecture/WORKSPACE.md
+          fi
+
+          git add $(find . -name "Cargo.toml" -not -path "*/target/*") \
+            spark-plugin/build.gradle.kts trino-plugin/build.gradle.kts ailake-flink/build.gradle.kts \
+            duckdb-ailake/CMakeLists.txt ailake-cpp/CMakeLists.txt \
+            airflow-providers-ailake/pyproject.toml airbyte-destination-ailake/pyproject.toml \
+            docs/architecture/WORKSPACE.md \
+            $DOC_FILES
           git diff --cached --quiet || \
             git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
           git pull --rebase origin main
@@ -116,6 +177,41 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ github.token }}
+
+  sync-develop:
+    name: Sync version bump to develop
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # Same bypass-listed identity as the main-branch bump commit — develop
+          # is also protected by a PR-required ruleset.
+          token: ${{ secrets.ACTIONS_PAT }}
+
+      - name: Cherry-pick version-bump commit onto develop
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          TAG="${{ needs.release.outputs.tag }}"
+          # The tag is created immediately after the bump commit (before any
+          # other commits land on main), so it always points at that exact commit.
+          BUMP_SHA=$(git rev-list -n 1 "$TAG")
+
+          git fetch origin develop
+          git checkout -B develop origin/develop
+
+          if git cherry-pick "$BUMP_SHA"; then
+            git push origin develop
+          else
+            git cherry-pick --abort
+            echo "::error::Version-bump commit $BUMP_SHA (tag $TAG) did not cherry-pick cleanly onto develop — develop is now version-drifted from main. Resolve manually: 'git checkout develop && git cherry-pick $BUMP_SHA', fix conflicts, then push."
+            exit 1
+          fi
 
   publish-crates:
     name: Publish to crates.io
