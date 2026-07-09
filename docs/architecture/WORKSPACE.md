@@ -136,16 +136,20 @@ Implements the `CatalogProvider` trait for every supported backend:
 
 ```
 ailake-catalog/src/
-├── lib.rs          # re-exports, module declarations
-├── provider.rs     # CatalogProvider trait, TableIdent, DataFileEntry, NewSnapshot
-├── metadata.rs     # metadata.json read/write (Iceberg Spec v2)
-├── snapshot.rs     # manifest JSON builder
-├── hadoop.rs       # HadoopCatalog — filesystem / any Store backend
-├── rest.rs         # RestCatalog — Iceberg REST Catalog spec (Polaris, S3 Tables, Nessie, Unity Catalog)
-├── databricks.rs   # DatabricksAuth + builders for Azure/AWS/GCP Unity Catalog
-├── glue.rs         # GlueCatalog — AWS Glue (feature = "catalog-glue", stub)
-├── nessie.rs       # NessieCatalog — Nessie branching extensions (feature = "catalog-nessie", stub)
-└── jdbc.rs         # JdbcCatalog — PostgreSQL/MySQL (feature = "catalog-jdbc", stub)
+├── lib.rs              # re-exports, module declarations
+├── provider.rs         # CatalogProvider trait, TableIdent, DataFileEntry, NewSnapshot
+├── metadata.rs         # metadata.json read/write (Iceberg Spec v2)
+├── snapshot.rs         # manifest JSON builder
+├── avro_manifest.rs    # Avro manifest read/write (Iceberg Spec v2 manifest-list + manifest files)
+├── avro_raw.rs         # low-level Avro OCF encode/decode helpers
+├── schema_evolution.rs # SchemaEvolution — ADD/RENAME COLUMN (add_column/rename_column)
+├── puffin.rs           # Puffin file read/write (statistics blobs, e.g. NDV sketches)
+├── hadoop.rs           # HadoopCatalog — filesystem / any Store backend
+├── rest.rs             # RestCatalog — Iceberg REST Catalog spec (Polaris, S3 Tables, Nessie, Unity Catalog)
+├── databricks.rs       # DatabricksAuth + builders for Azure/AWS/GCP Unity Catalog
+├── glue.rs             # GlueCatalog — AWS Glue (feature = "catalog-glue")
+├── nessie.rs           # NessieCatalog — Nessie branching extensions (feature = "catalog-nessie")
+└── jdbc.rs             # JdbcCatalog — PostgreSQL/MySQL/SQLite (feature = "catalog-jdbc")
 ```
 
 `CatalogProvider` trait:
@@ -241,7 +245,6 @@ members = [
     "ailake-parquet",
     "ailake-vec",
     "ailake-index",
-    "ailake-fts",
     "ailake-file",
     "ailake-catalog",
     "ailake-store",
@@ -250,6 +253,7 @@ members = [
     "tests",
     "ailake-jni",
     "ailake-py",
+    "ailake-fts",
 ]
 
 [workspace.dependencies]
@@ -278,11 +282,16 @@ object_store = { version = "0.10" }  # cloud features added per-crate via ailake
 iceberg     = "0.3"
 apache-avro = "0.16"
 
+# Full-text search
+tantivy     = { version = "0.22", default-features = false, features = ["mmap"] }
+ailake-fts  = { path = "ailake-fts", version = "0.1.0" }
+
 # Vector index
 hnsw_rs     = "0.3"
 bincode     = "1"
 memmap2     = "0.9"
 rayon       = "1"
+roaring     = "0.10"
 
 # GPU — runtime dlopen, both vendors; no build-time SDK required
 libloading  = "0.8"
@@ -294,7 +303,7 @@ zstd        = "0.13"
 # Bindings
 # Note: reqwest is NOT in workspace deps — ailake-catalog declares it inline
 # with rustls-tls to keep openssl-sys out of the ailake-py dep tree.
-pyo3        = { version = "0.24", features = ["extension-module"] }
+pyo3        = { version = "0.29", features = ["extension-module", "abi3-py39"] }
 # uniffi removed — all JVM bindings use C-ABI + JNA
 
 # CLI + HTTP server
@@ -306,7 +315,6 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Dev/test
-criterion   = { version = "0.5", features = ["html_reports"] }
 tempfile    = "3"
 proptest    = "1"
 rand        = "0.8"
@@ -320,7 +328,6 @@ panic         = "abort"
 
 [profile.bench]
 inherits    = "release"
-debug       = true
 debug       = true
 ```
 

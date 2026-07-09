@@ -103,6 +103,45 @@ Optional fields:
 
 ---
 
+### `ailake_write_batch_multi_json`
+
+```
+fn ailake_write_batch_multi_json(request_json: *const c_char) -> *mut c_char
+```
+
+Writes a batch of records with **N independent vector columns** (Phase 8 multimodal — e.g. text + image embeddings on the same row), each getting its own HNSW section in the same AI-Lake file. Searchable via `ailake_search_multimodal_json`'s RRF fusion.
+
+**Request JSON:**
+
+```json
+{
+  "warehouse":       "/path/to/warehouse",
+  "namespace":       "default",
+  "table":           "my_table",
+  "ids":             [1, 2, 3],
+  "vector_columns": [
+    {"col": "embedding",       "dim": 1536, "metric": "cosine", "precision": "f16",
+     "embeddings": [[0.1, 0.2, "..."], [0.3, 0.4, "..."], [0.5, 0.6, "..."]]},
+    {"col": "image_embedding", "dim": 512,  "metric": "cosine", "precision": "f16", "modality": "image",
+     "embeddings": [[0.7, 0.8, "..."], [0.9, 1.0, "..."], [1.1, 1.2, "..."]]}
+  ],
+  "embedding_model": "text-embedding-3-small@v1",
+  "format_version":  2,
+  "fts_columns":     ["chunk_text"],
+  "fts_tokenizer":   "default",
+  "deferred":        false
+}
+```
+
+- `vector_columns` — at least one entry required; the **first entry is primary** (used for geometric pruning in the manifest). Each entry: `col`, `dim` required; `metric` (default `"euclidean"`), `precision` (default `"f16"`), `modality` (optional: `"text"`/`"image"`/`"audio"`/`"video"`) optional. `embeddings[i]` has one entry per row, same order as `ids`, and every column's `embeddings.len()` must equal `ids.len()`.
+- `deferred` (bool, default `false`) — persist Parquet immediately, build all HNSW indexes in the background (same async pattern as `ailake_write_batch_json`'s `deferred`).
+- `columns` (object, default `{}`) — extra string metadata columns, same shape as `ailake_write_batch_json`'s `columns` field.
+- Other optional fields (`embedding_model`, `format_version`, `fts_columns`, `fts_tokenizer`) behave the same as in `ailake_write_batch_json`.
+
+**Response JSON:** `{"ok": true, "snapshot_id": 7}` or `{"ok": false, "error": "..."}`.
+
+---
+
 ### `ailake_delete_where_json`
 
 ```

@@ -17,9 +17,22 @@
 | Unit | `src/` inline `#[cfg(test)]` | `cargo test` | Single function, no I/O |
 | Integration | `tests/` at workspace root | `cargo test -p ailake-tests` | Multiple crates, local FS |
 | Property-based | `src/` inline or `tests/` | `cargo test` | Invariants across random inputs |
-| Benchmark | `benches/` per crate | `cargo bench` | Performance regressions |
+| Benchmark | external [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks) repo | `cargo run --release` (in that repo) | SIFT-1M write/index/search throughput + recall vs. LanceDB/pgvector/Deep Lake |
 | Compat (Python/DuckDB) | `tests/compat/` | `ci.yml` — every PR | PyArrow, DuckDB, PyIceberg, ailake-py SDK |
 | Compat (Spark/Trino/JVM) | `tests/compat/` + Gradle | `compat-heavy.yml` — push to main + weekly | Spark+Iceberg, Trino+REST, Flink/Spark/Trino JVM plugins |
+
+---
+
+## JVM plugin tests (Kotlin/Scala) — the "native lib absent" trap
+
+`spark-plugin`/`trino-plugin`/`ailake-flink` unit tests (`AilakeNativeTest`, `AilakeCatalogTest`, `AilakePageSinkTest`, ...) run against a real JNA-loaded `libailake_jni.so` in every CI job that touches them (`test-jvm` in `ci.yml`, `compat-jvm-plugins` in `compat-heavy.yml` — both `cargo build --release -p ailake-jni` first and set `LD_LIBRARY_PATH`/`AILAKE_LIB_PATH` or `-Dailake.native.lib=...` before `gradle test`, per `CONTRIBUTING.md` §4). Only a bare local `./gradlew test` with none of those set actually runs with the lib absent.
+
+This has produced the same bug three times (see `CHANGELOG.md` "Fixed" entries for `finishPassesTextColumnsAsColumnsMapToNativeWriteBatch`, `writeBatchMultiDoesNotThrowWhenNativeLibAbsent`, `AilakeCatalogTest`'s `alterTable` test): a test names itself `...WhenNativeLibAbsent` and asserts a strict `null`/empty result, but with the lib present the native call actually executes — and two things make it *succeed* instead of failing like it would against real infra:
+
+1. `LocalStore::new()` (`ailake-store/src/local.rs`) only strips a `file://` prefix. A fake `"s3://bucket/t/"` warehouse falls through as a literal relative path, so the "write" lands on local disk instead of failing like real S3 (no credentials/network) would.
+2. `file:///tmp/test-table` is a real writable path reused across many tests *and* across plugins — `test-jvm` runs `gradle -p trino-plugin test` then `gradle -p spark-plugin test` in the same job, sharing `/tmp` on the runner, so a table one plugin's test wrote can already exist by the time another plugin's test runs against the same path.
+
+**Rule**: never assert a JVM-plugin native call returns `null`/empty just because "the lib is absent in tests." Assert it returns *either* `null`/empty (lib truly absent or the call genuinely fails) *or* a valid success value (lib present and the call succeeds) — e.g. `assertTrue(result == null || result > 0)`. If a test needs a guaranteed-null result regardless of environment, force it structurally (empty `ids`, etc. — see `AilakeNative.writeBatch`'s `if (ids.isEmpty()) return null` guard), not by relying on the call failing.
 
 ---
 
@@ -565,67 +578,9 @@ Engine selection guide:
 - `ailake-auto` — hardware-adaptive; use in heterogeneous deployments
 - `lancedb` — comparison baseline only
 
-### `ailake-file/benches/write.rs`
-
-```rust
-fn bench_write(c: &mut Criterion) {
-    let mut group = c.benchmark_group("write");
-
-    for &rows in &[1_000usize, 10_000, 100_000] {
-        group.bench_with_input(
-            BenchmarkId::new("f16_lz4_with_hnsw", rows),
-            &rows,
-            |b, &rows| {
-                let (batch, embeddings) = fixtures::generate_batch(rows, 1536);
-                b.iter(|| {
-                    let dir = tempfile::tempdir().unwrap();
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    rt.block_on(async {
-                        let mut writer = TableWriter::new(
-                            dir.path().to_str().unwrap(),
-                            WriterConfig::default_f16()
-                        ).await.unwrap();
-                        writer.write_batch(batch.clone(), &embeddings).await.unwrap();
-                        writer.commit().await.unwrap();
-                    });
-                });
-            },
-        );
-    }
-    group.finish();
-}
-```
-
-### `ailake-index/benches/search.rs`
-
-```rust
-fn bench_search(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hnsw_search");
-
-    for &rows in &[10_000usize, 100_000, 1_000_000] {
-        // Build index once, bench search only
-        let index = build_index(rows, 1536);
-        let query: Vec<f32> = (0..1536).map(|_| rand::random()).collect();
-
-        group.bench_with_input(
-            BenchmarkId::new("top10_cosine", rows),
-            &rows,
-            |b, _| {
-                b.iter(|| {
-                    index.search(&query, 10, 50)
-                });
-            },
-        );
-    }
-    group.finish();
-}
-```
-
-Run benchmarks with:
-```bash
-cargo bench --workspace
-# HTML reports in target/criterion/
-```
+No in-repo `criterion` microbenchmarks exist today (no crate depends on `criterion`,
+no `benches/` directory in the workspace) — `cargo bench` is not a working command
+here. The SIFT-1M benchmark above is the only current benchmarking mechanism.
 
 ---
 

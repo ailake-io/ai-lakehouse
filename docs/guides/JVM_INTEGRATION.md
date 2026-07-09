@@ -1038,7 +1038,7 @@ delete, matching the native equality-delete-file mechanism.
 
 | Engine | SQL surface | Underlying call |
 |---|---|---|
-| Spark | — (Kotlin/Scala API only) | `AilakeNative.evolveSchema(tableUri, ns, table, addCols, renameCols)` |
+| Spark | `ALTER TABLE ailake.default.docs ADD COLUMN`/`RENAME COLUMN` (via catalog) | `AilakeNative.evolveSchema(tableUri, ns, table, addCols, renameCols)` |
 | Trino | `ALTER TABLE ailake.default.ingest ADD COLUMN`/`RENAME COLUMN` | `AilakeNative.evolveSchema(...)` (Kotlin) |
 | Flink | `ALTER TABLE ailake_docs_ingest ADD COLUMN`/`RENAME COLUMN` | `AilakeNativeLoader.evolveSchema(...)` |
 
@@ -1046,7 +1046,7 @@ delete, matching the native equality-delete-file mechanism.
 
 | Engine | SQL surface | Underlying call |
 |---|---|---|
-| Spark | — (Kotlin/Scala API only) | `AilakeNative.compact(tableUri, ns, table, minFiles, targetSizeBytes)` |
+| Spark | `spark.ailakeCompact(tableUri, ...)` (Spark has no native CALL-procedure syntax outside a full catalog stored-procedure API) | `AilakeNative.compact(tableUri, ns, table, minFiles, targetSizeBytes)` |
 | Trino | `CALL ailake.system.compact()` | `AilakeNative.compact(...)` (Kotlin) |
 | Flink | `SELECT ailake_compact(warehouse, ns, table)` (scalar function — Flink has no `CALL`-equivalent for connectors) | `AilakeNativeLoader.compact(...)` |
 | Python | `ailake.compact(path, min_files=4, target_size_bytes=128*1024*1024)` |

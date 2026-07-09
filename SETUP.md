@@ -116,7 +116,7 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Should finish with `112 passed` (2 ignored — doctests requiring live credentials or runtime context).
+Should finish with `296 passed` (7 ignored — doctests/GPU tests requiring live credentials, a GPU backend, or other runtime context not available in a plain local run).
 
 ### Tests by crate
 
@@ -719,16 +719,6 @@ python3 scripts/deeplake_bench.py  # run from ailake-benchmarks repo \
 ```
 
 > **Note**: Approximate ANN (Deep Memory) requires a paid Activeloop plan. Recall comparison with AI-Lake/pgvector/LanceDB is not direct.
-
-### 8E. Criterion microbenchmarks
-
-```bash
-# HNSW search benchmark (ailake-index)
-cargo bench -p ailake-index
-
-# Write benchmark (ailake-file)
-cargo bench -p ailake-file
-```
 
 ---
 

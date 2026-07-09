@@ -36,9 +36,9 @@ class AilakeHook(BaseHook):
 
     Usage::
 
-        hook = AilakeHook(conn_id="ailake_prod")
+        hook = AilakeHook(ailake_conn_id="ailake_prod")
         info = hook.get_table_info("default.docs")
-        results = hook.search("default.docs", query_vector=[0.1, 0.2, ...], top_k=10)
+        results = hook.search("default.docs", query=[0.1, 0.2, ...], top_k=10)
     """
 
     conn_name_attr = "ailake_conn_id"

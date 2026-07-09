@@ -160,10 +160,38 @@ struct HadoopCatalog {
 
 ```cpp
 struct TableInfo {
+    std::string table;
+    std::string location;
+    std::string vector_column;
     std::string vector_dim;
     std::string vector_metric;
-    std::string vector_precision;
-    std::string embedding_model; // from ailake.embedding-model property; empty if not set
+    std::string embedding_model; // "<name>" or "<name>@<version>"; empty if not set
+    int         files            = 0;
+    int         indexed_files    = 0;
+    uint64_t    rows             = 0;
+    uint64_t    size_bytes       = 0;
+    std::optional<int64_t> snapshot_id;
+    int format_version           = 2;  // 2 or 3
+    std::vector<PartitionDef> partition_fields; // empty for unpartitioned tables
+    std::vector<SchemaField>  schema_fields;    // current schema fields
+};
+```
+
+### `PartitionDef` / `SchemaField`
+
+```cpp
+struct PartitionDef {
+    std::string column;
+    std::string transform;
+    std::string column_type; // Iceberg type: "string", "int", "long", ...
+};
+
+// Mirrors one field in the Iceberg table schema.
+struct SchemaField {
+    int         id       = 0;
+    std::string name;
+    std::string type;    // Iceberg primitive type string
+    bool        required = false;
 };
 ```
 
@@ -194,10 +222,10 @@ struct DataFileEntry {
     std::string vector_column;
     uint32_t    vector_dim     = 0;
     std::vector<ExtraVectorIndex> extra_vector_indexes; // secondary columns (Phase 8)
-    std::string index_status;   // "ready" | "indexing" | "failed"
-    std::string index_error;    // non-empty only when index_status == "failed"
+    std::string index_status;   // "ready" | "indexing"
     std::string batch_id;
-    std::string embedding_model; // from per-file key_metadata JSON; empty if not set
+    std::string embedding_model; // "<name>" or "<name>@<version>"; empty if not set
+    std::string partition_value; // agent_id or other partition value (Phase 9)
 };
 ```
 

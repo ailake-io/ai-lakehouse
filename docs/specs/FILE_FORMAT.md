@@ -108,8 +108,9 @@ Starts at byte 0 of every AILK section. All integer fields little-endian.
 | `0`   | F32      | 4 |
 | `1`   | F16      | 2 (default) |
 | `2`   | I8       | 1 |
+| `3`   | Binary   | ceil(dim/8) |
 
-Value `3` (Binary / Hamming) was removed in v0.0.14 — recall ≈ 0 on standard float embeddings without specific binary training alignment. Readers encountering `precision=3` in legacy files should treat it as unsupported.
+The **RaBitQ / Binary Hamming index type** (Fase 7) was removed in v0.0.14 — recall ≈ 0 on standard float embeddings without specific binary training alignment. This is unrelated to `precision=3` above: the `Binary` column-encoding value itself is still defined (`ailake-core::VectorPrecision::Binary`, `ailake-file::footer::Precision::Binary`) and readers/writers still accept it as a storage precision.
 
 The `precision` field describes the encoding stored in the **Parquet column**.
 The centroid blob in the AILK section is always F32 (4 bytes per element)
@@ -265,8 +266,10 @@ Search algorithm:
 
 **Adaptive index selection**: `AilakeFileWriter` automatically chooses IVF-PQ
 over HNSW when `hardware_profile.recommend_ivf_pq(n_vectors)` returns true
-(currently: dataset ≥ 100 000 vectors on a GPU-capable host, or when the
-caller explicitly calls `writer.with_ivf_pq(IvfPqConfig)`).
+(currently: `n_vectors ≥ MIN_VECTORS_FOR_IVF_PQ` = 5,000 **and** either a GPU
+(CUDA/ROCm) is available or the CPU has more than 8 logical cores — see
+`ailake-index/src/hardware.rs`; or when the caller explicitly calls
+`writer.with_ivf_pq(IvfPqConfig)`).
 
 
 ---
@@ -349,7 +352,7 @@ All KV values are UTF-8 decimal strings (no quoting, no JSON encoding).
 AI-Lake tables are managed by an Iceberg Spec v2 catalog
 (`metadata/current.json` + per-snapshot manifests).
 
-### 8.1 Table-level properties (`metadata.json`)
+### 9.1 Table-level properties (`metadata.json`)
 
 Stored in the Iceberg `properties` map:
 
@@ -361,7 +364,7 @@ Stored in the Iceberg `properties` map:
 | `ailake.vector-metric`    | `cosine`     | Distance metric (`cosine`, `euclidean`, `dotproduct`) |
 | `ailake.vector-precision` | `f16`        | Precision (`f32`, `f16`, `i8`) |
 
-### 8.2 File-level manifest entry fields
+### 9.2 File-level manifest entry fields
 
 Each `DataFileEntry` is stored as a record in an **Avro OCF manifest file**
 (`metadata/{snap_id}-m0.avro`), with per-file geometric statistics in
@@ -405,7 +408,7 @@ Standard Iceberg fields (`file_path`, `file_format`, `record_count`,
 `lower_bounds`, `upper_bounds`) are populated normally so standard Iceberg
 engines can perform predicate pushdown on non-vector columns.
 
-### 8.3 Manifest example (Avro OCF record, shown as JSON for readability)
+### 9.3 Manifest example (Avro OCF record, shown as JSON for readability)
 
 ```json
 {
@@ -441,9 +444,9 @@ as written by `ailake_catalog::avro_manifest`. Readers that do not understand
 
 ---
 
-## 9. Read Algorithm
+## 10. Read Algorithm
 
-### 9.1 Catalog scan + geometric pruning
+### 10.1 Catalog scan + geometric pruning
 
 ```
 1. Read metadata/current.json  →  current_snapshot_id
@@ -452,10 +455,10 @@ as written by `ailake_catalog::avro_manifest`. Readers that do not understand
    a. Decode centroid_b64  →  F32 centroid vector
    b. d = distance(query, centroid, metric)
    c. if d - radius > pruning_threshold  →  skip file (no I/O)
-4. Surviving files proceed to §9.2
+4. Surviving files proceed to §10.2
 ```
 
-### 9.2 Per-file HNSW search
+### 10.2 Per-file HNSW search
 
 ```
 For each surviving file (parallelizable):
@@ -473,7 +476,7 @@ For each surviving file (parallelizable):
      c. Re-sort by exact_dist
 ```
 
-### 9.3 Global merge
+### 10.3 Global merge
 
 ```
 Collect all per-file results.
@@ -483,7 +486,7 @@ Truncate to top_k.
 
 ---
 
-## 10. Integrity Invariants
+## 11. Integrity Invariants
 
 Conforming implementations MUST verify:
 
@@ -498,7 +501,7 @@ Readers MUST return an error rather than silently returning wrong results.
 
 ---
 
-## 11. Multi-Column Files
+## 12. Multi-Column Files
 
 A file may embed more than one vector column (e.g., `embedding` and
 `image_embedding`). Each column gets its own AILK section.
@@ -515,7 +518,7 @@ Parquet KV entries:
 Readers looking for column `ctx` MUST check `ailake.ctx.footer_offset` first;
 fall back to `ailake.footer_offset` only for single-column files.
 
-### 11.1 `extra_vector_indexes` in key_metadata JSON
+### 12.1 `extra_vector_indexes` in key_metadata JSON
 
 Secondary column HNSW info is also embedded in the Avro manifest entry's
 `key_metadata` bytes (JSON-encoded `AilakeEntryExt`):
@@ -550,7 +553,7 @@ that only support single-column search MUST ignore unknown array elements.
 An absent or empty `extra_vector_indexes` array means the file has only one
 vector column (backward-compatible).
 
-### 11.2 Cross-modal search (Phase 8)
+### 12.2 Cross-modal search (Phase 8)
 
 The AI-Lake SDK supports cross-modal Reciprocal Rank Fusion (RRF) search over
 N vector columns:
@@ -568,7 +571,7 @@ the DuckDB extension, Go SDK, and C++ SDK expose RRF fusion via this path.
 
 ---
 
-## 12. Versioning and Compatibility
+## 13. Versioning and Compatibility
 
 | `format_version` | Status  | Notes |
 |------------------|---------|-------|
@@ -584,7 +587,7 @@ the AILK sections are invisible.
 
 ---
 
-## 13. Constants Summary
+## 14. Constants Summary
 
 | Constant                | Value |
 |-------------------------|-------|
@@ -597,7 +600,7 @@ the AILK sections are invisible.
 
 ---
 
-## 14. Reference Implementation
+## 15. Reference Implementation
 
 Canonical implementation: `ailake-file` Rust crate.
 
@@ -613,12 +616,12 @@ Canonical implementation: `ailake-file` Rust crate.
 
 ---
 
-## 15. Bincode v1 Wire Format (Language-Agnostic)
+## 16. Bincode v1 Wire Format (Language-Agnostic)
 
 The index blob (§6) is serialized with **bincode v1, little-endian, fixed-int mode**.
 This is not a general bincode spec — it describes only the rules used by AI-Lake.
 
-### 15.1 Encoding rules
+### 16.1 Encoding rules
 
 | Rust type   | Wire representation |
 |-------------|---------------------|
@@ -634,7 +637,7 @@ This is not a general bincode spec — it describes only the rules used by AI-La
 No alignment padding. No length prefix on the outer blob (length comes from
 `header.hnsw_len` in the AILK header).
 
-### 15.2 HnswSnapshot wire layout (§6.1, `flags & 0x0001 == 0`)
+### 16.2 HnswSnapshot wire layout (§6.1, `flags & 0x0001 == 0`)
 
 Sequential fields with no gaps:
 
@@ -665,7 +668,7 @@ max_layer        : u64   — top layer index (= max(node_levels))
 Total blob length must equal `header.hnsw_len`. Implementations MUST verify
 `len(row_ids) == header.record_count` after deserialization.
 
-### 15.3 IvfPqSnapshot wire layout (§6.2, `flags & 0x0001 == 1`)
+### 16.3 IvfPqSnapshot wire layout (§6.2, `flags & 0x0001 == 1`)
 
 ```
 config.nlist     : u64
@@ -689,10 +692,10 @@ inv_codes        : Vec<Vec<u8>>
 
 ---
 
-## 16. Cross-Language Implementations
+## 17. Cross-Language Implementations
 
 The AI-Lake format is designed so that any language can read and search
-AI-Lake files by implementing §15's bincode decoder and the AILK header parser
+AI-Lake files by implementing §16's bincode decoder and the AILK header parser
 (§3). No dependency on the Rust crate is required.
 
 | Language | Module | AILK header | Bincode decoder | HNSW search | IVF-PQ search |
@@ -701,12 +704,12 @@ AI-Lake files by implementing §15's bincode decoder and the AILK header parser
 | **C++17** | `ailake-cpp/include/ailake/` | `footer.hpp` → `is_ivf_pq()` | `bincode.hpp` → `BincodeReader` | `hnsw.hpp` → `hnsw_search` | `ivfpq.hpp` → `ivfpq_search` |
 | **Go** | `ailake-go/` | `footer.go` → `IsIvfPq()` | `bincode.go` → `bincodeReader` | `hnsw.go` → `(HnswIndex).Search` | `ivfpq.go` → `(IvfPqIndex).Search` |
 
-All three implementations follow the same read algorithm (§9) and enforce the
-same integrity invariants (§10). The C++ and Go SDKs were independently
+All three implementations follow the same read algorithm (§10) and enforce the
+same integrity invariants (§11). The C++ and Go SDKs were independently
 verified against the Rust reference implementation using the shared compat
 fixture (`ailake-query/examples/write_fixture.rs`).
 
-### 16.1 Bootstrap sequence (language-agnostic)
+### 17.1 Bootstrap sequence (language-agnostic)
 
 ```
 1. Read last 4 bytes of file → verify "PAR1" (Parquet magic)
@@ -718,8 +721,8 @@ fixture (`ailake-query/examples/write_fixture.rs`).
 7. Read centroid blob at ailk_start + header.centroid_offset
    → geometric pruning (optional but recommended)
 8. Read index blob at ailk_start + header.hnsw_offset, length = header.hnsw_len
-9. Decode index blob via §15.2 (HNSW) or §15.3 (IVF-PQ) depending on flags
-10. Search (§9.2)
+9. Decode index blob via §16.2 (HNSW) or §16.3 (IVF-PQ) depending on flags
+10. Search (§10.2)
 ```
 
 This sequence does not require the Rust toolchain or any Rust crates.

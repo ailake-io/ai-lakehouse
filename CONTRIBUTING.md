@@ -109,6 +109,8 @@ AILAKE_SPARK_TRINO_FIXTURE=$(pwd)/../spark-trino-fixture \
 cd ..
 ```
 
+With `libailake_jni.so` built and on the path like this, tests named `...WhenNativeLibAbsent` actually run against the real library — see `docs/contributing/TESTING.md` § "JVM plugin tests — the 'native lib absent' trap" before writing a new one.
+
 ### 5. Go SDK (ailake-go)
 
 ```bash

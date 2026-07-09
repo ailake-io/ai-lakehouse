@@ -178,6 +178,7 @@ type DataFileEntry struct {
     IndexError         string             // non-empty only when IndexStatus == "failed"
     BatchID            string
     EmbeddingModel     string // "<name>" or "<name>@<version>"; empty if not set
+    PartitionValue     string // agent_id or other partition value (Phase 9)
 }
 ```
 
