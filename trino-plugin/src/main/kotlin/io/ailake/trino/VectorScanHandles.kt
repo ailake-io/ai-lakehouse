@@ -27,6 +27,20 @@ data class MultimodalScanTableHandle @JsonCreator constructor(
     @JsonProperty("tableName") val tableName: String,
 ) : ConnectorTableHandle
 
+/**
+ * Table handle for `ailake.default.search_full` (Fase 11 — search + full-row fetch, no JOIN
+ * needed) — same shape as [VectorScanTableHandle], kept a distinct type purely so
+ * [VectorScanSplitManager]/[VectorScanRecordSetProvider] can dispatch to `AilakeNative.scan`
+ * instead of `AilakeNative.search` by table handle type. See [VectorScanMetadata].
+ */
+data class ScanTableHandle @JsonCreator constructor(
+    @JsonProperty("tableUri") val tableUri: String,
+    @JsonProperty("vectorColumn") val vectorColumn: String,
+    @JsonProperty("dim") val dim: Int,
+    @JsonProperty("namespace") val namespace: String,
+    @JsonProperty("tableName") val tableName: String,
+) : ConnectorTableHandle
+
 data class VectorScanColumnHandle @JsonCreator constructor(
     @JsonProperty("name") val name: String,
     @JsonProperty("ordinal") val ordinal: Int,

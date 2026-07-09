@@ -85,6 +85,32 @@ class AilakeSparkExtensionsTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(df.count() == 0)
   }
 
+  // ── ailakeSearchWithData (Fase 11 — search + full-row fetch, no JOIN needed) ─
+  //
+  // Regression: AilakeNative.scan (backed by ailake_scan_json) had no wrapper in
+  // any of the three JVM plugins — SQL/DataFrame search always returned only
+  // row_id/distance/file_path, forcing a manual JOIN against a separately-
+  // registered Iceberg table to get real columns.
+
+  test("ailakeSearchWithData returns empty DataFrame with empty schema when native library absent") {
+    import io.ailake.spark.implicits._
+    val query = Array(0.1f, 0.2f, 0.3f)
+    val df = spark.ailakeSearchWithData("s3://test-bucket/table/", query, topK = 10)
+    assert(df.schema.fields.isEmpty)
+    assert(df.count() == 0)
+  }
+
+  test("ailakeSearchWithData accepts vectorColumn/namespace/tableName/partitionFilter parameters") {
+    import io.ailake.spark.implicits._
+    val query = Array(0.1f, 0.2f, 0.3f)
+    val df = spark.ailakeSearchWithData(
+      "s3://test-bucket/table/", query, topK = 5,
+      vectorColumn = "doc_vec", namespace = "prod", tableName = "docs",
+      partitionFilter = Some("agent-42"),
+    )
+    assert(df.count() == 0)
+  }
+
   // ── ailakeSearchMultimodal (cross-modal RRF search) ───────────────────────
   //
   // Regression: AilakeNative.searchMultimodal was fully implemented but never

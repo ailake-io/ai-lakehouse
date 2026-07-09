@@ -217,6 +217,64 @@ object AilakeNativeLoader {
         }
     }
 
+    // ── Scan (Fase 11 — search + full-row fetch, no JOIN needed) ──────────────
+
+    /** One column of a [scan] response — `type` is one of the tags `ailake_scan_json` emits: `int64`, `float32`, `float64`, `utf8`, `bool`, `list_float32`. */
+    data class ScanColumn(val name: String, val type: String)
+
+    data class ScanResponse(
+        val ok: Boolean,
+        val schema: List<ScanColumn> = emptyList(),
+        val num_rows: Int = 0,
+        val columns: Map<String, List<Any?>> = emptyMap(),
+        val error: String? = null,
+    )
+
+    /**
+     * Vector search + full-row fetch in one native call — closes the "SQL search only returns
+     * row_id/distance/file_path" gap: previously the only way to get real columns
+     * (chunk_text, document_title, ...) back from a search was a manual JOIN against a
+     * separately-registered Iceberg table pointing at the same physical location. Result is
+     * columnar; every stored column comes back (vector column decoded to nested float lists),
+     * plus a trailing `_distance` column — no column-subset filter on the native side.
+     */
+    fun scan(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        vecCol: String,
+        dim: Int,
+        query: FloatArray,
+        topK: Int = 10,
+        partitionFilter: String? = null,
+    ): ScanResponse {
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse,
+            "namespace" to namespace,
+            "table" to table,
+            "vec_col" to vecCol,
+            "dim" to dim,
+            "query" to query.toList(),
+            "top_k" to topK,
+        )
+        if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        val req = mapper.writeValueAsString(payload)
+        val ptr = lib.ailake_scan_json(req)
+            ?: throw RuntimeException("ailake_scan_json returned null for table=$namespace.$table")
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<ScanResponse>(json)
+            if (!resp.ok) {
+                log.error("[ailake] ailake_scan_json returned error for table={}.{}: {}", namespace, table, resp.error)
+                throw RuntimeException("ailake_scan_json error: ${resp.error}")
+            }
+            log.debug("[ailake] scan OK table={}.{} top_k={} num_rows={}", namespace, table, topK, resp.num_rows)
+            resp
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
     // ── Write ─────────────────────────────────────────────────────────────────
 
     data class WriteResponse(

@@ -146,7 +146,9 @@ val hybridRows = AilakeNative.search(
   bm25Weight  = 0.4f,
 )
 
-// Join with Iceberg to get full row data
+// Join with Iceberg to get full row data — or skip the JOIN entirely with
+// spark.ailakeSearchWithData(...) (Fase 11, see §3D), which fetches real
+// columns in the same native call as the search itself.
 val iceberg = spark.read.format("iceberg").load("s3://my-lake/docs/")
 
 results
@@ -255,6 +257,17 @@ val mmDf = spark.ailakeSearchMultimodal(
   topK = 20,
 )
 mmDf.orderBy(mmDf("rrf_score").desc).show()
+
+// Search + full-row fetch in one call (Fase 11) — no manual JOIN against a
+// separately-registered Iceberg table needed to get chunk_text/document_title/etc
+// back. Schema is dynamic, built from the response: every stored column comes
+// back (vector column as ArrayType(FloatType)), plus a trailing _distance column.
+val fullDf = spark.ailakeSearchWithData(
+  tableUri    = "s3://my-lake/docs/",
+  queryVector = query,
+  topK        = 20,
+)
+fullDf.orderBy("_distance").show(truncate = false)
 ```
 
 ### 3E — Delete, schema evolution, compact (Scala)
@@ -543,6 +556,10 @@ DESCRIBE ailake.default.search;
 -- Cross-modal RRF search table — row_id bigint, rrf_score double, file_path varchar
 DESCRIBE ailake.default.search_multimodal;
 
+-- Search + full-row fetch, no JOIN needed (Fase 11) — id bigint, embedding varchar
+-- (JSON-encoded, see below), ...ailake.text-columns varchar, _distance double
+DESCRIBE ailake.default.search_full;
+
 -- Set session properties then query
 SET SESSION ailake.query_vector =
     '0.1,0.2,0.3,...';   -- comma-separated f32 values (dim must match table)
@@ -557,6 +574,17 @@ SELECT s.row_id, s.distance, i.chunk_text, i.document_title
 FROM   ailake.default.search s
 JOIN   iceberg.default.docs  i ON CAST(s.row_id AS BIGINT) = i.id
 ORDER  BY s.distance
+LIMIT  10;
+
+-- Same result without the JOIN (Fase 11) — real columns come back directly.
+-- The vector column is JSON-encoded text here (e.g. '[0.1,-0.2]'), not ARRAY<DOUBLE>
+-- — see VectorScanMetadata.scanColumns()'s KDoc for why.
+SET SESSION ailake.query_vector = '0.1,0.2,0.3,...';
+SET SESSION ailake.top_k = 10;
+
+SELECT id, chunk_text, ROUND(_distance, 6) AS dist
+FROM   ailake.default.search_full
+ORDER  BY _distance
 LIMIT  10;
 ```
 
@@ -756,6 +784,30 @@ SELECT row_id, distance, file_path FROM ailake_docs_search ORDER BY distance;
 -- Same physical (row_id, distance, file_path) schema/table as above — the
 -- "distance" slot carries the fused RRF score in this mode.
 SELECT row_id, distance AS rrf_score, file_path FROM ailake_docs_search ORDER BY distance DESC;
+
+-- Read (source), search + full-row fetch, no JOIN needed (Fase 11) — columns
+-- come straight from the DDL (schema-on-read), not a fixed 3-column shape.
+-- Only requirement: the last declared column must be _distance (FLOAT or DOUBLE).
+CREATE TABLE ailake_docs_search_full (
+    id        BIGINT,
+    text      STRING,
+    embedding ARRAY<FLOAT>,
+    _distance FLOAT
+) WITH (
+    'connector'     = 'ailake',
+    'warehouse'     = 's3://my-lake/',
+    'namespace'     = 'default',
+    'table-name'    = 'docs',
+    'vector.column' = 'embedding',
+    'vector.dim'    = '1536',
+    'search.top-k'  = '10',
+    'search.mode'   = 'full'
+);
+
+-- flink run ... -Dailake.query.vector='0.1,0.2,...'
+SELECT id, text, ROUND(_distance, 6) AS dist
+FROM   ailake_docs_search_full
+ORDER  BY _distance;
 
 -- Compact small files — no CALL-equivalent for connectors in Flink SQL, exposed
 -- as a plain scalar function instead:

@@ -36,6 +36,17 @@ class VectorScanRecordSetProvider : ConnectorRecordSetProvider {
             )
             return MultimodalScanRecordSet(rows, cols)
         }
+        // ailake.default.search_full (Fase 11) reuses VectorScanSplit's fields — dispatched by
+        // table handle type, not split type, since AilakeNative.scan needs the same
+        // tableUri/queryBytes/topK/namespace/tableName/vectorColumn a plain search split carries.
+        if (table is ScanTableHandle) {
+            val s = split as VectorScanSplit
+            val result = AilakeNative.scan(
+                s.tableUri, s.queryBytes, s.topK,
+                vectorColumn = s.vectorColumn, namespace = s.namespace, tableName = s.tableName,
+            )
+            return ScanRecordSet(result, cols)
+        }
         val s = split as VectorScanSplit
         // Three modes, selected by which session properties are set (see
         // VectorScanConnector.getSessionProperties): pure vector search
@@ -125,6 +136,70 @@ internal class VectorScanRecordCursor(
 
     override fun getObject(field: Int): Any? = null
     override fun isNull(field: Int): Boolean = false
+    override fun close() {}
+}
+
+/**
+ * `ailake.default.search_full` (Fase 11) — unlike [VectorScanRecordSet]/[MultimodalScanRecordSet],
+ * the column set here is per-catalog dynamic (`id`, the configured vector column, N configured
+ * text columns, `_distance`), so values are looked up by column name from
+ * [AilakeNative.ScanResult]'s columnar map rather than switched on a fixed set of names. The
+ * vector column comes back as a JSON-encoded string — see `VectorScanMetadata.scanColumns()`'s
+ * KDoc for why it isn't `ARRAY<DOUBLE>`.
+ */
+internal class ScanRecordSet(
+    private val result: AilakeNative.ScanResult,
+    private val columns: List<VectorScanColumnHandle>,
+) : RecordSet {
+    override fun getColumnTypes(): List<Type> = columns.map { col ->
+        when (col.name) {
+            "id" -> BIGINT
+            "_distance" -> DOUBLE
+            else -> VARCHAR
+        }
+    }
+    override fun cursor(): RecordCursor = ScanRecordCursor(result, columns)
+}
+
+internal class ScanRecordCursor(
+    private val result: AilakeNative.ScanResult,
+    private val columns: List<VectorScanColumnHandle>,
+) : RecordCursor {
+    private var position = -1
+    private val mapper = ObjectMapper()
+
+    private fun valueAt(field: Int): Any? = result.columns[columns[field].name]?.getOrNull(position)
+
+    override fun getCompletedBytes(): Long = result.numRows.toLong() * 64L
+    override fun getReadTimeNanos(): Long = 0L
+    override fun advanceNextPosition(): Boolean = ++position < result.numRows
+    override fun getType(field: Int): Type = when (columns[field].name) {
+        "id" -> BIGINT
+        "_distance" -> DOUBLE
+        else -> VARCHAR
+    }
+
+    override fun getBoolean(field: Int): Boolean =
+        throw UnsupportedOperationException("no boolean columns")
+
+    override fun getLong(field: Int): Long = (valueAt(field) as? Number)?.toLong()
+        ?: throw IllegalArgumentException("getLong not applicable for ${columns[field].name}")
+
+    override fun getDouble(field: Int): Double = (valueAt(field) as? Number)?.toDouble()
+        ?: throw IllegalArgumentException("getDouble not applicable for ${columns[field].name}")
+
+    override fun getSlice(field: Int): io.airlift.slice.Slice {
+        val text = when (val v = valueAt(field)) {
+            null -> ""
+            is List<*> -> mapper.writeValueAsString(v) // vector column — list_float32
+            is String -> v
+            else -> v.toString()
+        }
+        return Slices.utf8Slice(text)
+    }
+
+    override fun getObject(field: Int): Any? = null
+    override fun isNull(field: Int): Boolean = valueAt(field) == null
     override fun close() {}
 }
 

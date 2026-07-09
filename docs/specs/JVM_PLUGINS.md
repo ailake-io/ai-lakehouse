@@ -784,6 +784,46 @@ JVM caller
 
 ---
 
+## Search + full-row fetch, no JOIN needed (Fase 11)
+
+Before this, SQL search in all three plugins returned only `(row_id, distance, file_path)` —
+getting real columns (`chunk_text`, `document_title`, ...) back required a manual `JOIN`
+against a separately-registered Iceberg connector table pointing at the same physical
+location. `ailake_scan_json` (search + full-row fetch in one native call) already existed —
+consumed only by the DuckDB extension — but had no wrapper in any JVM plugin. Wired per-engine:
+
+| Plugin | Entry point | Column set |
+|---|---|---|
+| Spark | `spark.ailakeSearchWithData(tableUri, queryVector, topK, vectorColumn=...)` | Fully dynamic — `DataFrame` schema built from the response's `schema` array |
+| Trino | `SET SESSION ailake.query_vector = '...'; SELECT * FROM ailake.default.search_full;` | `id bigint, <vectorColumn> varchar (JSON-encoded), ...ailake.text-columns varchar, _distance double` |
+| Flink | `CREATE TABLE ... WITH ('search.mode' = 'full', ...)` on the existing search-shaped DDL | Whatever the `CREATE TABLE` declares, by name — last column must be `_distance` (FLOAT/DOUBLE) |
+
+`ailake_scan_json` doesn't accept a column-subset filter — it always returns the full row
+width, which is why Trino and Flink didn't need a new catalog/DDL property to select columns:
+Trino reuses the same `ailake.text-columns` catalog config `ingestColumns()` already builds
+from, and Flink's DDL already declares its own columns (schema-on-read).
+
+**Trino's vector column is `VARCHAR` (JSON-encoded), not `ARRAY<DOUBLE>`** — a deliberate
+scope cut: `RecordCursor.getObject` for array types needs a hand-built Trino `Block` via
+`BlockBuilder`, which wasn't safe to write without a live Trino SPI build to verify the exact
+API shape against. Flink's `AilakeScanTableSource`, by contrast, builds a real
+`GenericArrayData` for `ARRAY<FLOAT>` columns — `RowData` construction doesn't have the same
+Block-builder risk. Revisit the Trino side once `compat-heavy` CI can validate it.
+
+### Architecture diagram (scan path)
+
+```
+JVM caller
+  └─ scan(uri, query, topK)
+       └─ AilakeNative.scan() / AilakeNativeLoader.scan()  [Spark/Trino/Flink]
+            └─ JNA: ailake_scan_json                       [libailake_jni.so]
+                 └─ do_search() + fetch_rows()               [ailake-query, Rust]
+                      ├─ HNSW search                         [ailake-index]
+                      └─ Parquet row fetch                   [ailake-parquet]
+```
+
+---
+
 ## Native library deployment
 
 ### Local / development

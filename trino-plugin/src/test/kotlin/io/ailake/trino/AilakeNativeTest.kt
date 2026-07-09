@@ -29,6 +29,29 @@ class AilakeNativeTest {
         assertTrue(results.isEmpty())
     }
 
+    // ── Fase 11: scan (search + full-row fetch, ailake.default.search_full) ──
+
+    @Test
+    fun scanReturnsEmptyResultWhenNativeLibAbsent() {
+        val result = AilakeNative.scan("s3://bucket/table/", base64Of(0.1f, 0.2f, 0.3f), topK = 5)
+        assertTrue(result.schema.isEmpty())
+        assertEquals(0, result.numRows)
+        assertTrue(result.columns.isEmpty())
+    }
+
+    @Test
+    fun scanReturnsEmptyResultForBlankQueryBytes() {
+        val result = AilakeNative.scan("s3://bucket/table/", "  ", topK = 5)
+        assertTrue(result.schema.isEmpty())
+    }
+
+    @Test
+    fun scanColumnDataClassEquality() {
+        val c1 = AilakeNative.ScanColumn("id", "int64")
+        val c2 = AilakeNative.ScanColumn("id", "int64")
+        assertEquals(c1, c2)
+    }
+
     @Test
     fun searchRowDataClassEquality() {
         val r1 = AilakeNative.SearchRow(1L, 0.5f, "file.parquet")

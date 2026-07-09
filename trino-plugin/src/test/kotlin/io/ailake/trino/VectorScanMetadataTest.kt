@@ -83,12 +83,52 @@ class VectorScanMetadataTest {
     }
 
     @Test
-    fun listTablesReturnsSearchMultimodalAndIngestTables() {
+    fun listTablesReturnsSearchSearchMultimodalSearchFullAndIngestTables() {
         val tables = metadata.listTables(session, Optional.empty())
-        assertEquals(3, tables.size)
+        assertEquals(4, tables.size)
         assertTrue(SchemaTableName("default", "search") in tables)
         assertTrue(SchemaTableName("default", "search_multimodal") in tables)
+        assertTrue(SchemaTableName("default", "search_full") in tables)
         assertTrue(SchemaTableName("default", "ingest") in tables)
+    }
+
+    // ── search_full (Fase 11 — search + full-row fetch, no JOIN needed) ───────
+    //
+    // Regression: AilakeNative.scan (backed by ailake_scan_json) had no wrapper
+    // in any of the three JVM plugins — SQL search always returned only
+    // row_id/distance/file_path, forcing a manual JOIN against a separately-
+    // registered Iceberg table to get real columns.
+
+    @Test
+    fun getTableHandleFoundForSearchFull() {
+        val handle = metadata.getTableHandle(session, SchemaTableName("default", "search_full"))
+        assertNotNull(handle)
+        val h = handle as ScanTableHandle
+        assertEquals("s3://bucket/table/", h.tableUri)
+        assertEquals("embedding", h.vectorColumn)
+        assertEquals("default", h.namespace)
+        assertEquals("table", h.tableName)
+    }
+
+    @Test
+    fun getTableMetadataForSearchFullHasIdVectorAndDistanceColumns() {
+        val handle = metadata.getTableHandle(session, SchemaTableName("default", "search_full"))!!
+        val tableMeta = metadata.getTableMetadata(session, handle)
+        // fixture's textColumns defaults to emptyList() — id, embedding, _distance only
+        assertEquals(3, tableMeta.columns.size)
+        assertEquals("id", tableMeta.columns[0].name)
+        assertEquals("embedding", tableMeta.columns[1].name)
+        assertEquals("_distance", tableMeta.columns[2].name)
+    }
+
+    @Test
+    fun getColumnHandlesForSearchFullReturnsThreeHandles() {
+        val handle = metadata.getTableHandle(session, SchemaTableName("default", "search_full"))!!
+        val cols = metadata.getColumnHandles(session, handle)
+        assertEquals(3, cols.size)
+        assertTrue(cols.containsKey("id"))
+        assertTrue(cols.containsKey("embedding"))
+        assertTrue(cols.containsKey("_distance"))
     }
 
     // ── search_multimodal (cross-modal RRF search) ────────────────────────────

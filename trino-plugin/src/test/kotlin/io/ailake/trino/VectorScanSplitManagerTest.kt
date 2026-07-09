@@ -166,4 +166,30 @@ class VectorScanSplitManagerTest {
         assertEquals(5, split.topK)
         assertTrue(split.queriesJson.contains("\"col\":\"embedding\""))
     }
+
+    // ── search_full (Fase 11) ──────────────────────────────────────────────────
+    //
+    // Regression: ScanTableHandle used to fall through to the `handle as
+    // VectorScanTableHandle` cast (a ClassCastException), same "table parameter
+    // ignored" gap search_multimodal had.
+
+    private val scanHandle = ScanTableHandle("s3://bucket/table/", "doc_vec", 8, "default", "docs")
+
+    @Test
+    fun getSplitsBuildsVectorScanSplitForScanTableHandle() {
+        val source = splitManager.getSplits(
+            VectorScanTransactionHandle, session(queryVector = "1.0,2.0,3.0", topK = 7), scanHandle,
+            dynamicFilter, constraint,
+        )
+        val split = source.getNextBatch(1).get().splits.first() as VectorScanSplit
+        assertEquals("s3://bucket/table/", split.tableUri)
+        assertEquals("default", split.namespace)
+        assertEquals("docs", split.tableName)
+        assertEquals("doc_vec", split.vectorColumn)
+        assertEquals(7, split.topK)
+        val bytes = Base64.getDecoder().decode(split.queryBytes)
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val floats = FloatArray(bytes.size / 4) { buf.getFloat() }
+        assertArrayEquals(floatArrayOf(1.0f, 2.0f, 3.0f), floats, 1e-6f)
+    }
 }

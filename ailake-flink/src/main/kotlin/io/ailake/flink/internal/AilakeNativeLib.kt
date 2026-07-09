@@ -86,6 +86,21 @@ interface AilakeNativeLib : Library {
     fun ailake_search_multimodal_json(requestJson: String): Pointer?
 
     /**
+     * Vector search + full-row fetch in one call — closes the "SQL search only returns
+     * row_id/distance/file_path" gap: without it, real columns (chunk_text, document_title,
+     * ...) require a manual JOIN against a separately-registered Iceberg table.
+     *
+     * Request JSON fields: same as [ailake_search_json] (warehouse/namespace/table/vec_col/
+     * dim/query/top_k/ef_search/partition_filter) — no hybrid_text/text_column/bm25_weight.
+     *
+     * Response JSON: `{"ok":true,"schema":[{"name":"id","type":"int64"}, ...],"num_rows":N,
+     * "columns":{"id":[...],"embedding":[[...],...],"_distance":[...]}}`. Every stored column
+     * comes back (vector column decoded to nested float arrays), plus a trailing `_distance`
+     * column — no column-subset filter on the native side.
+     */
+    fun ailake_scan_json(requestJson: String): Pointer?
+
+    /**
      * Low-level search: f32 pointer + length variant.  Prefer [ailake_search_json] for
      * JVM callers.
      *

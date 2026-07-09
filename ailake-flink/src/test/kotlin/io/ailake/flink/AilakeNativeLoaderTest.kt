@@ -14,6 +14,25 @@ import org.junit.jupiter.api.Test
  */
 class AilakeNativeLoaderTest {
 
+    // ── ScanColumn / ScanResponse (Fase 11) ───────────────────────────────────
+
+    @Test
+    fun scanColumnEquality() {
+        val c1 = AilakeNativeLoader.ScanColumn("id", "int64")
+        val c2 = AilakeNativeLoader.ScanColumn("id", "int64")
+        assertEquals(c1, c2)
+    }
+
+    @Test
+    fun scanResponseDefaultsToEmptyOkTrue() {
+        val r = AilakeNativeLoader.ScanResponse(ok = true)
+        assertTrue(r.ok)
+        assertEquals(0, r.num_rows)
+        assertTrue(r.schema.isEmpty())
+        assertTrue(r.columns.isEmpty())
+        assertNull(r.error)
+    }
+
     // ── PartitionFieldDef ─────────────────────────────────────────────────────
 
     @Test

@@ -25,6 +25,16 @@ object AilakeNative {
 
     data class SearchRow(val rowId: Long, val distance: Float, val filePath: String)
 
+    /** One column of a [scan] response — `type` is one of the tags `ailake_scan_json` emits: `int64`, `float32`, `float64`, `utf8`, `bool`, `list_float32`. */
+    data class ScanColumn(val name: String, val type: String)
+
+    /** Result of [scan] — search + full-row fetch in one native call. Columnar, `_distance` always last. */
+    data class ScanResult(
+        val schema: List<ScanColumn> = emptyList(),
+        val numRows: Int = 0,
+        val columns: Map<String, List<Any?>> = emptyMap(),
+    )
+
     /** Partition field definition for multi-column partition specs (Phase K). */
     data class PartitionFieldDef(val column: String, val transform: String, val columnType: String)
 
@@ -43,6 +53,9 @@ object AilakeNative {
 
         /** Cross-modal RRF. Returns `{"ok":true,"results":[{"row_id":N,"rrf_score":F,"file_path":"..."}]}`. Caller must free. */
         fun ailake_search_multimodal_json(requestJson: String): Pointer?
+
+        /** Search + full-row fetch. Returns `{"ok":true,"schema":[...],"num_rows":N,"columns":{...}}`. Caller must free. */
+        fun ailake_scan_json(requestJson: String): Pointer?
 
         /** JSON-envelope write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
         fun ailake_write_batch_json(requestJson: String): Pointer?
@@ -494,6 +507,77 @@ object AilakeNative {
         } catch (e: Exception) {
             log.error("[ailake] Failed to parse native search response for tableUri={}: {}", tableUri, e.message, e)
             emptyList()
+        } finally {
+            runCatching { native.ailake_free_string(ptr) }
+        }
+    }
+
+    /**
+     * Vector search + full-row fetch in one native call (`ailake_scan_json`) — closes the
+     * "SQL search only returns row_id/distance/file_path" gap: previously the only way to get
+     * real columns (chunk_text, document_title, ...) back from a search was a manual `JOIN`
+     * against a separately-registered Iceberg table pointing at the same physical location.
+     * Result is columnar; every stored column comes back (vector column decoded to
+     * `list_float32`), plus a trailing `_distance` column — there's no column-subset filter on
+     * the native side, it always returns the full row width.
+     */
+    fun scan(
+        tableUri: String,
+        queryBytes: String,
+        topK: Int,
+        vectorColumn: String = "embedding",
+        partitionFilter: String? = null,
+        namespace: String = "default",
+        tableName: String = "",
+    ): ScanResult {
+        val native = lib ?: return ScanResult()
+        if (queryBytes.isBlank()) return ScanResult()
+
+        val effectiveTable = tableName.ifBlank { tableUri.trimEnd('/').substringAfterLast('/') }
+        val floats = runCatching {
+            val bytes = Base64.getDecoder().decode(queryBytes)
+            val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            (0 until bytes.size / 4).map { buf.getFloat() }
+        }.getOrElse {
+            log.error("[ailake] Failed to decode Base64 query vector for tableUri={}: {}", tableUri, it.message)
+            return ScanResult()
+        }
+        if (floats.isEmpty()) return ScanResult()
+
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to tableUri,
+            "namespace" to namespace,
+            "table" to effectiveTable,
+            "vec_col" to vectorColumn,
+            "query" to floats,
+            "dim" to floats.size,
+            "top_k" to topK,
+        )
+        if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        val requestJson = mapper.writeValueAsString(payload)
+
+        val ptr = native.ailake_scan_json(requestJson) ?: run {
+            log.warn("[ailake] ailake_scan_json returned null pointer for tableUri={}", tableUri)
+            return ScanResult()
+        }
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) {
+                log.warn("[ailake] Native scan returned ok=false for tableUri={}: {}", tableUri, resp["error"])
+                return ScanResult()
+            }
+            @Suppress("UNCHECKED_CAST")
+            val schemaList = (resp["schema"] as? List<Map<String, Any>> ?: emptyList()).map { m ->
+                ScanColumn(name = m["name"] as String, type = m["type"] as String)
+            }
+            val numRows = (resp["num_rows"] as? Number)?.toInt() ?: 0
+            @Suppress("UNCHECKED_CAST")
+            val columnsMap = resp["columns"] as? Map<String, List<Any?>> ?: emptyMap()
+            ScanResult(schemaList, numRows, columnsMap)
+        } catch (e: Exception) {
+            log.error("[ailake] Failed to parse native scan response for tableUri={}: {}", tableUri, e.message, e)
+            ScanResult()
         } finally {
             runCatching { native.ailake_free_string(ptr) }
         }

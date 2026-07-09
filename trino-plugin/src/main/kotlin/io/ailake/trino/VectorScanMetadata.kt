@@ -64,6 +64,7 @@ class VectorScanMetadata(
         const val SCHEMA = "default"
         const val TABLE_SEARCH = "search"
         const val TABLE_SEARCH_MULTIMODAL = "search_multimodal"
+        const val TABLE_SEARCH_FULL = "search_full"
         const val TABLE_INGEST = "ingest"
 
         val SEARCH_COLUMNS = listOf(
@@ -105,6 +106,26 @@ class VectorScanMetadata(
     private fun ingestColumnHandles(): Map<String, ColumnHandle> =
         ingestColumns().mapIndexed { i, c -> c.name to (VectorScanColumnHandle(c.name, i) as ColumnHandle) }.toMap()
 
+    /**
+     * `(id BIGINT, <vectorColumn> VARCHAR, ...textColumns VARCHAR, _distance DOUBLE)` for
+     * `ailake.default.search_full` (Fase 11) — same column set `ailake_scan_json` actually
+     * returns for this table (every stored column, no subset filter on the native side), so
+     * this reuses the same `ailake.text-columns` catalog config `ingestColumns()` already
+     * uses rather than needing a new property. The vector column comes back from
+     * `AilakeNative.scan` as `list_float32` (decoded F32 values) but is exposed here as
+     * VARCHAR (JSON-encoded array, e.g. `"[0.1,-0.2]"`) rather than `ARRAY<DOUBLE>` — avoids
+     * hand-rolling a Trino `Block`/`BlockBuilder` for `RecordCursor.getObject` (untested
+     * without a live Trino SPI build to verify against); revisit once compat-heavy CI can
+     * validate an ARRAY<DOUBLE> RecordCursor path.
+     */
+    private fun scanColumns(): List<ColumnMetadata> =
+        listOf(ColumnMetadata("id", BIGINT), ColumnMetadata(vectorColumn, VARCHAR)) +
+        textColumns.map { ColumnMetadata(it, VARCHAR) } +
+        listOf(ColumnMetadata("_distance", DOUBLE))
+
+    private fun scanColumnHandles(): Map<String, ColumnHandle> =
+        scanColumns().mapIndexed { i, c -> c.name to (VectorScanColumnHandle(c.name, i) as ColumnHandle) }.toMap()
+
     override fun listSchemaNames(session: ConnectorSession): List<String> = listOf(SCHEMA)
 
     override fun getTableHandle(
@@ -115,6 +136,7 @@ class VectorScanMetadata(
         return when (schemaTableName.tableName) {
             TABLE_SEARCH -> VectorScanTableHandle(tableUri, vectorColumn, dim, namespace, tableName)
             TABLE_SEARCH_MULTIMODAL -> MultimodalScanTableHandle(tableUri, namespace, tableName)
+            TABLE_SEARCH_FULL -> ScanTableHandle(tableUri, vectorColumn, dim, namespace, tableName)
             TABLE_INGEST -> AilakeIngestTableHandle(
                 tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel,
                 partitionFields, formatVersion, textColumns,
@@ -130,6 +152,7 @@ class VectorScanMetadata(
     ): ConnectorTableMetadata = when (table) {
         is AilakeIngestTableHandle -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_INGEST), ingestColumns())
         is MultimodalScanTableHandle -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_SEARCH_MULTIMODAL), MULTIMODAL_SEARCH_COLUMNS)
+        is ScanTableHandle -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_SEARCH_FULL), scanColumns())
         else -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_SEARCH), SEARCH_COLUMNS)
     }
 
@@ -139,6 +162,7 @@ class VectorScanMetadata(
     ): List<SchemaTableName> = listOf(
         SchemaTableName(SCHEMA, TABLE_SEARCH),
         SchemaTableName(SCHEMA, TABLE_SEARCH_MULTIMODAL),
+        SchemaTableName(SCHEMA, TABLE_SEARCH_FULL),
         SchemaTableName(SCHEMA, TABLE_INGEST),
     )
 
@@ -148,6 +172,7 @@ class VectorScanMetadata(
     ): Map<String, ColumnHandle> = when (tableHandle) {
         is AilakeIngestTableHandle -> ingestColumnHandles()
         is MultimodalScanTableHandle -> MULTIMODAL_SEARCH_COLUMN_HANDLES
+        is ScanTableHandle -> scanColumnHandles()
         else -> SEARCH_COLUMN_HANDLES
     }
 
@@ -160,6 +185,7 @@ class VectorScanMetadata(
         return when (tableHandle) {
             is AilakeIngestTableHandle -> ingestColumns()[ordinal]
             is MultimodalScanTableHandle -> MULTIMODAL_SEARCH_COLUMNS[ordinal]
+            is ScanTableHandle -> scanColumns()[ordinal]
             else -> SEARCH_COLUMNS[ordinal]
         }
     }

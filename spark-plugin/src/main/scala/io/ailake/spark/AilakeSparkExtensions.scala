@@ -3,7 +3,7 @@
 package io.ailake.spark
 
 import org.apache.spark.sql.{DataFrame, Row, SparkSession, SparkSessionExtensions}
-import org.apache.spark.sql.types.{DoubleType, LongType, StringType, StructField, StructType}
+import org.apache.spark.sql.types.{ArrayType, BooleanType, DoubleType, FloatType, LongType, StringType, StructField, StructType}
 
 /**
  * Spark extensions entry point. Register via:
@@ -88,6 +88,47 @@ object implicits {
         tableUri, queries, topK, partitionFilter, namespace, tableName)
       val sparkRows = rows.map(r => Row(r.rowId, r.rrfScore.toDouble, r.filePath))
       spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), schema)
+    }
+
+    /**
+     * Vector search + full-row fetch in one DataFrame — closes the "SQL search only returns
+     * row_id/distance/file_path" gap (Fase 11): previously getting real columns
+     * (chunk_text, document_title, ...) back from a search required a manual `JOIN` against
+     * a separately-registered Iceberg table pointing at the same physical location (see
+     * `docs/guides/JVM_INTEGRATION.md` §4D). Schema is built dynamically from
+     * `AilakeNative.scan`'s response — every stored column comes back (no column-subset
+     * filter on the native side), vector column as `ArrayType(FloatType)`, plus a trailing
+     * `_distance` column.
+     *
+     * @param vectorColumn vector column to search (default "embedding")
+     */
+    def ailakeSearchWithData(
+      tableUri:        String,
+      queryVector:     Array[Float],
+      topK:            Int,
+      vectorColumn:    String = "embedding",
+      namespace:       String = "default",
+      tableName:       String = "",
+      partitionFilter: Option[String] = None,
+    ): DataFrame = {
+      val scanResult = AilakeNative.scan(
+        tableUri, queryVector, topK, vectorColumn, partitionFilter, namespace, tableName)
+      val fields = scanResult.schema.map { col =>
+        val sparkType = col.dataType match {
+          case "int64"       => LongType
+          case "float32"     => FloatType
+          case "float64"     => DoubleType
+          case "bool"        => BooleanType
+          case "list_float32" => ArrayType(FloatType)
+          case _             => StringType
+        }
+        StructField(col.name, sparkType, nullable = true)
+      }
+      val schema = StructType(fields)
+      val rows = (0 until scanResult.numRows).map { i =>
+        Row.fromSeq(scanResult.schema.map(col => scanResult.columns(col.name)(i)))
+      }
+      spark.createDataFrame(spark.sparkContext.parallelize(rows, numSlices = 1), schema)
     }
 
     /**
