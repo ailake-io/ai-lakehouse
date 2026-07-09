@@ -1520,7 +1520,9 @@ fn estimate(
     pq_m: Option<u32>,
 ) -> PyResult<Py<PyAny>> {
     let dim = dim as u64;
-    let pq_m = pq_m.map(|m| m as u64).unwrap_or_else(|| (dim / 32).max(8).min(dim));
+    let pq_m = pq_m
+        .map(|m| m as u64)
+        .unwrap_or_else(|| (dim / 32).max(8).min(dim));
 
     let vec_f32 = rows.saturating_mul(dim).saturating_mul(4);
     let vec_f16 = rows.saturating_mul(dim).saturating_mul(2);
@@ -1554,7 +1556,13 @@ fn estimate(
             "~97%",
             "reranks with raw I8",
         ),
-        ("PQ-only (pq_only=True)", 0, pq_bytes, "~94%", "no reranking"),
+        (
+            "PQ-only (pq_only=True)",
+            0,
+            pq_bytes,
+            "~94%",
+            "no reranking",
+        ),
     ];
 
     let list = PyList::empty(py);
