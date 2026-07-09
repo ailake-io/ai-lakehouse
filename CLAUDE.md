@@ -519,6 +519,18 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] **Flink — write multi-column (multimodal)** — nova opção de DDL `vector.columns` (mesmo JSON do Trino) no `CREATE TABLE` já ingest-shaped; `AilakeVectorTableSink`/`AilakeSinkFunction` resolvem N colunas `ARRAY<FLOAT>` por nome em vez do único `vecCol`, chamando `AilakeNativeLoader.writeBatchMulti` (novo wrapper) via `ailake_write_batch_multi_json`.
 - Testes adicionados nos três plugins; docs (`JVM_INTEGRATION.md`, `JVM_PLUGINS.md`) e `CHANGELOG.md` atualizados.
 
+### Fase 13 — Paridade CLI/DuckDB/Airflow
+
+> **Contexto (2026-07-09)**: mesma auditoria de paridade (padrão Fase 11/12), agora sobre `ailake-cli`, `duckdb-ailake` e `airflow-providers-ailake`. Achado mais sério que os anteriores: não só gaps de cobertura, mas um bug ativo — `ailake insert` não tinha 8 flags que `ailake_write_batch_json` (usado por todo plugin JVM e `ailake-py`) já aceita por escrita (`--partition-by/-value/-fields`, `--format-version`, `--hnsw-m/-ef`, `--pre-normalize`, `--deferred`), então qualquer DAG Airflow usando esses parâmetros no `AilakeWriteOperator` crashava em runtime com erro do clap. `airflow-providers-ailake` tinha sido escrito contra a superfície de capacidade *pretendida*, não a do CLI real (incompleta).
+
+- [x] **`ailake-cli insert` — 8 flags novas** — `--partition-by`, `--partition-value`, `--partition-fields`, `--format-version`, `--hnsw-m`, `--hnsw-ef`, `--pre-normalize`, `--deferred`, espelhando `ailake_write_batch_json`'s `Req`. `--deferred` é mutuamente exclusivo com `--batch-id` (writes deferred ainda não carregam idempotency tag).
+- [x] **`ailake decay-memories <table> --lambda <λ>`** — subcommand novo, faltava inteiramente (só existia via `ailake-py`); `AilakeHook.decay_memories()` já chamava esse subcommand assumindo que existia.
+- [x] **`duckdb-ailake` — `ailake_write_batch_multi` + `ailake_compact`** — 2 dos 9 capabilities nativos nunca tinham sido wireados numa função SQL. Seguem o padrão arity-ladder já estabelecido (`ailake_write_batch`/`ailake_delete_where`).
+- [x] **`airflow-providers-ailake` — 6 capabilities do CLI nunca wrapeadas** — `migrate`/`delete_rows`/`add_vector_column`/`backfill_vector_column`/`estimate` (hook + operator, exceto `estimate` que é hook-only); `AilakeWriteOperator` ganhou `vector_cols` (multimodal); `AilakeCompactOperator` ganhou `max_files_per_pass`.
+- [x] **Fix `AilakeHook.compact()`** — nunca pedia `--format json`, então seu parser de texto (`"files_compacted:"`) nunca dava match no output real (`"compacted into <path>"`) — sempre retornava `0` silenciosamente. Corrigido para usar `--format json`.
+- Fora de escopo (documentado, não implementado): `search_multimodal`/`ailake_scan_json` não têm superfície nenhuma no `ailake-cli` — precisa de design real de formato de saída, não é wire-up mecânico.
+- Testes reais (não só mocks): build real do CLI + round-trip manual; extensão DuckDB compilada e carregada numa sessão DuckDB real (`RTLD_GLOBAL` antes de `import duckdb`); Airflow com venv real (`apache-airflow` + `pytest`), 82 testes (60 existentes + 22 novos), e chamadas diretas contra o binário `ailake` real para todo hook novo. Docs (`README.md` dos três, `CHANGELOG.md`) atualizados.
+
 ---
 
 ## 11. Stack Técnica — Rust

@@ -16,10 +16,14 @@ import pytest
 from airflow_providers_ailake import get_provider_info
 from airflow_providers_ailake.hooks.ailake import AilakeHook
 from airflow_providers_ailake.operators.ailake import (
+    AilakeAddVectorColumnOperator,
+    AilakeBackfillVectorColumnOperator,
     AilakeCompactOperator,
+    AilakeDeleteRowsOperator,
     AilakeDeleteWhereOperator,
     AilakeEvolveSchemaOperator,
     AilakeFtsSearchOperator,
+    AilakeMigrateOperator,
     AilakeSearchOperator,
     AilakeWriteOperator,
 )
@@ -799,3 +803,280 @@ class TestAilakeIndexStatusSensor:
             with patch.object(hook, "get_table_info", return_value={"index_status": "failed"}):
                 with pytest.raises(RuntimeError, match="<no detail>"):
                     sensor.poke(context={})
+
+
+# ---------------------------------------------------------------------------
+# AilakeHook — compact/decay_memories/migrate/delete_rows/vector-column/estimate
+# ---------------------------------------------------------------------------
+
+class TestAilakeHookNewCapabilities:
+    def test_compact_requests_json_and_parses_files_compacted(self):
+        hook = _make_hook()
+        payload = json.dumps({"ok": True, "files_compacted": 3})
+        with patch.object(hook, "run_cli", return_value=_completed(stdout=payload)) as mock_cli:
+            result = hook.compact("default.docs")
+        assert result == 3
+        args = mock_cli.call_args[0]
+        assert "--format" in args
+        assert "json" in args
+        assert "--max-files-per-pass" in args
+
+    def test_compact_returns_zero_on_unparseable_output(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed(stdout="not json")):
+            result = hook.compact("default.docs")
+        assert result == 0
+
+    def test_compact_max_files_per_pass_passed_to_cli(self):
+        hook = _make_hook()
+        payload = json.dumps({"ok": True, "files_compacted": 0})
+        with patch.object(hook, "run_cli", return_value=_completed(stdout=payload)) as mock_cli:
+            hook.compact("default.docs", max_files_per_pass=5)
+        args = mock_cli.call_args[0]
+        assert "--max-files-per-pass" in args
+        assert "5" in args
+
+    def test_decay_memories_calls_cli_with_lambda(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed(stdout="files_updated: 7")) as mock_cli:
+            result = hook.decay_memories("default.docs", decay_lambda=0.2)
+        assert result == 7
+        args = mock_cli.call_args[0]
+        assert "decay-memories" in args
+        assert "--lambda" in args
+        assert "0.2" in args
+
+    def test_migrate_calls_cli_with_expected_flags(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+            hook.migrate(
+                "default.docs",
+                embed_cmd="python3 embed.py",
+                old_column="embedding",
+                new_column="embedding_v2",
+                model_name="text-embedding-3-small",
+                model_version="v1",
+            )
+        args = mock_cli.call_args[0]
+        assert "migrate" in args
+        assert "--old-column" in args
+        assert "--new-column" in args
+        assert "--embed-cmd" in args
+        assert "python3 embed.py" in args
+        assert "--model-name" in args
+        assert "text-embedding-3-small" in args
+        assert "--model-version" in args
+        assert "v1" in args
+
+    def test_migrate_omits_model_flags_when_not_set(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+            hook.migrate("default.docs", embed_cmd="python3 embed.py")
+        args = mock_cli.call_args[0]
+        assert "--model-name" not in args
+        assert "--model-version" not in args
+
+    def test_delete_rows_calls_cli(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+            hook.delete_rows("default.docs", "data/part-00001.parquet", [0, 5, 42])
+        args = mock_cli.call_args[0]
+        assert "delete-rows" in args
+        assert "--file" in args
+        assert "data/part-00001.parquet" in args
+        assert "--rows" in args
+        assert "0,5,42" in args
+
+    def test_delete_rows_noop_on_empty(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli") as mock_cli:
+            hook.delete_rows("default.docs", "data/part-00001.parquet", [])
+        mock_cli.assert_not_called()
+
+    def test_add_vector_column_parses_schema_id(self):
+        hook = _make_hook()
+        stdout = "vector column 'image_embedding' added — new_schema_id: 4"
+        with patch.object(hook, "run_cli", return_value=_completed(stdout=stdout)) as mock_cli:
+            result = hook.add_vector_column("default.docs", "image_embedding", 512)
+        assert result == 4
+        args = mock_cli.call_args[0]
+        assert "add-vector-column" in args
+        assert "--column" in args
+        assert "image_embedding" in args
+        assert "--dim" in args
+        assert "512" in args
+
+    def test_add_vector_column_returns_minus_one_on_no_id_in_output(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed(stdout="no schema id here")):
+            result = hook.add_vector_column("default.docs", "image_embedding", 512)
+        assert result == -1
+
+    def test_backfill_vector_column_calls_cli(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+            hook.backfill_vector_column(
+                "default.docs", "image_embedding", embed_cmd="python3 embed_images.py"
+            )
+        args = mock_cli.call_args[0]
+        assert "backfill-vector-column" in args
+        assert "--column" in args
+        assert "image_embedding" in args
+        assert "--embed-cmd" in args
+        assert "python3 embed_images.py" in args
+
+    def test_estimate_parses_json(self):
+        hook = _make_hook()
+        payload = json.dumps({"rows": 1000000, "dim": 1536, "hnsw_m": 16, "pq_m": None, "estimates": []})
+        with patch.object(hook, "run_cli", return_value=_completed(stdout=payload)) as mock_cli:
+            result = hook.estimate("1M", 1536)
+        assert result["rows"] == 1000000
+        assert result["dim"] == 1536
+        args = mock_cli.call_args[0]
+        assert "estimate" in args
+        assert "--rows" in args
+        assert "1M" in args
+        assert "--format" in args
+        assert "json" in args
+
+    def test_estimate_returns_empty_dict_on_parse_failure(self):
+        hook = _make_hook()
+        with patch.object(hook, "run_cli", return_value=_completed(stdout="not json")):
+            result = hook.estimate("1M", 1536)
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# AilakeWriteOperator — vector_cols (multimodal) and deferred/batch_id conflict
+# ---------------------------------------------------------------------------
+
+class TestAilakeWriteOperatorVectorColsAndDeferred:
+    def test_vector_cols_passed_as_cli_flag(self):
+        op = AilakeWriteOperator(
+            task_id="write",
+            table="default.media",
+            source_file="/tmp/media.parquet",
+            vector_cols=[
+                {"column": "embedding", "dim": 4},
+                {"column": "image_embedding", "dim": 512, "metric": "euclidean", "modality": "image"},
+            ],
+        )
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--vector-cols" in args
+        idx = args.index("--vector-cols")
+        assert args[idx + 1] == "embedding:4:cosine,image_embedding:512:euclidean:image"
+        assert "--embeddings" not in args
+
+    def test_embeddings_flag_used_when_vector_cols_not_set(self):
+        op = AilakeWriteOperator(
+            task_id="write", table="default.docs", source_file="/tmp/docs.parquet"
+        )
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--embeddings" in args
+        assert "--vector-cols" not in args
+
+    def test_deferred_drops_batch_id(self):
+        op = AilakeWriteOperator(
+            task_id="write", table="default.docs", source_file="/tmp/docs.parquet", deferred=True
+        )
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--deferred" in args
+        assert "--batch-id" not in args
+
+    def test_non_deferred_passes_batch_id(self):
+        op = AilakeWriteOperator(
+            task_id="write", table="default.docs", source_file="/tmp/docs.parquet"
+        )
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--batch-id" in args
+
+
+# ---------------------------------------------------------------------------
+# New operators — Migrate, DeleteRows, AddVectorColumn, BackfillVectorColumn
+# ---------------------------------------------------------------------------
+
+class TestAilakeMigrateOperator:
+    def test_execute_calls_hook_migrate(self):
+        op = AilakeMigrateOperator(
+            task_id="migrate", table="default.docs", embed_cmd="python3 embed.py"
+        )
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "migrate") as mock_migrate:
+                op.execute(context={})
+        mock_migrate.assert_called_once()
+        _, kwargs = mock_migrate.call_args
+        assert kwargs["embed_cmd"] == "python3 embed.py"
+
+
+class TestAilakeDeleteRowsOperator:
+    def test_execute_calls_hook_delete_rows(self):
+        op = AilakeDeleteRowsOperator(
+            task_id="delete_rows",
+            table="default.docs",
+            file="data/part-00001.parquet",
+            row_positions=[0, 5, 42],
+        )
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "delete_rows") as mock_dr:
+                op.execute(context={})
+        mock_dr.assert_called_once_with("default.docs", "data/part-00001.parquet", [0, 5, 42])
+
+    def test_execute_noop_on_empty_row_positions(self):
+        op = AilakeDeleteRowsOperator(
+            task_id="delete_rows", table="default.docs", file="data/part-00001.parquet", row_positions=[]
+        )
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "delete_rows") as mock_dr:
+                op.execute(context={})
+        mock_dr.assert_not_called()
+
+
+class TestAilakeAddVectorColumnOperator:
+    def test_execute_pushes_schema_id_to_xcom(self):
+        op = AilakeAddVectorColumnOperator(
+            task_id="add_col", table="default.docs", column="image_embedding", dim=512
+        )
+        hook = _make_hook()
+        ti = MagicMock()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "add_vector_column", return_value=4) as mock_avc:
+                result = op.execute(context={"ti": ti})
+        assert result == 4
+        mock_avc.assert_called_once()
+        ti.xcom_push.assert_called_once_with(key="schema_id", value=4)
+
+
+class TestAilakeBackfillVectorColumnOperator:
+    def test_execute_calls_hook_backfill(self):
+        op = AilakeBackfillVectorColumnOperator(
+            task_id="backfill",
+            table="default.docs",
+            column="image_embedding",
+            embed_cmd="python3 embed_images.py",
+        )
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "backfill_vector_column") as mock_bf:
+                op.execute(context={})
+        mock_bf.assert_called_once()
+        _, kwargs = mock_bf.call_args
+        assert kwargs["embed_cmd"] == "python3 embed_images.py"

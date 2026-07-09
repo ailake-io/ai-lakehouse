@@ -40,6 +40,8 @@ add_library(duckdb_ailake MODULE
     src/ailake_scan_table.cpp
     src/ailake_delete.cpp
     src/ailake_evolve_schema.cpp
+    src/ailake_write_batch_multi.cpp
+    src/ailake_compact.cpp
 )
 
 target_include_directories(duckdb_ailake PRIVATE
