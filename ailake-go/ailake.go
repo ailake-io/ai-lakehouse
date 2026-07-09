@@ -177,10 +177,13 @@ func searchFile(
 	opts SearchOptions,
 	hw *HardwareProfile,
 ) ([]FileSearchResult, error) {
-	// Resolve absolute path
+	// Resolve absolute path. entry.Path is already relative to the warehouse
+	// root (e.g. "default/docs/data/part-00000.parquet" — the Rust catalog
+	// writer includes namespace/table in it), so join against warehouse only;
+	// joining namespace/table again here would double-prefix the path.
 	filePath := entry.Path
 	if !filepath.IsAbs(filePath) {
-		filePath = filepath.Join(warehouse, namespace, table, filePath)
+		filePath = filepath.Join(warehouse, filePath)
 	}
 
 	if entry.HnswOffset == nil || entry.HnswLen == nil {

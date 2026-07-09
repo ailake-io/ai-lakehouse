@@ -293,7 +293,26 @@ Uses geometric pruning on the primary column centroid, dispatches HNSW search pe
 
 ## Write operations
 
-The C++ header-only SDK delegates write operations (write_batch, delete_where, evolve_schema) to the `ailake` CLI binary via subprocess. No Rust FFI required at the C++ layer.
+The C++ header-only SDK delegates write operations (write_batch, write_batch_multi, delete_where, evolve_schema, compact) to the `ailake` CLI binary via subprocess. No Rust FFI required at the C++ layer.
+
+### `ailake::write_batch_multi`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Multi-column (Phase 8 multimodal) write — each column gets its own HNSW
+// index in the AILK footer. Requires at least one VectorColSpec.
+ailake::write_batch_multi(
+    "/path/to/warehouse",   // warehouse root
+    "default.media",        // "namespace.table"
+    "/local/batch.parquet", // source Parquet file
+    {
+        {"embedding", 1536, "cosine", ""},        // text column
+        {"image_embedding", 512, "cosine", "image"}, // image column
+    }
+);
+// throws std::runtime_error if vector_cols is empty or the CLI exits non-zero
+```
 
 ### `ailake::delete_where`
 
@@ -303,10 +322,9 @@ The C++ header-only SDK delegates write operations (write_batch, delete_where, e
 // Commit an Iceberg equality delete (no data files rewritten)
 ailake::delete_where(
     "/path/to/warehouse",  // warehouse root
-    "default",             // namespace
-    "my_table",            // table name
+    "default.my_table",    // "namespace.table"
     "id",                  // equality delete column
-    {"doc-1", "doc-2"}    // values to delete
+    {"doc-1", "doc-2"}     // values to delete
 );
 // throws std::runtime_error on failure
 ```
@@ -319,14 +337,28 @@ ailake::delete_where(
 // Metadata-only schema evolution (no data files rewritten; field IDs are stable)
 ailake::evolve_schema(
     "/path/to/warehouse",
-    "default",
-    "my_table",
-    {{"source_url", "string", false, ""}},  // add_columns: {name, type, required, initial_default}
-    {}                                        // rename_columns: {} empty = no renames
+    "default.my_table",                        // "namespace.table"
+    {{"source_url", "string", ""}},             // add_columns: {name, type, initial_default}
+    {}                                           // rename_columns: {} empty = no renames
 );
+// returns the new schema_id (-1 if not parseable from CLI output)
 ```
 
-Both functions invoke the `ailake` binary via `resolve_bin()` (respects `AILAKE_BIN` env var) and parse the JSON response. An empty `values` list in `delete_where` is a no-op.
+### `ailake::compact`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Merge small files in a table via `ailake compact`.
+int files_compacted = ailake::compact(
+    "/path/to/warehouse",
+    "default.my_table",
+    {.min_files = 2}   // CompactOptions: target_size, min_files, max_files_per_pass, deferred
+);
+// returns 0 if nothing was eligible
+```
+
+All four functions invoke the `ailake` binary via `resolve_bin()` (respects `AILAKE_BIN` env var). An empty `values` list in `delete_where` is a no-op; an empty add/rename list in `evolve_schema` is a no-op returning 0.
 
 ### `ailake::search_text`
 
