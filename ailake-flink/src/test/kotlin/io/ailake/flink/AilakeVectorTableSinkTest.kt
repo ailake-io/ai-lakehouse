@@ -9,9 +9,18 @@ import org.apache.flink.table.catalog.ResolvedSchema
 import org.apache.flink.table.data.GenericArrayData
 import org.apache.flink.table.data.GenericRowData
 import org.apache.flink.table.data.StringData
+import org.apache.flink.table.expressions.CallExpression
+import org.apache.flink.table.expressions.FieldReferenceExpression
+import org.apache.flink.table.expressions.ResolvedExpression
+import org.apache.flink.table.expressions.ValueLiteralExpression
+import org.apache.flink.table.functions.BuiltInFunctionDefinitions
+import org.apache.flink.table.types.logical.LogicalTypeRoot
 import org.junit.jupiter.api.Assertions.assertDoesNotThrow
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import java.lang.reflect.Field
 
@@ -157,5 +166,136 @@ class AilakeVectorTableSinkTest {
         sink.invoke(row, noopContext)
         val textBuffers: Map<String, List<String>> = privateField(sink, "textBuffers")
         assertEquals(listOf(""), textBuffers.getValue("text"))
+    }
+
+    // ── null id/vector guard ────────────────────────────────────────────────────
+    //
+    // Regression: extra text columns were null-checked (empty-string fallback) but
+    // id/vector were not — row.getLong/getArray on a null field threw an opaque NPE
+    // instead of a clear validation error.
+
+    @Test
+    fun invokeThrowsClearErrorOnNullId() {
+        val sink = AilakeSinkFunction(
+            warehouse = "file:///tmp/x", namespace = "default", tableName = "docs",
+            vecCol = "embedding", dim = 2, metric = "cosine", precision = "f16", idIdx = 0, vecIdx = 1,
+        )
+        val row = GenericRowData(2)
+        row.setField(0, null)
+        row.setField(1, GenericArrayData(floatArrayOf(0.1f, 0.2f)))
+        val ex = assertThrows(IllegalStateException::class.java) { sink.invoke(row, noopContext) }
+        assertTrue(ex.message!!.contains("id"))
+    }
+
+    @Test
+    fun invokeThrowsClearErrorOnNullEmbedding() {
+        val sink = AilakeSinkFunction(
+            warehouse = "file:///tmp/x", namespace = "default", tableName = "docs",
+            vecCol = "embedding", dim = 2, metric = "cosine", precision = "f16", idIdx = 0, vecIdx = 1,
+        )
+        val row = GenericRowData(2)
+        row.setField(0, 1L)
+        row.setField(1, null)
+        val ex = assertThrows(IllegalStateException::class.java) { sink.invoke(row, noopContext) }
+        assertTrue(ex.message!!.contains("embedding"))
+    }
+
+    // ── id/vector column type validation ────────────────────────────────────────
+    //
+    // Regression: a type mismatch (e.g. id STRING instead of BIGINT) only surfaced
+    // as an opaque ClassCastException deep in RowData extraction on the first row.
+
+    @Test
+    fun validateColumnTypeAcceptsMatchingType() {
+        assertDoesNotThrow {
+            AilakeVectorTableSink.validateColumnType("id", LogicalTypeRoot.BIGINT, setOf(LogicalTypeRoot.BIGINT), "BIGINT")
+        }
+    }
+
+    @Test
+    fun validateColumnTypeRejectsMismatchedType() {
+        val ex = assertThrows(IllegalArgumentException::class.java) {
+            AilakeVectorTableSink.validateColumnType("id", LogicalTypeRoot.VARCHAR, setOf(LogicalTypeRoot.BIGINT), "BIGINT")
+        }
+        assertTrue(ex.message!!.contains("id"))
+        assertTrue(ex.message!!.contains("BIGINT"))
+    }
+
+    // ── DELETE pushdown (applyDeleteFilters / executeDeletion) ─────────────────
+    //
+    // Regression: AilakeNativeLoader.deleteWhere was fully implemented but had no
+    // SQL surface — DELETE FROM did nothing. Now wired via SupportsDeletePushDown,
+    // equality/IN pushdown only.
+
+    private fun sink() = AilakeVectorTableSink(
+        warehouse = "file:///tmp/x", namespace = "default", tableName = "docs",
+        vecCol = "embedding", dim = 4, metric = "cosine", precision = "f16",
+        schema = ResolvedSchema.of(
+            Column.physical("id", DataTypes.BIGINT()),
+            Column.physical("embedding", DataTypes.ARRAY(DataTypes.FLOAT())),
+        ),
+    )
+
+    private fun equalsExpr(field: String, value: Any): CallExpression {
+        val fieldRef = FieldReferenceExpression(field, DataTypes.BIGINT(), 0, 0)
+        val literal = ValueLiteralExpression(value)
+        return CallExpression.anonymous(BuiltInFunctionDefinitions.EQUALS, listOf(fieldRef, literal), DataTypes.BOOLEAN())
+    }
+
+    private fun inExpr(field: String, values: List<Any>): CallExpression {
+        val fieldRef = FieldReferenceExpression(field, DataTypes.BIGINT(), 0, 0)
+        val children: List<ResolvedExpression> = listOf(fieldRef) + values.map { ValueLiteralExpression(it) }
+        return CallExpression.anonymous(BuiltInFunctionDefinitions.IN, children, DataTypes.BOOLEAN())
+    }
+
+    @Test
+    fun applyDeleteFiltersAcceptsSingleEquality() {
+        val s = sink()
+        assertTrue(s.applyDeleteFilters(listOf(equalsExpr("id", 5L))))
+        assertEquals("id", privateField<String?>(s, "deleteColumn"))
+        assertEquals(listOf("5"), privateField<List<String>?>(s, "deleteValues"))
+    }
+
+    @Test
+    fun applyDeleteFiltersAcceptsIn() {
+        val s = sink()
+        assertTrue(s.applyDeleteFilters(listOf(inExpr("id", listOf(1L, 2L, 3L)))))
+        assertEquals("id", privateField<String?>(s, "deleteColumn"))
+        assertEquals(listOf("1", "2", "3"), privateField<List<String>?>(s, "deleteValues"))
+    }
+
+    @Test
+    fun applyDeleteFiltersRejectsMultipleFilters() {
+        val s = sink()
+        assertFalse(s.applyDeleteFilters(listOf(equalsExpr("id", 5L), equalsExpr("id", 6L))))
+    }
+
+    @Test
+    fun applyDeleteFiltersRejectsNonEqualsNonIn() {
+        val s = sink()
+        val fieldRef = FieldReferenceExpression("id", DataTypes.BIGINT(), 0, 0)
+        val gt = CallExpression.anonymous(
+            BuiltInFunctionDefinitions.GREATER_THAN,
+            listOf(fieldRef, ValueLiteralExpression(5L)),
+            DataTypes.BOOLEAN(),
+        )
+        assertFalse(s.applyDeleteFilters(listOf(gt)))
+    }
+
+    @Test
+    fun executeDeletionReturnsEmptyWithoutCapturedPredicate() {
+        val s = sink()
+        assertTrue(s.executeDeletion().isEmpty)
+    }
+
+    @Test
+    fun executeDeletionFailsClearlyWhenNativeLibraryAbsent() {
+        assumeTrue(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
+        val s = sink()
+        s.applyDeleteFilters(listOf(equalsExpr("id", 5L)))
+        // AilakeNativeLoader.lib throws (via getOrThrow()) when the native lib isn't on
+        // the library path — surfaces as UnsatisfiedLinkError (a JVM Error), not a
+        // RuntimeException; see AilakeInputFormat.open()'s comment on this same quirk.
+        assertThrows(Throwable::class.java) { s.executeDeletion() }
     }
 }
