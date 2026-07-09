@@ -150,12 +150,18 @@ class AilakeCatalogTest extends AnyFunSuite {
     val catalog = makeCatalog()
     val ident = Identifier.of(Array("default"), "docs")
     val change = TableChange.addColumn(Array("source"), StringType)
-    val ex = intercept[RuntimeException] {
-      catalog.alterTable(ident, change)
+    // Native lib absent → evolveSchema returns -1 → RuntimeException("...ALTER TABLE failed...").
+    // Native lib present AND the table already exists on disk at file:///tmp/test-table/default/docs
+    // (e.g. left behind by an earlier trino-plugin test run sharing the same CI runner's /tmp) →
+    // evolveSchema succeeds and alterTable returns a Table instead of throwing. Either outcome proves
+    // it's a real evolveSchema call, not the old blanket "not supported by AI-Lake catalog" throw.
+    try {
+      val table = catalog.alterTable(ident, change)
+      assert(table != null)
+    } catch {
+      case ex: RuntimeException =>
+        assert(ex.getMessage.contains("ALTER TABLE failed"))
     }
-    // Native lib absent in test env → evolveSchema returns -1 → this message,
-    // not the old "ALTER TABLE not supported by AI-Lake catalog".
-    assert(ex.getMessage.contains("ALTER TABLE failed"))
   }
 
   test("alterTable rejects unsupported column type") {
