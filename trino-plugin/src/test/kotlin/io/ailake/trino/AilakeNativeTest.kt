@@ -29,6 +29,83 @@ class AilakeNativeTest {
         assertTrue(results.isEmpty())
     }
 
+    // ── Fase 11: scan (search + full-row fetch, ailake.default.search_full) ──
+
+    @Test
+    fun scanReturnsEmptyResultWhenNativeLibAbsent() {
+        val result = AilakeNative.scan("s3://bucket/table/", base64Of(0.1f, 0.2f, 0.3f), topK = 5)
+        assertTrue(result.schema.isEmpty())
+        assertEquals(0, result.numRows)
+        assertTrue(result.columns.isEmpty())
+    }
+
+    @Test
+    fun scanReturnsEmptyResultForBlankQueryBytes() {
+        val result = AilakeNative.scan("s3://bucket/table/", "  ", topK = 5)
+        assertTrue(result.schema.isEmpty())
+    }
+
+    @Test
+    fun scanColumnDataClassEquality() {
+        val c1 = AilakeNative.ScanColumn("id", "int64")
+        val c2 = AilakeNative.ScanColumn("id", "int64")
+        assertEquals(c1, c2)
+    }
+
+    // ── writeBatchMulti (Phase 8 multimodal write) ────────────────────────────
+    //
+    // Regression: writeBatchMulti was exposed from Spark (`ailakeWriteMulti`)
+    // but had no wrapper here at all — a Trino-only user could never write a
+    // table with 2+ independent vector columns.
+
+    @Test
+    fun writeBatchMultiDoesNotThrowWhenNativeLibAbsent() {
+        // Result is null (lib absent) or a snapshot_id (lib present, local fallback since
+        // "s3://..." with no AWS creds/network resolves via LocalStore's relative-path
+        // fallback in CI) — same caveat as writeBatchWithFtsColumnsDoesNotThrow below.
+        val spec = AilakeNative.VectorColSpec("embedding", 4)
+        val result = AilakeNative.writeBatchMulti(
+            tableUri = "s3://bucket/t/", namespace = "default", tableName = "docs",
+            ids = listOf(1L, 2L),
+            vectorColumns = listOf(spec to listOf(listOf(0.1f, 0.2f, 0.3f, 0.4f), listOf(0.5f, 0.6f, 0.7f, 0.8f))),
+        )
+        assertTrue(result == null || result > 0, "writeBatchMulti must return null or a positive snapshot_id; got $result")
+    }
+
+    @Test
+    fun writeBatchMultiReturnsNullForEmptyIds() {
+        val spec = AilakeNative.VectorColSpec("embedding", 4)
+        val result = AilakeNative.writeBatchMulti(
+            tableUri = "s3://bucket/t/", namespace = "default", tableName = "docs",
+            ids = emptyList(), vectorColumns = listOf(spec to emptyList()),
+        )
+        assertNull(result)
+    }
+
+    @Test
+    fun writeBatchMultiReturnsNullForEmptyVectorColumns() {
+        val result = AilakeNative.writeBatchMulti(
+            tableUri = "s3://bucket/t/", namespace = "default", tableName = "docs",
+            ids = listOf(1L), vectorColumns = emptyList(),
+        )
+        assertNull(result)
+    }
+
+    @Test
+    fun vectorColSpecDefaults() {
+        val spec = AilakeNative.VectorColSpec("embedding", 1536)
+        assertEquals("cosine", spec.metric)
+        assertEquals("f16", spec.precision)
+        assertNull(spec.modality)
+    }
+
+    @Test
+    fun vectorColSpecEquality() {
+        val s1 = AilakeNative.VectorColSpec("embedding", 4, modality = "text")
+        val s2 = AilakeNative.VectorColSpec("embedding", 4, modality = "text")
+        assertEquals(s1, s2)
+    }
+
     @Test
     fun searchRowDataClassEquality() {
         val r1 = AilakeNative.SearchRow(1L, 0.5f, "file.parquet")

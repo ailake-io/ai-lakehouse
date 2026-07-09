@@ -56,6 +56,12 @@ class VectorScanMetadata(
     private val deferred: Boolean = false,
     private val ftsColumns: List<String> = emptyList(),
     private val ftsTokenizer: String = "default",
+    // Multi-column (Phase 8 multimodal) ingest — e.g. text + image embeddings on the same
+    // row, each with its own HNSW index. When non-empty, ingestColumns() emits one
+    // ARRAY<DOUBLE> column per entry instead of the single `vectorColumn`, and
+    // AilakePageSink calls ailake_write_batch_multi_json instead of ailake_write_batch_json.
+    // Configured catalog-wide via ailake.vector-columns (VectorScanConnectorFactory).
+    private val vectorColumns: List<AilakeNative.VectorColSpec> = emptyList(),
 ) : ConnectorMetadata {
 
     private val log = LoggerFactory.getLogger(VectorScanMetadata::class.java)
@@ -63,6 +69,8 @@ class VectorScanMetadata(
     companion object {
         const val SCHEMA = "default"
         const val TABLE_SEARCH = "search"
+        const val TABLE_SEARCH_MULTIMODAL = "search_multimodal"
+        const val TABLE_SEARCH_FULL = "search_full"
         const val TABLE_INGEST = "ingest"
 
         val SEARCH_COLUMNS = listOf(
@@ -75,6 +83,18 @@ class VectorScanMetadata(
             "distance"  to VectorScanColumnHandle("distance", 1),
             "file_path" to VectorScanColumnHandle("file_path", 2),
         )
+
+        /** `AilakeNative.searchMultimodal` was fully implemented but had no SQL surface — see [MultimodalScanTableHandle]. */
+        val MULTIMODAL_SEARCH_COLUMNS = listOf(
+            ColumnMetadata("row_id", BIGINT),
+            ColumnMetadata("rrf_score", DOUBLE),
+            ColumnMetadata("file_path", VARCHAR),
+        )
+        val MULTIMODAL_SEARCH_COLUMN_HANDLES: Map<String, ColumnHandle> = mapOf(
+            "row_id"    to VectorScanColumnHandle("row_id", 0),
+            "rrf_score" to VectorScanColumnHandle("rrf_score", 1),
+            "file_path" to VectorScanColumnHandle("file_path", 2),
+        )
     }
 
     /**
@@ -82,15 +102,45 @@ class VectorScanMetadata(
      * columns are appended in the order configured via `ailake.text-columns`
      * on the catalog. `AilakePageSink` relies on this exact ordering (id=0,
      * vector=1, text columns starting at 2) to read the right Page channels.
+     *
+     * Multi-column mode (`ailake.vector-columns` configured, `vectorColumns.isNotEmpty()`):
+     * `(id BIGINT, <col1> ARRAY<DOUBLE>, <col2> ARRAY<DOUBLE>, ..., ...textColumns VARCHAR)`
+     * — one ARRAY<DOUBLE> per configured vector column (in `ailake.vector-columns` order),
+     * `AilakePageSink` reads channels 1..N as vectors before the text columns start at N+1.
      */
-    private fun ingestColumns(): List<ColumnMetadata> =
-        listOf(
-            ColumnMetadata("id", BIGINT),
-            ColumnMetadata.builder().setName("embedding").setType(ArrayType(DOUBLE)).setNullable(false).build(),
-        ) + textColumns.map { ColumnMetadata(it, VARCHAR) }
+    private fun ingestColumns(): List<ColumnMetadata> {
+        val vecCols = if (vectorColumns.isNotEmpty()) {
+            vectorColumns.map { spec ->
+                ColumnMetadata.builder().setName(spec.column).setType(ArrayType(DOUBLE)).setNullable(false).build()
+            }
+        } else {
+            listOf(ColumnMetadata.builder().setName("embedding").setType(ArrayType(DOUBLE)).setNullable(false).build())
+        }
+        return listOf(ColumnMetadata("id", BIGINT)) + vecCols + textColumns.map { ColumnMetadata(it, VARCHAR) }
+    }
 
     private fun ingestColumnHandles(): Map<String, ColumnHandle> =
         ingestColumns().mapIndexed { i, c -> c.name to (VectorScanColumnHandle(c.name, i) as ColumnHandle) }.toMap()
+
+    /**
+     * `(id BIGINT, <vectorColumn> VARCHAR, ...textColumns VARCHAR, _distance DOUBLE)` for
+     * `ailake.default.search_full` (Fase 11) — same column set `ailake_scan_json` actually
+     * returns for this table (every stored column, no subset filter on the native side), so
+     * this reuses the same `ailake.text-columns` catalog config `ingestColumns()` already
+     * uses rather than needing a new property. The vector column comes back from
+     * `AilakeNative.scan` as `list_float32` (decoded F32 values) but is exposed here as
+     * VARCHAR (JSON-encoded array, e.g. `"[0.1,-0.2]"`) rather than `ARRAY<DOUBLE>` — avoids
+     * hand-rolling a Trino `Block`/`BlockBuilder` for `RecordCursor.getObject` (untested
+     * without a live Trino SPI build to verify against); revisit once compat-heavy CI can
+     * validate an ARRAY<DOUBLE> RecordCursor path.
+     */
+    private fun scanColumns(): List<ColumnMetadata> =
+        listOf(ColumnMetadata("id", BIGINT), ColumnMetadata(vectorColumn, VARCHAR)) +
+        textColumns.map { ColumnMetadata(it, VARCHAR) } +
+        listOf(ColumnMetadata("_distance", DOUBLE))
+
+    private fun scanColumnHandles(): Map<String, ColumnHandle> =
+        scanColumns().mapIndexed { i, c -> c.name to (VectorScanColumnHandle(c.name, i) as ColumnHandle) }.toMap()
 
     override fun listSchemaNames(session: ConnectorSession): List<String> = listOf(SCHEMA)
 
@@ -101,10 +151,13 @@ class VectorScanMetadata(
         if (schemaTableName.schemaName != SCHEMA) return null
         return when (schemaTableName.tableName) {
             TABLE_SEARCH -> VectorScanTableHandle(tableUri, vectorColumn, dim, namespace, tableName)
+            TABLE_SEARCH_MULTIMODAL -> MultimodalScanTableHandle(tableUri, namespace, tableName)
+            TABLE_SEARCH_FULL -> ScanTableHandle(tableUri, vectorColumn, dim, namespace, tableName)
             TABLE_INGEST -> AilakeIngestTableHandle(
                 tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel,
                 partitionFields, formatVersion, textColumns,
                 hnswM, hnswEfConstruction, preNormalize, deferred, ftsColumns, ftsTokenizer,
+                vectorColumns = vectorColumns,
             )
             else -> null
         }
@@ -115,6 +168,8 @@ class VectorScanMetadata(
         table: ConnectorTableHandle,
     ): ConnectorTableMetadata = when (table) {
         is AilakeIngestTableHandle -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_INGEST), ingestColumns())
+        is MultimodalScanTableHandle -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_SEARCH_MULTIMODAL), MULTIMODAL_SEARCH_COLUMNS)
+        is ScanTableHandle -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_SEARCH_FULL), scanColumns())
         else -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_SEARCH), SEARCH_COLUMNS)
     }
 
@@ -123,6 +178,8 @@ class VectorScanMetadata(
         schemaName: Optional<String>,
     ): List<SchemaTableName> = listOf(
         SchemaTableName(SCHEMA, TABLE_SEARCH),
+        SchemaTableName(SCHEMA, TABLE_SEARCH_MULTIMODAL),
+        SchemaTableName(SCHEMA, TABLE_SEARCH_FULL),
         SchemaTableName(SCHEMA, TABLE_INGEST),
     )
 
@@ -131,6 +188,8 @@ class VectorScanMetadata(
         tableHandle: ConnectorTableHandle,
     ): Map<String, ColumnHandle> = when (tableHandle) {
         is AilakeIngestTableHandle -> ingestColumnHandles()
+        is MultimodalScanTableHandle -> MULTIMODAL_SEARCH_COLUMN_HANDLES
+        is ScanTableHandle -> scanColumnHandles()
         else -> SEARCH_COLUMN_HANDLES
     }
 
@@ -142,6 +201,8 @@ class VectorScanMetadata(
         val ordinal = (columnHandle as VectorScanColumnHandle).ordinal
         return when (tableHandle) {
             is AilakeIngestTableHandle -> ingestColumns()[ordinal]
+            is MultimodalScanTableHandle -> MULTIMODAL_SEARCH_COLUMNS[ordinal]
+            is ScanTableHandle -> scanColumns()[ordinal]
             else -> SEARCH_COLUMNS[ordinal]
         }
     }

@@ -21,6 +21,18 @@ class AilakeNativeTest extends AnyFunSuite {
     assert(results.isEmpty)
   }
 
+  test("scan returns empty ScanResult when native library absent") {
+    val result = AilakeNative.scan("s3://bucket/t/", Array(0.1f, 0.2f, 0.3f), topK = 5)
+    assert(result.schema.isEmpty)
+    assert(result.numRows == 0)
+    assert(result.columns.isEmpty)
+  }
+
+  test("scan returns empty ScanResult for zero-length query") {
+    val result = AilakeNative.scan("s3://bucket/t/", Array.emptyFloatArray, topK = 10)
+    assert(result.schema.isEmpty)
+  }
+
   test("SearchRow equality") {
     val r1 = AilakeNative.SearchRow(1L, 0.5f, "part-001.parquet")
     val r2 = AilakeNative.SearchRow(1L, 0.5f, "part-001.parquet")

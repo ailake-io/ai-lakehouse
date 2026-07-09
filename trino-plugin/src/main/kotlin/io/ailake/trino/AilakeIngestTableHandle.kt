@@ -45,4 +45,8 @@ data class AilakeIngestTableHandle @JsonCreator constructor(
     // null = no delete predicate captured yet (the normal INSERT-path state).
     @JsonProperty("deleteColumn")     val deleteColumn:     String? = null,
     @JsonProperty("deleteValues")     val deleteValues:     List<String>? = null,
+    // Multi-column (Phase 8 multimodal) ingest — see VectorScanMetadata.ingestColumns()'s
+    // KDoc. Empty (default) = single-vector-column path via ailake_write_batch_json, same
+    // as before this existed.
+    @JsonProperty("vectorColumns")    val vectorColumns:    List<AilakeNative.VectorColSpec> = emptyList(),
 ) : ConnectorTableHandle, ConnectorInsertTableHandle

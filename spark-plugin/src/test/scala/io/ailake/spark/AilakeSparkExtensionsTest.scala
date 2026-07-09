@@ -85,6 +85,115 @@ class AilakeSparkExtensionsTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(df.count() == 0)
   }
 
+  // ── ailakeSearch hybrid BM25+vector + ailakeSearchText (pure full-text) ────
+  //
+  // Regression: AilakeNative.search's hybridText/textColumn/bm25Weight params
+  // and AilakeNative.searchText were both fully implemented but unreachable
+  // from any DataFrame call — same "dead capability" gap as the others.
+
+  test("ailakeSearch with hybridText returns empty DataFrame when native library absent") {
+    import io.ailake.spark.implicits._
+    val query = Array(0.1f, 0.2f, 0.3f)
+    val df = spark.ailakeSearch("s3://test-bucket/table/", query, topK = 5, hybridText = Some("rust programming"))
+    assert(df.schema.fieldNames sameElements Array("row_id", "distance", "file_path"))
+    assert(df.count() == 0)
+  }
+
+  test("ailakeSearchText returns DataFrame with correct schema") {
+    import io.ailake.spark.implicits._
+    val df = spark.ailakeSearchText("s3://test-bucket/table/", "rust programming", topK = 10)
+    val expectedSchema = StructType(Seq(
+      StructField("row_id", LongType, nullable = false),
+      StructField("distance", DoubleType, nullable = false),
+      StructField("file_path", StringType, nullable = false),
+    ))
+    assert(df.schema == expectedSchema)
+    assert(df.count() == 0)
+  }
+
+  test("ailakeSearchText accepts namespace/tableName/textColumns/partitionFilter parameters") {
+    import io.ailake.spark.implicits._
+    val df = spark.ailakeSearchText(
+      "s3://test-bucket/table/", "rust programming",
+      namespace = "prod", tableName = "docs",
+      textColumns = Seq("chunk_text", "source"), topK = 5,
+      partitionFilter = Some("agent-42"),
+    )
+    assert(df.count() == 0)
+  }
+
+  // ── ailakeCompact ──────────────────────────────────────────────────────────
+  //
+  // Regression: AilakeNative.compact was fully implemented but had no
+  // DataFrame/SQL entry point anywhere in this plugin.
+
+  test("ailakeCompact returns None when native library absent") {
+    import io.ailake.spark.implicits._
+    val result = spark.ailakeCompact("s3://test-bucket/table/", namespace = "default", tableName = "docs")
+    assert(result.isEmpty)
+  }
+
+  test("ailakeCompact resolves tableName from tableUri when not provided") {
+    import io.ailake.spark.implicits._
+    val result = spark.ailakeCompact("s3://test-bucket/docs/")
+    assert(result.isEmpty)
+  }
+
+  // ── ailakeSearchWithData (Fase 11 — search + full-row fetch, no JOIN needed) ─
+  //
+  // Regression: AilakeNative.scan (backed by ailake_scan_json) had no wrapper in
+  // any of the three JVM plugins — SQL/DataFrame search always returned only
+  // row_id/distance/file_path, forcing a manual JOIN against a separately-
+  // registered Iceberg table to get real columns.
+
+  test("ailakeSearchWithData returns empty DataFrame with empty schema when native library absent") {
+    import io.ailake.spark.implicits._
+    val query = Array(0.1f, 0.2f, 0.3f)
+    val df = spark.ailakeSearchWithData("s3://test-bucket/table/", query, topK = 10)
+    assert(df.schema.fields.isEmpty)
+    assert(df.count() == 0)
+  }
+
+  test("ailakeSearchWithData accepts vectorColumn/namespace/tableName/partitionFilter parameters") {
+    import io.ailake.spark.implicits._
+    val query = Array(0.1f, 0.2f, 0.3f)
+    val df = spark.ailakeSearchWithData(
+      "s3://test-bucket/table/", query, topK = 5,
+      vectorColumn = "doc_vec", namespace = "prod", tableName = "docs",
+      partitionFilter = Some("agent-42"),
+    )
+    assert(df.count() == 0)
+  }
+
+  // ── ailakeSearchMultimodal (cross-modal RRF search) ───────────────────────
+  //
+  // Regression: AilakeNative.searchMultimodal was fully implemented but never
+  // exposed as a DataFrame call — same "dead capability" gap as ailakeSearch
+  // before it, closed the same way.
+
+  test("ailakeSearchMultimodal returns DataFrame with correct schema") {
+    import io.ailake.spark.implicits._
+    val queries = Seq(("embedding", Array(0.1f, -0.2f), 1.0f))
+    val df = spark.ailakeSearchMultimodal("s3://test-bucket/table/", queries, topK = 5)
+
+    val expectedSchema = StructType(Seq(
+      StructField("row_id", LongType, nullable = false),
+      StructField("rrf_score", DoubleType, nullable = false),
+      StructField("file_path", StringType, nullable = false),
+    ))
+    assert(df.schema == expectedSchema)
+  }
+
+  test("ailakeSearchMultimodal returns empty DataFrame when native library absent") {
+    import io.ailake.spark.implicits._
+    val queries = Seq(
+      ("embedding", Array(0.1f, 0.2f), 1.0f),
+      ("image_embedding", Array(0.3f, 0.4f), 0.5f),
+    )
+    val df = spark.ailakeSearchMultimodal("s3://test-bucket/table/", queries, topK = 10)
+    assert(df.count() == 0)
+  }
+
   // ── ailakeWriteMulti (Phase 8 multimodal write) ───────────────────────────
   //
   // Closes the "searchMultimodal has no write path from Spark" gap: previously

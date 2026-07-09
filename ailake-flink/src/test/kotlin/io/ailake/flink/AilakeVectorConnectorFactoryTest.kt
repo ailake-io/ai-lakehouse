@@ -59,6 +59,21 @@ class AilakeVectorConnectorFactoryTest {
         assert("deferred" in keys) { "deferred missing: $keys" }
     }
 
+    @Test
+    fun optionalOptionsIncludesSearchMode() {
+        val keys = AilakeVectorConnectorFactory().optionalOptions().map { it.key() }
+        assert("search.mode" in keys) { "search.mode missing: $keys" }
+    }
+
+    @Test
+    fun optionalOptionsIncludesVectorColumns() {
+        // Regression: writeBatchMulti was exposed from Spark (`ailakeWriteMulti`) but had
+        // no DDL option here — a Flink-only user could never write a table with 2+
+        // independent vector columns.
+        val keys = AilakeVectorConnectorFactory().optionalOptions().map { it.key() }
+        assert("vector.columns" in keys) { "vector.columns missing: $keys" }
+    }
+
     // ── validateSearchResultSchema ──────────────────────────────────────────────
     //
     // Regression: AilakeInputFormat.nextRecord() always emitted a fixed
@@ -111,6 +126,56 @@ class AilakeVectorConnectorFactoryTest {
         )
         assertThrows(ValidationException::class.java) {
             AilakeVectorConnectorFactory().validateSearchResultSchema(schema)
+        }
+    }
+
+    // ── validateScanResultSchema (Fase 11 — search.mode='full') ────────────────
+    //
+    // Regression: AilakeNativeLoader.scan (backed by ailake_scan_json) had no
+    // wrapper or table source in any of the three JVM plugins — SQL search
+    // always returned only row_id/distance/file_path, forcing a manual JOIN
+    // against a separately-registered Iceberg table to get real columns.
+
+    @Test
+    fun validateScanResultSchemaAcceptsAnyColumnsWithTrailingDistance() {
+        val schema = ResolvedSchema.of(
+            Column.physical("id", DataTypes.BIGINT()),
+            Column.physical("text", DataTypes.STRING()),
+            Column.physical("embedding", DataTypes.ARRAY(DataTypes.FLOAT())),
+            Column.physical("_distance", DataTypes.FLOAT()),
+        )
+        assertDoesNotThrow { AilakeVectorConnectorFactory().validateScanResultSchema(schema) }
+    }
+
+    @Test
+    fun validateScanResultSchemaAcceptsDoubleDistance() {
+        val schema = ResolvedSchema.of(
+            Column.physical("id", DataTypes.BIGINT()),
+            Column.physical("_distance", DataTypes.DOUBLE()),
+        )
+        assertDoesNotThrow { AilakeVectorConnectorFactory().validateScanResultSchema(schema) }
+    }
+
+    @Test
+    fun validateScanResultSchemaRejectsMissingTrailingDistance() {
+        val schema = ResolvedSchema.of(
+            Column.physical("id", DataTypes.BIGINT()),
+            Column.physical("text", DataTypes.STRING()),
+        )
+        val ex = assertThrows(ValidationException::class.java) {
+            AilakeVectorConnectorFactory().validateScanResultSchema(schema)
+        }
+        assert(ex.message!!.contains("_distance"))
+    }
+
+    @Test
+    fun validateScanResultSchemaRejectsWrongDistanceType() {
+        val schema = ResolvedSchema.of(
+            Column.physical("id", DataTypes.BIGINT()),
+            Column.physical("_distance", DataTypes.STRING()),
+        )
+        assertThrows(ValidationException::class.java) {
+            AilakeVectorConnectorFactory().validateScanResultSchema(schema)
         }
     }
 }

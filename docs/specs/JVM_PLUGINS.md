@@ -660,7 +660,21 @@ loader.evolveSchema(tableUri, "default", "docs", addCols = listOf(...), renameCo
 
 ## Cross-modal search (Phase 8)
 
-All three JVM plugins expose `searchMultimodal()` backed by `ailake_search_multimodal_json` in `libailake_jni.so`.
+All three JVM plugins expose `searchMultimodal()` backed by `ailake_search_multimodal_json` in `libailake_jni.so`
+at the `AilakeNative`/`AilakeNativeLoader` layer (below). Each plugin also wires it into its query surface — see
+**SQL/DataFrame surface** below; before that wiring, this native wrapper existed but was unreachable from SQL or
+DataFrame code, the same "dead capability" gap DELETE/ALTER TABLE had before Phase K.
+
+### SQL/DataFrame surface
+
+| Plugin | Entry point | Result columns |
+|---|---|---|
+| Spark | `spark.ailakeSearchMultimodal(tableUri, queries, topK)` (`io.ailake.spark.implicits._`) | `row_id: Long, rrf_score: Double, file_path: String` |
+| Trino | `SET SESSION ailake.multimodal_queries = '[...]'; SELECT * FROM ailake.default.search_multimodal;` | `row_id bigint, rrf_score double, file_path varchar` |
+| Flink | job parameter `ailake.multimodal.queries = '[...]'` on the existing search-shaped `CREATE TABLE` | `row_id BIGINT, distance FLOAT, file_path STRING` — RRF score reuses the `distance` slot |
+
+`queries` JSON/param shape (Trino/Flink): array of `{"col", "query" (csv f32 for Trino/Flink; `Array[Float]` for
+Spark's Scala API), "weight"}`. See `docs/guides/JVM_INTEGRATION.md` §3D/5C/6B for full examples.
 
 ### C-ABI entry point
 
@@ -767,6 +781,82 @@ JVM caller
                       ├─ Per-column HNSW search     [ailake-index]
                       └─ Reciprocal Rank Fusion      [score = Σ w/(60+rank)]
 ```
+
+---
+
+## Search + full-row fetch, no JOIN needed (Fase 11)
+
+Before this, SQL search in all three plugins returned only `(row_id, distance, file_path)` —
+getting real columns (`chunk_text`, `document_title`, ...) back required a manual `JOIN`
+against a separately-registered Iceberg connector table pointing at the same physical
+location. `ailake_scan_json` (search + full-row fetch in one native call) already existed —
+consumed only by the DuckDB extension — but had no wrapper in any JVM plugin. Wired per-engine:
+
+| Plugin | Entry point | Column set |
+|---|---|---|
+| Spark | `spark.ailakeSearchWithData(tableUri, queryVector, topK, vectorColumn=...)` | Fully dynamic — `DataFrame` schema built from the response's `schema` array |
+| Trino | `SET SESSION ailake.query_vector = '...'; SELECT * FROM ailake.default.search_full;` | `id bigint, <vectorColumn> varchar (JSON-encoded), ...ailake.text-columns varchar, _distance double` |
+| Flink | `CREATE TABLE ... WITH ('search.mode' = 'full', ...)` on the existing search-shaped DDL | Whatever the `CREATE TABLE` declares, by name — last column must be `_distance` (FLOAT/DOUBLE) |
+
+`ailake_scan_json` doesn't accept a column-subset filter — it always returns the full row
+width, which is why Trino and Flink didn't need a new catalog/DDL property to select columns:
+Trino reuses the same `ailake.text-columns` catalog config `ingestColumns()` already builds
+from, and Flink's DDL already declares its own columns (schema-on-read).
+
+**Trino's vector column is `VARCHAR` (JSON-encoded), not `ARRAY<DOUBLE>`** — a deliberate
+scope cut: `RecordCursor.getObject` for array types needs a hand-built Trino `Block` via
+`BlockBuilder`, which wasn't safe to write without a live Trino SPI build to verify the exact
+API shape against. Flink's `AilakeScanTableSource`, by contrast, builds a real
+`GenericArrayData` for `ARRAY<FLOAT>` columns — `RowData` construction doesn't have the same
+Block-builder risk. Revisit the Trino side once `compat-heavy` CI can validate it.
+
+### Architecture diagram (scan path)
+
+```
+JVM caller
+  └─ scan(uri, query, topK)
+       └─ AilakeNative.scan() / AilakeNativeLoader.scan()  [Spark/Trino/Flink]
+            └─ JNA: ailake_scan_json                       [libailake_jni.so]
+                 └─ do_search() + fetch_rows()               [ailake-query, Rust]
+                      ├─ HNSW search                         [ailake-index]
+                      └─ Parquet row fetch                   [ailake-parquet]
+```
+
+---
+
+## Plugin parity (Fase 12)
+
+A capability audit after Fase 11 compared all 11 native capabilities against each plugin's
+SQL/DataFrame surface. Trino and Flink were already near-parity (10/11); Spark had 5
+capabilities fully implemented in `AilakeNative.scala` with zero DataFrame/SQL caller — real
+dead code, not a documented decision (unlike ALTER TABLE, which used to throw
+`UnsupportedOperationException` explicitly). The inverse gap: multi-column (multimodal) write
+existed only in Spark, with zero wrapper in Trino or Flink.
+
+| Capability | Spark | Trino | Flink |
+|---|---|---|---|
+| Hybrid BM25+vector search | `ailakeSearch(hybridText=...)` | session props | job params |
+| Pure full-text search | `ailakeSearchText(...)` | session prop | job param |
+| DELETE | `AilakeTable` implements `SupportsDelete` (equality/IN) | `DELETE FROM ... WHERE` (equality/IN) | `DELETE FROM ... WHERE` (equality/IN) |
+| ALTER TABLE ADD/RENAME COLUMN | `AilakeCatalog.alterTable` (was unconditional throw) | `ALTER TABLE ... ADD/RENAME COLUMN` | `ALTER TABLE ... ADD/RENAME COLUMN` |
+| Compact | `spark.ailakeCompact(...)` (no native CALL-procedure API in Spark) | `CALL ailake.system.compact()` | `ailake_compact(...)` scalar UDF |
+| Multi-column (multimodal) write | `ailakeWriteMulti(...)` (pre-existing) | `ailake.vector-columns` catalog property → `ailake.default.ingest` | `'vector.columns'` DDL option on the ingest `CREATE TABLE` |
+
+**Multi-column write, Trino/Flink**: both reuse the existing single-vector-column ingest
+table shape — when `vector-columns`/`vector.columns` is configured, `ingestColumns()` (Trino)
+or the declared DDL (Flink) gets one `ARRAY<DOUBLE>`/`ARRAY<FLOAT>` per entry instead of the
+single vector column, and the write path calls the new `writeBatchMulti` wrapper
+(`ailake_write_batch_multi_json`) instead of `writeBatch`. Same JSON spec shape in both:
+`[{"column","dim","metric"?,"precision"?,"modality"?}]`.
+
+**Spark's DELETE** uses `org.apache.spark.sql.connector.catalog.SupportsDelete` — `canDeleteWhere`
+accepts exactly one `EqualTo`/`In` filter (same equality-delete-file constraint
+`AilakeNative.deleteWhere` has everywhere), rejecting anything else so Spark reports "DELETE
+not supported for this table" rather than a silent partial delete.
+
+**Spark's ALTER TABLE** now calls `AilakeNative.evolveSchema` via `TableChange.AddColumn`/
+`RenameColumn`, same Iceberg-primitive-types-only restriction and same "in-memory schema is
+resolved per-call, not tracked" limitation Trino/Flink already document.
 
 ---
 

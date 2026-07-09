@@ -56,6 +56,11 @@ class AilakeVectorTableSink(
     private val hnswEfConstruction: Int? = null,
     private val preNormalize: Boolean = false,
     private val deferred: Boolean = false,
+    // Multi-column (Phase 8 multimodal) ingest — e.g. text + image embeddings on the same
+    // row, each with its own HNSW index. When non-empty, one ARRAY<FLOAT> column per entry
+    // (by name) is expected instead of the single vecCol, and writes go through
+    // ailake_write_batch_multi_json. Configured via the `vector.columns` DDL option.
+    private val vectorColumns: List<AilakeNativeLoader.VectorColSpec> = emptyList(),
 ) : DynamicTableSink, SupportsDeletePushDown {
 
     private val log = LoggerFactory.getLogger(AilakeVectorTableSink::class.java)
@@ -94,12 +99,16 @@ class AilakeVectorTableSink(
             }
         }
 
-        internal fun computeExtraColumnIndices(schema: ResolvedSchema, idIdx: Int, vecIdx: Int): Map<String, Int> {
+        internal fun computeExtraColumnIndices(schema: ResolvedSchema, idIdx: Int, vecIdx: Int): Map<String, Int> =
+            computeExtraColumnIndices(schema, idIdx, setOf(vecIdx))
+
+        /** Multi-column (Phase 8 multimodal) overload — excludes every configured vector column index, not just one. */
+        internal fun computeExtraColumnIndices(schema: ResolvedSchema, idIdx: Int, vecIndices: Set<Int>): Map<String, Int> {
             val colNames = schema.columnNames
             val dataTypes = schema.columnDataTypes
             return colNames
                 .withIndex()
-                .filter { (i, _) -> i != idIdx && i != vecIdx }
+                .filter { (i, _) -> i != idIdx && i !in vecIndices }
                 .filter { (i, _) ->
                     val root = dataTypes[i].logicalType.typeRoot
                     root == LogicalTypeRoot.VARCHAR || root == LogicalTypeRoot.CHAR
@@ -114,10 +123,28 @@ class AilakeVectorTableSink(
     override fun getSinkRuntimeProvider(context: DynamicTableSink.Context): DynamicTableSink.SinkRuntimeProvider {
         val colNames = schema.columnNames
         val idIdx = colNames.indexOfFirst { it == "id" }.takeIf { it >= 0 } ?: 0
-        val vecIdx = colNames.indexOfFirst { it == vecCol }.takeIf { it >= 0 } ?: 1
         validateColumnType(colNames[idIdx], schema.columnDataTypes[idIdx].logicalType.typeRoot, setOf(LogicalTypeRoot.BIGINT), "BIGINT")
-        validateColumnType(colNames[vecIdx], schema.columnDataTypes[vecIdx].logicalType.typeRoot, setOf(LogicalTypeRoot.ARRAY), "ARRAY<FLOAT>")
-        val extraColumnIndices = computeExtraColumnIndices(schema, idIdx, vecIdx)
+
+        // Multi-column (Phase 8 multimodal) mode: one ARRAY<FLOAT> column per `vectorColumns`
+        // entry, resolved by name against the declared schema instead of the single `vecCol`.
+        val vecIdx: Int
+        val vecIndices: List<Int>
+        if (vectorColumns.isNotEmpty()) {
+            vecIndices = vectorColumns.map { spec ->
+                val idx = colNames.indexOfFirst { it == spec.column }
+                require(idx >= 0) {
+                    "Vector column '${spec.column}' (from vector.columns) not found in declared schema: ${colNames.toList()}"
+                }
+                validateColumnType(spec.column, schema.columnDataTypes[idx].logicalType.typeRoot, setOf(LogicalTypeRoot.ARRAY), "ARRAY<FLOAT>")
+                idx
+            }
+            vecIdx = vecIndices[0]
+        } else {
+            vecIdx = colNames.indexOfFirst { it == vecCol }.takeIf { it >= 0 } ?: 1
+            validateColumnType(colNames[vecIdx], schema.columnDataTypes[vecIdx].logicalType.typeRoot, setOf(LogicalTypeRoot.ARRAY), "ARRAY<FLOAT>")
+            vecIndices = listOf(vecIdx)
+        }
+        val extraColumnIndices = computeExtraColumnIndices(schema, idIdx, vecIndices.toSet())
         return object : DataStreamSinkProvider {
             override fun consumeDataStream(
                 context: ProviderContext,
@@ -144,6 +171,8 @@ class AilakeVectorTableSink(
                         hnswEfConstruction = hnswEfConstruction,
                         preNormalize       = preNormalize,
                         deferred           = deferred,
+                        vectorColumns      = vectorColumns,
+                        vecIndices         = vecIndices,
                     )
                 )
             }
@@ -153,7 +182,7 @@ class AilakeVectorTableSink(
     override fun copy(): DynamicTableSink = AilakeVectorTableSink(
         warehouse, namespace, tableName, vecCol, dim, metric, precision, schema,
         embeddingModel, partitionFields, formatVersion, ftsColumns, ftsTokenizer,
-        hnswM, hnswEfConstruction, preNormalize, deferred,
+        hnswM, hnswEfConstruction, preNormalize, deferred, vectorColumns,
     )
 
     override fun asSummaryString(): String = "AI-Lake-Sink[$namespace.$tableName]"
@@ -212,20 +241,36 @@ class AilakeSinkFunction(
     private val hnswEfConstruction: Int? = null,
     private val preNormalize: Boolean = false,
     private val deferred: Boolean = false,
+    // Multi-column (Phase 8 multimodal) mode — see AilakeVectorTableSink's `vectorColumns`
+    // doc. Empty (default) = single-column path via vecIdx/writeBatch, unchanged from
+    // before this existed.
+    private val vectorColumns: List<AilakeNativeLoader.VectorColSpec> = emptyList(),
+    private val vecIndices: List<Int> = emptyList(),
 ) : RichSinkFunction<RowData>() {
 
     private val idsBuffer = mutableListOf<Long>()
     private val embeddingsBuffer = mutableListOf<FloatArray>()
+    private val multiEmbeddingsBuffers: List<MutableList<FloatArray>> =
+        vectorColumns.map { mutableListOf() }
     private val textBuffers: Map<String, MutableList<String>> =
         extraColumnIndices.keys.associateWith { mutableListOf() }
 
     override fun invoke(row: RowData, context: SinkFunction.Context) {
         check(!row.isNullAt(idIdx)) { "id column cannot be NULL — every row must carry a real id for AI-Lake to index it" }
-        check(!row.isNullAt(vecIdx)) { "Vector column '$vecCol' cannot be NULL — every row must carry a real embedding for AI-Lake to index it" }
         val id = row.getLong(idIdx)
-        val embedding = row.getArray(vecIdx).toFloatArray()
         idsBuffer.add(id)
-        embeddingsBuffer.add(embedding)
+        if (vectorColumns.isNotEmpty()) {
+            vecIndices.forEachIndexed { i, idx ->
+                check(!row.isNullAt(idx)) {
+                    "Vector column '${vectorColumns[i].column}' cannot be NULL — every row must carry a real " +
+                    "embedding for AI-Lake to index it"
+                }
+                multiEmbeddingsBuffers[i].add(row.getArray(idx).toFloatArray())
+            }
+        } else {
+            check(!row.isNullAt(vecIdx)) { "Vector column '$vecCol' cannot be NULL — every row must carry a real embedding for AI-Lake to index it" }
+            embeddingsBuffer.add(row.getArray(vecIdx).toFloatArray())
+        }
         for ((col, idx) in extraColumnIndices) {
             val text = if (row.isNullAt(idx)) "" else row.getString(idx).toString()
             textBuffers[col]?.add(text)
@@ -243,30 +288,47 @@ class AilakeSinkFunction(
         val columnsSnapshot: Map<String, List<String>> =
             textBuffers.mapValues { (_, buf) -> buf.toList() }
         try {
-            AilakeNativeLoader.writeBatch(
-                warehouse       = warehouse,
-                namespace       = namespace,
-                table           = tableName,
-                vecCol          = vecCol,
-                dim             = dim,
-                metric          = metric,
-                precision       = precision,
-                ids             = idsBuffer.toLongArray(),
-                embeddings      = embeddingsBuffer.toTypedArray(),
-                embeddingModel  = embeddingModel,
-                partitionFields = partitionFields,
-                formatVersion   = formatVersion,
-                ftsColumns      = ftsColumns,
-                ftsTokenizer    = ftsTokenizer,
-                hnswM              = hnswM,
-                hnswEfConstruction = hnswEfConstruction,
-                preNormalize       = preNormalize,
-                deferred           = deferred,
-                columns         = columnsSnapshot,
-            )
+            if (vectorColumns.isNotEmpty()) {
+                AilakeNativeLoader.writeBatchMulti(
+                    warehouse      = warehouse,
+                    namespace      = namespace,
+                    table          = tableName,
+                    ids            = idsBuffer.toLongArray(),
+                    vectorColumns  = vectorColumns.zip(multiEmbeddingsBuffers.map { it.toTypedArray() }),
+                    embeddingModel = embeddingModel,
+                    formatVersion  = formatVersion,
+                    ftsColumns     = ftsColumns,
+                    ftsTokenizer   = ftsTokenizer,
+                    deferred       = deferred,
+                    columns        = columnsSnapshot,
+                )
+            } else {
+                AilakeNativeLoader.writeBatch(
+                    warehouse       = warehouse,
+                    namespace       = namespace,
+                    table           = tableName,
+                    vecCol          = vecCol,
+                    dim             = dim,
+                    metric          = metric,
+                    precision       = precision,
+                    ids             = idsBuffer.toLongArray(),
+                    embeddings      = embeddingsBuffer.toTypedArray(),
+                    embeddingModel  = embeddingModel,
+                    partitionFields = partitionFields,
+                    formatVersion   = formatVersion,
+                    ftsColumns      = ftsColumns,
+                    ftsTokenizer    = ftsTokenizer,
+                    hnswM              = hnswM,
+                    hnswEfConstruction = hnswEfConstruction,
+                    preNormalize       = preNormalize,
+                    deferred           = deferred,
+                    columns         = columnsSnapshot,
+                )
+            }
         } finally {
             idsBuffer.clear()
             embeddingsBuffer.clear()
+            multiEmbeddingsBuffers.forEach { it.clear() }
             textBuffers.values.forEach { it.clear() }
         }
     }

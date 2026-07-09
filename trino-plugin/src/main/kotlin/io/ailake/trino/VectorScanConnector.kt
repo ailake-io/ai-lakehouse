@@ -31,12 +31,14 @@ class VectorScanConnector(
     private val deferred: Boolean = false,
     private val ftsColumns: List<String> = emptyList(),
     private val ftsTokenizer: String = "default",
+    private val vectorColumns: List<AilakeNative.VectorColSpec> = emptyList(),
 ) : Connector {
 
     private val metadata = VectorScanMetadata(
         tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel,
         partitionFields, formatVersion, textColumns,
         hnswM, hnswEfConstruction, preNormalize, deferred, ftsColumns, ftsTokenizer,
+        vectorColumns,
     )
     private val splitManager = VectorScanSplitManager()
     private val recordSetProvider = VectorScanRecordSetProvider()
@@ -82,6 +84,13 @@ class VectorScanConnector(
      *   -- O(log N) via Tantivy when the table has an FTS index (see
      *   -- ailake.fts-columns), falls back to O(N) BM25 brute-force otherwise
      *   SET SESSION ailake.query_text = 'rust programming';
+     *
+     *   -- cross-modal RRF search (e.g. text + image embeddings on the same row)
+     *   SET SESSION ailake.multimodal_queries =
+     *     '[{"col":"embedding","query":"0.1,-0.2","weight":1.0},
+     *       {"col":"image_embedding","query":"0.4,0.5","weight":0.5}]';
+     *   SET SESSION ailake.top_k = 10;
+     *   SELECT * FROM ailake.default.search_multimodal ORDER BY rrf_score DESC;
      */
     override fun getSessionProperties(): List<PropertyMetadata<*>> = listOf(
         PropertyMetadata.stringProperty(
@@ -106,6 +115,13 @@ class VectorScanConnector(
             "hybrid_weight",
             "BM25 weight in RRF fusion when both query_vector and query_text are set (0.0 = pure vector, 1.0 = pure BM25)",
             0.5,
+            false,
+        ),
+        PropertyMetadata.stringProperty(
+            "multimodal_queries",
+            "JSON array of {col, query (csv f32), weight} for cross-modal RRF search of " +
+            "ailake.default.search_multimodal, e.g. '[{\"col\":\"embedding\",\"query\":\"0.1,-0.2\",\"weight\":1.0}]'",
+            "",
             false,
         ),
     )

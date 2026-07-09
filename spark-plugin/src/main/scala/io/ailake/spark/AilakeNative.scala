@@ -19,6 +19,12 @@ object AilakeNative {
 
   case class SearchRow(rowId: Long, distance: Float, filePath: String)
 
+  /** One column of a [[scan]] response — `dataType` is one of the tags `ailake_scan_json` emits: `int64`, `float32`, `float64`, `utf8`, `bool`, `list_float32`. */
+  case class ScanColumn(name: String, dataType: String)
+
+  /** Result of [[scan]] — search + full-row fetch in one native call. Columnar, `_distance` always last. */
+  case class ScanResult(schema: Seq[ScanColumn], numRows: Int, columns: Map[String, Seq[Any]])
+
   /** Partition field definition for multi-column partition specs (Phase K). */
   case class PartitionFieldDef(column: String, transform: String, columnType: String)
 
@@ -50,6 +56,9 @@ object AilakeNative {
 
     /** Cross-modal RRF. Returns `{"ok":true,"results":[{"row_id":N,"rrf_score":F,"file_path":"..."}]}`. Caller must free. */
     def ailake_search_multimodal_json(requestJson: String): Pointer
+
+    /** Search + full-row fetch. Returns `{"ok":true,"schema":[...],"num_rows":N,"columns":{...}}`. Caller must free. */
+    def ailake_scan_json(requestJson: String): Pointer
 
     /** JSON-envelope write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
     def ailake_write_batch_json(requestJson: String): Pointer
@@ -441,6 +450,59 @@ object AilakeNative {
   }
 
   /**
+   * Vector search + full-row fetch in one native call (`ailake_scan_json`) — closes the
+   * "SQL search only returns row_id/distance/file_path" gap: previously the only way to get
+   * real columns (chunk_text, document_title, ...) back from a search was a manual DataFrame
+   * `JOIN` against a separately-registered Iceberg table pointing at the same physical
+   * location. Result is columnar; every stored column comes back (vector column decoded to
+   * `list_float32`), plus a trailing `_distance` column — there's no column-subset filter on
+   * the native side, it always returns the full row width.
+   *
+   * @param tableUri    path/URI of the AI-Lake table root
+   * @param query       f32 query vector
+   * @param topK        number of nearest neighbors
+   * @param vectorColumn vector column to search (default "embedding")
+   */
+  def scan(
+    tableUri:        String,
+    query:           Array[Float],
+    topK:            Int,
+    vectorColumn:    String = "embedding",
+    partitionFilter: Option[String] = None,
+    namespace:       String = "default",
+    tableName:       String = "",
+  ): ScanResult = {
+    if (query.isEmpty) return ScanResult(Seq.empty, 0, Map.empty)
+    lib match {
+      case None => ScanResult(Seq.empty, 0, Map.empty)
+      case Some(native) =>
+        val effectiveTable = if (tableName.nonEmpty) tableName else tableUri.stripSuffix("/").split("/").last
+        val queryJson = query.mkString("[", ",", "]")
+        val partJson = partitionFilter.map(v => s""","partition_filter":${jsonStr(v)}""").getOrElse("")
+        val requestJson =
+          s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},"table":${jsonStr(effectiveTable)},""" +
+          s""""vec_col":${jsonStr(vectorColumn)},"query":$queryJson,"dim":${query.length},"top_k":$topK$partJson}"""
+        val ptr = native.ailake_scan_json(requestJson)
+        if (ptr == null) {
+          log.warn("[ailake] ailake_scan_json returned null pointer for tableUri={}", tableUri)
+          return ScanResult(Seq.empty, 0, Map.empty)
+        }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read scan result string for tableUri=$tableUri: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return ScanResult(Seq.empty, 0, Map.empty)
+        }
+        native.ailake_free_string(ptr)
+        try { parseScanResponse(json, tableUri) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to parse scan response for tableUri=$tableUri: ${e.getMessage}", e)
+            ScanResult(Seq.empty, 0, Map.empty)
+        }
+    }
+  }
+
+  /**
    * Full-text search via Tantivy (fast path when AILK_FTS present) or BM25 brute-force.
    * Returns empty on library absence or error.
    *
@@ -611,6 +673,40 @@ object AilakeNative {
   }
 
   private def jsonStr(s: String): String = mapper.writeValueAsString(s)
+
+  private def parseScanResponse(json: String, tableUri: String): ScanResult = {
+    val root = mapper.readTree(json)
+    if (!root.path("ok").asBoolean(false)) {
+      val err = root.path("error").asText("<no error field>")
+      log.warn(s"[ailake] Native scan returned ok=false for tableUri=$tableUri: $err")
+      return ScanResult(Seq.empty, 0, Map.empty)
+    }
+    val schemaNodes = root.path("schema")
+    val schema = (0 until schemaNodes.size()).map { i =>
+      val n = schemaNodes.get(i)
+      ScanColumn(n.get("name").asText(), n.get("type").asText())
+    }.toSeq
+    val numRows = root.path("num_rows").asInt(0)
+    val columnsNode = root.path("columns")
+    val columns: Map[String, Seq[Any]] = schema.map { col =>
+      val arr = columnsNode.path(col.name)
+      val values: Seq[Any] = col.dataType match {
+        case "int64"   => (0 until arr.size()).map(i => if (arr.get(i).isNull) null else arr.get(i).asLong())
+        case "float32" => (0 until arr.size()).map(i => if (arr.get(i).isNull) null else arr.get(i).floatValue())
+        case "float64" => (0 until arr.size()).map(i => if (arr.get(i).isNull) null else arr.get(i).doubleValue())
+        case "bool"    => (0 until arr.size()).map(i => if (arr.get(i).isNull) null else arr.get(i).asBoolean())
+        case "list_float32" =>
+          (0 until arr.size()).map { i =>
+            val inner = arr.get(i)
+            (0 until inner.size()).map(j => inner.get(j).floatValue())
+          }
+        case _ /* utf8 and anything else */ =>
+          (0 until arr.size()).map(i => if (arr.get(i).isNull) null else arr.get(i).asText())
+      }
+      col.name -> values
+    }.toMap
+    ScanResult(schema, numRows, columns)
+  }
 
   private def parseResponse(json: String, tableUri: String): Seq[SearchRow] = {
     Try {

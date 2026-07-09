@@ -19,30 +19,41 @@ import java.util.concurrent.CompletableFuture
  *
  * Expected page layout (matches VectorScanMetadata.ingestColumns()):
  *   channel 0        — id BIGINT
- *   channel 1        — embedding ARRAY<DOUBLE>
- *   channel 2..N     — handle.textColumns, VARCHAR, same order
+ *   channel 1        — embedding ARRAY<DOUBLE>  (or channels 1..N, one per
+ *                       `handle.vectorColumns` entry, in multi-column mode)
+ *   channel N+1..M   — handle.textColumns, VARCHAR, same order
  */
 class AilakePageSink(private val handle: AilakeIngestTableHandle) : ConnectorPageSink {
 
     private val log = LoggerFactory.getLogger(AilakePageSink::class.java)
     private val ids = mutableListOf<Long>()
+    // Single-column mode (handle.vectorColumns is empty)
     private val embeddings = mutableListOf<List<Float>>()
+    // Multi-column mode — one embeddings list per handle.vectorColumns entry, same order
+    private val multiEmbeddings: List<MutableList<List<Float>>> =
+        handle.vectorColumns.map { mutableListOf() }
     private val textValues: Map<String, MutableList<String>> =
         handle.textColumns.associateWith { mutableListOf<String>() }
     private var autoId = 0L
 
     override fun appendPage(page: Page): CompletableFuture<*> {
-        val idBlock  = page.getBlock(0)
-        val vecBlock = page.getBlock(1)
-        val textBlocks = handle.textColumns.mapIndexed { i, name -> name to page.getBlock(2 + i) }
+        val idBlock = page.getBlock(0)
+        val vecColCount = if (handle.vectorColumns.isNotEmpty()) handle.vectorColumns.size else 1
+        val vecBlocks = (0 until vecColCount).map { i -> page.getBlock(1 + i) }
+        val textStart = 1 + vecColCount
+        val textBlocks = handle.textColumns.mapIndexed { i, name -> name to page.getBlock(textStart + i) }
 
         for (pos in 0 until page.positionCount) {
             ids += if (!idBlock.isNull(pos)) BIGINT.getLong(idBlock, pos) else autoId
-            check(!vecBlock.isNull(pos)) {
-                "Vector column '${handle.vectorColumn}' cannot be NULL (row with id-position=$pos in this page) " +
-                "— every row must carry a real embedding for AI-Lake to index it."
+            vecBlocks.forEachIndexed { i, block ->
+                val colName = if (handle.vectorColumns.isNotEmpty()) handle.vectorColumns[i].column else handle.vectorColumn
+                check(!block.isNull(pos)) {
+                    "Vector column '$colName' cannot be NULL (row with id-position=$pos in this page) " +
+                    "— every row must carry a real embedding for AI-Lake to index it."
+                }
+                if (handle.vectorColumns.isNotEmpty()) multiEmbeddings[i] += extractVector(block, pos)
+                else embeddings += extractVector(block, pos)
             }
-            embeddings += extractVector(vecBlock, pos)
             textBlocks.forEach { (name, block) ->
                 textValues.getValue(name) += if (block.isNull(pos)) "" else VARCHAR.getSlice(block, pos).toStringUtf8()
             }
@@ -59,27 +70,43 @@ class AilakePageSink(private val handle: AilakeIngestTableHandle) : ConnectorPag
     override fun finish(): CompletableFuture<Collection<Slice>> {
         if (ids.isEmpty()) return CompletableFuture.completedFuture(emptyList())
 
-        val snapshotId = AilakeNative.writeBatch(
-            tableUri        = handle.tableUri,
-            namespace       = handle.namespace,
-            tableName       = handle.tableName,
-            vectorColumn    = handle.vectorColumn,
-            dim             = handle.dim,
-            metric          = handle.metric,
-            precision       = handle.precision,
-            ids             = ids,
-            embeddings      = embeddings,
-            embeddingModel  = handle.embeddingModel,
-            partitionFields = handle.partitionFields,
-            formatVersion   = handle.formatVersion,
-            hnswM              = handle.hnswM,
-            hnswEfConstruction = handle.hnswEfConstruction,
-            preNormalize       = handle.preNormalize,
-            deferred           = handle.deferred,
-            ftsColumns         = handle.ftsColumns,
-            ftsTokenizer       = handle.ftsTokenizer,
-            columns         = textValues,
-        )
+        val snapshotId = if (handle.vectorColumns.isNotEmpty()) {
+            AilakeNative.writeBatchMulti(
+                tableUri       = handle.tableUri,
+                namespace      = handle.namespace,
+                tableName      = handle.tableName,
+                ids            = ids,
+                vectorColumns  = handle.vectorColumns.zip(multiEmbeddings),
+                embeddingModel = handle.embeddingModel,
+                formatVersion  = handle.formatVersion,
+                ftsColumns     = handle.ftsColumns,
+                ftsTokenizer   = handle.ftsTokenizer,
+                deferred       = handle.deferred,
+                columns        = textValues,
+            )
+        } else {
+            AilakeNative.writeBatch(
+                tableUri        = handle.tableUri,
+                namespace       = handle.namespace,
+                tableName       = handle.tableName,
+                vectorColumn    = handle.vectorColumn,
+                dim             = handle.dim,
+                metric          = handle.metric,
+                precision       = handle.precision,
+                ids             = ids,
+                embeddings      = embeddings,
+                embeddingModel  = handle.embeddingModel,
+                partitionFields = handle.partitionFields,
+                formatVersion   = handle.formatVersion,
+                hnswM              = handle.hnswM,
+                hnswEfConstruction = handle.hnswEfConstruction,
+                preNormalize       = handle.preNormalize,
+                deferred           = handle.deferred,
+                ftsColumns         = handle.ftsColumns,
+                ftsTokenizer       = handle.ftsTokenizer,
+                columns         = textValues,
+            )
+        }
 
         if (snapshotId == null) {
             log.warn("[ailake] writeBatch returned null — INSERT may not have persisted")
@@ -94,6 +121,7 @@ class AilakePageSink(private val handle: AilakeIngestTableHandle) : ConnectorPag
     override fun abort() {
         ids.clear()
         embeddings.clear()
+        multiEmbeddings.forEach { it.clear() }
         textValues.values.forEach { it.clear() }
     }
 }

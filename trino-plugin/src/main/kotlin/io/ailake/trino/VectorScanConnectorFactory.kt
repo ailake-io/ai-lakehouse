@@ -44,10 +44,30 @@ class VectorScanConnectorFactory : ConnectorFactory {
         val ftsColumns = config.getOrDefault("ailake.fts-columns", "")
             .split(",").map { it.trim() }.filter { it.isNotEmpty() }
         val ftsTokenizer = config.getOrDefault("ailake.fts-tokenizer", "default")
+        // Multi-column (Phase 8 multimodal) ingest — e.g. text + image embeddings on the
+        // same row. When set, the `ingest` table's schema gets one ARRAY<DOUBLE> column per
+        // entry (instead of the single `ailake.vector-column`) and INSERT calls
+        // ailake_write_batch_multi_json instead of ailake_write_batch_json. Was already
+        // exposed from Spark (`ailakeWriteMulti`) but had no wrapper here at all.
+        val vcJson = config.getOrDefault("ailake.vector-columns", "[]")
+        val vectorColumns: List<AilakeNative.VectorColSpec> = if (vcJson == "[]" || vcJson.isBlank()) emptyList() else {
+            val node = ObjectMapper().readTree(vcJson)
+            (0 until node.size()).map { i ->
+                val n = node.get(i)
+                AilakeNative.VectorColSpec(
+                    column = n.get("column").asText(),
+                    dim = n.get("dim").asInt(),
+                    metric = n.path("metric").asText("cosine"),
+                    precision = n.path("precision").asText("f16"),
+                    modality = if (n.has("modality") && !n.get("modality").isNull) n.get("modality").asText() else null,
+                )
+            }
+        }
         return VectorScanConnector(
             tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel,
             partitionFields, formatVersion, textColumns,
             hnswM, hnswEfConstruction, preNormalize, deferred, ftsColumns, ftsTokenizer,
+            vectorColumns,
         )
     }
 }

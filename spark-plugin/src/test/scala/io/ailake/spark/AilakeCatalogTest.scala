@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.spark
 
-import org.apache.spark.sql.connector.catalog.Identifier
+import org.apache.spark.sql.connector.catalog.{Identifier, TableChange}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
@@ -138,5 +138,59 @@ class AilakeCatalogTest extends AnyFunSuite {
         Identifier.of(Array("default"), "new"),
       )
     }
+  }
+
+  // ── ALTER TABLE ADD/RENAME COLUMN ─────────────────────────────────────────
+  //
+  // Regression: AilakeNative.evolveSchema was fully implemented and tested but
+  // alterTable used to unconditionally throw UnsupportedOperationException —
+  // same "dead capability" gap Trino/Flink already closed, closed the same way.
+
+  test("alterTable with ADD COLUMN attempts a real evolveSchema call, not the old blanket throw") {
+    val catalog = makeCatalog()
+    val ident = Identifier.of(Array("default"), "docs")
+    val change = TableChange.addColumn(Array("source"), StringType)
+    // Native lib absent → evolveSchema returns -1 → RuntimeException("...ALTER TABLE failed...").
+    // Native lib present AND the table already exists on disk at file:///tmp/test-table/default/docs
+    // (e.g. left behind by an earlier trino-plugin test run sharing the same CI runner's /tmp) →
+    // evolveSchema succeeds and alterTable returns a Table instead of throwing. Either outcome proves
+    // it's a real evolveSchema call, not the old blanket "not supported by AI-Lake catalog" throw.
+    try {
+      val table = catalog.alterTable(ident, change)
+      assert(table != null)
+    } catch {
+      case ex: RuntimeException =>
+        assert(ex.getMessage.contains("ALTER TABLE failed"))
+    }
+  }
+
+  test("alterTable rejects unsupported column type") {
+    val catalog = makeCatalog()
+    val ident = Identifier.of(Array("default"), "docs")
+    val change = TableChange.addColumn(Array("ts"), TimestampType)
+    val ex = intercept[UnsupportedOperationException] {
+      catalog.alterTable(ident, change)
+    }
+    assert(ex.getMessage.contains("not supported"))
+  }
+
+  test("alterTable rejects nested column path for ADD COLUMN") {
+    val catalog = makeCatalog()
+    val ident = Identifier.of(Array("default"), "docs")
+    val change = TableChange.addColumn(Array("parent", "child"), StringType)
+    val ex = intercept[UnsupportedOperationException] {
+      catalog.alterTable(ident, change)
+    }
+    assert(ex.getMessage.contains("nested"))
+  }
+
+  test("alterTable rejects nested column path for RENAME COLUMN") {
+    val catalog = makeCatalog()
+    val ident = Identifier.of(Array("default"), "docs")
+    val change = TableChange.renameColumn(Array("parent", "child"), "newName")
+    val ex = intercept[UnsupportedOperationException] {
+      catalog.alterTable(ident, change)
+    }
+    assert(ex.getMessage.contains("nested"))
   }
 }

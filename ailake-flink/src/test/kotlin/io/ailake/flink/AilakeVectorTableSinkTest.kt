@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.flink
 
+import io.ailake.flink.internal.AilakeNativeLoader
 import org.apache.flink.streaming.api.functions.sink.SinkFunction
 import org.apache.flink.table.api.DataTypes
 import org.apache.flink.table.catalog.Column
@@ -15,6 +16,7 @@ import org.apache.flink.table.expressions.ResolvedExpression
 import org.apache.flink.table.expressions.ValueLiteralExpression
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions
 import org.apache.flink.table.types.logical.LogicalTypeRoot
+import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertDoesNotThrow
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -83,6 +85,71 @@ class AilakeVectorTableSinkTest {
         )
         val result = AilakeVectorTableSink.computeExtraColumnIndices(schema, idIdx = 0, vecIdx = 1)
         assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun computeExtraColumnIndicesMultiColumnOverloadExcludesAllVectorColumns() {
+        // Regression: writeBatchMulti was exposed from Spark (`ailakeWriteMulti`) but had no
+        // wrapper or DDL option here — a Flink-only user could never write a table with 2+
+        // independent vector columns.
+        val schema = ResolvedSchema.of(
+            Column.physical("id", DataTypes.BIGINT()),
+            Column.physical("embedding", DataTypes.ARRAY(DataTypes.FLOAT())),
+            Column.physical("image_embedding", DataTypes.ARRAY(DataTypes.FLOAT())),
+            Column.physical("text", DataTypes.STRING()),
+        )
+        val result = AilakeVectorTableSink.computeExtraColumnIndices(schema, idIdx = 0, vecIndices = setOf(1, 2))
+        assertEquals(mapOf("text" to 3), result)
+    }
+
+    // ── AilakeSinkFunction multi-column (Phase 8 multimodal) accumulation ─────
+
+    @Test
+    fun invokeWithVectorColumnsConfiguredAccumulatesPerColumnBuffers() {
+        val sink = AilakeSinkFunction(
+            warehouse = "file:///tmp/ailake-flink-test-does-not-need-to-exist",
+            namespace = "default", tableName = "docs",
+            vecCol = "embedding", dim = 2, metric = "cosine", precision = "f16",
+            idIdx = 0, vecIdx = 1,
+            vectorColumns = listOf(
+                AilakeNativeLoader.VectorColSpec("embedding", 2),
+                AilakeNativeLoader.VectorColSpec("image_embedding", 2),
+            ),
+            vecIndices = listOf(1, 2),
+        )
+        val row1 = GenericRowData(3)
+        row1.setField(0, 1L)
+        row1.setField(1, GenericArrayData(floatArrayOf(0.1f, 0.2f)))
+        row1.setField(2, GenericArrayData(floatArrayOf(0.5f, 0.6f)))
+
+        sink.invoke(row1, noopContext)
+
+        val multiEmbeddingsBuffers: List<MutableList<FloatArray>> = privateField(sink, "multiEmbeddingsBuffers")
+        assertEquals(2, multiEmbeddingsBuffers.size)
+        assertArrayEquals(floatArrayOf(0.1f, 0.2f), multiEmbeddingsBuffers[0][0])
+        assertArrayEquals(floatArrayOf(0.5f, 0.6f), multiEmbeddingsBuffers[1][0])
+
+        val embeddingsBuffer: MutableList<FloatArray> = privateField(sink, "embeddingsBuffer")
+        assertTrue(embeddingsBuffer.isEmpty())
+    }
+
+    @Test
+    fun invokeWithVectorColumnsConfiguredThrowsClearErrorOnNullEmbedding() {
+        val sink = AilakeSinkFunction(
+            warehouse = "file:///tmp/x", namespace = "default", tableName = "docs",
+            vecCol = "embedding", dim = 2, metric = "cosine", precision = "f16", idIdx = 0, vecIdx = 1,
+            vectorColumns = listOf(
+                AilakeNativeLoader.VectorColSpec("embedding", 2),
+                AilakeNativeLoader.VectorColSpec("image_embedding", 2),
+            ),
+            vecIndices = listOf(1, 2),
+        )
+        val row = GenericRowData(3)
+        row.setField(0, 1L)
+        row.setField(1, GenericArrayData(floatArrayOf(0.1f, 0.2f)))
+        row.setField(2, null)
+        val ex = assertThrows(IllegalStateException::class.java) { sink.invoke(row, noopContext) }
+        assertTrue(ex.message!!.contains("image_embedding"))
     }
 
     // ── AilakeSinkFunction accumulation ────────────────────────────────────────

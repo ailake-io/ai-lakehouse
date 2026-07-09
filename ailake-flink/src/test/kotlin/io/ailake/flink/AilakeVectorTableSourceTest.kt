@@ -6,7 +6,9 @@ import org.apache.flink.api.common.ExecutionConfig
 import org.apache.flink.api.common.functions.RuntimeContext
 import org.apache.flink.configuration.Configuration
 import org.apache.flink.core.io.GenericInputSplit
+import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertDoesNotThrow
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -118,5 +120,48 @@ class AilakeVectorTableSourceTest {
         )
         format.runtimeContext = runtimeContextWithParams(params)
         assertDoesNotThrow { format.open(GenericInputSplit(0, 1)) }
+    }
+
+    // ── ailake.multimodal.queries job parameter ────────────────────────────────
+    //
+    // Regression: AilakeNativeLoader.searchMultimodal was fully implemented but
+    // unreachable from any Flink source — same "dead capability" gap as
+    // searchText was, closed the same way.
+
+    @Test
+    fun openWithOnlyMultimodalQueriesDoesNotThrow() {
+        val params = Configuration()
+        params.setString(
+            "ailake.multimodal.queries",
+            """[{"col":"embedding","query":"0.1,0.2","weight":1.0},""" +
+            """{"col":"image_embedding","query":"0.3,0.4","weight":0.5}]""",
+        )
+        val format = AilakeInputFormat(
+            warehouse = "file:///tmp/x", namespace = "default", tableName = "table",
+            vecCol = "embedding", dim = 4, topK = 5, efSearch = 50,
+        )
+        format.runtimeContext = runtimeContextWithParams(params)
+        assertDoesNotThrow { format.open(GenericInputSplit(0, 1)) }
+        assertTrue(format.reachedEnd(), "expected empty result set when the native lib can't be loaded")
+    }
+
+    @Test
+    fun parseMultimodalQueriesParsesColQueryAndWeight() {
+        val parsed = AilakeInputFormat.parseMultimodalQueries(
+            """[{"col":"embedding","query":"0.1,0.2,0.3","weight":0.7}]"""
+        )
+        assertEquals(1, parsed.size)
+        val (col, query, weight) = parsed[0]
+        assertEquals("embedding", col)
+        assertArrayEquals(floatArrayOf(0.1f, 0.2f, 0.3f), query, 1e-6f)
+        assertEquals(0.7f, weight, 1e-6f)
+    }
+
+    @Test
+    fun parseMultimodalQueriesDefaultsWeightToOne() {
+        val parsed = AilakeInputFormat.parseMultimodalQueries(
+            """[{"col":"embedding","query":"0.1,0.2"}]"""
+        )
+        assertEquals(1.0f, parsed[0].third, 1e-6f)
     }
 }
