@@ -85,6 +85,60 @@ class AilakeSparkExtensionsTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(df.count() == 0)
   }
 
+  // ── ailakeSearch hybrid BM25+vector + ailakeSearchText (pure full-text) ────
+  //
+  // Regression: AilakeNative.search's hybridText/textColumn/bm25Weight params
+  // and AilakeNative.searchText were both fully implemented but unreachable
+  // from any DataFrame call — same "dead capability" gap as the others.
+
+  test("ailakeSearch with hybridText returns empty DataFrame when native library absent") {
+    import io.ailake.spark.implicits._
+    val query = Array(0.1f, 0.2f, 0.3f)
+    val df = spark.ailakeSearch("s3://test-bucket/table/", query, topK = 5, hybridText = Some("rust programming"))
+    assert(df.schema.fieldNames sameElements Array("row_id", "distance", "file_path"))
+    assert(df.count() == 0)
+  }
+
+  test("ailakeSearchText returns DataFrame with correct schema") {
+    import io.ailake.spark.implicits._
+    val df = spark.ailakeSearchText("s3://test-bucket/table/", "rust programming", topK = 10)
+    val expectedSchema = StructType(Seq(
+      StructField("row_id", LongType, nullable = false),
+      StructField("distance", DoubleType, nullable = false),
+      StructField("file_path", StringType, nullable = false),
+    ))
+    assert(df.schema == expectedSchema)
+    assert(df.count() == 0)
+  }
+
+  test("ailakeSearchText accepts namespace/tableName/textColumns/partitionFilter parameters") {
+    import io.ailake.spark.implicits._
+    val df = spark.ailakeSearchText(
+      "s3://test-bucket/table/", "rust programming",
+      namespace = "prod", tableName = "docs",
+      textColumns = Seq("chunk_text", "source"), topK = 5,
+      partitionFilter = Some("agent-42"),
+    )
+    assert(df.count() == 0)
+  }
+
+  // ── ailakeCompact ──────────────────────────────────────────────────────────
+  //
+  // Regression: AilakeNative.compact was fully implemented but had no
+  // DataFrame/SQL entry point anywhere in this plugin.
+
+  test("ailakeCompact returns None when native library absent") {
+    import io.ailake.spark.implicits._
+    val result = spark.ailakeCompact("s3://test-bucket/table/", namespace = "default", tableName = "docs")
+    assert(result.isEmpty)
+  }
+
+  test("ailakeCompact resolves tableName from tableUri when not provided") {
+    import io.ailake.spark.implicits._
+    val result = spark.ailakeCompact("s3://test-bucket/docs/")
+    assert(result.isEmpty)
+  }
+
   // ── ailakeSearchWithData (Fase 11 — search + full-row fetch, no JOIN needed) ─
   //
   // Regression: AilakeNative.scan (backed by ailake_scan_json) had no wrapper in

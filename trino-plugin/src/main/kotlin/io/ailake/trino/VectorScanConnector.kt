@@ -31,12 +31,14 @@ class VectorScanConnector(
     private val deferred: Boolean = false,
     private val ftsColumns: List<String> = emptyList(),
     private val ftsTokenizer: String = "default",
+    private val vectorColumns: List<AilakeNative.VectorColSpec> = emptyList(),
 ) : Connector {
 
     private val metadata = VectorScanMetadata(
         tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel,
         partitionFields, formatVersion, textColumns,
         hnswM, hnswEfConstruction, preNormalize, deferred, ftsColumns, ftsTokenizer,
+        vectorColumns,
     )
     private val splitManager = VectorScanSplitManager()
     private val recordSetProvider = VectorScanRecordSetProvider()

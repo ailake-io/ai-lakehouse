@@ -824,6 +824,42 @@ JVM caller
 
 ---
 
+## Plugin parity (Fase 12)
+
+A capability audit after Fase 11 compared all 11 native capabilities against each plugin's
+SQL/DataFrame surface. Trino and Flink were already near-parity (10/11); Spark had 5
+capabilities fully implemented in `AilakeNative.scala` with zero DataFrame/SQL caller — real
+dead code, not a documented decision (unlike ALTER TABLE, which used to throw
+`UnsupportedOperationException` explicitly). The inverse gap: multi-column (multimodal) write
+existed only in Spark, with zero wrapper in Trino or Flink.
+
+| Capability | Spark | Trino | Flink |
+|---|---|---|---|
+| Hybrid BM25+vector search | `ailakeSearch(hybridText=...)` | session props | job params |
+| Pure full-text search | `ailakeSearchText(...)` | session prop | job param |
+| DELETE | `AilakeTable` implements `SupportsDelete` (equality/IN) | `DELETE FROM ... WHERE` (equality/IN) | `DELETE FROM ... WHERE` (equality/IN) |
+| ALTER TABLE ADD/RENAME COLUMN | `AilakeCatalog.alterTable` (was unconditional throw) | `ALTER TABLE ... ADD/RENAME COLUMN` | `ALTER TABLE ... ADD/RENAME COLUMN` |
+| Compact | `spark.ailakeCompact(...)` (no native CALL-procedure API in Spark) | `CALL ailake.system.compact()` | `ailake_compact(...)` scalar UDF |
+| Multi-column (multimodal) write | `ailakeWriteMulti(...)` (pre-existing) | `ailake.vector-columns` catalog property → `ailake.default.ingest` | `'vector.columns'` DDL option on the ingest `CREATE TABLE` |
+
+**Multi-column write, Trino/Flink**: both reuse the existing single-vector-column ingest
+table shape — when `vector-columns`/`vector.columns` is configured, `ingestColumns()` (Trino)
+or the declared DDL (Flink) gets one `ARRAY<DOUBLE>`/`ARRAY<FLOAT>` per entry instead of the
+single vector column, and the write path calls the new `writeBatchMulti` wrapper
+(`ailake_write_batch_multi_json`) instead of `writeBatch`. Same JSON spec shape in both:
+`[{"column","dim","metric"?,"precision"?,"modality"?}]`.
+
+**Spark's DELETE** uses `org.apache.spark.sql.connector.catalog.SupportsDelete` — `canDeleteWhere`
+accepts exactly one `EqualTo`/`In` filter (same equality-delete-file constraint
+`AilakeNative.deleteWhere` has everywhere), rejecting anything else so Spark reports "DELETE
+not supported for this table" rather than a silent partial delete.
+
+**Spark's ALTER TABLE** now calls `AilakeNative.evolveSchema` via `TableChange.AddColumn`/
+`RenameColumn`, same Iceberg-primitive-types-only restriction and same "in-memory schema is
+resolved per-call, not tracked" limitation Trino/Flink already document.
+
+---
+
 ## Native library deployment
 
 ### Local / development

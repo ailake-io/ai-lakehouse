@@ -388,6 +388,89 @@ object AilakeNativeLoader {
     }
 
     /**
+     * One vector column in a multi-column (Phase 8 multimodal) write batch — e.g. text +
+     * image embeddings on the same row, each with its own HNSW index. See [writeBatchMulti].
+     */
+    data class VectorColSpec(
+        val column: String,
+        val dim: Int,
+        val metric: String = "cosine",
+        val precision: String = "f16",
+        val modality: String? = null,
+    )
+
+    /**
+     * Write a batch of rows with N independent vector columns (Phase 8 multimodal). Each
+     * column gets its own HNSW section in the same AI-Lake file. Was already exposed from
+     * Spark (`ailakeWriteMulti`) but had no wrapper here — same "dead capability" gap as
+     * DELETE/schema evolution before them, closed the same way. Throws on native error,
+     * matching [writeBatch]'s existing contract.
+     *
+     * @param vectorColumns  one spec per vector column, paired with its per-row embeddings
+     *                       (`embeddings[i]` has one entry per row, in the same order as `ids`).
+     *                       First entry is primary (used for geometric pruning in the manifest).
+     */
+    fun writeBatchMulti(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        ids: LongArray,
+        vectorColumns: List<Pair<VectorColSpec, Array<FloatArray>>>,
+        embeddingModel: String? = null,
+        formatVersion: Int = 2,
+        ftsColumns: List<String> = emptyList(),
+        ftsTokenizer: String = "default",
+        deferred: Boolean = false,
+        columns: Map<String, List<String>> = emptyMap(),
+    ): Long {
+        require(vectorColumns.isNotEmpty()) { "vectorColumns must not be empty" }
+        vectorColumns.forEach { (spec, embeddings) ->
+            require(ids.size == embeddings.size) { "ids.size != embeddings.size for column '${spec.column}'" }
+        }
+        val vecColsPayload = vectorColumns.map { (spec, embeddings) ->
+            val m = mutableMapOf<String, Any>(
+                "col" to spec.column,
+                "dim" to spec.dim,
+                "metric" to spec.metric,
+                "precision" to spec.precision,
+                "embeddings" to embeddings.map { it.toList() },
+            )
+            if (spec.modality != null) m["modality"] = spec.modality
+            m
+        }
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse,
+            "namespace" to namespace,
+            "table" to table,
+            "ids" to ids.toList(),
+            "vector_columns" to vecColsPayload,
+            "format_version" to formatVersion,
+        )
+        if (embeddingModel != null) payload["embedding_model"] = embeddingModel
+        if (ftsColumns.isNotEmpty()) {
+            payload["fts_columns"] = ftsColumns
+            payload["fts_tokenizer"] = ftsTokenizer
+        }
+        if (deferred) payload["deferred"] = true
+        if (columns.isNotEmpty()) payload["columns"] = columns
+        val req = mapper.writeValueAsString(payload)
+        val ptr = lib.ailake_write_batch_multi_json(req)
+            ?: throw RuntimeException("ailake_write_batch_multi_json returned null for table=$namespace.$table")
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<WriteResponse>(json)
+            if (!resp.ok) {
+                log.error("[ailake] ailake_write_batch_multi_json returned error for table={}.{}: {}", namespace, table, resp.error)
+                throw RuntimeException("ailake_write_batch_multi_json error: ${resp.error}")
+            }
+            log.info("[ailake] writeBatchMulti OK table={}.{} rows={} snapshot_id={}", namespace, table, ids.size, resp.snapshot_id)
+            resp.snapshot_id
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    /**
      * Logically delete all rows where [column] equals any value in [values].
      * Throws [RuntimeException] on native error.
      */

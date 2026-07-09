@@ -56,6 +56,12 @@ class VectorScanMetadata(
     private val deferred: Boolean = false,
     private val ftsColumns: List<String> = emptyList(),
     private val ftsTokenizer: String = "default",
+    // Multi-column (Phase 8 multimodal) ingest — e.g. text + image embeddings on the same
+    // row, each with its own HNSW index. When non-empty, ingestColumns() emits one
+    // ARRAY<DOUBLE> column per entry instead of the single `vectorColumn`, and
+    // AilakePageSink calls ailake_write_batch_multi_json instead of ailake_write_batch_json.
+    // Configured catalog-wide via ailake.vector-columns (VectorScanConnectorFactory).
+    private val vectorColumns: List<AilakeNative.VectorColSpec> = emptyList(),
 ) : ConnectorMetadata {
 
     private val log = LoggerFactory.getLogger(VectorScanMetadata::class.java)
@@ -96,12 +102,22 @@ class VectorScanMetadata(
      * columns are appended in the order configured via `ailake.text-columns`
      * on the catalog. `AilakePageSink` relies on this exact ordering (id=0,
      * vector=1, text columns starting at 2) to read the right Page channels.
+     *
+     * Multi-column mode (`ailake.vector-columns` configured, `vectorColumns.isNotEmpty()`):
+     * `(id BIGINT, <col1> ARRAY<DOUBLE>, <col2> ARRAY<DOUBLE>, ..., ...textColumns VARCHAR)`
+     * — one ARRAY<DOUBLE> per configured vector column (in `ailake.vector-columns` order),
+     * `AilakePageSink` reads channels 1..N as vectors before the text columns start at N+1.
      */
-    private fun ingestColumns(): List<ColumnMetadata> =
-        listOf(
-            ColumnMetadata("id", BIGINT),
-            ColumnMetadata.builder().setName("embedding").setType(ArrayType(DOUBLE)).setNullable(false).build(),
-        ) + textColumns.map { ColumnMetadata(it, VARCHAR) }
+    private fun ingestColumns(): List<ColumnMetadata> {
+        val vecCols = if (vectorColumns.isNotEmpty()) {
+            vectorColumns.map { spec ->
+                ColumnMetadata.builder().setName(spec.column).setType(ArrayType(DOUBLE)).setNullable(false).build()
+            }
+        } else {
+            listOf(ColumnMetadata.builder().setName("embedding").setType(ArrayType(DOUBLE)).setNullable(false).build())
+        }
+        return listOf(ColumnMetadata("id", BIGINT)) + vecCols + textColumns.map { ColumnMetadata(it, VARCHAR) }
+    }
 
     private fun ingestColumnHandles(): Map<String, ColumnHandle> =
         ingestColumns().mapIndexed { i, c -> c.name to (VectorScanColumnHandle(c.name, i) as ColumnHandle) }.toMap()
@@ -141,6 +157,7 @@ class VectorScanMetadata(
                 tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel,
                 partitionFields, formatVersion, textColumns,
                 hnswM, hnswEfConstruction, preNormalize, deferred, ftsColumns, ftsTokenizer,
+                vectorColumns,
             )
             else -> null
         }

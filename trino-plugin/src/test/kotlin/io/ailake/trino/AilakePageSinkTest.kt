@@ -209,6 +209,85 @@ class AilakePageSinkTest {
         assertEquals("default", h.ftsTokenizer)
     }
 
+    // ── multi-column (Phase 8 multimodal) ingest — ailake.vector-columns ──────
+    //
+    // Regression: AilakeNative.writeBatchMulti was exposed from Spark
+    // (`ailakeWriteMulti`) but had no wrapper or SQL surface here at all — a
+    // Trino-only user could never write a table with 2+ independent vector
+    // columns, only single-vector-column ingest existed.
+
+    private fun buildMultiPage(ids: List<Long>, vecCols: List<List<List<Double>>>): Page {
+        val n = ids.size
+        val idBuilder = BIGINT.createBlockBuilder(null, n)
+        ids.forEach { BIGINT.writeLong(idBuilder, it) }
+        val arrayType = ArrayType(DOUBLE)
+        val vecBlocks = vecCols.map { rows ->
+            val b = arrayType.createBlockBuilder(null, n) as ArrayBlockBuilder
+            rows.forEach { vec -> b.buildEntry<RuntimeException> { eb -> vec.forEach { DOUBLE.writeDouble(eb, it) } } }
+            b.build()
+        }
+        return Page(*(listOf(idBuilder.build()) + vecBlocks).toTypedArray<Block>())
+    }
+
+    private fun multiHandle() = AilakeIngestTableHandle(
+        tableUri = "file:///tmp/test-table", namespace = "default", tableName = "docs",
+        vectorColumn = "embedding", dim = 2, metric = "cosine", precision = "f16",
+        vectorColumns = listOf(
+            AilakeNative.VectorColSpec("embedding", 2),
+            AilakeNative.VectorColSpec("image_embedding", 2),
+        ),
+    )
+
+    @Test
+    fun appendPageAccumulatesMultipleVectorColumns() {
+        val sink = AilakePageSink(multiHandle())
+        val page = buildMultiPage(
+            ids = listOf(1L, 2L),
+            vecCols = listOf(
+                listOf(listOf(0.1, 0.2), listOf(0.3, 0.4)),
+                listOf(listOf(0.5, 0.6), listOf(0.7, 0.8)),
+            ),
+        )
+        sink.appendPage(page).get()
+
+        val multiEmbeddings: List<MutableList<List<Float>>> = privateField(sink, "multiEmbeddings")
+        assertEquals(2, multiEmbeddings.size)
+        assertEquals(listOf(listOf(0.1f, 0.2f), listOf(0.3f, 0.4f)), multiEmbeddings[0])
+        assertEquals(listOf(listOf(0.5f, 0.6f), listOf(0.7f, 0.8f)), multiEmbeddings[1])
+    }
+
+    @Test
+    fun appendPageWithMultiColumnHandleDoesNotTouchSingleColumnBuffer() {
+        val sink = AilakePageSink(multiHandle())
+        val page = buildMultiPage(ids = listOf(1L), vecCols = listOf(listOf(listOf(0.1, 0.2)), listOf(listOf(0.3, 0.4))))
+        sink.appendPage(page).get()
+
+        val embeddings: MutableList<List<Float>> = privateField(sink, "embeddings")
+        assertTrue(embeddings.isEmpty())
+    }
+
+    @Test
+    fun finishWithVectorColumnsConfiguredReturnsEmptyWhenNativeLibAbsent() {
+        val sink = AilakePageSink(multiHandle())
+        val page = buildMultiPage(ids = listOf(1L), vecCols = listOf(listOf(listOf(0.1, 0.2)), listOf(listOf(0.3, 0.4))))
+        sink.appendPage(page).get()
+        val fragments = sink.finish().get()
+        assertTrue(fragments.isEmpty())
+    }
+
+    @Test
+    fun handleDefaultsVectorColumnsToEmptyList() {
+        assertTrue(handle().vectorColumns.isEmpty())
+    }
+
+    @Test
+    fun handleCarriesConfiguredVectorColumns() {
+        val h = multiHandle()
+        assertEquals(2, h.vectorColumns.size)
+        assertEquals("embedding", h.vectorColumns[0].column)
+        assertEquals("image_embedding", h.vectorColumns[1].column)
+    }
+
     @Test
     fun handleCarriesConfiguredWriteTuningKnobs() {
         val h = AilakeIngestTableHandle(

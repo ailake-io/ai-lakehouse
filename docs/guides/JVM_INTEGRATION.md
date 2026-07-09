@@ -136,10 +136,11 @@ val results = spark.ailakeSearch(
 )
 results.orderBy("distance").show(10)
 
-// Hybrid BM25+vector search
-val hybridRows = AilakeNative.search(
+// Hybrid BM25+vector search — DataFrame-level (ailakeSearch's hybridText/textColumn/
+// bm25Weight params); low-level AilakeNative.search(hybridText=...) also still available.
+val hybridDf = spark.ailakeSearch(
   tableUri    = "s3://my-lake/docs/",
-  query       = query,
+  queryVector = query,
   topK        = 20,
   hybridText  = Some("geometric pruning"),
   textColumn  = "chunk_text",
@@ -234,6 +235,17 @@ val ftsRows = AilakeNative.searchText(
 )
 ftsRows.foreach(r => println(s"row=${r.rowId}  score=${r.distance}"))
 
+// DataFrame-level equivalent (`spark.ailakeSearchText`) — columns:
+// row_id (Long), distance (Double), file_path (String)
+import io.ailake.spark.implicits._
+val ftsDf = spark.ailakeSearchText(
+  tableUri    = "s3://my-lake/docs/",
+  queryText   = "machine learning embeddings",
+  textColumns = Seq("chunk_text"),
+  topK        = 10,
+)
+ftsDf.orderBy("distance").show()
+
 // Cross-modal RRF (text + image, Phase 8)
 val mmRows = AilakeNative.searchMultimodal(
   tableUri = "s3://my-lake/media/",
@@ -299,6 +311,24 @@ AilakeNative.compact(
   minFiles        = 4,
   targetSizeBytes = 128L * 1024 * 1024,
 )
+
+// DataFrame-level equivalent (`spark.ailakeCompact`) — Spark has no native CALL-procedure
+// syntax outside a full catalog stored-procedure API, so this is a plain SparkSession
+// method (same shape as ailakeWrite) rather than Trino's CALL/Flink's scalar UDF.
+val filesCompacted: Option[Int] = spark.ailakeCompact("s3://my-lake/docs/")
+
+// SQL-level DELETE and ALTER TABLE, via the io.ailake.spark.AilakeCatalog catalog plugin
+// (spark.sql.catalog.ailake = io.ailake.spark.AilakeCatalog — see §5's Trino catalog
+// registration pattern; Spark's is per-table-uri, set as spark.sql.catalog.ailake.table-uri).
+// Equality/IN pushdown only — no row-level scan-and-delete.
+spark.sql("DELETE FROM ailake.default.docs WHERE id = 5")
+spark.sql("DELETE FROM ailake.default.docs WHERE id IN (1, 2, 3)")
+
+// Adds/renames the column in the table's Iceberg schema on disk immediately. This
+// catalog resolves its schema per-call from spark.sql.catalog.ailake.* options and the
+// current DataFrame, not from any tracked state — same limitation Trino/Flink document.
+spark.sql("ALTER TABLE ailake.default.docs ADD COLUMN source STRING")
+spark.sql("ALTER TABLE ailake.default.docs RENAME COLUMN source TO doc_source")
 ```
 
 ### 3F — Running tests
@@ -534,6 +564,23 @@ ailake.hnsw-m=                            # unset = table/HnswConfig default
 ailake.hnsw-ef-construction=
 ailake.pre-normalize=false
 ailake.deferred=false
+
+# Multi-column (Phase 8 multimodal) ingest — e.g. text + image embeddings on the same
+# row, each with its own HNSW index. When set, INSERT INTO ailake.default.ingest expects
+# one ARRAY<DOUBLE> column per entry (by name) instead of the single ailake.vector-column,
+# and writes go through ailake_write_batch_multi_json. Leave unset ([]) for single-column
+# ingest (the default, unchanged).
+ailake.vector-columns=[{"column":"embedding","dim":1536,"metric":"cosine","precision":"f16"},{"column":"image_embedding","dim":512,"metric":"cosine","precision":"f16","modality":"image"}]
+```
+
+With `ailake.vector-columns` set as above:
+
+```sql
+-- Schema: id bigint, embedding array(double), image_embedding array(double)
+DESCRIBE ailake.default.ingest;
+
+INSERT INTO ailake.default.ingest
+VALUES (1, ARRAY[0.1, 0.2, ...], ARRAY[0.4, 0.5, ...]);
 ```
 
 Multiple tables → multiple catalog files with different names:
@@ -749,6 +796,28 @@ DELETE FROM ailake_docs_ingest WHERE id IN (1, 2, 3);
 -- restart the job (or reissue CREATE TABLE) before INSERT/SELECT can see it.
 ALTER TABLE ailake_docs_ingest ADD COLUMN source STRING;
 ALTER TABLE ailake_docs_ingest RENAME COLUMN source TO doc_source;
+
+-- Multi-column (Phase 8 multimodal) ingest — e.g. text + image embeddings on the same
+-- row, each with its own HNSW index. One ARRAY<FLOAT> column per vector.columns entry
+-- (resolved by name against the declared schema) instead of the single vector.column.
+CREATE TABLE ailake_docs_multimodal_ingest (
+    id              BIGINT,
+    text            STRING,
+    embedding       ARRAY<FLOAT>,
+    image_embedding ARRAY<FLOAT>
+) WITH (
+    'connector'      = 'ailake',
+    'warehouse'      = 's3://my-lake/',
+    'namespace'      = 'default',
+    'table-name'     = 'media',
+    'vector.dim'     = '1536',  -- required option, unused in multi-column mode
+    'vector.columns' =
+      '[{"column":"embedding","dim":1536,"metric":"cosine","precision":"f16"},
+        {"column":"image_embedding","dim":512,"metric":"cosine","precision":"f16","modality":"image"}]'
+);
+
+INSERT INTO ailake_docs_multimodal_ingest
+SELECT id, text, embedding, image_embedding FROM hive_catalog.default.media_chunks;
 
 -- Read (source): fixed 3-column search-result shape
 CREATE TABLE ailake_docs_search (

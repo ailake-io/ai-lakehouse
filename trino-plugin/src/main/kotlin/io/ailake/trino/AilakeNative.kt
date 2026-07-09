@@ -44,6 +44,18 @@ object AilakeNative {
     /** Column rename request for schema evolution. */
     data class RenameColReq(val from: String, val to: String)
 
+    /**
+     * One vector column in a multi-column (Phase 8 multimodal) write batch — e.g. text +
+     * image embeddings on the same row, each with its own HNSW index. See [writeBatchMulti].
+     */
+    data class VectorColSpec(
+        val column: String,
+        val dim: Int,
+        val metric: String = "cosine",
+        val precision: String = "f16",
+        val modality: String? = null,
+    )
+
     private interface Lib : Library {
         /** Returns ailake-jni version string. Static — do NOT free this pointer. */
         fun ailake_version(): String
@@ -59,6 +71,9 @@ object AilakeNative {
 
         /** JSON-envelope write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
         fun ailake_write_batch_json(requestJson: String): Pointer?
+
+        /** Multi-column (Phase 8 multimodal) write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
+        fun ailake_write_batch_multi_json(requestJson: String): Pointer?
 
         /** Logical delete via equality delete file. Returns `{"ok":true}`. Caller must free. */
         fun ailake_delete_where_json(requestJson: String): Pointer?
@@ -195,6 +210,81 @@ object AilakeNative {
             (resp["snapshot_id"] as? Number)?.toLong()
         } catch (e: Exception) {
             log.error("[ailake] Failed to parse writeBatch response for table={}: {}", tableName, e.message, e)
+            null
+        } finally {
+            runCatching { native.ailake_free_string(ptr) }
+        }
+    }
+
+    /**
+     * Write a batch of rows with N independent vector columns (Phase 8 multimodal — e.g.
+     * text + image embeddings on the same row, searchable via [searchMultimodal]). Each
+     * column gets its own HNSW section in the same AI-Lake file. Was already exposed from
+     * Spark (`ailakeWriteMulti`) but had no wrapper here — same "dead capability" gap as
+     * DELETE/ALTER TABLE/compact before them, closed the same way.
+     *
+     * @param vectorColumns  one spec per vector column, paired with its per-row embeddings
+     *                       (`embeddings[i]` has one entry per row, in the same order as `ids`).
+     *                       First entry is primary (used for geometric pruning in the manifest).
+     */
+    fun writeBatchMulti(
+        tableUri: String,
+        namespace: String,
+        tableName: String,
+        ids: List<Long>,
+        vectorColumns: List<Pair<VectorColSpec, List<List<Float>>>>,
+        embeddingModel: String? = null,
+        formatVersion: Int = 2,
+        ftsColumns: List<String> = emptyList(),
+        ftsTokenizer: String = "default",
+        deferred: Boolean = false,
+        columns: Map<String, List<String>> = emptyMap(),
+    ): Long? {
+        val native = lib ?: return null
+        if (ids.isEmpty() || vectorColumns.isEmpty()) return null
+
+        val vecColsPayload = vectorColumns.map { (spec, embeddings) ->
+            val m = mutableMapOf<String, Any>(
+                "col" to spec.column,
+                "dim" to spec.dim,
+                "metric" to spec.metric,
+                "precision" to spec.precision,
+                "embeddings" to embeddings,
+            )
+            if (spec.modality != null) m["modality"] = spec.modality
+            m
+        }
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to tableUri,
+            "namespace" to namespace,
+            "table" to tableName,
+            "ids" to ids,
+            "vector_columns" to vecColsPayload,
+            "format_version" to formatVersion,
+        )
+        if (embeddingModel != null) payload["embedding_model"] = embeddingModel
+        if (ftsColumns.isNotEmpty()) {
+            payload["fts_columns"] = ftsColumns
+            payload["fts_tokenizer"] = ftsTokenizer
+        }
+        if (deferred) payload["deferred"] = true
+        if (columns.isNotEmpty()) payload["columns"] = columns
+        val requestJson = mapper.writeValueAsString(payload)
+
+        val ptr = native.ailake_write_batch_multi_json(requestJson) ?: run {
+            log.warn("[ailake] ailake_write_batch_multi_json returned null pointer for table={}", tableName)
+            return null
+        }
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) {
+                log.warn("[ailake] writeBatchMulti ok=false for table={}: {}", tableName, resp["error"])
+                return null
+            }
+            (resp["snapshot_id"] as? Number)?.toLong()
+        } catch (e: Exception) {
+            log.error("[ailake] Failed to parse writeBatchMulti response for table={}: {}", tableName, e.message, e)
             null
         } finally {
             runCatching { native.ailake_free_string(ptr) }

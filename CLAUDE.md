@@ -506,6 +506,19 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
   - Documentação: `docs/guides/JVM_INTEGRATION.md` (§3D/3F/5C/6B) e `docs/specs/JVM_PLUGINS.md` atualizados com os novos entry points.
   - Sem trabalho novo em Rust — wiring puro do lado JVM, mesmo formato do fix de `searchMultimodal`.
 
+### Fase 12 — Paridade completa Spark/Trino/Flink
+
+> **Contexto (2026-07-08)**: auditoria de paridade pós-Fase 11 comparando os 11 capabilities nativos (`ailake-jni`) contra a superfície SQL/DataFrame de cada plugin achou Trino e Flink praticamente empatados (10/11), mas Spark com 5 capabilities implementadas em `AilakeNative.scala` sem nenhum caller DataFrame/SQL — "dead code" real, não decisão documentada (diferente de ALTER TABLE, que antes lançava `UnsupportedOperationException` explícito). Achado simétrico inverso: write multi-column (multimodal) só existia em Spark, zero wrapper em Trino/Flink.
+
+- [x] **Spark — hybrid BM25+vector search** — `ailakeSearch` ganhou `hybridText`/`textColumn`/`bm25Weight` (já existiam em `AilakeNative.search`, nunca repassados pelo único caller DataFrame).
+- [x] **Spark — full-text search puro** — `implicits.AilakeSession.ailakeSearchText(tableUri, queryText, ...)`, `DataFrame(row_id, distance, file_path)`.
+- [x] **Spark — DELETE** — `AilakeTable` ganhou `SupportsDelete` (equality/IN pushdown, mesma semântica de Trino/Flink — `AilakeNative.deleteWhere` só suporta equality delete file, sem scan-and-delete linha a linha).
+- [x] **Spark — ALTER TABLE ADD/RENAME COLUMN** — `AilakeCatalog.alterTable` parava de lançar `UnsupportedOperationException` incondicional; agora chama `AilakeNative.evolveSchema` via `TableChange.AddColumn`/`RenameColumn`, mesma limitação documentada de Trino/Flink (schema em memória é resolvido por chamada a partir das options do catalog, não hardcoded — mas nada aqui rastreia coluna nova adicionada até que o `DataFrame` do próximo `INSERT`/`SELECT` já a inclua).
+- [x] **Spark — compact** — `implicits.AilakeSession.ailakeCompact(tableUri, ...)`. Sem `CALL` nativo no Spark SQL fora de uma API de stored procedure completa de catalog, então é um método simples em `SparkSession`, mesmo padrão de `ailakeWrite`.
+- [x] **Trino — write multi-column (multimodal)** — nova catalog property `ailake.vector-columns` (JSON `[{"column","dim","metric"?,"precision"?,"modality"?}]`); quando configurada, `ingestColumns()` emite um `ARRAY<DOUBLE>` por entrada em vez do único `vectorColumn`, e `AilakePageSink` chama `AilakeNative.writeBatchMulti` (novo wrapper, `ailake_write_batch_multi_json`) em vez de `writeBatch`. Reaproveita `ailake.text-columns` para as colunas extra, sem propriedade nova ali.
+- [x] **Flink — write multi-column (multimodal)** — nova opção de DDL `vector.columns` (mesmo JSON do Trino) no `CREATE TABLE` já ingest-shaped; `AilakeVectorTableSink`/`AilakeSinkFunction` resolvem N colunas `ARRAY<FLOAT>` por nome em vez do único `vecCol`, chamando `AilakeNativeLoader.writeBatchMulti` (novo wrapper) via `ailake_write_batch_multi_json`.
+- Testes adicionados nos três plugins; docs (`JVM_INTEGRATION.md`, `JVM_PLUGINS.md`) e `CHANGELOG.md` atualizados.
+
 ---
 
 ## 11. Stack Técnica — Rust

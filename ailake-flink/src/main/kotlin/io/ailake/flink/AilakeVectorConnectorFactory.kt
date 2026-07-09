@@ -95,6 +95,15 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
         val HNSW_EF_CONSTRUCTION  = ConfigOptions.key("hnsw.ef-construction").intType().noDefaultValue()
         val PRE_NORMALIZE         = ConfigOptions.key("pre-normalize").booleanType().defaultValue(false)
         val DEFERRED              = ConfigOptions.key("deferred").booleanType().defaultValue(false)
+        /**
+         * Multi-column (Phase 8 multimodal) ingest — e.g. text + image embeddings on the
+         * same row, each with its own HNSW index. JSON array of
+         * `{"column","dim","metric"?,"precision"?,"modality"?}`. When set, the sink expects
+         * one `ARRAY<FLOAT>` column per entry (by name) instead of the single `vector.column`,
+         * and writes via `ailake_write_batch_multi_json`. Was already exposed from Spark
+         * (`ailakeWriteMulti`) but had no DDL option here at all.
+         */
+        val VEC_COLUMNS           = ConfigOptions.key("vector.columns").stringType().defaultValue("[]")
     }
 
     override fun factoryIdentifier(): String = IDENTIFIER
@@ -104,7 +113,7 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
     override fun optionalOptions(): Set<ConfigOption<*>> = setOf(
         NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF, SEARCH_MODE, EMBEDDING_MODEL,
         PARTITION_FIELDS, FORMAT_VERSION, FTS_COLUMNS, FTS_TOKENIZER,
-        HNSW_M, HNSW_EF_CONSTRUCTION, PRE_NORMALIZE, DEFERRED,
+        HNSW_M, HNSW_EF_CONSTRUCTION, PRE_NORMALIZE, DEFERRED, VEC_COLUMNS,
     )
 
     /**
@@ -202,6 +211,20 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
         val ftsColsRaw = opts.get(FTS_COLUMNS)
         val ftsColumns = if (ftsColsRaw.isBlank()) emptyList()
                          else ftsColsRaw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        val vcJson = opts.get(VEC_COLUMNS)
+        val vectorColumns: List<AilakeNativeLoader.VectorColSpec> = if (vcJson == "[]" || vcJson.isBlank()) emptyList() else {
+            val node = ObjectMapper().readTree(vcJson)
+            (0 until node.size()).map { i ->
+                val n = node.get(i)
+                AilakeNativeLoader.VectorColSpec(
+                    column = n.get("column").asText(),
+                    dim = n.get("dim").asInt(),
+                    metric = n.path("metric").asText("cosine"),
+                    precision = n.path("precision").asText("f16"),
+                    modality = if (n.has("modality") && !n.get("modality").isNull) n.get("modality").asText() else null,
+                )
+            }
+        }
         return AilakeVectorTableSink(
             warehouse       = opts.get(WAREHOUSE),
             namespace       = opts.get(NAMESPACE),
@@ -220,6 +243,7 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
             hnswEfConstruction = runCatching { opts.get(HNSW_EF_CONSTRUCTION) }.getOrNull(),
             preNormalize       = opts.get(PRE_NORMALIZE),
             deferred           = opts.get(DEFERRED),
+            vectorColumns      = vectorColumns,
         )
     }
 }

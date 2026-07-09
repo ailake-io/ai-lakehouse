@@ -131,6 +131,51 @@ class VectorScanMetadataTest {
         assertTrue(cols.containsKey("_distance"))
     }
 
+    // ── multi-column (Phase 8 multimodal) ingest — ailake.vector-columns ──────
+    //
+    // Regression: writeBatchMulti was exposed from Spark (`ailakeWriteMulti`)
+    // but had no wrapper or SQL surface here — a Trino-only user could never
+    // write a table with 2+ independent vector columns.
+
+    @Test
+    fun ingestColumnsWithVectorColumnsConfiguredEmitsOneArrayColumnPerEntry() {
+        val m = VectorScanMetadata(
+            tableUri = "s3://bucket/table/", vectorColumn = "embedding", dim = 1536,
+            metric = "cosine", precision = "f16", namespace = "default", tableName = "table",
+            vectorColumns = listOf(
+                AilakeNative.VectorColSpec("embedding", 2),
+                AilakeNative.VectorColSpec("image_embedding", 2),
+            ),
+        )
+        val handle = m.getTableHandle(session, SchemaTableName("default", "ingest"))!!
+        val tableMeta = m.getTableMetadata(session, handle)
+        assertEquals(3, tableMeta.columns.size)
+        assertEquals("id", tableMeta.columns[0].name)
+        assertEquals("embedding", tableMeta.columns[1].name)
+        assertEquals("image_embedding", tableMeta.columns[2].name)
+    }
+
+    @Test
+    fun ingestColumnsWithoutVectorColumnsConfiguredFallsBackToSingleVectorColumn() {
+        val handle = metadata.getTableHandle(session, SchemaTableName("default", "ingest"))!!
+        val tableMeta = metadata.getTableMetadata(session, handle)
+        assertEquals(2, tableMeta.columns.size)
+        assertEquals("id", tableMeta.columns[0].name)
+        assertEquals("embedding", tableMeta.columns[1].name)
+    }
+
+    @Test
+    fun getTableHandleForIngestCarriesVectorColumns() {
+        val m = VectorScanMetadata(
+            tableUri = "s3://bucket/table/", vectorColumn = "embedding", dim = 1536,
+            metric = "cosine", precision = "f16", namespace = "default", tableName = "table",
+            vectorColumns = listOf(AilakeNative.VectorColSpec("embedding", 2)),
+        )
+        val handle = m.getTableHandle(session, SchemaTableName("default", "ingest")) as AilakeIngestTableHandle
+        assertEquals(1, handle.vectorColumns.size)
+        assertEquals("embedding", handle.vectorColumns[0].column)
+    }
+
     // ── search_multimodal (cross-modal RRF search) ────────────────────────────
     //
     // Regression: AilakeNative.searchMultimodal was fully implemented but had

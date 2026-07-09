@@ -14,6 +14,23 @@ import org.junit.jupiter.api.Test
  */
 class AilakeNativeLoaderTest {
 
+    // ── VectorColSpec (Phase 8 multimodal write) ──────────────────────────────
+
+    @Test
+    fun vectorColSpecDefaults() {
+        val spec = AilakeNativeLoader.VectorColSpec("embedding", 1536)
+        assertEquals("cosine", spec.metric)
+        assertEquals("f16", spec.precision)
+        assertNull(spec.modality)
+    }
+
+    @Test
+    fun vectorColSpecEquality() {
+        val s1 = AilakeNativeLoader.VectorColSpec("embedding", 4, modality = "text")
+        val s2 = AilakeNativeLoader.VectorColSpec("embedding", 4, modality = "text")
+        assertEquals(s1, s2)
+    }
+
     // ── ScanColumn / ScanResponse (Fase 11) ───────────────────────────────────
 
     @Test

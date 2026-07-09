@@ -71,6 +71,19 @@ interface AilakeNativeLib : Library {
     fun ailake_write_batch_json(requestJson: String): Pointer?
 
     /**
+     * Write a batch of records with N independent vector columns (Phase 8 multimodal —
+     * e.g. text + image embeddings on the same row, each with its own HNSW section).
+     *
+     * Request JSON fields: same as [ailake_write_batch_json] except `vector_columns`
+     * (Array of `{col, dim, metric?, precision?, modality?, embeddings: Float[][]}`)
+     * replaces the single `vec_col`/`dim`/`metric`/`precision`/`embeddings` fields. First
+     * entry is primary (used for geometric pruning in the manifest).
+     *
+     * Response JSON: `{"ok":true,"snapshot_id":N}` or `{"ok":false,"error":"..."}`
+     */
+    fun ailake_write_batch_multi_json(requestJson: String): Pointer?
+
+    /**
      * Cross-modal RRF search across multiple vector columns.
      *
      * Request JSON fields:

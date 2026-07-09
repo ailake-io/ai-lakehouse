@@ -65,6 +65,15 @@ class AilakeVectorConnectorFactoryTest {
         assert("search.mode" in keys) { "search.mode missing: $keys" }
     }
 
+    @Test
+    fun optionalOptionsIncludesVectorColumns() {
+        // Regression: writeBatchMulti was exposed from Spark (`ailakeWriteMulti`) but had
+        // no DDL option here — a Flink-only user could never write a table with 2+
+        // independent vector columns.
+        val keys = AilakeVectorConnectorFactory().optionalOptions().map { it.key() }
+        assert("vector.columns" in keys) { "vector.columns missing: $keys" }
+    }
+
     // ── validateSearchResultSchema ──────────────────────────────────────────────
     //
     // Regression: AilakeInputFormat.nextRecord() always emitted a fixed
