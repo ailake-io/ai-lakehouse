@@ -20,6 +20,13 @@ data class VectorScanTableHandle @JsonCreator constructor(
     @JsonProperty("tableName") val tableName: String,
 ) : ConnectorTableHandle
 
+/** Table handle for `ailake.default.search_multimodal` — see [VectorScanMetadata]. */
+data class MultimodalScanTableHandle @JsonCreator constructor(
+    @JsonProperty("tableUri") val tableUri: String,
+    @JsonProperty("namespace") val namespace: String,
+    @JsonProperty("tableName") val tableName: String,
+) : ConnectorTableHandle
+
 data class VectorScanColumnHandle @JsonCreator constructor(
     @JsonProperty("name") val name: String,
     @JsonProperty("ordinal") val ordinal: Int,
@@ -43,6 +50,24 @@ data class VectorScanSplit @JsonCreator constructor(
     @JsonProperty("vectorColumn") val vectorColumn: String,
     @JsonProperty("queryText") val queryText: String = "",
     @JsonProperty("hybridWeight") val hybridWeight: Float = 0.5f,
+) : ConnectorSplit {
+    override fun isRemotelyAccessible(): Boolean = true
+    override fun getAddresses(): List<HostAddress> = emptyList()
+    override fun getInfo(): Any? = null
+}
+
+/**
+ * Split for `ailake.default.search_multimodal`. Unlike [VectorScanSplit], the query
+ * payload (N per-column vectors + RRF weights) isn't reduced to a single float array at
+ * planning time — `queriesJson` carries the raw `SET SESSION ailake.multimodal_queries`
+ * JSON straight through and is parsed once at execution in [VectorScanRecordSetProvider].
+ */
+data class MultimodalScanSplit @JsonCreator constructor(
+    @JsonProperty("tableUri") val tableUri: String,
+    @JsonProperty("namespace") val namespace: String,
+    @JsonProperty("tableName") val tableName: String,
+    @JsonProperty("queriesJson") val queriesJson: String,
+    @JsonProperty("topK") val topK: Int,
 ) : ConnectorSplit {
     override fun isRemotelyAccessible(): Boolean = true
     override fun getAddresses(): List<HostAddress> = emptyList()

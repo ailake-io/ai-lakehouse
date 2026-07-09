@@ -85,6 +85,35 @@ class AilakeSparkExtensionsTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(df.count() == 0)
   }
 
+  // ── ailakeSearchMultimodal (cross-modal RRF search) ───────────────────────
+  //
+  // Regression: AilakeNative.searchMultimodal was fully implemented but never
+  // exposed as a DataFrame call — same "dead capability" gap as ailakeSearch
+  // before it, closed the same way.
+
+  test("ailakeSearchMultimodal returns DataFrame with correct schema") {
+    import io.ailake.spark.implicits._
+    val queries = Seq(("embedding", Array(0.1f, -0.2f), 1.0f))
+    val df = spark.ailakeSearchMultimodal("s3://test-bucket/table/", queries, topK = 5)
+
+    val expectedSchema = StructType(Seq(
+      StructField("row_id", LongType, nullable = false),
+      StructField("rrf_score", DoubleType, nullable = false),
+      StructField("file_path", StringType, nullable = false),
+    ))
+    assert(df.schema == expectedSchema)
+  }
+
+  test("ailakeSearchMultimodal returns empty DataFrame when native library absent") {
+    import io.ailake.spark.implicits._
+    val queries = Seq(
+      ("embedding", Array(0.1f, 0.2f), 1.0f),
+      ("image_embedding", Array(0.3f, 0.4f), 0.5f),
+    )
+    val df = spark.ailakeSearchMultimodal("s3://test-bucket/table/", queries, topK = 10)
+    assert(df.count() == 0)
+  }
+
   // ── ailakeWriteMulti (Phase 8 multimodal write) ───────────────────────────
   //
   // Closes the "searchMultimodal has no write path from Spark" gap: previously

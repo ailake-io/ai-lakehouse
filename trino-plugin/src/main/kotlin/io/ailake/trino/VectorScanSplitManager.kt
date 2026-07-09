@@ -22,9 +22,21 @@ class VectorScanSplitManager : ConnectorSplitManager {
         dynamicFilter: DynamicFilter,
         constraint: Constraint,
     ): ConnectorSplitSource {
+        val topK = session.getProperty("top_k", Int::class.java) ?: 10
+        if (table is MultimodalScanTableHandle) {
+            val queriesJson = session.getProperty("multimodal_queries", String::class.java) ?: ""
+            return FixedSplitSource(
+                MultimodalScanSplit(
+                    tableUri    = table.tableUri,
+                    namespace   = table.namespace,
+                    tableName   = table.tableName,
+                    queriesJson = queriesJson,
+                    topK        = topK,
+                )
+            )
+        }
         val handle = table as VectorScanTableHandle
         val queryVectorCsv = session.getProperty("query_vector", String::class.java) ?: ""
-        val topK = session.getProperty("top_k", Int::class.java) ?: 10
         val queryText = session.getProperty("query_text", String::class.java) ?: ""
         val hybridWeight = session.getProperty("hybrid_weight", Double::class.java)?.toFloat() ?: 0.5f
         // Parse CSV→bytes once at planning; split carries compact Base64 binary.

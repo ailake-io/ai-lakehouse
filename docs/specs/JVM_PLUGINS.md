@@ -660,7 +660,21 @@ loader.evolveSchema(tableUri, "default", "docs", addCols = listOf(...), renameCo
 
 ## Cross-modal search (Phase 8)
 
-All three JVM plugins expose `searchMultimodal()` backed by `ailake_search_multimodal_json` in `libailake_jni.so`.
+All three JVM plugins expose `searchMultimodal()` backed by `ailake_search_multimodal_json` in `libailake_jni.so`
+at the `AilakeNative`/`AilakeNativeLoader` layer (below). Each plugin also wires it into its query surface — see
+**SQL/DataFrame surface** below; before that wiring, this native wrapper existed but was unreachable from SQL or
+DataFrame code, the same "dead capability" gap DELETE/ALTER TABLE had before Phase K.
+
+### SQL/DataFrame surface
+
+| Plugin | Entry point | Result columns |
+|---|---|---|
+| Spark | `spark.ailakeSearchMultimodal(tableUri, queries, topK)` (`io.ailake.spark.implicits._`) | `row_id: Long, rrf_score: Double, file_path: String` |
+| Trino | `SET SESSION ailake.multimodal_queries = '[...]'; SELECT * FROM ailake.default.search_multimodal;` | `row_id bigint, rrf_score double, file_path varchar` |
+| Flink | job parameter `ailake.multimodal.queries = '[...]'` on the existing search-shaped `CREATE TABLE` | `row_id BIGINT, distance FLOAT, file_path STRING` — RRF score reuses the `distance` slot |
+
+`queries` JSON/param shape (Trino/Flink): array of `{"col", "query" (csv f32 for Trino/Flink; `Array[Float]` for
+Spark's Scala API), "weight"}`. See `docs/guides/JVM_INTEGRATION.md` §3D/5C/6B for full examples.
 
 ### C-ABI entry point
 

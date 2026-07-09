@@ -3,6 +3,7 @@
 package io.ailake.spark
 
 import org.apache.spark.sql.{DataFrame, Row, SparkSession, SparkSessionExtensions}
+import org.apache.spark.sql.types.{DoubleType, LongType, StringType, StructField, StructType}
 
 /**
  * Spark extensions entry point. Register via:
@@ -35,6 +36,9 @@ class AilakeSparkExtensions extends (SparkSessionExtensions => Unit) {
  *   results.show()
  *
  * Returns a DataFrame with columns: row_id (Long), distance (Double), file_path (String).
+ *
+ * Cross-modal search: `spark.ailakeSearchMultimodal(tableUri, queries, topK)` returns
+ * columns: row_id (Long), rrf_score (Double), file_path (String).
  */
 object implicits {
   implicit class AilakeSession(private val spark: SparkSession) extends AnyVal {
@@ -56,6 +60,34 @@ object implicits {
       val rows = AilakeNative.search(tableUri, queryVector, topK, namespace = namespace, tableName = tableName)
       val sparkRows = rows.map(r => Row(r.rowId, r.distance.toDouble, r.filePath))
       spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), plan.schema)
+    }
+
+    /**
+     * Cross-modal vector search via Reciprocal Rank Fusion (Phase 8 multimodal —
+     * e.g. text + image embeddings on the same row). Was implemented natively
+     * (`AilakeNative.searchMultimodal`) but never exposed as a DataFrame call —
+     * same "dead capability" gap as `ailakeSearch` before it, closed the same way.
+     *
+     * @param queries  one or more (column, query vector, weight) triples
+     * @param topK     number of fused results to return
+     */
+    def ailakeSearchMultimodal(
+      tableUri:        String,
+      queries:         Seq[(String, Array[Float], Float)],
+      topK:            Int,
+      namespace:       String = "default",
+      tableName:       String = "",
+      partitionFilter: Option[String] = None,
+    ): DataFrame = {
+      val schema = StructType(Seq(
+        StructField("row_id", LongType, nullable = false),
+        StructField("rrf_score", DoubleType, nullable = false),
+        StructField("file_path", StringType, nullable = false),
+      ))
+      val rows = AilakeNative.searchMultimodal(
+        tableUri, queries, topK, partitionFilter, namespace, tableName)
+      val sparkRows = rows.map(r => Row(r.rowId, r.rrfScore.toDouble, r.filePath))
+      spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), schema)
     }
 
     /**

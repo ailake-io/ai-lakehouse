@@ -63,6 +63,7 @@ class VectorScanMetadata(
     companion object {
         const val SCHEMA = "default"
         const val TABLE_SEARCH = "search"
+        const val TABLE_SEARCH_MULTIMODAL = "search_multimodal"
         const val TABLE_INGEST = "ingest"
 
         val SEARCH_COLUMNS = listOf(
@@ -73,6 +74,18 @@ class VectorScanMetadata(
         val SEARCH_COLUMN_HANDLES: Map<String, ColumnHandle> = mapOf(
             "row_id"    to VectorScanColumnHandle("row_id", 0),
             "distance"  to VectorScanColumnHandle("distance", 1),
+            "file_path" to VectorScanColumnHandle("file_path", 2),
+        )
+
+        /** `AilakeNative.searchMultimodal` was fully implemented but had no SQL surface — see [MultimodalScanTableHandle]. */
+        val MULTIMODAL_SEARCH_COLUMNS = listOf(
+            ColumnMetadata("row_id", BIGINT),
+            ColumnMetadata("rrf_score", DOUBLE),
+            ColumnMetadata("file_path", VARCHAR),
+        )
+        val MULTIMODAL_SEARCH_COLUMN_HANDLES: Map<String, ColumnHandle> = mapOf(
+            "row_id"    to VectorScanColumnHandle("row_id", 0),
+            "rrf_score" to VectorScanColumnHandle("rrf_score", 1),
             "file_path" to VectorScanColumnHandle("file_path", 2),
         )
     }
@@ -101,6 +114,7 @@ class VectorScanMetadata(
         if (schemaTableName.schemaName != SCHEMA) return null
         return when (schemaTableName.tableName) {
             TABLE_SEARCH -> VectorScanTableHandle(tableUri, vectorColumn, dim, namespace, tableName)
+            TABLE_SEARCH_MULTIMODAL -> MultimodalScanTableHandle(tableUri, namespace, tableName)
             TABLE_INGEST -> AilakeIngestTableHandle(
                 tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel,
                 partitionFields, formatVersion, textColumns,
@@ -115,6 +129,7 @@ class VectorScanMetadata(
         table: ConnectorTableHandle,
     ): ConnectorTableMetadata = when (table) {
         is AilakeIngestTableHandle -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_INGEST), ingestColumns())
+        is MultimodalScanTableHandle -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_SEARCH_MULTIMODAL), MULTIMODAL_SEARCH_COLUMNS)
         else -> ConnectorTableMetadata(SchemaTableName(SCHEMA, TABLE_SEARCH), SEARCH_COLUMNS)
     }
 
@@ -123,6 +138,7 @@ class VectorScanMetadata(
         schemaName: Optional<String>,
     ): List<SchemaTableName> = listOf(
         SchemaTableName(SCHEMA, TABLE_SEARCH),
+        SchemaTableName(SCHEMA, TABLE_SEARCH_MULTIMODAL),
         SchemaTableName(SCHEMA, TABLE_INGEST),
     )
 
@@ -131,6 +147,7 @@ class VectorScanMetadata(
         tableHandle: ConnectorTableHandle,
     ): Map<String, ColumnHandle> = when (tableHandle) {
         is AilakeIngestTableHandle -> ingestColumnHandles()
+        is MultimodalScanTableHandle -> MULTIMODAL_SEARCH_COLUMN_HANDLES
         else -> SEARCH_COLUMN_HANDLES
     }
 
@@ -142,6 +159,7 @@ class VectorScanMetadata(
         val ordinal = (columnHandle as VectorScanColumnHandle).ordinal
         return when (tableHandle) {
             is AilakeIngestTableHandle -> ingestColumns()[ordinal]
+            is MultimodalScanTableHandle -> MULTIMODAL_SEARCH_COLUMNS[ordinal]
             else -> SEARCH_COLUMNS[ordinal]
         }
     }

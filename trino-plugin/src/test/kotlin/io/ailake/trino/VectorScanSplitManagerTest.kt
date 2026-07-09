@@ -136,4 +136,34 @@ class VectorScanSplitManagerTest {
         assertEquals("", VectorScanSplitManager.csvFloatsToBase64(""))
         assertEquals("", VectorScanSplitManager.csvFloatsToBase64("   "))
     }
+
+    // ── search_multimodal ──────────────────────────────────────────────────────
+    //
+    // Regression: AilakeNative.searchMultimodal had no SQL surface — getSplits
+    // ignored the `table` parameter entirely and always built a VectorScanSplit.
+
+    private val multimodalHandle = MultimodalScanTableHandle("s3://bucket/table/", "default", "docs")
+
+    private fun multimodalSession(
+        queriesJson: String = """[{"col":"embedding","query":"0.1,0.2","weight":1.0}]""",
+        topK: Int = 5,
+    ): ConnectorSession =
+        mock {
+            on { getProperty("multimodal_queries", String::class.java) } doReturn queriesJson
+            on { getProperty("top_k", Int::class.java) } doReturn topK
+        }
+
+    @Test
+    fun getSplitsBuildsMultimodalScanSplitForMultimodalTableHandle() {
+        val source = splitManager.getSplits(
+            VectorScanTransactionHandle, multimodalSession(), multimodalHandle,
+            dynamicFilter, constraint,
+        )
+        val split = source.getNextBatch(1).get().splits.first() as MultimodalScanSplit
+        assertEquals("s3://bucket/table/", split.tableUri)
+        assertEquals("default", split.namespace)
+        assertEquals("docs", split.tableName)
+        assertEquals(5, split.topK)
+        assertTrue(split.queriesJson.contains("\"col\":\"embedding\""))
+    }
 }

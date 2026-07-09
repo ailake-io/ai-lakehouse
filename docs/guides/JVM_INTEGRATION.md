@@ -242,6 +242,19 @@ val mmRows = AilakeNative.searchMultimodal(
   topK = 20,
 )
 mmRows.foreach(r => println(s"row=${r.rowId}  rrf=${r.rrfScore}"))
+
+// DataFrame-level equivalent (`spark.ailakeSearchMultimodal`) — columns:
+// row_id (Long), rrf_score (Double), file_path (String)
+import io.ailake.spark.implicits._
+val mmDf = spark.ailakeSearchMultimodal(
+  tableUri = "s3://my-lake/media/",
+  queries  = Seq(
+    ("embedding",       textVec,  0.7f),
+    ("image_embedding", imageVec, 0.3f),
+  ),
+  topK = 20,
+)
+mmDf.orderBy(mmDf("rrf_score").desc).show()
 ```
 
 ### 3E — Delete, schema evolution, compact (Scala)
@@ -527,6 +540,9 @@ SHOW TABLES  FROM ailake.default;
 -- Schema: row_id bigint, distance double, file_path varchar
 DESCRIBE ailake.default.search;
 
+-- Cross-modal RRF search table — row_id bigint, rrf_score double, file_path varchar
+DESCRIBE ailake.default.search_multimodal;
+
 -- Set session properties then query
 SET SESSION ailake.query_vector =
     '0.1,0.2,0.3,...';   -- comma-separated f32 values (dim must match table)
@@ -552,6 +568,7 @@ LIMIT  10;
 | `top_k` | `integer` | `10` | Nearest neighbors to return |
 | `query_text` | `varchar` | `""` | Query text. Alone → pure full-text search (Tantivy O(log N) if `ailake.fts-columns` indexed, else O(N) BM25). With `query_vector` → hybrid BM25+vector RRF fusion |
 | `hybrid_weight` | `double` | `0.5` | BM25 weight in RRF fusion when both `query_vector` and `query_text` are set (`0.0` = pure vector, `1.0` = pure BM25) |
+| `multimodal_queries` | `varchar` | `""` | JSON array of `{col, query (csv f32), weight}` for cross-modal RRF search of `ailake.default.search_multimodal` (see below) |
 
 ```sql
 -- Pure full-text search
@@ -562,6 +579,17 @@ SELECT row_id, file_path FROM ailake.default.search ORDER BY distance LIMIT 10;
 SET SESSION ailake.query_vector = '0.1,0.2,...';
 SET SESSION ailake.query_text = 'rust programming';
 SET SESSION ailake.hybrid_weight = 0.3;
+
+-- Cross-modal RRF search (e.g. text + image embeddings on the same row).
+-- Schema: row_id bigint, rrf_score double, file_path varchar
+SET SESSION ailake.multimodal_queries =
+    '[{"col":"embedding","query":"0.1,-0.2","weight":0.7},
+      {"col":"image_embedding","query":"0.4,0.5","weight":0.3}]';
+SET SESSION ailake.top_k = 20;
+
+SELECT row_id, rrf_score, file_path
+FROM   ailake.default.search_multimodal
+ORDER  BY rrf_score DESC;
 ```
 
 **DELETE, ALTER TABLE, and maintenance:**
@@ -719,6 +747,15 @@ CREATE TABLE ailake_docs_search (
 -- ailake.query.vector + ailake.query.text together -> hybrid BM25+vector RRF
 -- (weight via ailake.hybrid.weight, default 0.5).
 SELECT row_id, distance, file_path FROM ailake_docs_search ORDER BY distance;
+
+-- Cross-modal RRF search (e.g. text + image embeddings on the same row) instead
+-- selected via ailake.multimodal.queries — JSON array of {col, query (csv f32), weight}:
+--   flink run ... -Dailake.multimodal.queries=
+--     '[{"col":"embedding","query":"0.1,-0.2","weight":0.7},
+--       {"col":"image_embedding","query":"0.4,0.5","weight":0.3}]'
+-- Same physical (row_id, distance, file_path) schema/table as above — the
+-- "distance" slot carries the fused RRF score in this mode.
+SELECT row_id, distance AS rrf_score, file_path FROM ailake_docs_search ORDER BY distance DESC;
 
 -- Compact small files — no CALL-equivalent for connectors in Flink SQL, exposed
 -- as a plain scalar function instead:

@@ -91,4 +91,40 @@ class VectorScanRecordSetTest {
         cursor.advanceNextPosition()
         assertEquals(0.12, cursor.getDouble(0), 0.001)
     }
+
+    // ── MultimodalScanRecordSet ────────────────────────────────────────────────
+
+    private val multimodalRows = listOf(
+        AilakeNative.MultimodalSearchRow(rowId = 1L, rrfScore = 0.9f, filePath = "part-001.parquet"),
+        AilakeNative.MultimodalSearchRow(rowId = 2L, rrfScore = 0.5f, filePath = "part-002.parquet"),
+    )
+
+    private val multimodalColumns = listOf(
+        VectorScanColumnHandle("row_id", 0),
+        VectorScanColumnHandle("rrf_score", 1),
+        VectorScanColumnHandle("file_path", 2),
+    )
+
+    @Test
+    fun multimodalColumnTypesMatchSchema() {
+        val rs = MultimodalScanRecordSet(multimodalRows, multimodalColumns)
+        val types = rs.getColumnTypes()
+        assertEquals(BIGINT, types[0])
+        assertEquals(DOUBLE, types[1])
+        assertEquals(VARCHAR, types[2])
+    }
+
+    @Test
+    fun multimodalCursorReturnsCorrectRrfScore() {
+        val cursor = MultimodalScanRecordSet(multimodalRows, multimodalColumns).cursor()
+        cursor.advanceNextPosition()
+        assertEquals(0.9, cursor.getDouble(1), 0.001)
+    }
+
+    @Test
+    fun multimodalCursorReturnsCorrectFilePath() {
+        val cursor = MultimodalScanRecordSet(multimodalRows, multimodalColumns).cursor()
+        cursor.advanceNextPosition()
+        assertEquals("part-001.parquet", cursor.getSlice(2).toStringUtf8())
+    }
 }

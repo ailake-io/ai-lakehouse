@@ -83,11 +83,48 @@ class VectorScanMetadataTest {
     }
 
     @Test
-    fun listTablesReturnsSearchAndIngestTables() {
+    fun listTablesReturnsSearchMultimodalAndIngestTables() {
         val tables = metadata.listTables(session, Optional.empty())
-        assertEquals(2, tables.size)
+        assertEquals(3, tables.size)
         assertTrue(SchemaTableName("default", "search") in tables)
+        assertTrue(SchemaTableName("default", "search_multimodal") in tables)
         assertTrue(SchemaTableName("default", "ingest") in tables)
+    }
+
+    // ── search_multimodal (cross-modal RRF search) ────────────────────────────
+    //
+    // Regression: AilakeNative.searchMultimodal was fully implemented but had
+    // no SQL surface in any of the three plugins — same "dead capability" gap
+    // as DELETE/ALTER TABLE before it, closed the same way.
+
+    @Test
+    fun getTableHandleFoundForSearchMultimodal() {
+        val handle = metadata.getTableHandle(session, SchemaTableName("default", "search_multimodal"))
+        assertNotNull(handle)
+        val h = handle as MultimodalScanTableHandle
+        assertEquals("s3://bucket/table/", h.tableUri)
+        assertEquals("default", h.namespace)
+        assertEquals("table", h.tableName)
+    }
+
+    @Test
+    fun getTableMetadataForSearchMultimodalHasThreeColumns() {
+        val handle = metadata.getTableHandle(session, SchemaTableName("default", "search_multimodal"))!!
+        val tableMeta = metadata.getTableMetadata(session, handle)
+        assertEquals(3, tableMeta.columns.size)
+        assertEquals("row_id", tableMeta.columns[0].name)
+        assertEquals("rrf_score", tableMeta.columns[1].name)
+        assertEquals("file_path", tableMeta.columns[2].name)
+    }
+
+    @Test
+    fun getColumnHandlesForSearchMultimodalReturnsThreeHandles() {
+        val handle = metadata.getTableHandle(session, SchemaTableName("default", "search_multimodal"))!!
+        val cols = metadata.getColumnHandles(session, handle)
+        assertEquals(3, cols.size)
+        assertTrue(cols.containsKey("row_id"))
+        assertTrue(cols.containsKey("rrf_score"))
+        assertTrue(cols.containsKey("file_path"))
     }
 
     @Test
