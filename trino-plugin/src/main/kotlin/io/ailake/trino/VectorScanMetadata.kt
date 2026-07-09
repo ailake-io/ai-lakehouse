@@ -157,7 +157,7 @@ class VectorScanMetadata(
                 tableUri, namespace, tableName, vectorColumn, dim, metric, precision, embeddingModel,
                 partitionFields, formatVersion, textColumns,
                 hnswM, hnswEfConstruction, preNormalize, deferred, ftsColumns, ftsTokenizer,
-                vectorColumns,
+                vectorColumns = vectorColumns,
             )
             else -> null
         }

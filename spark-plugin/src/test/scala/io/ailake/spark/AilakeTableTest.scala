@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.spark
 
-import org.apache.spark.sql.sources.{EqualTo, GreaterThan, In}
+import org.apache.spark.sql.sources.{EqualTo, Filter, GreaterThan, In}
 import org.junit.runner.RunWith
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.junit.JUnitRunner
@@ -19,35 +19,40 @@ class AilakeTableTest extends AnyFunSuite {
   private def handle(): AilakeWriteHandle =
     AilakeWriteHandle("file:///tmp/t", "default", "docs", "embedding", 4, "cosine", "f16")
 
+  // SupportsDelete extends SupportsDeleteV2, which also has canDeleteWhere/deleteWhere
+  // overloads taking Predicate[] — Array(EqualTo(...)) infers Array[EqualTo], too narrow
+  // for Scala to pick a single overload by widening, so every call here is explicitly
+  // typed Array[Filter] to disambiguate against the Predicate[] overload.
+
   test("canDeleteWhere accepts a single EqualTo filter") {
     val table = new AilakeTable(handle())
-    assert(table.canDeleteWhere(Array(EqualTo("id", 5L))))
+    assert(table.canDeleteWhere(Array[Filter](EqualTo("id", 5L))))
   }
 
   test("canDeleteWhere accepts a single In filter") {
     val table = new AilakeTable(handle())
-    assert(table.canDeleteWhere(Array(In("id", Array(1L, 2L, 3L)))))
+    assert(table.canDeleteWhere(Array[Filter](In("id", Array(1L, 2L, 3L)))))
   }
 
   test("canDeleteWhere rejects multi-filter predicates") {
     val table = new AilakeTable(handle())
-    assert(!table.canDeleteWhere(Array(EqualTo("id", 5L), EqualTo("source", "x"))))
+    assert(!table.canDeleteWhere(Array[Filter](EqualTo("id", 5L), EqualTo("source", "x"))))
   }
 
   test("canDeleteWhere rejects range predicates") {
     val table = new AilakeTable(handle())
-    assert(!table.canDeleteWhere(Array(GreaterThan("id", 5L))))
+    assert(!table.canDeleteWhere(Array[Filter](GreaterThan("id", 5L))))
   }
 
   test("canDeleteWhere rejects an empty filter array") {
     val table = new AilakeTable(handle())
-    assert(!table.canDeleteWhere(Array.empty))
+    assert(!table.canDeleteWhere(Array.empty[Filter]))
   }
 
   test("deleteWhere with an unsupported filter throws UnsupportedOperationException") {
     val table = new AilakeTable(handle())
     val ex = intercept[UnsupportedOperationException] {
-      table.deleteWhere(Array(GreaterThan("id", 5L)))
+      table.deleteWhere(Array[Filter](GreaterThan("id", 5L)))
     }
     assert(ex.getMessage.contains("WHERE clause"))
   }
@@ -55,7 +60,7 @@ class AilakeTableTest extends AnyFunSuite {
   test("deleteWhere with EqualTo throws RuntimeException when native lib absent") {
     val table = new AilakeTable(handle())
     val ex = intercept[RuntimeException] {
-      table.deleteWhere(Array(EqualTo("id", 5L)))
+      table.deleteWhere(Array[Filter](EqualTo("id", 5L)))
     }
     assert(ex.getMessage.contains("DELETE WHERE"))
   }
@@ -63,7 +68,7 @@ class AilakeTableTest extends AnyFunSuite {
   test("deleteWhere with In throws RuntimeException when native lib absent") {
     val table = new AilakeTable(handle())
     intercept[RuntimeException] {
-      table.deleteWhere(Array(In("id", Array(1L, 2L))))
+      table.deleteWhere(Array[Filter](In("id", Array(1L, 2L))))
     }
   }
 
