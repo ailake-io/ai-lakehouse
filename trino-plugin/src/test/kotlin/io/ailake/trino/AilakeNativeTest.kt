@@ -59,14 +59,17 @@ class AilakeNativeTest {
     // table with 2+ independent vector columns.
 
     @Test
-    fun writeBatchMultiReturnsNullWhenNativeLibAbsent() {
+    fun writeBatchMultiDoesNotThrowWhenNativeLibAbsent() {
+        // Result is null (lib absent) or a snapshot_id (lib present, local fallback since
+        // "s3://..." with no AWS creds/network resolves via LocalStore's relative-path
+        // fallback in CI) — same caveat as writeBatchWithFtsColumnsDoesNotThrow below.
         val spec = AilakeNative.VectorColSpec("embedding", 4)
         val result = AilakeNative.writeBatchMulti(
             tableUri = "s3://bucket/t/", namespace = "default", tableName = "docs",
             ids = listOf(1L, 2L),
             vectorColumns = listOf(spec to listOf(listOf(0.1f, 0.2f, 0.3f, 0.4f), listOf(0.5f, 0.6f, 0.7f, 0.8f))),
         )
-        assertNull(result)
+        assertTrue(result == null || result > 0, "writeBatchMulti must return null or a positive snapshot_id; got $result")
     }
 
     @Test

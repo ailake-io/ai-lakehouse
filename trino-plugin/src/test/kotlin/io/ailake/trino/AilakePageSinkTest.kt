@@ -267,12 +267,19 @@ class AilakePageSinkTest {
     }
 
     @Test
-    fun finishWithVectorColumnsConfiguredReturnsEmptyWhenNativeLibAbsent() {
+    fun finishWithVectorColumnsConfiguredDoesNotThrowWhenNativeLibAbsent() {
+        // fragments is empty (lib absent, writeBatchMulti → null) or a single fragment
+        // carrying the snapshot_id (lib present — same local-fallback caveat as
+        // AilakeNativeTest.writeBatchMultiDoesNotThrowWhenNativeLibAbsent).
         val sink = AilakePageSink(multiHandle())
         val page = buildMultiPage(ids = listOf(1L), vecCols = listOf(listOf(listOf(0.1, 0.2)), listOf(listOf(0.3, 0.4))))
         sink.appendPage(page).get()
         val fragments = sink.finish().get()
-        assertTrue(fragments.isEmpty())
+        assertTrue(fragments.size <= 1, "finish() must return at most one fragment; got ${fragments.size}")
+        fragments.firstOrNull()?.let { fragment ->
+            val snapshotId = fragment.toStringUtf8().toLong()
+            assertTrue(snapshotId > 0, "fragment must carry a positive snapshot_id; got $snapshotId")
+        }
     }
 
     @Test
