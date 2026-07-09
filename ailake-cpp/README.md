@@ -303,8 +303,7 @@ The C++ header-only SDK delegates write operations (write_batch, delete_where, e
 // Commit an Iceberg equality delete (no data files rewritten)
 ailake::delete_where(
     "/path/to/warehouse",  // warehouse root
-    "default",             // namespace
-    "my_table",            // table name
+    "default.my_table",    // table_id: "namespace.table"
     "id",                  // equality delete column
     {"doc-1", "doc-2"}    // values to delete
 );
@@ -319,9 +318,8 @@ ailake::delete_where(
 // Metadata-only schema evolution (no data files rewritten; field IDs are stable)
 ailake::evolve_schema(
     "/path/to/warehouse",
-    "default",
-    "my_table",
-    {{"source_url", "string", false, ""}},  // add_columns: {name, type, required, initial_default}
+    "default.my_table",                      // table_id: "namespace.table"
+    {{"source_url", "string", ""}},          // add_columns: {name, type, initial_default}
     {}                                        // rename_columns: {} empty = no renames
 );
 ```
