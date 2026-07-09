@@ -154,7 +154,7 @@ pip install apache-airflow-providers-ailake
 
 ```bash
 TAG=v0.1.1          # GitHub release tag (Rust/PyPI version)
-JAR_VERSION=0.1.0   # JVM plugin version (gradle, versioned independently — check the release page)
+JAR_VERSION=0.1.1   # JVM plugin version (gradle, versioned independently — check the release page)
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/spark-plugin-${JAR_VERSION}-plugin.jar

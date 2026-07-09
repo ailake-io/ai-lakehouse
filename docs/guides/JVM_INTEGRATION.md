@@ -32,7 +32,7 @@ Engine (Spark / Trino / Flink)
 
 ```bash
 TAG=v0.1.1          # GitHub release tag — replace with target release (Rust/PyPI version)
-JAR_VERSION=0.1.0   # JVM plugin version — gradle, versioned independently of TAG; check the release page
+JAR_VERSION=0.1.1   # JVM plugin version — gradle, versioned independently of TAG; check the release page
 
 # Native library (required by all three engines)
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/libailake_jni.so
@@ -81,7 +81,7 @@ The JVM plugin loads the library via JNA in this order:
 **spark-shell (interactive):**
 
 ```bash
-PLUGIN_JAR=/opt/ailake/spark-plugin-0.1.0-plugin.jar
+PLUGIN_JAR=/opt/ailake/spark-plugin-0.1.1-plugin.jar
 LIB_DIR=/opt/ailake/lib
 
 $SPARK_HOME/bin/spark-shell \
@@ -358,7 +358,7 @@ on all nodes before the Spark executor JVM starts.
 
 ```bash
 databricks fs cp libailake_jni.so         dbfs:/FileStore/ailake/libailake_jni.so
-databricks fs cp spark-plugin-0.1.0-plugin.jar \
+databricks fs cp spark-plugin-0.1.1-plugin.jar \
                                           dbfs:/FileStore/ailake/spark-plugin.jar
 ```
 
@@ -528,7 +528,7 @@ TRINO_HOME=/opt/trino
 
 # 1. Plugin jar
 mkdir -p $TRINO_HOME/plugin/ailake
-cp trino-plugin-0.1.0-plugin.jar $TRINO_HOME/plugin/ailake/
+cp trino-plugin-0.1.1-plugin.jar $TRINO_HOME/plugin/ailake/
 
 # 2. Native library
 mkdir -p /opt/ailake/lib
@@ -731,14 +731,14 @@ cd trino-plugin
 ```bash
 flink run \
   --jar my-pipeline.jar \
-  --classpath ailake-flink-0.1.0-plugin.jar \
+  --classpath ailake-flink-0.1.1-plugin.jar \
   -Dtaskmanager.extraLibFolders=/opt/ailake/lib
 ```
 
 Or add to `$FLINK_HOME/lib/` so all jobs on the cluster pick it up:
 
 ```bash
-cp ailake-flink-0.1.0-plugin.jar /opt/flink/lib/
+cp ailake-flink-0.1.1-plugin.jar /opt/flink/lib/
 cp libailake_jni.so               /opt/ailake/lib/
 echo 'env.java.opts.taskmanager: -Djava.library.path=/opt/ailake/lib' \
     >> /opt/flink/conf/flink-conf.yaml
