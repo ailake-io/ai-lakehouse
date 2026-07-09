@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
-"""Airflow operators for AI-Lake: write, compact, search, delete_where, evolve_schema."""
+"""Airflow operators for AI-Lake: write, compact, search, delete_where, evolve_schema,
+migrate, delete_rows, add_vector_column, backfill_vector_column."""
 
 from __future__ import annotations
 
@@ -24,7 +25,12 @@ class AilakeWriteOperator(BaseOperator):
     :param table: Fully-qualified table name (``namespace.table`` or ``table``).
     :param source_file: Local path to the source Parquet file.  May be a Jinja
         template, e.g. ``{{ ti.xcom_pull(task_ids='generate') }}``.
-    :param embeddings_column: Name of the embedding column in the source file.
+    :param embeddings_column: Name of the embedding column in the source file
+        (single-column mode; ignored when ``vector_cols`` is set).
+    :param vector_cols: Multi-column (Phase 8 multimodal) mode — one dict per
+        vector column with keys ``column``, ``dim``, and optionally ``metric``
+        (default ``"cosine"``) and ``modality``. When set, ``embeddings_column``
+        is ignored.
     :param batch_id: Idempotency key.  Defaults to ``{{ run_id }}_{{ task_id }}``.
     :param fts_columns: Text columns to index with Tantivy FTS (e.g. ``["chunk_text"]``).
         Empty or ``None`` disables FTS (default).
@@ -33,6 +39,9 @@ class AilakeWriteOperator(BaseOperator):
     :param hnsw_ef_construction: HNSW ef_construction. ``None`` = use table default.
     :param pre_normalize: Normalize vectors to unit L2 at write time (recommended for cosine).
     :param deferred: Build index asynchronously. Parquet committed immediately.
+        Not combinable with ``batch_id`` on the CLI — when ``True``, ``batch_id``
+        is dropped (with a warning) rather than passed, since deferred writes
+        don't carry an idempotency tag yet.
     :param ailake_conn_id: Airflow connection id (conn_type="ailake").
     """
 
@@ -45,6 +54,7 @@ class AilakeWriteOperator(BaseOperator):
         table: str,
         source_file: str,
         embeddings_column: str = "embedding",
+        vector_cols: list[dict[str, Any]] | None = None,
         batch_id: str = "{{ run_id }}_{{ task.task_id }}",
         partition_by: str | None = None,
         partition_value: str | None = None,
@@ -63,6 +73,7 @@ class AilakeWriteOperator(BaseOperator):
         self.table = table
         self.source_file = source_file
         self.embeddings_column = embeddings_column
+        self.vector_cols = vector_cols
         self.batch_id = batch_id
         self.partition_by = partition_by
         self.partition_value = partition_value
@@ -107,12 +118,34 @@ class AilakeWriteOperator(BaseOperator):
         if self.deferred:
             extra_args += ["--deferred"]
 
+        if self.vector_cols:
+            specs = []
+            for vc in self.vector_cols:
+                spec = f"{vc['column']}:{vc['dim']}:{vc.get('metric', 'cosine')}"
+                if vc.get("modality"):
+                    spec += f":{vc['modality']}"
+                specs.append(spec)
+            extra_args += ["--vector-cols", ",".join(specs)]
+        else:
+            extra_args += ["--embeddings", self.embeddings_column]
+
+        # --deferred and --batch-id are mutually exclusive on the CLI (deferred
+        # writes don't yet carry an idempotency tag) — drop the idempotency key
+        # rather than crash when both are set, since deferred=True is an explicit
+        # opt-in the caller made.
+        if self.deferred:
+            self.log.warning(
+                "AilakeWriteOperator: deferred=True — dropping batch_id '%s', "
+                "idempotency is not enforced for deferred writes",
+                self.batch_id,
+            )
+        else:
+            extra_args += ["--batch-id", self.batch_id]
+
         result = hook.run_cli(
             "insert",
             self.table,
             self.source_file,
-            "--embeddings", self.embeddings_column,
-            "--batch-id", self.batch_id,
             *extra_args,
         )
         self.log.info(result.stdout.strip())
@@ -126,6 +159,8 @@ class AilakeCompactOperator(BaseOperator):
     :param table: Fully-qualified table name.
     :param target_size: Target file size in bytes (default 512 MiB).
     :param min_files: Min small files required to trigger compaction (default 4).
+    :param max_files_per_pass: Bounds peak RAM / HNSW rebuild cost (default 20).
+    :param deferred: Build the HNSW index in the background instead of blocking.
     :param ailake_conn_id: Airflow connection id.
     """
 
@@ -138,6 +173,8 @@ class AilakeCompactOperator(BaseOperator):
         table: str,
         target_size: int = 536_870_912,
         min_files: int = 4,
+        max_files_per_pass: int = 20,
+        deferred: bool = False,
         ailake_conn_id: str = AilakeHook.default_conn_name,
         **kwargs: Any,
     ) -> None:
@@ -145,17 +182,21 @@ class AilakeCompactOperator(BaseOperator):
         self.table = table
         self.target_size = target_size
         self.min_files = min_files
+        self.max_files_per_pass = max_files_per_pass
+        self.deferred = deferred
         self.ailake_conn_id = ailake_conn_id
 
-    def execute(self, context: Context) -> None:
+    def execute(self, context: Context) -> int:
         hook = AilakeHook(ailake_conn_id=self.ailake_conn_id)
-        result = hook.run_cli(
-            "compact",
+        files_compacted = hook.compact(
             self.table,
-            "--target-size", str(self.target_size),
-            "--min-files", str(self.min_files),
+            target_size=self.target_size,
+            min_files=self.min_files,
+            max_files_per_pass=self.max_files_per_pass,
+            deferred=self.deferred,
         )
-        self.log.info(result.stdout.strip())
+        self.log.info("compact: table=%s files_compacted=%d", self.table, files_compacted)
+        return files_compacted
 
 
 class AilakeSearchOperator(BaseOperator):
@@ -445,3 +486,251 @@ class AilakeFtsSearchOperator(BaseOperator):
         self.log.info("fts_search: table=%s returned %d results", self.table, len(results))
         context["ti"].xcom_push(key="fts_results", value=results)
         return results
+
+
+class AilakeMigrateOperator(BaseOperator):
+    """Re-embed a table's vector column via an external embed command.
+
+    Wraps ``ailake migrate <table> --embed-cmd <cmd> [...]``.
+
+    :param table: Fully-qualified table name (``namespace.table``).
+    :param embed_cmd: Shell command that reads a JSON array of strings from
+        stdin and writes a JSON array of float arrays to stdout.
+    :param old_column: Name of the existing embedding column (default ``"embedding"``).
+    :param new_column: Name for the migrated column; may equal ``old_column``
+        for an in-place upgrade (default ``"embedding_v2"``).
+    :param text_column: Parquet column holding the raw text to re-embed
+        (default ``"chunk_text"``).
+    :param strategy: ``"atomic_replace"`` (lower storage) or
+        ``"dual-write-then-cutover"`` (zero downtime, default).
+    :param batch_size: Number of texts per embed-cmd call (default 512).
+    :param model_name: Model identifier stored in ``ailake.embedding-model``.
+    :param model_version: Optional version tag appended to ``model_name``.
+    :param ailake_conn_id: Airflow connection id.
+    """
+
+    template_fields: Sequence[str] = ("table",)
+    ui_color = "#c4e0f0"
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        embed_cmd: str,
+        old_column: str = "embedding",
+        new_column: str = "embedding_v2",
+        text_column: str = "chunk_text",
+        strategy: str = "dual-write-then-cutover",
+        batch_size: int = 512,
+        model_name: str | None = None,
+        model_version: str | None = None,
+        ailake_conn_id: str = AilakeHook.default_conn_name,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.table = table
+        self.embed_cmd = embed_cmd
+        self.old_column = old_column
+        self.new_column = new_column
+        self.text_column = text_column
+        self.strategy = strategy
+        self.batch_size = batch_size
+        self.model_name = model_name
+        self.model_version = model_version
+        self.ailake_conn_id = ailake_conn_id
+
+    def execute(self, context: Context) -> None:
+        hook = AilakeHook(ailake_conn_id=self.ailake_conn_id)
+        hook.migrate(
+            self.table,
+            embed_cmd=self.embed_cmd,
+            old_column=self.old_column,
+            new_column=self.new_column,
+            text_column=self.text_column,
+            strategy=self.strategy,
+            batch_size=self.batch_size,
+            model_name=self.model_name,
+            model_version=self.model_version,
+        )
+        self.log.info(
+            "migrate: table=%s %s -> %s complete", self.table, self.old_column, self.new_column
+        )
+
+
+class AilakeDeleteRowsOperator(BaseOperator):
+    """Mark rows as deleted in a V3 table using Iceberg Deletion Vectors.
+
+    Distinct from :class:`AilakeDeleteWhereOperator` (equality-predicate delete):
+    this deletes specific row *positions* within one data file.
+
+    Wraps ``ailake delete-rows <table> --file <file> --rows <v1,v2,...>``.
+
+    Requires the table to have been created with ``format_version=3``
+    (Deletion Vectors are a V3-only Iceberg feature) — the CLI raises a clear
+    error on a V2 table rather than corrupting it. For V2 tables, use
+    :class:`AilakeDeleteWhereOperator` (equality predicate) instead.
+
+    :param table: Fully-qualified table name (``namespace.table``).
+    :param file: Parquet data file path as reported by ``ailake info``
+        (e.g. ``"data/part-00001.parquet"``).
+    :param row_positions: 0-based row positions to delete within ``file``.
+    :param ailake_conn_id: Airflow connection id.
+    """
+
+    template_fields: Sequence[str] = ("table", "file")
+    ui_color = "#ffb0b0"
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        file: str,
+        row_positions: list[int],
+        ailake_conn_id: str = AilakeHook.default_conn_name,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.table = table
+        self.file = file
+        self.row_positions = row_positions
+        self.ailake_conn_id = ailake_conn_id
+
+    def execute(self, context: Context) -> None:
+        if not self.row_positions:
+            self.log.info("delete_rows: row_positions is empty — no-op")
+            return
+
+        hook = AilakeHook(ailake_conn_id=self.ailake_conn_id)
+        hook.delete_rows(self.table, self.file, list(self.row_positions))
+        self.log.info(
+            "delete_rows: table=%s file=%s deleted %d row(s)",
+            self.table,
+            self.file,
+            len(self.row_positions),
+        )
+
+
+class AilakeAddVectorColumnOperator(BaseOperator):
+    """Add a new vector column to an existing table schema (no data files rewritten).
+
+    Old files return null for the new column until
+    :class:`AilakeBackfillVectorColumnOperator` is run. Pushes the new
+    ``schema_id`` to XCom under key ``"schema_id"``.
+
+    Wraps ``ailake add-vector-column <table> --column <c> --dim <n> [...]``.
+
+    :param table: Fully-qualified table name (``namespace.table``).
+    :param column: New vector column name.
+    :param dim: Vector dimensionality for the new column.
+    :param metric: Distance metric (default ``"cosine"``).
+    :param precision: Vector precision (default ``"f16"``).
+    :param pre_normalize: Normalize vectors to unit L2 at write time.
+    :param hnsw_m: HNSW M parameter (default: table default).
+    :param hnsw_ef: HNSW ef_construction parameter (default: table default).
+    :param ailake_conn_id: Airflow connection id.
+    """
+
+    template_fields: Sequence[str] = ("table",)
+    ui_color = "#d4f0e0"
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        column: str,
+        dim: int,
+        metric: str = "cosine",
+        precision: str = "f16",
+        pre_normalize: bool = False,
+        hnsw_m: int | None = None,
+        hnsw_ef: int | None = None,
+        ailake_conn_id: str = AilakeHook.default_conn_name,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.table = table
+        self.column = column
+        self.dim = dim
+        self.metric = metric
+        self.precision = precision
+        self.pre_normalize = pre_normalize
+        self.hnsw_m = hnsw_m
+        self.hnsw_ef = hnsw_ef
+        self.ailake_conn_id = ailake_conn_id
+
+    def execute(self, context: Context) -> int:
+        hook = AilakeHook(ailake_conn_id=self.ailake_conn_id)
+        schema_id = hook.add_vector_column(
+            self.table,
+            self.column,
+            self.dim,
+            metric=self.metric,
+            precision=self.precision,
+            pre_normalize=self.pre_normalize,
+            hnsw_m=self.hnsw_m,
+            hnsw_ef=self.hnsw_ef,
+        )
+        self.log.info(
+            "add_vector_column: table=%s column=%s new_schema_id=%s",
+            self.table,
+            self.column,
+            schema_id,
+        )
+        context["ti"].xcom_push(key="schema_id", value=schema_id)
+        return schema_id
+
+
+class AilakeBackfillVectorColumnOperator(BaseOperator):
+    """Backfill a new vector column in all existing files.
+
+    Reads text from ``text_column``, calls ``embed_cmd`` for each batch, and
+    rewrites files to include both the original vector column and the new
+    one. Idempotent: files already containing the column are skipped.
+    Requires :class:`AilakeAddVectorColumnOperator` to have been run first
+    for ``column``.
+
+    Wraps ``ailake backfill-vector-column <table> --column <c> --embed-cmd <cmd> [...]``.
+
+    :param table: Fully-qualified table name (``namespace.table``).
+    :param column: Vector column to backfill (must already exist via
+        ``AilakeAddVectorColumnOperator``).
+    :param embed_cmd: Shell command that reads a JSON array of strings from
+        stdin and writes a JSON array of float arrays to stdout.
+    :param text_column: Parquet column holding the raw text to embed
+        (default ``"chunk_text"``).
+    :param batch_size: Texts per embed-cmd call (default 512).
+    :param ailake_conn_id: Airflow connection id.
+    """
+
+    template_fields: Sequence[str] = ("table",)
+    ui_color = "#d4f0e0"
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        column: str,
+        embed_cmd: str,
+        text_column: str = "chunk_text",
+        batch_size: int = 512,
+        ailake_conn_id: str = AilakeHook.default_conn_name,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.table = table
+        self.column = column
+        self.embed_cmd = embed_cmd
+        self.text_column = text_column
+        self.batch_size = batch_size
+        self.ailake_conn_id = ailake_conn_id
+
+    def execute(self, context: Context) -> None:
+        hook = AilakeHook(ailake_conn_id=self.ailake_conn_id)
+        hook.backfill_vector_column(
+            self.table,
+            self.column,
+            embed_cmd=self.embed_cmd,
+            text_column=self.text_column,
+            batch_size=self.batch_size,
+        )
+        self.log.info("backfill_vector_column: table=%s column=%s complete", self.table, self.column)

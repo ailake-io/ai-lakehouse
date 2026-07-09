@@ -13,8 +13,8 @@ use ailake_core::{
 };
 use ailake_query::{
     delete_rows as rs_delete_rows, CompactionConfig, CompactionExecutor, CompactionPlanner,
-    EmbedFn, HybridConfig, MigrationJob, MigrationProgress, MigrationStrategy, MultiVectorBatch,
-    ProgressFn, SearchConfig, TableWriter,
+    EmbedFn, HybridConfig, MemoryDecayJob, MigrationJob, MigrationProgress, MigrationStrategy,
+    MultiVectorBatch, ProgressFn, SearchConfig, TableWriter,
 };
 use ailake_store::store_from_url;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -106,6 +106,18 @@ enum Commands {
         /// Name of the embeddings column in the source file (single-column mode)
         #[arg(long, default_value = "embedding")]
         embeddings: String,
+        /// Distance metric (single-column mode only; default: table's existing metric,
+        /// or cosine for a brand-new table). Multi-column mode carries metric per
+        /// column in --vector-cols instead.
+        #[arg(long, value_enum)]
+        metric: Option<Metric>,
+        /// Vector precision (single-column mode only; default: f16).
+        #[arg(long, value_enum)]
+        precision: Option<Precision>,
+        /// Model identifier stored in ailake.embedding-model Iceberg property
+        /// (single-column mode only).
+        #[arg(long)]
+        embedding_model: Option<String>,
         /// Multi-column mode: comma-separated column specs, each as col:dim:metric[:modality].
         /// Example: "embedding:1536:cosine,image_embedding:512:cosine:image"
         /// When set, --embeddings is ignored.
@@ -121,6 +133,36 @@ enum Commands {
         /// Tantivy tokenizer for FTS (default: "default").
         #[arg(long, default_value = "default")]
         fts_tokenizer: String,
+        /// Single-column identity partition column name (legacy; prefer --partition-fields).
+        #[arg(long)]
+        partition_by: Option<String>,
+        /// Value for --partition-by. Must be set when --partition-by is set.
+        #[arg(long)]
+        partition_value: Option<String>,
+        /// Multi-column Iceberg partition spec as a JSON array, e.g.
+        /// '[{"column":"topic_id","transform":"identity","column_type":"int"}]'.
+        /// Takes precedence over --partition-by when set.
+        #[arg(long)]
+        partition_fields: Option<String>,
+        /// Iceberg format version: 2 (default, V2) or 3 (opt-in V3).
+        #[arg(long, default_value = "2")]
+        format_version: u8,
+        /// HNSW M — connections per node (default: 16). Only applies when the table
+        /// is created by this insert; ignored on writes to an already-created table.
+        #[arg(long)]
+        hnsw_m: Option<u32>,
+        /// HNSW ef_construction — candidate pool during build (default: 150). Same
+        /// only-applies-at-creation caveat as --hnsw-m.
+        #[arg(long)]
+        hnsw_ef: Option<u32>,
+        /// Normalize vectors to unit L2 at write time (recommended for cosine).
+        #[arg(long, default_value_t = false)]
+        pre_normalize: bool,
+        /// Write Parquet immediately and build the HNSW index in the background
+        /// instead of blocking until it's fully built. Not combinable with --batch-id
+        /// (deferred writes don't yet carry an idempotency tag).
+        #[arg(long, default_value_t = false, conflicts_with = "batch_id")]
+        deferred: bool,
     },
     /// Search a table by vector similarity or full-text (mutually exclusive)
     Search {
@@ -177,6 +219,18 @@ enum Commands {
         /// background instead of blocking until it's fully built
         #[arg(long)]
         deferred: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
+    /// Recompute recency weights across all memory files in a table
+    /// (exp(-lambda * days_since_access), Phase 9 agent memory)
+    DecayMemories {
+        /// Table name
+        table: String,
+        /// Exponential decay rate. Higher = faster decay. Typical: 0.05 (slow) to 0.5 (aggressive)
+        #[arg(long, default_value = "0.1")]
+        lambda: f32,
         /// Output format
         #[arg(long, value_enum, default_value = "text")]
         format: OutputFormat,
@@ -530,10 +584,21 @@ async fn run(cli: Cli) -> Result<(), String> {
             table,
             file,
             embeddings,
+            metric,
+            precision,
+            embedding_model,
             vector_cols,
             batch_id,
             fts_columns,
             fts_tokenizer,
+            partition_by,
+            partition_value,
+            partition_fields,
+            format_version,
+            hnsw_m,
+            hnsw_ef,
+            pre_normalize,
+            deferred,
         } => {
             let ident = parse_table_ident(&table);
             let fts_cfg: Option<ailake_fts::FtsConfig> =
@@ -542,6 +607,11 @@ async fn run(cli: Cli) -> Result<(), String> {
                     tokenizer: fts_tokenizer,
                     writer_heap_bytes: 50 * 1024 * 1024,
                 });
+            let partition_fields: Vec<ailake_core::PartitionDef> = match partition_fields {
+                Some(json) => serde_json::from_str(&json)
+                    .map_err(|e| format!("invalid --partition-fields JSON: {e}"))?,
+                None => vec![],
+            };
 
             // Read source Parquet from local disk.
             let raw = std::fs::read(&file).map_err(|e| format!("failed to read {file}: {e}"))?;
@@ -571,16 +641,16 @@ async fn run(cli: Cli) -> Result<(), String> {
                     precision: VectorPrecision::F16,
                     pq: None,
                     keep_raw_for_reranking: true,
-                    pre_normalize: false,
-                    hnsw_m: None,
-                    hnsw_ef_construction: None,
+                    pre_normalize,
+                    hnsw_m,
+                    hnsw_ef_construction: hnsw_ef,
                     ivf_residual: false,
                     embedding_model: None,
                     modality: first_modality,
-                    partition_by: None,
-                    partition_value: None,
+                    partition_by: partition_by.clone(),
+                    partition_value: partition_value.clone(),
                     partition_column_type: None,
-                    partition_fields: vec![],
+                    partition_fields: partition_fields.clone(),
                 };
                 mv_owned.push((first_policy, first_embs));
 
@@ -594,9 +664,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                         precision: VectorPrecision::F16,
                         pq: None,
                         keep_raw_for_reranking: true,
-                        pre_normalize: false,
-                        hnsw_m: None,
-                        hnsw_ef_construction: None,
+                        pre_normalize,
+                        hnsw_m,
+                        hnsw_ef_construction: hnsw_ef,
                         ivf_residual: false,
                         embedding_model: None,
                         modality: *modality,
@@ -616,7 +686,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                         Arc::clone(&store),
                         table_policy,
                         ident,
-                        2,
+                        format_version,
                     )
                     .await
                     .map_err(|e| e.to_string())?;
@@ -635,10 +705,17 @@ async fn run(cli: Cli) -> Result<(), String> {
                     })
                     .collect();
 
-                writer
-                    .write_batch_multi(&batch, &batches)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                if deferred {
+                    writer
+                        .write_batch_multi_deferred(&batch, &batches)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    writer
+                        .write_batch_multi(&batch, &batches)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
                 writer.commit().await.map_err(|e| e.to_string())?;
 
                 println!(
@@ -658,59 +735,74 @@ async fn run(cli: Cli) -> Result<(), String> {
                     ));
                 }
 
+                let embedding_model_info = embedding_model.map(EmbeddingModelInfo::new);
+
                 // Load existing policy from catalog, or default to cosine/f16.
                 let policy = match catalog.load_table(&ident).await {
                     Ok(meta) => VectorStoragePolicy {
                         column_name: embeddings.clone(),
                         dim,
-                        metric: meta
-                            .properties
-                            .get("ailake.vector-metric")
-                            .map(|m| match m.as_str() {
-                                "euclidean" => VectorMetric::Euclidean,
-                                "dot" => VectorMetric::DotProduct,
-                                _ => VectorMetric::Cosine,
-                            })
-                            .unwrap_or(VectorMetric::Cosine),
-                        precision: VectorPrecision::F16,
+                        metric: metric.clone().map(VectorMetric::from).unwrap_or_else(|| {
+                            meta.properties
+                                .get("ailake.vector-metric")
+                                .map(|m| match m.as_str() {
+                                    "euclidean" => VectorMetric::Euclidean,
+                                    "dot" => VectorMetric::DotProduct,
+                                    _ => VectorMetric::Cosine,
+                                })
+                                .unwrap_or(VectorMetric::Cosine)
+                        }),
+                        precision: precision
+                            .clone()
+                            .map(VectorPrecision::from)
+                            .unwrap_or(VectorPrecision::F16),
                         pq: None,
                         keep_raw_for_reranking: true,
-                        pre_normalize: false,
-                        hnsw_m: None,
-                        hnsw_ef_construction: None,
+                        pre_normalize,
+                        hnsw_m,
+                        hnsw_ef_construction: hnsw_ef,
                         ivf_residual: false,
-                        embedding_model: None,
+                        embedding_model: embedding_model_info.clone(),
                         modality: None,
-                        partition_by: None,
-                        partition_value: None,
+                        partition_by: partition_by.clone(),
+                        partition_value: partition_value.clone(),
                         partition_column_type: None,
-                        partition_fields: vec![],
+                        partition_fields: partition_fields.clone(),
                     },
                     Err(_) => VectorStoragePolicy {
                         column_name: embeddings.clone(),
                         dim,
-                        metric: VectorMetric::Cosine,
-                        precision: VectorPrecision::F16,
+                        metric: metric
+                            .map(VectorMetric::from)
+                            .unwrap_or(VectorMetric::Cosine),
+                        precision: precision
+                            .map(VectorPrecision::from)
+                            .unwrap_or(VectorPrecision::F16),
                         pq: None,
                         keep_raw_for_reranking: true,
-                        pre_normalize: false,
-                        hnsw_m: None,
-                        hnsw_ef_construction: None,
+                        pre_normalize,
+                        hnsw_m,
+                        hnsw_ef_construction: hnsw_ef,
                         ivf_residual: false,
-                        embedding_model: None,
+                        embedding_model: embedding_model_info,
                         modality: None,
-                        partition_by: None,
-                        partition_value: None,
+                        partition_by,
+                        partition_value,
                         partition_column_type: None,
-                        partition_fields: vec![],
+                        partition_fields,
                     },
                 };
 
                 let mut writer = {
-                    let w =
-                        TableWriter::create_or_open(catalog, Arc::clone(&store), policy, ident, 2)
-                            .await
-                            .map_err(|e| e.to_string())?;
+                    let w = TableWriter::create_or_open(
+                        catalog,
+                        Arc::clone(&store),
+                        policy,
+                        ident,
+                        format_version,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
                     if let Some(cfg) = fts_cfg {
                         w.with_fts_config(cfg)
                     } else {
@@ -722,6 +814,10 @@ async fn run(cli: Cli) -> Result<(), String> {
                 match batch_id {
                     Some(ref id) => writer
                         .write_batch_idempotent(&batch, &embs, id)
+                        .await
+                        .map_err(|e| e.to_string())?,
+                    None if deferred => writer
+                        .write_batch_deferred(&batch, &embs)
                         .await
                         .map_err(|e| e.to_string())?,
                     None => writer
@@ -1022,6 +1118,66 @@ async fn run(cli: Cli) -> Result<(), String> {
                     Some(entry) => println!("compacted into {}", entry.path),
                     None => println!("nothing to compact (no files eligible)"),
                 },
+            }
+            Ok(())
+        }
+
+        Commands::DecayMemories {
+            table,
+            lambda,
+            format,
+        } => {
+            let ident = parse_table_ident(&table);
+
+            let meta = catalog
+                .load_table(&ident)
+                .await
+                .map_err(|e| e.to_string())?;
+            let dim = meta
+                .properties
+                .get("ailake.vector-dim")
+                .and_then(|v| v.parse::<u32>().ok())
+                .ok_or("table missing ailake.vector-dim property")?;
+            let column = meta
+                .properties
+                .get("ailake.vector-column")
+                .cloned()
+                .unwrap_or_else(|| "embedding".to_string());
+            let metric = match meta
+                .properties
+                .get("ailake.vector-metric")
+                .map(|s| s.as_str())
+                .unwrap_or("cosine")
+            {
+                "euclidean" => VectorMetric::Euclidean,
+                "dotproduct" | "dot_product" => VectorMetric::DotProduct,
+                "normalizedcosine" | "normalized_cosine" => VectorMetric::NormalizedCosine,
+                _ => VectorMetric::Cosine,
+            };
+            let policy = VectorStoragePolicy::default_f16(&column, dim, metric);
+
+            let job = MemoryDecayJob::new(
+                Arc::clone(&catalog) as Arc<dyn CatalogProvider>,
+                Arc::clone(&store),
+                policy,
+                lambda,
+            );
+            let files_updated = job.run(&ident).await.map_err(|e| e.to_string())?;
+
+            match format {
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&serde_json::json!({
+                            "ok": true,
+                            "files_updated": files_updated,
+                        }))
+                        .map_err(|e| e.to_string())?
+                    );
+                }
+                OutputFormat::Text => {
+                    println!("files_updated: {files_updated}");
+                }
             }
             Ok(())
         }

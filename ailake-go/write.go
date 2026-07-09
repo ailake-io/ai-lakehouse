@@ -170,6 +170,22 @@ type WriteBatchOptions struct {
 	PreNormalize bool
 	// Deferred builds the index asynchronously (Parquet committed immediately).
 	Deferred bool
+	// VectorCols enables multi-column (Phase 8 multimodal) write mode — e.g.
+	// text + image embeddings on the same row, each with its own HNSW index.
+	// When non-empty, VecCol/Metric/Precision are ignored (the CLI's
+	// --vector-cols spec carries per-column metric, and multi-column mode
+	// always writes F16).
+	VectorCols []VectorColSpec
+}
+
+// VectorColSpec describes one vector column in a multi-column (Phase 8
+// multimodal) write — e.g. text + image embeddings on the same row, each
+// getting its own HNSW section in the same AI-Lake file.
+type VectorColSpec struct {
+	Column   string
+	Dim      int
+	Metric   string // default "cosine"
+	Modality string // optional: text | image | audio | video
 }
 
 // WriteBatch writes a batch of rows and their embeddings to an AI-Lake table
@@ -196,23 +212,43 @@ func WriteBatch(
 	}
 
 	tableID := namespace + "." + table
-	if opts.VecCol == "" {
-		opts.VecCol = "embedding"
-	}
 
 	args := []string{
 		"--store", warehouse,
 		"insert", tableID, parquetFile,
-		"--embeddings", opts.VecCol,
 	}
-	if opts.Metric != "" {
-		args = append(args, "--metric", opts.Metric)
-	}
-	if opts.Precision != "" {
-		args = append(args, "--precision", opts.Precision)
-	}
-	if opts.EmbeddingModel != "" {
-		args = append(args, "--embedding-model", opts.EmbeddingModel)
+	if len(opts.VectorCols) > 0 {
+		// Multi-column (Phase 8 multimodal) mode: --vector-cols carries per-column
+		// metric and takes precedence over --embeddings, which the CLI ignores when
+		// set. Precision is always F16 in this mode (same as the CLI's own default).
+		specs := make([]string, len(opts.VectorCols))
+		for i, vc := range opts.VectorCols {
+			metric := vc.Metric
+			if metric == "" {
+				metric = "cosine"
+			}
+			spec := fmt.Sprintf("%s:%d:%s", vc.Column, vc.Dim, metric)
+			if vc.Modality != "" {
+				spec += ":" + vc.Modality
+			}
+			specs[i] = spec
+		}
+		args = append(args, "--vector-cols", strings.Join(specs, ","))
+	} else {
+		vecCol := opts.VecCol
+		if vecCol == "" {
+			vecCol = "embedding"
+		}
+		args = append(args, "--embeddings", vecCol)
+		if opts.Metric != "" {
+			args = append(args, "--metric", opts.Metric)
+		}
+		if opts.Precision != "" {
+			args = append(args, "--precision", opts.Precision)
+		}
+		if opts.EmbeddingModel != "" {
+			args = append(args, "--embedding-model", opts.EmbeddingModel)
+		}
 	}
 	if opts.PartitionBy != "" {
 		args = append(args, "--partition-by", opts.PartitionBy)
@@ -249,6 +285,78 @@ func WriteBatch(
 		return fmt.Errorf("ailake insert: %w", err)
 	}
 	return nil
+}
+
+// CompactOptions controls optional parameters for Compact.
+type CompactOptions struct {
+	// TargetSize is the target output file size in bytes (0 = CLI default, 512 MiB).
+	TargetSize int64
+	// MinFiles is the minimum number of small files required to trigger compaction
+	// (0 = CLI default, 4).
+	MinFiles int
+	// MaxFilesPerPass bounds peak RAM / HNSW rebuild cost (0 = CLI default, 20).
+	MaxFilesPerPass int
+	// Deferred writes the merged Parquet immediately and builds the HNSW index
+	// in the background instead of blocking until it's fully built.
+	Deferred bool
+}
+
+// compactResponse mirrors the JSON envelope `ailake compact --format json` emits.
+type compactResponse struct {
+	OK             bool `json:"ok"`
+	FilesCompacted int  `json:"files_compacted"`
+}
+
+// Compact merges small files in an AI-Lake table into a larger file by
+// delegating to the `ailake compact` CLI. Returns the number of files
+// compacted (0 = nothing eligible).
+func Compact(
+	catalog *HadoopCatalog,
+	namespace, table string,
+	opts CompactOptions,
+) (int, error) {
+	bin, err := resolveBin()
+	if err != nil {
+		return 0, err
+	}
+
+	warehouse := catalog.Warehouse
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
+	tableID := namespace + "." + table
+
+	args := []string{
+		"--store", warehouse,
+		"compact", tableID,
+		"--format", "json",
+	}
+	if opts.TargetSize > 0 {
+		args = append(args, "--target-size", fmt.Sprintf("%d", opts.TargetSize))
+	}
+	if opts.MinFiles > 0 {
+		args = append(args, "--min-files", fmt.Sprintf("%d", opts.MinFiles))
+	}
+	if opts.MaxFilesPerPass > 0 {
+		args = append(args, "--max-files-per-pass", fmt.Sprintf("%d", opts.MaxFilesPerPass))
+	}
+	if opts.Deferred {
+		args = append(args, "--deferred")
+	}
+
+	out, err := exec.Command(bin, args...).CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("ailake compact: %w\n%s", err, out)
+	}
+
+	var resp compactResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return 0, fmt.Errorf("ailake compact: parsing JSON output: %w\n%s", err, out)
+	}
+	return resp.FilesCompacted, nil
 }
 
 // SearchHybridResult is a single hit from SearchHybrid (BM25+vector RRF fusion).

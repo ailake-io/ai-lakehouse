@@ -76,18 +76,24 @@ search_file(const std::string& abs_path,
     std::ifstream f(abs_path, std::ios::binary | std::ios::ate);
     if (!f) throw std::runtime_error("ailake: cannot open " + abs_path);
 
-    // Read AILK header at hnsw_offset
+    // entry.hnsw_offset (from manifest key_metadata) is ALREADY the absolute
+    // byte offset of the index blob itself (Rust: `ailk_start + header.hnsw_offset`,
+    // see writer.rs/compaction.rs) — NOT the AILK header position. Back-compute
+    // the AILK header position by subtracting header size + centroid+radius bytes,
+    // matching ailake-go's searchFileAtOffset.
+    size_t centroid_bytes = ((size_t)entry.vector_dim + 1) * 4;
+    size_t ailk_header_pos = *entry.hnsw_offset - kHeaderSize - centroid_bytes;
+
     uint8_t header_buf[kHeaderSize];
-    f.seekg((std::streamoff)*entry.hnsw_offset);
+    f.seekg((std::streamoff)ailk_header_pos);
     f.read(reinterpret_cast<char*>(header_buf), kHeaderSize);
     if (!f) throw std::runtime_error("ailake: cannot read AILK header in " + abs_path);
     auto hdr = parse_header(header_buf);
 
-    // Read index blob
-    size_t index_start = *entry.hnsw_offset + hdr.hnsw_offset;
-    std::vector<uint8_t> index_buf(hdr.hnsw_len);
-    f.seekg((std::streamoff)index_start);
-    f.read(reinterpret_cast<char*>(index_buf.data()), (std::streamsize)hdr.hnsw_len);
+    // Read index blob directly at the absolute offset the manifest gives us.
+    std::vector<uint8_t> index_buf(*entry.hnsw_len);
+    f.seekg((std::streamoff)*entry.hnsw_offset);
+    f.read(reinterpret_cast<char*>(index_buf.data()), (std::streamsize)*entry.hnsw_len);
     if (!f) throw std::runtime_error("ailake: cannot read index blob in " + abs_path);
 
     const auto& hw = opts.hardware();

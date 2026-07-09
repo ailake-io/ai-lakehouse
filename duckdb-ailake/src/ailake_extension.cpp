@@ -50,6 +50,8 @@ bool AilakeLib::load(const std::string &lib_path) {
     auto st  = reinterpret_cast<search_text_fn_t>  (AILAKE_DLSYM(sym_handle, "ailake_search_text_json"));
     auto del = reinterpret_cast<delete_where_fn_t> (AILAKE_DLSYM(sym_handle, "ailake_delete_where_json"));
     auto ev  = reinterpret_cast<evolve_schema_fn_t>(AILAKE_DLSYM(sym_handle, "ailake_evolve_schema_json"));
+    auto wm  = reinterpret_cast<write_multi_fn_t>  (AILAKE_DLSYM(sym_handle, "ailake_write_batch_multi_json"));
+    auto cp  = reinterpret_cast<compact_fn_t>      (AILAKE_DLSYM(sym_handle, "ailake_compact_json"));
     auto f   = reinterpret_cast<free_fn_t>         (AILAKE_DLSYM(sym_handle, "ailake_free_string"));
 
     if (!s || !w || !f) {
@@ -65,6 +67,8 @@ bool AilakeLib::load(const std::string &lib_path) {
     search_text_fn_   = st;  // may be nullptr for older builds
     delete_where_fn_  = del; // may be nullptr for older builds
     evolve_schema_fn_ = ev;  // may be nullptr for older builds
+    write_multi_fn_   = wm;  // may be nullptr for older builds
+    compact_fn_       = cp;  // may be nullptr for older builds
     free_fn_          = f;
     return true;
 }
@@ -413,6 +417,118 @@ int32_t AilakeLib::evolve_schema(
     }
 }
 
+int64_t AilakeLib::write_batch_multi(
+    const std::string                   &warehouse,
+    const std::string                   &ns,
+    const std::string                   &table_name,
+    const std::vector<int64_t>          &ids,
+    const std::vector<VectorColSpecArg> &vector_columns,
+    int                                   format_version,
+    bool                                  deferred
+) const {
+    if (!write_multi_fn_ || !free_fn_ || ids.empty() || vector_columns.empty()) return -1;
+
+    std::string ids_json = "[";
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (i > 0) ids_json += ',';
+        ids_json += std::to_string(ids[i]);
+    }
+    ids_json += ']';
+
+    std::string cols_json = "[";
+    for (size_t c = 0; c < vector_columns.size(); ++c) {
+        if (c > 0) cols_json += ',';
+        const auto &vc = vector_columns[c];
+
+        std::string emb_json = "[";
+        for (size_t i = 0; i < vc.embeddings.size(); ++i) {
+            if (i > 0) emb_json += ',';
+            emb_json += '[';
+            for (size_t j = 0; j < vc.embeddings[i].size(); ++j) {
+                if (j > 0) emb_json += ',';
+                emb_json += std::to_string(vc.embeddings[i][j]);
+            }
+            emb_json += ']';
+        }
+        emb_json += ']';
+
+        cols_json += "{\"col\":"       + json_escape(vc.col)       +
+                     ",\"dim\":"       + std::to_string(vc.dim)    +
+                     ",\"metric\":"    + json_escape(vc.metric)    +
+                     ",\"precision\":" + json_escape(vc.precision) +
+                     ",\"embeddings\":" + emb_json;
+        if (!vc.modality.empty())
+            cols_json += ",\"modality\":" + json_escape(vc.modality);
+        cols_json += '}';
+    }
+    cols_json += ']';
+
+    std::string req =
+        "{\"warehouse\":"       + json_escape(warehouse)  +
+        ",\"namespace\":"       + json_escape(ns)          +
+        ",\"table\":"           + json_escape(table_name)  +
+        ",\"ids\":"             + ids_json                 +
+        ",\"vector_columns\":"  + cols_json                +
+        ",\"format_version\":"  + std::to_string(format_version);
+    if (deferred)
+        req += ",\"deferred\":true";
+    req += "}";
+
+    char *raw = write_multi_fn_(req.c_str());
+    if (!raw) return -1;
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    try {
+        auto j = nlohmann::json::parse(resp);
+        if (!j.value("ok", false)) return -1;
+        return j.value("snapshot_id", int64_t(-1));
+    } catch (...) {
+        return -1;
+    }
+}
+
+int64_t AilakeLib::compact(
+    const std::string &warehouse,
+    const std::string &table_name,
+    int64_t             min_files,
+    int64_t             target_size_bytes,
+    int64_t             max_files_per_pass,
+    bool                deferred,
+    const std::string  &ns
+) const {
+    if (!compact_fn_ || !free_fn_) return -1;
+
+    std::string req =
+        "{\"warehouse\":" + json_escape(warehouse)  +
+        ",\"namespace\":" + json_escape(ns)          +
+        ",\"table\":"     + json_escape(table_name);
+    if (min_files >= 0)
+        req += ",\"min_files\":" + std::to_string(min_files);
+    if (target_size_bytes >= 0)
+        req += ",\"target_size_bytes\":" + std::to_string(target_size_bytes);
+    if (max_files_per_pass >= 0)
+        req += ",\"max_files_per_pass\":" + std::to_string(max_files_per_pass);
+    if (deferred)
+        req += ",\"deferred\":true";
+    req += "}";
+
+    char *raw = compact_fn_(req.c_str());
+    if (!raw) return -1;
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    try {
+        auto j = nlohmann::json::parse(resp);
+        if (!j.value("ok", false)) return -1;
+        return j.value("files_compacted", int64_t(-1));
+    } catch (...) {
+        return -1;
+    }
+}
+
 ScanResult AilakeLib::scan(
     const std::string        &warehouse,
     const std::string        &table_name,
@@ -573,6 +689,8 @@ void RegisterAilakeScan(duckdb::ExtensionLoader &loader);
 void RegisterAilakeSearchText(duckdb::ExtensionLoader &loader);
 void RegisterAilakeDeleteWhere(duckdb::ExtensionLoader &loader);
 void RegisterAilakeEvolveSchema(duckdb::ExtensionLoader &loader);
+void RegisterAilakeWriteBatchMulti(duckdb::ExtensionLoader &loader);
+void RegisterAilakeCompact(duckdb::ExtensionLoader &loader);
 
 extern "C" {
 
@@ -586,6 +704,8 @@ DUCKDB_CPP_EXTENSION_ENTRY(ailake, loader) {
     RegisterAilakeWrite(loader);
     RegisterAilakeScan(loader);
     RegisterAilakeSearchText(loader);
+    RegisterAilakeWriteBatchMulti(loader);
+    RegisterAilakeCompact(loader);
     RegisterAilakeDeleteWhere(loader);
     RegisterAilakeEvolveSchema(loader);
 }

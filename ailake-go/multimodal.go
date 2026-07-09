@@ -150,9 +150,12 @@ func searchFileCol(
 	opts SearchOptions,
 	hw *HardwareProfile,
 ) ([]FileSearchResult, error) {
+	// entry.Path is already relative to the warehouse root (includes
+	// namespace/table) — see searchFile's comment in ailake.go for why
+	// joining namespace/table again here would double-prefix the path.
 	filePath := entry.Path
 	if !filepath.IsAbs(filePath) {
-		filePath = filepath.Join(warehouse, namespace, table, filePath)
+		filePath = filepath.Join(warehouse, filePath)
 	}
 
 	var hnswOffset, hnswLen uint64

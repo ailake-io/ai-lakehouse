@@ -101,6 +101,20 @@ jobs:
           AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_TMPDIR: /tmp/ailake_duck_evolve
 
+      - name: Run write_batch_multi tests
+        run: python duckdb-ailake/test/test_write_multi.py
+        env:
+          AILAKE_LIB:    target/release/libailake_jni.so
+          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_TMPDIR: /tmp/ailake_duck_write_multi
+
+      - name: Run compact tests
+        run: python duckdb-ailake/test/test_compact.py
+        env:
+          AILAKE_LIB:    target/release/libailake_jni.so
+          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
+          AILAKE_TMPDIR: /tmp/ailake_duck_compact
+
       - name: Phase T — Run FTS write tests
         run: python duckdb-ailake/test/test_write.py -k fts
         env:
