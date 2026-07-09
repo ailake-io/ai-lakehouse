@@ -197,23 +197,34 @@ chunks = [
     }
     for i in range(5)
 ]
-ctx = ailake.assemble_context(chunks, max_tokens=1024)
-assert len(ctx) > 0, "FAIL: assemble_context returned empty string"
+# Fase 15: assemble_context() now returns {"text", "chunk_count", "token_estimate"}
+# (was a bare string) — richer output, and "embedding" per-chunk enables real dedup.
+result = ailake.assemble_context(chunks, max_tokens=1024)
+assert isinstance(result, dict) and set(result) == {"text", "chunk_count", "token_estimate"}, \
+    f"FAIL: assemble_context did not return the expected dict shape: {result!r}"
+ctx = result["text"]
+assert len(ctx) > 0, "FAIL: assemble_context returned empty text"
+assert result["chunk_count"] == 5, f"FAIL: expected chunk_count=5, got {result['chunk_count']}"
 for i in range(5):
     assert f"chunk number {i}" in ctx, f"FAIL: chunk {i} missing from context"
 print(f"PASS (assemble_context): {len(ctx)} chars, all 5 chunks present")
 
-ctx_tiny = ailake.assemble_context(chunks, max_tokens=10)
+ctx_tiny = ailake.assemble_context(chunks, max_tokens=10)["text"]
 assert len(ctx_tiny) < len(ctx), "FAIL: tiny budget did not truncate context"
 print(f"PASS (assemble_context budget): tiny={len(ctx_tiny)} chars < full={len(ctx)} chars")
 
 dup_chunks = [
-    {"document_id": "doc-2", "chunk_index": 0, "chunk_text": "alpha text", "distance": 0.1},
-    {"document_id": "doc-2", "chunk_index": 1, "chunk_text": "beta text", "distance": 0.2},
+    {"document_id": "doc-2", "chunk_index": 0, "chunk_text": "alpha text",
+     "distance": 0.1, "embedding": [1.0, 0.0]},
+    {"document_id": "doc-2", "chunk_index": 1, "chunk_text": "beta text",
+     "distance": 0.2, "embedding": [1.0, 0.0001]},
 ]
-ctx_dedup = ailake.assemble_context(dup_chunks, max_tokens=4096, dedup_threshold=0.0)
-assert len(ctx_dedup) > 0, "FAIL: assemble_context with dedup_threshold=0.0 returned empty"
-print("PASS (assemble_context dedup_threshold): parameter accepted, output non-empty")
+dedup_result = ailake.assemble_context(dup_chunks, max_tokens=4096, dedup_threshold=0.05)
+assert dedup_result["chunk_count"] == 1, (
+    f"FAIL: dedup_threshold=0.05 with near-identical embeddings should drop to 1 chunk, "
+    f"got {dedup_result['chunk_count']}"
+)
+print("PASS (assemble_context dedup_threshold): near-duplicate embeddings deduplicated")
 
 
 # ── 7. Error handling ─────────────────────────────────────────────────────────

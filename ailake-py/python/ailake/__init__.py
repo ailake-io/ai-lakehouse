@@ -9,13 +9,18 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence, U
 
 from ailake._ailake import (  # type: ignore[import]
     TableWriter as _TableWriter,
+    TimestampNs,
     VectorColSpec,
     WorkingMemoryBuffer,
     add_column,
-    assemble_context,
+    add_vector_column,
+    assemble_context as _assemble_context_raw,
+    backfill_vector_column,
+    compact as _compact_native,
     decay_memories,
     delete_rows,
     delete_where,
+    estimate,
     hardware_info,
     migrate_embeddings,
     now_ns,
@@ -28,6 +33,11 @@ from ailake._ailake import (  # type: ignore[import]
 
 # Expose search_with_data for callers that need raw IPC bytes (advanced use).
 search_with_data = _search_with_data
+
+# scan() is a naming-parity alias for search_with_data — same capability as
+# ailake-go's Scan() and ailake-jni's ailake_scan_json (search + full-row
+# fetch in one call, no JOIN needed against a separately-registered table).
+scan = _search_with_data
 
 if TYPE_CHECKING:
     import numpy as np
@@ -44,11 +54,14 @@ __all__ = [
     "search_text",
     "search_multimodal",
     "search_with_data",
+    "scan",
     "compact",
+    "estimate",
     "Table",
     "SearchQuery",
     "TableWriter",
     "VectorColSpec",
+    "TimestampNs",
     "WorkingMemoryBuffer",
     "Agent",
     "assemble_context",
@@ -59,6 +72,8 @@ __all__ = [
     "evolve_schema",
     "add_column",
     "rename_column",
+    "add_vector_column",
+    "backfill_vector_column",
     "now_ns",
     "hardware_info",
 ]
@@ -116,6 +131,7 @@ class SearchQuery:
         bm25_weight: float = 0.5,
         pruning_threshold: "float | None" = None,
         ef_search: "int | None" = None,
+        rerank_factor: "int | None" = None,
     ) -> None:
         self._path = path
         self._query = query
@@ -128,6 +144,7 @@ class SearchQuery:
         self._bm25_weight = bm25_weight
         self._pruning_threshold = pruning_threshold
         self._ef_search = ef_search
+        self._rerank_factor = rerank_factor
         self._results: list[dict] | None = None      # lazy — pointer-only
         self._arrow_batch: Any | None = None          # lazy — full RecordBatch
 
@@ -147,7 +164,7 @@ class SearchQuery:
             self._results = _search_raw(
                 self._path, self._query, self._top_k, self._partition_filter,
                 self._hybrid_text, self._text_column, self._bm25_weight,
-                self._pruning_threshold, self._ef_search,
+                self._pruning_threshold, self._ef_search, self._rerank_factor,
             )
         return self._results
 
@@ -156,7 +173,9 @@ class SearchQuery:
             import io
             import pyarrow as pa  # noqa: PLC0415
             ipc_bytes: bytes = _search_with_data(
-                self._path, self._query, self._top_k, self._partition_filter
+                self._path, self._query, self._top_k, self._partition_filter,
+                self._hybrid_text, self._text_column, self._bm25_weight,
+                self._pruning_threshold, self._ef_search, self._rerank_factor,
             )
             table = pa.ipc.open_file(io.BytesIO(ipc_bytes)).read_all()
             if self._score_fn is not None:
@@ -485,6 +504,78 @@ class Table:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._writer.commit)
 
+    def write_batch_idempotent(
+        self,
+        texts: list[str],
+        embeddings: _Embeddings,
+        batch_id: str,
+        extra_columns: Optional[dict[str, list]] = None,
+    ) -> "Table":
+        """Idempotent write — no-op if *batch_id* was already committed.
+
+        Safe for retried Airflow tasks / at-least-once pipelines: calling this
+        twice with the same *batch_id* only writes the batch once.
+
+        Args:
+            texts: one string per row.
+            embeddings: ``list[list[float]]`` or any array with a ``.tolist()`` method.
+            batch_id: unique key for this batch (e.g. Airflow run_id + task_id).
+            extra_columns: additional tabular columns — see :meth:`insert`.
+        """
+        _emb: list[list[float]] = (
+            embeddings.tolist()  # type: ignore[union-attr]
+            if hasattr(embeddings, "tolist")
+            else [list(row) for row in embeddings]
+        )
+        self._writer.write_batch_idempotent(texts, _emb, batch_id, extra_columns)
+        return self
+
+    def write_batch_multi(
+        self,
+        texts: list[str],
+        columns: list[tuple["VectorColSpec", _Embeddings]],
+        extra_columns: Optional[dict[str, list]] = None,
+    ) -> "Table":
+        """Write a batch with N independent vector columns (Phase 8 multimodal).
+
+        Each column gets its own HNSW index in the file footer. Use for
+        multimodal tables where the same row has embeddings from different
+        modalities (text + image, etc.).
+
+        Args:
+            texts: one string per row (primary tabular column).
+            columns: ``[(VectorColSpec, embeddings), ...]`` — each tuple pairs a
+                     column spec with its embeddings (``list[list[float]]`` or
+                     array with ``.tolist()``); embedding-list length must equal
+                     ``len(texts)`` for every entry.
+            extra_columns: additional tabular columns — see :meth:`insert`.
+        """
+        _columns = [
+            (spec, emb.tolist() if hasattr(emb, "tolist") else [list(row) for row in emb])
+            for spec, emb in columns
+        ]
+        self._writer.write_batch_multi(texts, _columns, extra_columns)
+        return self
+
+    def write_batch_multi_deferred(
+        self,
+        texts: list[str],
+        columns: list[tuple["VectorColSpec", _Embeddings]],
+        extra_columns: Optional[dict[str, list]] = None,
+    ) -> "Table":
+        """Deferred variant of :meth:`write_batch_multi`.
+
+        Persists Parquet immediately and builds all N column HNSW indexes in
+        a background task — see the native ``write_batch_multi_deferred``
+        docstring for the index-status lifecycle.
+        """
+        _columns = [
+            (spec, emb.tolist() if hasattr(emb, "tolist") else [list(row) for row in emb])
+            for spec, emb in columns
+        ]
+        self._writer.write_batch_multi_deferred(texts, _columns, extra_columns)
+        return self
+
     # ── search ────────────────────────────────────────────────────────────────
 
     def search(
@@ -499,6 +590,7 @@ class Table:
         bm25_weight: float = 0.5,
         pruning_threshold: "float | None" = None,
         ef_search: "int | None" = None,
+        rerank_factor: "int | None" = None,
     ) -> SearchQuery:
         """Return a chainable :class:`SearchQuery`.
 
@@ -516,6 +608,10 @@ class Table:
             bm25_weight: BM25 weight in RRF fusion (default ``0.5``).
             pruning_threshold: geometric pruning distance. Files whose centroid is farther
                                than this from the query are skipped. Default ``None`` = no pruning.
+            ef_search: HNSW beam width override. Default ``None`` = 50.
+            rerank_factor: when set, fetches ``top_k * rerank_factor`` HNSW candidates and
+                           reranks with exact F32 distances before truncating — corrects PQ
+                           approximation error on IVF-PQ-indexed tables. Default ``None`` = off.
         """
         _q: list[float] = (
             query.tolist()  # type: ignore[union-attr]
@@ -532,6 +628,7 @@ class Table:
             bm25_weight=bm25_weight,
             pruning_threshold=pruning_threshold,
             ef_search=ef_search,
+            rerank_factor=rerank_factor,
         )
 
     # ── context manager ───────────────────────────────────────────────────────
@@ -691,30 +788,6 @@ def open_table(
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
 
-# Metadata is embedded in chunk_text using this separator (ASCII unit separator,
-# extremely unlikely to appear in natural text).
-_AGENT_META_SEP = "\x1f"
-
-
-def _pack_agent_meta(text: str, meta: dict) -> str:
-    """Embed JSON metadata as a prefix in the stored text."""
-    import json
-    return _AGENT_META_SEP + json.dumps(meta, separators=(",", ":")) + _AGENT_META_SEP + text
-
-
-def _unpack_agent_meta(stored: str) -> tuple[str, dict]:
-    """Extract metadata prefix from stored text. Returns (original_text, meta_dict)."""
-    import json
-    if stored.startswith(_AGENT_META_SEP):
-        parts = stored.split(_AGENT_META_SEP, 2)
-        if len(parts) == 3:
-            try:
-                return parts[2], json.loads(parts[1])
-            except (json.JSONDecodeError, IndexError):
-                pass
-    return stored, {}
-
-
 class Agent:
     """High-level agent memory helper — Phase 9.
 
@@ -785,8 +858,11 @@ class Agent:
         self._lambda = lambda_
         # Writer is lazily initialised on first write (dim unknown until first embedding).
         self._writer: Optional[_TableWriter] = None
-        # Pending (stored_text, embedding) pairs not yet written.
-        self._pending: list[tuple[str, list[float]]] = []
+        # Pending (text, embedding, meta) triples not yet written. `meta` holds
+        # real typed columns (agent_id, mem_type, last_accessed_at, ...) written
+        # via extra_columns — NOT packed into the text column.
+        self._pending: list[tuple[str, list[float], dict]] = []
+        self._step_counter = 0
 
     # ── internal ──────────────────────────────────────────────────────────────
 
@@ -806,20 +882,34 @@ class Agent:
         results = self._embed_fn([text])
         return results[0] if results else []
 
+    def _next_step(self) -> int:
+        step = self._step_counter
+        self._step_counter += 1
+        return step
+
     def _flush_pending(self) -> None:
         if not self._pending:
             return
-        texts = [t for t, _ in self._pending]
-        embs = [e for _, e in self._pending]
+        texts = [t for t, _, _ in self._pending]
+        embs = [e for _, e, _ in self._pending]
+        metas = [m for _, _, m in self._pending]
         dim = len(embs[0])
         writer = self._ensure_writer(dim)
-        writer.write_batch(texts, embs)
+        extra_columns = {key: [m[key] for m in metas] for key in metas[0]}
+        writer.write_batch(texts, embs, extra_columns)
         self._pending.clear()
 
     # ── write ─────────────────────────────────────────────────────────────────
 
     def remember(self, text: str, importance: float = 1.0) -> str:
         """Embed *text* and buffer it as an episodic memory.
+
+        Writes real typed columns (``agent_id``, ``session_id``, ``mem_type``,
+        ``record_id``, ``importance``, ``created_at``, ``last_accessed_at``,
+        ``access_count``) matching ``EpisodicMemorySchema`` — the table stays
+        queryable by any AI-Lake client (Spark/Trino/Flink/DuckDB/CLI), not just
+        this SDK, and :func:`decay_memories` (which requires a real
+        ``last_accessed_at`` Timestamp column) works against it directly.
 
         Args:
             text:       Natural-language memory to store.
@@ -833,22 +923,27 @@ class Agent:
         Note:
             Call :meth:`commit` to persist buffered memories to storage.
         """
-        import time
         import uuid as _uuid
         mem_id = str(_uuid.uuid4())
-        now = int(time.time())
+        now = TimestampNs(now_ns())
         meta = {
-            "type": "memory",
-            "mem_id": mem_id,
             "agent_id": self._agent_id,
             "session_id": self._session_id,
-            "importance": importance,
+            "step_index": self._next_step(),
+            "mem_type": "memory",
+            "record_id": mem_id,
+            "importance": float(importance),
             "created_at": now,
             "last_accessed_at": now,
             "access_count": 0,
+            "tool_name": "",
+            "tool_input_json": "",
+            "tool_output_json": "",
+            "outcome": "",
+            "latency_ms": 0,
         }
         emb = self._embed_one(text)
-        self._pending.append((_pack_agent_meta(text, meta), emb))
+        self._pending.append((text, emb, meta))
         return mem_id
 
     def log_tool_call(
@@ -864,6 +959,9 @@ class Agent:
 
         The embedding is computed from ``"{name}: {input_json}"`` so that
         semantic search can find past calls by intent rather than just name.
+        Writes real typed columns matching ``ToolCallSchema`` (``agent_id``,
+        ``session_id``, ``step_index``, ``tool_name``, ``tool_input_json``,
+        ``tool_output_json``, ``outcome``, ``latency_ms``).
 
         Args:
             name:        Tool name (e.g. ``"web_search"``, ``"code_exec"``).
@@ -877,30 +975,30 @@ class Agent:
             ``call_id`` — a UUID string identifying this tool call record.
         """
         import json
-        import time
         import uuid as _uuid
         call_id = str(_uuid.uuid4())
-        now = int(time.time())
         input_json = json.dumps(input) if not isinstance(input, str) else input
         output_json = json.dumps(output) if not isinstance(output, str) else output
         embed_text = f"{name}: {input_json}"
+        now = TimestampNs(now_ns())
         meta = {
-            "type": "tool_call",
-            "call_id": call_id,
             "agent_id": self._agent_id,
             "session_id": self._session_id,
+            "step_index": self._next_step(),
+            "mem_type": "tool_call",
+            "record_id": call_id,
+            "importance": float(importance),
+            "created_at": now,
+            "last_accessed_at": now,
+            "access_count": 0,
             "tool_name": name,
             "tool_input_json": input_json,
             "tool_output_json": output_json,
             "outcome": outcome,
-            "latency_ms": latency_ms,
-            "importance": importance,
-            "created_at": now,
-            "last_accessed_at": now,
-            "access_count": 0,
+            "latency_ms": int(latency_ms),
         }
         emb = self._embed_one(embed_text)
-        self._pending.append((_pack_agent_meta(embed_text, meta), emb))
+        self._pending.append((embed_text, emb, meta))
         return call_id
 
     def commit(self) -> int:
@@ -937,11 +1035,10 @@ class Agent:
             List of dicts sorted by hybrid score (best first), each containing:
             ``text``, ``distance``, ``score``, ``recency``, ``importance``,
             ``type`` (``"memory"`` | ``"tool_call"``), ``mem_id`` / ``call_id``,
-            ``agent_id``, ``session_id``, ``created_at``.
+            ``agent_id``, ``session_id``, ``created_at`` (int, Unix epoch nanoseconds).
         """
         import io
         import math
-        import time
 
         import pyarrow as pa  # noqa: PLC0415
 
@@ -959,44 +1056,71 @@ class Agent:
         raw_ipc: bytes = _search_with_data(self._table_path, q, candidate_k, self._agent_id)
         batch = pa.ipc.open_file(io.BytesIO(raw_ipc)).read_all()
 
-        now = int(time.time())
-        col_names = batch.schema.names
-        has_chunk_text = "text" in col_names
-        has_distance = "_distance" in col_names
+        col_names = set(batch.schema.names)
+
+        def col(name: str):
+            return batch.column(name) if name in col_names else None
+
+        dist_col = col("_distance")
+        text_col = col("text")
+        importance_col = col("importance")
+        last_accessed_col = col("last_accessed_at")
+        created_col = col("created_at")
+        mem_type_col = col("mem_type")
+        record_id_col = col("record_id")
+        agent_id_col = col("agent_id")
+        session_id_col = col("session_id")
+        tool_name_col = col("tool_name")
+        tool_input_col = col("tool_input_json")
+        tool_output_col = col("tool_output_json")
+        outcome_col = col("outcome")
+        latency_col = col("latency_ms")
+
+        now = now_ns()
 
         scored: list[dict] = []
         for i in range(batch.num_rows):
-            dist = float(batch.column("_distance")[i].as_py()) if has_distance else 1.0
-            raw_text = str(batch.column("text")[i].as_py()) if has_chunk_text else ""
-            text, meta = _unpack_agent_meta(raw_text)
+            dist = float(dist_col[i].as_py()) if dist_col is not None else 1.0
+            text = str(text_col[i].as_py()) if text_col is not None else ""
+            importance = float(importance_col[i].as_py()) if importance_col is not None else 1.0
 
-            last_accessed = meta.get("last_accessed_at", now)
-            days_since = max(0.0, (now - last_accessed) / 86400.0)
+            # Read raw ns via `.value` — TimestampScalar.as_py() at nanosecond
+            # resolution requires pandas to be installed; `.value` doesn't.
+            last_accessed_ns = last_accessed_col[i].value if last_accessed_col is not None else None
+            days_since = (
+                max(0.0, (now - last_accessed_ns) / 86_400_000_000_000.0)
+                if last_accessed_ns is not None
+                else 0.0
+            )
             recency = math.exp(-self._lambda * days_since)
-            importance = float(meta.get("importance", 1.0))
             denom = max(recency * importance, 1e-7)
             score = dist / denom
 
+            rtype = str(mem_type_col[i].as_py()) if mem_type_col is not None else "memory"
             entry: dict = {
                 "text": text,
                 "distance": dist,
                 "score": score,
                 "recency": recency,
                 "importance": importance,
-                "type": meta.get("type", "memory"),
-                "agent_id": meta.get("agent_id"),
-                "session_id": meta.get("session_id"),
-                "created_at": meta.get("created_at"),
+                "type": rtype,
+                "agent_id": agent_id_col[i].as_py() if agent_id_col is not None else None,
+                "session_id": session_id_col[i].as_py() if session_id_col is not None else None,
+                "created_at": created_col[i].value if created_col is not None else None,
             }
-            if meta.get("type") == "tool_call":
-                entry["call_id"] = meta.get("call_id")
-                entry["tool_name"] = meta.get("tool_name")
-                entry["tool_input_json"] = meta.get("tool_input_json")
-                entry["tool_output_json"] = meta.get("tool_output_json")
-                entry["outcome"] = meta.get("outcome")
-                entry["latency_ms"] = meta.get("latency_ms")
+            if rtype == "tool_call":
+                entry["call_id"] = record_id_col[i].as_py() if record_id_col is not None else None
+                entry["tool_name"] = tool_name_col[i].as_py() if tool_name_col is not None else None
+                entry["tool_input_json"] = (
+                    tool_input_col[i].as_py() if tool_input_col is not None else None
+                )
+                entry["tool_output_json"] = (
+                    tool_output_col[i].as_py() if tool_output_col is not None else None
+                )
+                entry["outcome"] = outcome_col[i].as_py() if outcome_col is not None else None
+                entry["latency_ms"] = latency_col[i].as_py() if latency_col is not None else None
             else:
-                entry["mem_id"] = meta.get("mem_id")
+                entry["mem_id"] = record_id_col[i].as_py() if record_id_col is not None else None
 
             scored.append(entry)
 
@@ -1033,7 +1157,7 @@ class Agent:
             }
             for i, m in enumerate(memories)
         ]
-        return assemble_context(chunks, max_tokens=max_tokens)
+        return assemble_context(chunks, max_tokens=max_tokens)["text"]
 
     # ── async variants ─────────────────────────────────────────────────────────
 
@@ -1089,6 +1213,48 @@ class Agent:
 
 
 # ── module-level helpers ──────────────────────────────────────────────────────
+
+def assemble_context(
+    chunks: list[dict],
+    max_tokens: int = 4096,
+    dedup_threshold: float = 0.05,
+    group_by_document: bool = True,
+    max_chunks_per_document: int = 10,
+) -> dict:
+    """Assemble a list of text chunks into structured XML context for LLM input.
+
+    Args:
+        chunks: list of dicts with keys ``document_id``, ``chunk_index``, ``chunk_text``,
+                and optional ``document_title``, ``section_path``, ``source_uri``,
+                ``distance``, ``embedding`` (``list[float]`` — enables cosine-distance
+                near-duplicate removal via *dedup_threshold*; chunks without an
+                ``"embedding"`` key are never deduplicated, matching the underlying
+                Rust default when no embedding is supplied).
+        max_tokens: token budget (4 chars ≈ 1 token).
+        dedup_threshold: cosine distance below which two chunks (that both carry an
+                         ``"embedding"``) are considered duplicates and one is dropped.
+        group_by_document: group and sort chunks by ``document_id``/``chunk_index``
+                           before rendering (default ``True``).
+        max_chunks_per_document: cap chunks per document group (default 10).
+
+    Returns:
+        ``{"text": str, "chunk_count": int, "token_estimate": int}``.
+
+    Example::
+
+        ctx = ailake.assemble_context(chunks, max_tokens=2048,
+                                       dedup_threshold=0.05)
+        print(ctx["text"])           # XML ready for LLM input
+        print(ctx["chunk_count"])    # how many chunks made it in
+    """
+    return _assemble_context_raw(
+        chunks,
+        max_tokens=max_tokens,
+        dedup_threshold=dedup_threshold,
+        group_by_document=group_by_document,
+        max_chunks_per_document=max_chunks_per_document,
+    )
+
 
 def evolve_schema(
     path: str,
@@ -1151,6 +1317,7 @@ def search(
     bm25_weight: float = 0.5,
     pruning_threshold: "float | None" = None,
     ef_search: "int | None" = None,
+    rerank_factor: "int | None" = None,
 ) -> SearchQuery:
     """Module-level search returning a chainable :class:`SearchQuery`.
 
@@ -1222,6 +1389,7 @@ def search(
         bm25_weight=bm25_weight,
         pruning_threshold=pruning_threshold,
         ef_search=ef_search,
+        rerank_factor=rerank_factor,
     )
 
 
@@ -1229,22 +1397,24 @@ def compact(
     path: str,
     *,
     min_files: int = 4,
-    target_size_bytes: int = 128 * 1024 * 1024,
+    target_size_bytes: int = 536_870_912,
     max_files_per_pass: int = 20,
     deferred: bool = False,
 ) -> dict:
     """Compact small files in an AI-Lake table into a larger merged file.
 
-    Reads table metadata from ``path``, selects files smaller than
-    ``target_size_bytes``, merges them into a single file with a rebuilt
-    HNSW/IVF-PQ index, and commits the result as a new Iceberg snapshot.
+    Native binding — calls ``ailake_query::compaction`` directly (no
+    external ``ailake`` CLI binary required). Reads table metadata from
+    ``path``, selects files smaller than ``target_size_bytes``, merges them
+    into a single file with a rebuilt HNSW/IVF-PQ index, and commits the
+    result as a new Iceberg snapshot.
 
     Args:
         path: Table root path or URI (same value passed to :class:`TableWriter`).
         min_files: Minimum number of eligible files required to trigger
                    compaction (default 4). No-op when fewer files qualify.
         target_size_bytes: Files smaller than this are candidates for merge
-                           (default 128 MiB).
+                           (default 512 MiB, matching ``ailake compact``'s CLI default).
         max_files_per_pass: Maximum files merged in one pass (default 20).
                             Bounds peak RAM and HNSW rebuild cost.
         deferred: When ``True``, writes the merged Parquet immediately and
@@ -1254,42 +1424,17 @@ def compact(
 
     Returns:
         ``{"ok": True, "files_compacted": N, "output_path": "..."}`` or
-        ``{"ok": True, "files_compacted": 0}`` when nothing to compact.
+        ``{"ok": True, "files_compacted": 0, "output_path": None}`` when nothing to compact.
 
     Example::
 
         result = ailake.compact("s3://my-lake/docs/", min_files=5)
         print(result)  # {"ok": True, "files_compacted": 1, "output_path": "data/compacted-..."}
     """
-    import json
-    import os
-    import shutil
-    import subprocess
-
-    bin_path = os.environ.get("AILAKE_BIN") or shutil.which("ailake")
-    if bin_path is None:
-        return {"ok": True, "files_compacted": 0, "warning": "ailake CLI not found; skipping"}
-
-    table_id = "default.table"
-
-    args = [
-        bin_path,
-        "--store", path,
-        "compact", table_id,
-        "--min-files", str(min_files),
-        "--target-size", str(target_size_bytes),
-        "--max-files-per-pass", str(max_files_per_pass),
-        "--format", "json",
-    ]
-    if deferred:
-        args.append("--deferred")
-    try:
-        result = subprocess.run(args, capture_output=True, text=True)
-    except (FileNotFoundError, PermissionError) as exc:
-        return {"ok": True, "files_compacted": 0, "warning": f"ailake CLI not executable: {exc}"}
-    if result.returncode != 0:
-        return {"ok": False, "error": result.stderr.strip() or result.stdout.strip()}
-    try:
-        return json.loads(result.stdout.strip())
-    except json.JSONDecodeError:
-        return {"ok": False, "error": f"unparseable CLI output: {result.stdout.strip()}"}
+    return _compact_native(
+        path,
+        min_files=min_files,
+        target_size_bytes=target_size_bytes,
+        max_files_per_pass=max_files_per_pass,
+        deferred=deferred,
+    )
