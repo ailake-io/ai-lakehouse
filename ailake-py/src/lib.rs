@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use arrow_array::{RecordBatch, StringArray};
 use arrow_ipc::writer::FileWriter;
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Schema};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
@@ -37,21 +37,56 @@ fn rt() -> PyResult<tokio::runtime::Runtime> {
     })
 }
 
+/// Wraps an i64 Unix epoch nanosecond value so `build_batch_with_extra` can
+/// tell it apart from a plain `int` extra column and emit a real
+/// `Timestamp(Nanosecond, UTC)` Arrow column instead of `Int64`.
+///
+/// Required for `last_accessed_at`/`created_at` columns consumed by
+/// `decay_memories()` (`ailake_query::memory_decay::days_old_vec` only
+/// accepts `Timestamp(ns/us)` or `Utf8`, never `Int64`).
+///
+/// Example::
+///
+///     writer.write_batch(texts, embeddings, extra_columns={
+///         "last_accessed_at": [ailake.TimestampNs(ailake.now_ns())] * len(texts),
+///     })
+#[pyclass(name = "TimestampNs", from_py_object)]
+#[derive(Clone, Copy)]
+pub struct TimestampNs {
+    #[pyo3(get)]
+    pub ns: i64,
+}
+
+#[pymethods]
+impl TimestampNs {
+    #[new]
+    fn new(ns: i64) -> Self {
+        Self { ns }
+    }
+    fn __repr__(&self) -> String {
+        format!("TimestampNs({})", self.ns)
+    }
+    fn __int__(&self) -> i64 {
+        self.ns
+    }
+}
+
 /// Build a RecordBatch from texts and optional extra columns.
 ///
 /// Texts become the `"text"` column (Utf8). Extra columns are inferred from
 /// the Python value type of the first element:
-///   - `int` → Int64
-///   - `float` → Float32
+///   - `TimestampNs` → Timestamp(Nanosecond, UTC)
 ///   - `bool` → Boolean
+///   - `float` → Float32
+///   - `int` → Int64
 ///   - `str`/other → Utf8
 fn build_batch_with_extra(
     py: Python<'_>,
     texts: Vec<String>,
     extra_columns: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<RecordBatch> {
-    use arrow_array::{BooleanArray, Float32Array, Int64Array};
-    use arrow_schema::Field;
+    use arrow_array::{BooleanArray, Float32Array, Int64Array, TimestampNanosecondArray};
+    use arrow_schema::{Field, TimeUnit};
 
     let mut fields = vec![Field::new("text", DataType::Utf8, false)];
     let text_arr: Arc<dyn arrow_array::Array> = Arc::new(StringArray::from(texts));
@@ -65,6 +100,23 @@ fn build_batch_with_extra(
             // Infer type from first element
             let first = values.first().map(|x| x.bind(py));
             if first
+                .as_ref()
+                .map(|x| x.is_instance_of::<TimestampNs>())
+                .unwrap_or(false)
+            {
+                let arr: Vec<Option<i64>> = values
+                    .iter()
+                    .map(|x| x.bind(py).extract::<TimestampNs>().ok().map(|t| t.ns))
+                    .collect();
+                fields.push(Field::new(
+                    &col_name,
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                    true,
+                ));
+                arrays.push(Arc::new(
+                    TimestampNanosecondArray::from(arr).with_timezone("UTC"),
+                ));
+            } else if first
                 .as_ref()
                 .map(|x| x.is_instance_of::<pyo3::types::PyBool>())
                 .unwrap_or(false)
@@ -136,6 +188,11 @@ pub struct TableWriter {
     runtime: tokio::runtime::Runtime,
     /// Optional Python callable used for Pattern B: embed_fn(texts) -> list[list[float]]
     embed_fn: Option<Py<PyAny>>,
+    /// Mirrors the primary column's dim/ivf_residual — RsTableWriter's `policy`
+    /// field is private, so write_batch_ivf_pq(_deferred) needs its own copy to
+    /// build an IvfPqConfig without a new Rust-side accessor.
+    dim: u32,
+    ivf_residual: bool,
 }
 
 #[pymethods]
@@ -254,6 +311,8 @@ impl TableWriter {
             inner: Some(writer),
             runtime: rt,
             embed_fn: stored_embed_fn,
+            dim,
+            ivf_residual,
         })
     }
 
@@ -338,6 +397,80 @@ impl TableWriter {
             })
     }
 
+    /// Write a batch, forcing IVF-PQ indexing (synchronous build).
+    ///
+    /// Unlike `write_batch_auto_deferred`, which only picks IVF-PQ when its
+    /// hardware/batch-size heuristic (GPU or ≥8 cores and ≥5 000 vectors)
+    /// says so, this always builds IVF-PQ — smaller index, better for S3
+    /// sequential-scan workloads. Blocks until the index is fully built.
+    ///
+    /// Args:
+    ///   texts: list[str] — text content for each row
+    ///   embeddings: list[list[float]] — one embedding per row
+    #[pyo3(signature = (texts, embeddings, extra_columns=None))]
+    fn write_batch_ivf_pq(
+        &mut self,
+        py: Python<'_>,
+        texts: Vec<String>,
+        embeddings: Vec<Vec<f32>>,
+        extra_columns: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let batch = build_batch_with_extra(py, texts, extra_columns)?;
+
+        let writer = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TableWriter already committed"))?;
+
+        let mut ivf_config =
+            ailake_query::IvfPqConfig::for_dataset(self.dim as usize, embeddings.len());
+        if self.ivf_residual {
+            ivf_config = ivf_config.with_residual();
+        }
+
+        self.runtime
+            .block_on(writer.write_batch_ivf_pq(&batch, &embeddings, ivf_config))
+            .map_err(|e| {
+                warn!("ailake-py: write_batch_ivf_pq failed: {}", e);
+                PyValueError::new_err(e.to_string())
+            })
+    }
+
+    /// Deferred variant of `write_batch_ivf_pq` — persists Parquet immediately
+    /// (~200k vec/s) and builds the IVF-PQ index in a background task.
+    ///
+    /// Args:
+    ///   texts: list[str] — text content for each row
+    ///   embeddings: list[list[float]] — one embedding per row
+    #[pyo3(signature = (texts, embeddings, extra_columns=None))]
+    fn write_batch_ivf_pq_deferred(
+        &mut self,
+        py: Python<'_>,
+        texts: Vec<String>,
+        embeddings: Vec<Vec<f32>>,
+        extra_columns: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let batch = build_batch_with_extra(py, texts, extra_columns)?;
+
+        let writer = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("TableWriter already committed"))?;
+
+        let mut ivf_config =
+            ailake_query::IvfPqConfig::for_dataset(self.dim as usize, embeddings.len());
+        if self.ivf_residual {
+            ivf_config = ivf_config.with_residual();
+        }
+
+        self.runtime
+            .block_on(writer.write_batch_ivf_pq_deferred(&batch, &embeddings, ivf_config))
+            .map_err(|e| {
+                warn!("ailake-py: write_batch_ivf_pq_deferred failed: {}", e);
+                PyValueError::new_err(e.to_string())
+            })
+    }
+
     /// Idempotent write — no-op if `batch_id` was already committed.
     ///
     /// Args:
@@ -375,11 +508,13 @@ impl TableWriter {
     ///   columns: list[tuple[VectorColSpec, list[list[float]]]]
     ///            Each tuple: (column_spec, embeddings_for_that_column)
     ///            Length of each embedding list must equal len(texts).
+    #[pyo3(signature = (texts, columns, extra_columns=None))]
     fn write_batch_multi(
         &mut self,
         py: Python<'_>,
         texts: Vec<String>,
         columns: Vec<(Py<VectorColSpec>, Vec<Vec<f32>>)>,
+        extra_columns: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         if columns.is_empty() {
             return Err(PyValueError::new_err(
@@ -387,10 +522,7 @@ impl TableWriter {
             ));
         }
 
-        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
-        let text_arr = StringArray::from(texts);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let batch = build_batch_with_extra(py, texts, extra_columns)?;
 
         // Build owned policies + embedding vecs.
         let mut mv_batches: Vec<(VectorStoragePolicy, Vec<Vec<f32>>)> =
@@ -404,6 +536,10 @@ impl TableWriter {
                 .and_then(|s| s.parse::<VectorModality>().ok());
             let mut policy = VectorStoragePolicy::default_f16(&spec.column, spec.dim, metric);
             policy.modality = modality;
+            policy.precision = parse_precision(&spec.precision);
+            policy.pre_normalize = spec.pre_normalize;
+            policy.hnsw_m = spec.hnsw_m;
+            policy.hnsw_ef_construction = spec.hnsw_ef_construction;
             mv_batches.push((policy, embs.clone()));
         }
 
@@ -442,11 +578,13 @@ impl TableWriter {
     /// Args:
     ///   texts: list[str]
     ///   columns: list[tuple[VectorColSpec, list[list[float]]]]
+    #[pyo3(signature = (texts, columns, extra_columns=None))]
     fn write_batch_multi_deferred(
         &mut self,
         py: Python<'_>,
         texts: Vec<String>,
         columns: Vec<(Py<VectorColSpec>, Vec<Vec<f32>>)>,
+        extra_columns: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         if columns.is_empty() {
             return Err(PyValueError::new_err(
@@ -454,10 +592,7 @@ impl TableWriter {
             ));
         }
 
-        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
-        let text_arr = StringArray::from(texts);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(text_arr)])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let batch = build_batch_with_extra(py, texts, extra_columns)?;
 
         let mut mv_batches: Vec<(VectorStoragePolicy, Vec<Vec<f32>>)> =
             Vec::with_capacity(columns.len());
@@ -470,6 +605,10 @@ impl TableWriter {
                 .and_then(|s| s.parse::<VectorModality>().ok());
             let mut policy = VectorStoragePolicy::default_f16(&spec.column, spec.dim, metric);
             policy.modality = modality;
+            policy.precision = parse_precision(&spec.precision);
+            policy.pre_normalize = spec.pre_normalize;
+            policy.hnsw_m = spec.hnsw_m;
+            policy.hnsw_ef_construction = spec.hnsw_ef_construction;
             mv_batches.push((policy, embs.clone()));
         }
 
@@ -516,7 +655,7 @@ impl TableWriter {
 /// Returns a list of dicts: [{"row_id": int, "distance": float, "file": str}, ...]
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None))]
+#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None))]
 fn search(
     py: Python<'_>,
     path: &str,
@@ -528,6 +667,7 @@ fn search(
     bm25_weight: f32,
     pruning_threshold: Option<f32>,
     ef_search: Option<usize>,
+    rerank_factor: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
@@ -565,7 +705,7 @@ fn search(
         top_k,
         ef_search: ef_search.unwrap_or(50),
         pruning_threshold: pruning_threshold.unwrap_or(f32::INFINITY),
-        rerank_factor: None,
+        rerank_factor,
         score_fn: None,
         partition_filter,
         hybrid,
@@ -648,21 +788,29 @@ fn search_text(
 ///
 /// Python side deserializes with: `pyarrow.ipc.open_file(io.BytesIO(bytes)).read_all()`
 #[pyfunction]
-#[pyo3(signature = (path, query, top_k=10, partition_filter=None))]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None))]
 fn search_with_data(
     py: Python<'_>,
     path: &str,
     query: Vec<f32>,
     top_k: usize,
     partition_filter: Option<String>,
+    hybrid_text: Option<String>,
+    text_column: &str,
+    bm25_weight: f32,
+    pruning_threshold: Option<f32>,
+    ef_search: Option<usize>,
+    rerank_factor: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
-        "ailake-py: search_with_data path={} dim={} top_k={} partition={:?}",
+        "ailake-py: search_with_data path={} dim={} top_k={} partition={:?} hybrid={:?}",
         path,
         query.len(),
         top_k,
-        partition_filter
+        partition_filter,
+        hybrid_text.as_deref().map(|t| &t[..t.len().min(50)])
     );
 
     let (catalog, store) = local_catalog_store(path);
@@ -682,14 +830,20 @@ fn search_with_data(
         .cloned()
         .unwrap_or_else(|| "embedding".into());
 
+    let hybrid = hybrid_text.map(|qt| {
+        ailake_query::HybridConfig::new(qt)
+            .with_text_column(text_column)
+            .with_bm25_weight(bm25_weight)
+    });
+
     let config = SearchConfig {
         top_k,
-        ef_search: 50,
-        pruning_threshold: f32::INFINITY,
-        rerank_factor: None,
+        ef_search: ef_search.unwrap_or(50),
+        pruning_threshold: pruning_threshold.unwrap_or(f32::INFINITY),
+        rerank_factor,
         score_fn: None,
         partition_filter,
-        hybrid: None,
+        hybrid,
     };
 
     let results = rt
@@ -731,20 +885,33 @@ fn record_batch_to_ipc(batch: &RecordBatch) -> PyResult<Vec<u8>> {
 ///
 /// Args:
 ///   chunks: list[dict] with keys: document_id, chunk_index, chunk_text,
-///           and optional: document_title, section_path, source_uri, distance
+///           and optional: document_title, section_path, source_uri, distance,
+///           embedding (list[float] — enables cosine-distance dedup; chunks
+///           without an "embedding" key are never deduplicated against anything,
+///           matching the Rust default when no embedding is available).
 ///   max_tokens: int — token budget (4 chars ≈ 1 token)
-///   dedup_threshold: float — cosine distance below which chunks are deduplicated
+///   dedup_threshold: float — cosine distance below which chunks are deduplicated.
+///                    Only takes effect for chunks carrying an "embedding" key.
+///   group_by_document: bool — group and sort chunks by document_id/chunk_index
+///                      before rendering (default True).
+///   max_chunks_per_document: int — cap chunks per document group (default 10).
+///
+/// Returns a dict: {"text": str, "chunk_count": int, "token_estimate": int}.
 #[pyfunction]
-#[pyo3(signature = (chunks, max_tokens=4096, dedup_threshold=0.05))]
+#[pyo3(signature = (chunks, max_tokens=4096, dedup_threshold=0.05, group_by_document=true, max_chunks_per_document=10))]
 fn assemble_context(
+    py: Python<'_>,
     chunks: Vec<Bound<'_, PyDict>>,
     max_tokens: usize,
     dedup_threshold: f32,
-) -> PyResult<String> {
+    group_by_document: bool,
+    max_chunks_per_document: usize,
+) -> PyResult<Py<PyAny>> {
     let config = ContextAssemblerConfig {
         max_tokens,
         dedup_threshold,
-        ..Default::default()
+        group_by_document,
+        max_chunks_per_document,
     };
     let ca = ContextAssembler::new(config);
 
@@ -764,6 +931,11 @@ fn assemble_context(
                     .flatten()
                     .and_then(|v| v.extract::<String>().ok())
             };
+            let embedding: Option<Vec<f32>> = d
+                .get_item("embedding")
+                .ok()
+                .flatten()
+                .and_then(|v| v.extract::<Vec<f32>>().ok());
             Chunk {
                 document_id: get_str("document_id"),
                 chunk_index: d
@@ -782,13 +954,17 @@ fn assemble_context(
                     .flatten()
                     .and_then(|v| v.extract::<f32>().ok())
                     .unwrap_or(0.0),
-                embedding: None,
+                embedding,
             }
         })
         .collect();
 
     let ctx = ca.assemble_chunks(rust_chunks);
-    Ok(ctx.text)
+    let d = PyDict::new(py);
+    d.set_item("text", ctx.text)?;
+    d.set_item("chunk_count", ctx.chunk_count)?;
+    d.set_item("token_estimate", ctx.token_estimate)?;
+    Ok(d.into())
 }
 
 /// Migrate an AI-Lake table from one embedding model to another.
@@ -914,6 +1090,10 @@ fn parse_metric(s: &str) -> PyResult<VectorMetric> {
 ///   dim: int — dimensionality of vectors in this column
 ///   metric: str — "cosine" | "euclidean" | "dot_product" | "normalized_cosine"
 ///   modality: str | None — "text" | "image" | "audio" | "video" (optional tag)
+///   precision: str — "f16" (default) | "f32" | "i8"
+///   pre_normalize: bool — normalize this column's vectors to unit L2 at write time
+///   hnsw_m: int | None — HNSW M for this column's index (None = table/lib default)
+///   hnsw_ef_construction: int | None — HNSW ef_construction for this column's index
 #[pyclass]
 pub struct VectorColSpec {
     #[pyo3(get, set)]
@@ -924,19 +1104,49 @@ pub struct VectorColSpec {
     pub metric: String,
     #[pyo3(get, set)]
     pub modality: Option<String>,
+    #[pyo3(get, set)]
+    pub precision: String,
+    #[pyo3(get, set)]
+    pub pre_normalize: bool,
+    #[pyo3(get, set)]
+    pub hnsw_m: Option<u32>,
+    #[pyo3(get, set)]
+    pub hnsw_ef_construction: Option<u32>,
 }
 
 #[pymethods]
 impl VectorColSpec {
     #[new]
-    #[pyo3(signature = (column, dim, metric="cosine", modality=None))]
-    fn new(column: String, dim: u32, metric: &str, modality: Option<String>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (column, dim, metric="cosine", modality=None, precision="f16", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None))]
+    fn new(
+        column: String,
+        dim: u32,
+        metric: &str,
+        modality: Option<String>,
+        precision: &str,
+        pre_normalize: bool,
+        hnsw_m: Option<u32>,
+        hnsw_ef_construction: Option<u32>,
+    ) -> Self {
         Self {
             column,
             dim,
             metric: metric.to_string(),
             modality,
+            precision: precision.to_string(),
+            pre_normalize,
+            hnsw_m,
+            hnsw_ef_construction,
         }
+    }
+}
+
+fn parse_precision(s: &str) -> ailake_core::VectorPrecision {
+    match s {
+        "f32" => ailake_core::VectorPrecision::F32,
+        "i8" => ailake_core::VectorPrecision::I8,
+        _ => ailake_core::VectorPrecision::F16,
     }
 }
 
@@ -953,7 +1163,8 @@ impl VectorColSpec {
 /// Returns a list of dicts: [{"row_id": int, "rrf_score": float, "file": str}, ...]
 /// rrf_score is higher for better results.
 #[pyfunction]
-#[pyo3(signature = (path, queries, top_k=10, dim=None, partition_filter=None))]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (path, queries, top_k=10, dim=None, partition_filter=None, ef_search=None, pruning_threshold=None, rerank_factor=None))]
 fn search_multimodal(
     py: Python<'_>,
     path: &str,
@@ -961,6 +1172,9 @@ fn search_multimodal(
     top_k: usize,
     dim: Option<u32>,
     partition_filter: Option<String>,
+    ef_search: Option<usize>,
+    pruning_threshold: Option<f32>,
+    rerank_factor: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     let (catalog, store) = local_catalog_store(path);
@@ -1008,9 +1222,9 @@ fn search_multimodal(
 
     let config = SearchConfig {
         top_k,
-        ef_search: 50,
-        pruning_threshold: f32::INFINITY,
-        rerank_factor: None,
+        ef_search: ef_search.unwrap_or(50),
+        pruning_threshold: pruning_threshold.unwrap_or(f32::INFINITY),
+        rerank_factor,
         score_fn: None,
         partition_filter,
         hybrid: None,
@@ -1159,6 +1373,213 @@ fn decay_memories(path: &str, decay_lambda: f32) -> PyResult<usize> {
 
     rt.block_on(job.run(&table))
         .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Compact small files in an AI-Lake table into a larger merged file.
+///
+/// Native binding over `ailake_query::compaction` (CompactionPlanner +
+/// CompactionExecutor) — no external `ailake` CLI binary required, unlike the
+/// pure-Python `compact()` this replaces, which silently no-op'd
+/// (`{"ok": true, "files_compacted": 0}`, indistinguishable from "nothing to
+/// compact") whenever the CLI binary wasn't on PATH.
+///
+/// Args:
+///   path: table root path or URI (same value passed to TableWriter)
+///   min_files: minimum eligible files required to trigger compaction (default 4)
+///   target_size_bytes: files smaller than this are merge candidates (default 512 MiB,
+///                      matching `ailake compact`'s own CLI default)
+///   max_files_per_pass: maximum files merged in one pass (default 20)
+///   deferred: when True, persists the merged Parquet immediately and builds the
+///             index in the background instead of blocking until it's ready
+///
+/// Returns a dict: {"ok": True, "files_compacted": int, "output_path": str | None}.
+#[pyfunction]
+#[pyo3(signature = (path, min_files=4, target_size_bytes=536_870_912, max_files_per_pass=20, deferred=false))]
+fn compact(
+    py: Python<'_>,
+    path: &str,
+    min_files: usize,
+    target_size_bytes: u64,
+    max_files_per_pass: usize,
+    deferred: bool,
+) -> PyResult<Py<PyAny>> {
+    use ailake_core::VectorPrecision;
+    use ailake_query::compaction::{CompactionConfig, CompactionExecutor, CompactionPlanner};
+
+    let rt = rt()?;
+    let (catalog, store) = local_catalog_store(path);
+    let table = TableIdent::new("default", "table");
+
+    let meta = rt
+        .block_on(catalog.load_table(&table))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let dim: u32 = meta
+        .properties
+        .get("ailake.vector-dim")
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| PyValueError::new_err("table missing ailake.vector-dim property"))?;
+    let column = meta
+        .properties
+        .get("ailake.vector-column")
+        .cloned()
+        .unwrap_or_else(|| "embedding".to_string());
+    let metric = parse_metric(
+        meta.properties
+            .get("ailake.vector-metric")
+            .map(|s| s.as_str())
+            .unwrap_or("cosine"),
+    )
+    .unwrap_or(VectorMetric::Cosine);
+    let pre_normalize = meta
+        .properties
+        .get("ailake.pre-normalize")
+        .map(|s| s == "true")
+        .unwrap_or(false);
+    let hnsw_m = meta
+        .properties
+        .get("ailake.hnsw-m")
+        .and_then(|s| s.parse().ok());
+    let hnsw_ef_construction = meta
+        .properties
+        .get("ailake.hnsw-ef-construction")
+        .and_then(|s| s.parse().ok());
+
+    let policy = VectorStoragePolicy {
+        column_name: column,
+        dim,
+        metric,
+        precision: VectorPrecision::F16,
+        pq: None,
+        keep_raw_for_reranking: true,
+        pre_normalize,
+        hnsw_m,
+        hnsw_ef_construction,
+        ivf_residual: false,
+        embedding_model: None,
+        modality: None,
+        partition_by: None,
+        partition_value: None,
+        partition_column_type: None,
+        partition_fields: vec![],
+    };
+
+    let config = CompactionConfig {
+        min_files_to_compact: min_files,
+        target_file_size_bytes: target_size_bytes,
+        index_strategy: Default::default(),
+        max_files_per_pass,
+    };
+    let planner = CompactionPlanner::new(config);
+    let executor = CompactionExecutor::new(Arc::clone(&store), policy);
+
+    let result = if deferred {
+        rt.block_on(executor.run_deferred(&planner, &table, Arc::clone(&catalog), "data"))
+    } else {
+        rt.block_on(executor.run(&planner, &table, Arc::clone(&catalog), "data"))
+    }
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let d = PyDict::new(py);
+    d.set_item("ok", true)?;
+    match result {
+        Some(entry) => {
+            d.set_item("files_compacted", 1)?;
+            d.set_item("output_path", entry.path)?;
+        }
+        None => {
+            d.set_item("files_compacted", 0)?;
+            d.set_item("output_path", py.None())?;
+        }
+    }
+    Ok(d.into())
+}
+
+/// Estimate storage usage before writing a table (pure math, no I/O).
+///
+/// Mirrors `ailake estimate`'s math exactly (ailake-cli/src/main.rs
+/// run_estimate) — F32/F16/I8 raw vector bytes, an HNSW index-size
+/// approximation, and IVF-PQ code bytes, across 6 storage-precision modes.
+///
+/// Args:
+///   rows: number of vectors
+///   dim: vector dimensionality
+///   hnsw_m: HNSW M parameter — connections per node (default 16)
+///   pq_m: PQ sub-vectors M for the IVF-PQ/PQ-only rows (default: dim/32, clamped [8, dim])
+///
+/// Returns a list of dicts, one per storage mode:
+///   {"mode": str, "vectors_bytes": int, "index_bytes": int, "total_bytes": int,
+///    "reduction_vs_f32_hnsw": float, "recall": str, "note": str}
+#[pyfunction]
+#[pyo3(signature = (rows, dim, hnsw_m=16, pq_m=None))]
+fn estimate(
+    py: Python<'_>,
+    rows: u64,
+    dim: u32,
+    hnsw_m: u32,
+    pq_m: Option<u32>,
+) -> PyResult<Py<PyAny>> {
+    let dim = dim as u64;
+    let pq_m = pq_m
+        .map(|m| m as u64)
+        .unwrap_or_else(|| (dim / 32).max(8).min(dim));
+
+    let vec_f32 = rows.saturating_mul(dim).saturating_mul(4);
+    let vec_f16 = rows.saturating_mul(dim).saturating_mul(2);
+    let vec_i8 = rows.saturating_mul(dim);
+
+    // HNSW index: ~M×2 neighbors × 9 bytes avg (bincode overhead-adjusted).
+    let hnsw_bytes = rows
+        .saturating_mul(hnsw_m as u64)
+        .saturating_mul(2)
+        .saturating_mul(9);
+    // IVF-PQ codes: 1 byte per sub-quantizer code per row.
+    let pq_bytes = rows.saturating_mul(pq_m);
+
+    let baseline_total = vec_f32 + hnsw_bytes;
+
+    let rows_table: [(&str, u64, u64, &str, &str); 6] = [
+        ("F32 (baseline)", vec_f32, hnsw_bytes, "~99%", ""),
+        ("F16 (default)", vec_f16, hnsw_bytes, "~99%", ""),
+        ("I8", vec_i8, hnsw_bytes, "~97%", ""),
+        (
+            "F16 + IVF-PQ index",
+            vec_f16,
+            pq_bytes,
+            "~99%",
+            "reranks with raw F16",
+        ),
+        (
+            "I8  + IVF-PQ index",
+            vec_i8,
+            pq_bytes,
+            "~97%",
+            "reranks with raw I8",
+        ),
+        (
+            "PQ-only (pq_only=True)",
+            0,
+            pq_bytes,
+            "~94%",
+            "no reranking",
+        ),
+    ];
+
+    let list = PyList::empty(py);
+    for (mode, vectors_bytes, index_bytes, recall, note) in rows_table {
+        let total = vectors_bytes + index_bytes;
+        let reduction = baseline_total as f64 / total.max(1) as f64;
+        let d = PyDict::new(py);
+        d.set_item("mode", mode)?;
+        d.set_item("vectors_bytes", vectors_bytes)?;
+        d.set_item("index_bytes", index_bytes)?;
+        d.set_item("total_bytes", total)?;
+        d.set_item("reduction_vs_f32_hnsw", reduction)?;
+        d.set_item("recall", recall)?;
+        d.set_item("note", note)?;
+        list.append(d)?;
+    }
+    Ok(list.into())
 }
 
 /// Mark rows as deleted in a V3 AI-Lake table using Iceberg Deletion Vectors.
@@ -1520,6 +1941,7 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TableWriter>()?;
     m.add_class::<VectorColSpec>()?;
     m.add_class::<PyWorkingMemoryBuffer>()?;
+    m.add_class::<TimestampNs>()?;
     m.add_function(wrap_pyfunction!(search, m)?)?;
     m.add_function(wrap_pyfunction!(search_text, m)?)?;
     m.add_function(wrap_pyfunction!(search_multimodal, m)?)?;
@@ -1535,6 +1957,8 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hardware_info, m)?)?;
     m.add_function(wrap_pyfunction!(add_vector_column, m)?)?;
     m.add_function(wrap_pyfunction!(backfill_vector_column, m)?)?;
+    m.add_function(wrap_pyfunction!(compact, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate, m)?)?;
     Ok(())
 }
 

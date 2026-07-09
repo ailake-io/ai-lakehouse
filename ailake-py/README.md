@@ -153,8 +153,11 @@ Opens or creates an AI-Lake table at `path`.
 |---|---|
 | `insert(texts, embeddings=None, extra_columns=None) → Table` | Buffer a batch. `embeddings`: `list[list[float]]` or numpy array. When `embed_fn` was set on `open_table()`, `embeddings` may be omitted — the callable is invoked automatically. `extra_columns`: `dict[str, list]` of additional tabular columns (e.g. `id`, `category`) written alongside `text`/`embedding`; type per column inferred from its first element (bool/float/int/str). |
 | `write_batch_auto_deferred(texts, embeddings=None, extra_columns=None) → Table` | Deferred write — Parquet persisted immediately (~200k vec/s); index (HNSW or IVF-PQ, auto-selected) built in a background thread. Shard served via flat scan until index ready. |
+| `write_batch_idempotent(texts, embeddings, batch_id, extra_columns=None) → Table` | No-op if `batch_id` was already committed — safe for retried Airflow tasks / at-least-once pipelines. |
+| `write_batch_multi(texts, columns, extra_columns=None) → Table` | N-column multimodal write — see `TableWriter.write_batch_multi` below. |
+| `write_batch_multi_deferred(texts, columns, extra_columns=None) → Table` | Deferred variant of `write_batch_multi`. |
 | `commit() → int` | Persist as a new Iceberg snapshot; returns snapshot ID. |
-| `search(query, top_k=10, fetch_data=False, partition_filter=None, score_fn=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None) → SearchQuery` | Lazy, chainable search. `query`: `list[float]` or numpy array. `fetch_data=True` returns all Parquet columns + `_distance`. `hybrid_text` enables BM25+vector RRF fusion. `pruning_threshold` skips files whose centroid is farther than this from the query. `ef_search` overrides the HNSW search pool size. Raises `ModelMismatch` if query dim ≠ table dim. |
+| `search(query, top_k=10, fetch_data=False, partition_filter=None, score_fn=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None) → SearchQuery` | Lazy, chainable search. `query`: `list[float]` or numpy array. `fetch_data=True` returns all Parquet columns + `_distance`. `hybrid_text` enables BM25+vector RRF fusion. `pruning_threshold` skips files whose centroid is farther than this from the query. `ef_search` overrides the HNSW search pool size. `rerank_factor` corrects PQ approximation error on IVF-PQ tables by fetching `top_k * rerank_factor` candidates and reranking with exact distances. Raises `ModelMismatch` if query dim ≠ table dim. |
 | `insert_async(...)` | Async variant of `insert`. |
 | `write_batch_auto_deferred_async(...)` | Async variant of `write_batch_auto_deferred`. |
 | `commit_async() → int` | Async variant of `commit`. |
@@ -199,7 +202,7 @@ df = table.search(query, top_k=10, fetch_data=True).to_pandas()
 
 `fetch_data=True` reads each matching Parquet file once and uses `arrow_select::take` to extract only the matched rows — no full table scan.
 
-### `search(path, query, top_k=10, fetch_data=False, partition_filter=None, score_fn=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None) → SearchQuery`
+### `search(path, query, top_k=10, fetch_data=False, partition_filter=None, score_fn=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None) → SearchQuery`
 
 Module-level search returning the same chainable `SearchQuery`.
 
@@ -207,9 +210,10 @@ Module-level search returning the same chainable `SearchQuery`.
 - `hybrid_text` — BM25 query string; when set, retrieves `10×top_k` HNSW candidates and fuses via RRF with `bm25_weight`.
 - `pruning_threshold` — geometric pruning distance; files whose centroid distance exceeds this are skipped. Default `None` = no pruning.
 - `ef_search` — HNSW search pool size. Larger = higher recall, slower. Default `None` = table default (50).
+- `rerank_factor` — when set, fetches `top_k * rerank_factor` HNSW candidates and reranks with exact F32 distances — corrects PQ approximation error on IVF-PQ-indexed tables. Default `None` = off. Also honored by `search_with_data`/`scan` and `search_multimodal`.
 - `score_fn` — re-ranking callable `(distance: float, row: Any) -> float`. Requires `fetch_data=True`.
 
-### `VectorColSpec(column, dim, metric="cosine", modality=None)`
+### `VectorColSpec(column, dim, metric="cosine", modality=None, precision="f16", pre_normalize=False, hnsw_m=None, hnsw_ef_construction=None)`
 
 Declares one vector column for multi-column writes or searches.
 
@@ -219,10 +223,13 @@ Declares one vector column for multi-column writes or searches.
 | `dim` | Embedding dimension | `512` |
 | `metric` | Distance metric | `"cosine"` |
 | `modality` | Optional tag — stored as `ailake.modality-<column>` | `"text"` / `"image"` / `"audio"` / `"video"` |
+| `precision` | Per-column storage precision | `"f16"` (default) / `"f32"` / `"i8"` |
+| `pre_normalize` | Normalize this column's vectors to unit L2 at write time | `False` (default) |
+| `hnsw_m` / `hnsw_ef_construction` | Per-column HNSW tuning (`None` = table/library default) | `8` / `100` |
 
-### `TableWriter.write_batch_multi(texts, columns)`
+### `TableWriter.write_batch_multi(texts, columns, extra_columns=None)`
 
-Write a batch with **N independent vector columns** in one call. Each column gets its own HNSW index in the AILK section of the file footer.
+Write a batch with **N independent vector columns** in one call. Each column gets its own HNSW index in the AILK section of the file footer. `extra_columns` works the same as on `write_batch` (e.g. for `MultimodalContextSchema` fields like `media_uri`/`media_caption`). `write_batch_multi_deferred(...)` is the deferred-index variant.
 
 ```python
 from ailake import TableWriter, VectorColSpec
@@ -234,11 +241,16 @@ writer = TableWriter("s3://my-lake/media/", dim=1536, metric="cosine")
 writer.write_batch_multi(
     texts,
     [(text_spec, text_embeddings), (image_spec, image_embeddings)],
+    extra_columns={"media_uri": media_uris, "media_caption": captions},
 )
 snapshot_id = writer.commit()
 ```
 
-### `search_multimodal(path, queries, top_k=10) → list[dict]`
+### `TableWriter.write_batch_ivf_pq(texts, embeddings, extra_columns=None)` / `write_batch_ivf_pq_deferred(...)`
+
+Forces IVF-PQ indexing regardless of `write_batch_auto_deferred`'s hardware/batch-size heuristic — smaller index, better for S3 sequential-scan workloads. The `_deferred` variant persists Parquet immediately and builds the index in the background.
+
+### `search_multimodal(path, queries, top_k=10, ef_search=None, pruning_threshold=None, rerank_factor=None) → list[dict]`
 
 Cross-modal search: fuse results from N vector columns via **Reciprocal Rank Fusion**.
 
@@ -263,7 +275,7 @@ argument needed when reading tables written with `write_batch_multi`.
 
 ### `Agent(table_path, embed_fn, agent_id=None)` — Phase 9 episodic memory
 
-High-level helper for agent frameworks (LangChain, CrewAI, AutoGen). Wraps `TableWriter` + `search` + `ContextAssembler` with hybrid scoring (distance × recency × importance) and automatic per-agent partition isolation.
+High-level helper for agent frameworks (LangChain, CrewAI, AutoGen). Wraps `TableWriter` + `search` + `ContextAssembler` with hybrid scoring (distance × recency × importance) and automatic per-agent partition isolation. Metadata (`agent_id`, `session_id`, `mem_type`, `importance`, `created_at`, `last_accessed_at`, `tool_name`, `outcome`, ...) is written as real typed columns — the table stays queryable by any AI-Lake client (Spark/Trino/Flink/DuckDB/CLI), and `ailake.decay_memories(table_path)` works against it directly (it reads the real `last_accessed_at` Timestamp column, not a JSON-packed string).
 
 ```python
 import ailake
@@ -411,14 +423,31 @@ info = ailake.hardware_info()
 
 Call before `write_batch_auto_deferred` to understand what index type will be selected.
 
-### `compact(path, *, min_files=4, target_size_bytes=134217728, max_files_per_pass=20, deferred=False) → dict`
+### `compact(path, *, min_files=4, target_size_bytes=536870912, max_files_per_pass=20, deferred=False) → dict`
 
-Merges small files into a larger file and rebuilds the HNSW index. Returns `{"ok": True, "files_compacted": N}`. No-op when fewer than `min_files` qualify.
+Native binding — calls `ailake_query::compaction` directly (no external `ailake` CLI binary required). Merges small files into a larger file and rebuilds the HNSW/IVF-PQ index. Returns `{"ok": True, "files_compacted": N, "output_path": str | None}`. No-op when fewer than `min_files` qualify.
 
 ```python
 result = ailake.compact("s3://my-lake/docs/", min_files=5)
 # {"ok": True, "files_compacted": 1, "output_path": "data/compacted-..."}
 ```
+
+### `estimate(rows, dim, hnsw_m=16, pq_m=None) → list[dict]`
+
+Pure-math storage estimate (no I/O) across 6 precision modes (F32/F16/I8, with/without IVF-PQ, PQ-only). Mirrors `ailake estimate`'s CLI output exactly.
+
+```python
+for row in ailake.estimate(rows=1_000_000, dim=1536):
+    print(row["mode"], row["total_bytes"], row["recall"])
+```
+
+### `add_vector_column(table_path, column, dim, metric="cosine", precision="f16", pre_normalize=False, hnsw_m=None, hnsw_ef_construction=None) → int`
+
+Adds a new vector column to an existing table's schema without rewriting data files. Old files return `null` for this column until `backfill_vector_column` runs. Returns the new schema-id.
+
+### `backfill_vector_column(table_path, column, embed_fn, text_column="chunk_text", batch_size=512) → None`
+
+Backfills a column added via `add_vector_column` across all existing files by embedding `text_column`. Idempotent — files that already have the column are skipped.
 
 ### `evolve_schema(path, *, add_columns=None, rename_columns=None) → int`
 
@@ -457,23 +486,19 @@ hits = ailake.search_text("s3://my-lake/docs/", "rust async programming", top_k=
 hits = ailake.search_text(path, "query", text_columns=["chunk_text", "document_title"])
 ```
 
-### `info(path) → dict`
+### `scan(path, query, top_k=10, ...) → bytes`
 
-Returns table metadata including per-file index status. Useful for monitoring deferred index builds.
+Alias for `search_with_data` — same capability as ailake-go's `Scan()` and ailake-jni's `ailake_scan_json` (search + full-row fetch in one call, no JOIN needed against a separately-registered table). See `search_with_data` below.
+
+### `assemble_context(chunks, max_tokens=4096, dedup_threshold=0.05, group_by_document=True, max_chunks_per_document=10) → dict`
+
+Assembles chunk dicts into structured XML for LLM input. Returns `{"text": str, "chunk_count": int, "token_estimate": int}` (previously returned a bare string). Deduplicates near-identical chunks within the token budget — pass an `"embedding": list[float]` key per chunk to enable cosine-distance dedup; chunks without it are never deduplicated.
 
 ```python
-info = ailake.info("s3://my-lake/docs/")
-# {"files": [...], "ready_files": 5, "indexing_files": 1, "failed_files": 0}
-# Each entry in "files" has:
-#   {"path": "data/part-00000.parquet", "index_status": "ready"|"indexing"|"failed",
-#    "index_error": None|"k-means did not converge", "record_count": 50000}
+ctx = ailake.assemble_context(chunks, max_tokens=2048)
+print(ctx["text"])         # XML ready for LLM input
+print(ctx["chunk_count"])  # how many chunks made it in
 ```
-
-When `index_status == "failed"`, the file is served via flat scan (O(N) brute-force). The next compaction run automatically rebuilds the index.
-
-### `assemble_context(chunks, max_tokens=4096, dedup_threshold=0.05) → str`
-
-Assembles chunk dicts into structured XML for LLM input. Deduplicates near-identical chunks within the token budget.
 
 ## Storage modes and index types
 
