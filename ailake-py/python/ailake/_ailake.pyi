@@ -3,7 +3,29 @@
 # Stubs for the compiled Rust extension ailake._ailake.
 # This file is the authoritative type source for type checkers and IDEs.
 
-from typing import Any, Callable, Optional, Sequence, Union
+from typing import Callable, Optional, Sequence
+
+
+class TimestampNs:
+    """Wraps an i64 Unix epoch nanosecond value for use as an ``extra_columns``
+    value that should become a real ``Timestamp(Nanosecond, UTC)`` Arrow column
+    instead of ``Int64``.
+
+    Required for ``last_accessed_at``/``created_at`` columns consumed by
+    :func:`decay_memories` — a plain ``int`` (e.g. the raw return of
+    :func:`now_ns`) is written as ``Int64``, which ``decay_memories`` rejects.
+
+    Example::
+
+        writer.write_batch(texts, embeddings, extra_columns={
+            "last_accessed_at": [ailake.TimestampNs(ailake.now_ns())] * len(texts),
+        })
+    """
+
+    ns: int
+
+    def __init__(self, ns: int) -> None: ...
+    def __int__(self) -> int: ...
 
 
 class VectorColSpec:
@@ -15,12 +37,21 @@ class VectorColSpec:
         metric: ``"cosine"`` | ``"euclidean"`` | ``"dot_product"`` | ``"normalized_cosine"``.
         modality: Optional tag — ``"text"`` | ``"image"`` | ``"audio"`` | ``"video"``.
                   Stored as ``ailake.modality-<column>`` in Iceberg properties.
+        precision: ``"f16"`` (default) | ``"f32"`` | ``"i8"`` — storage precision
+                   for this column's vectors.
+        pre_normalize: Normalize this column's vectors to unit L2 at write time.
+        hnsw_m: HNSW ``M`` for this column's index (``None`` = table/library default).
+        hnsw_ef_construction: HNSW ``ef_construction`` for this column's index.
     """
 
     column: str
     dim: int
     metric: str
     modality: Optional[str]
+    precision: str
+    pre_normalize: bool
+    hnsw_m: Optional[int]
+    hnsw_ef_construction: Optional[int]
 
     def __init__(
         self,
@@ -28,6 +59,10 @@ class VectorColSpec:
         dim: int,
         metric: str = "cosine",
         modality: Optional[str] = None,
+        precision: str = "f16",
+        pre_normalize: bool = False,
+        hnsw_m: Optional[int] = None,
+        hnsw_ef_construction: Optional[int] = None,
     ) -> None: ...
 
 class TableWriter:
@@ -147,10 +182,37 @@ class TableWriter:
         """
         ...
 
+    def write_batch_ivf_pq(
+        self,
+        texts: Sequence[str],
+        embeddings: Sequence[Sequence[float]],
+        extra_columns: Optional[dict[str, list]] = None,
+    ) -> None:
+        """Write a batch, forcing IVF-PQ indexing (synchronous build).
+
+        Unlike ``write_batch_auto_deferred``, which only picks IVF-PQ when its
+        hardware/batch-size heuristic says so, this always builds IVF-PQ —
+        smaller index, better for S3 sequential-scan workloads. Blocks until
+        the index is fully built.
+        """
+        ...
+
+    def write_batch_ivf_pq_deferred(
+        self,
+        texts: Sequence[str],
+        embeddings: Sequence[Sequence[float]],
+        extra_columns: Optional[dict[str, list]] = None,
+    ) -> None:
+        """Deferred variant of ``write_batch_ivf_pq`` — persists Parquet
+        immediately (~200k vec/s) and builds the IVF-PQ index in the background.
+        """
+        ...
+
     def write_batch_multi(
         self,
         texts: Sequence[str],
         columns: Sequence[tuple["VectorColSpec", Sequence[Sequence[float]]]],
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> None:
         """Write a batch with N independent vector columns.
 
@@ -179,6 +241,7 @@ class TableWriter:
         self,
         texts: Sequence[str],
         columns: Sequence[tuple["VectorColSpec", Sequence[Sequence[float]]]],
+        extra_columns: Optional[dict[str, list]] = None,
     ) -> None:
         """Deferred variant of ``write_batch_multi``.
 
@@ -231,6 +294,7 @@ def search(
     bm25_weight: float = 0.5,
     pruning_threshold: Optional[float] = None,
     ef_search: Optional[int] = None,
+    rerank_factor: Optional[int] = None,
 ) -> list[dict[str, object]]:
     """Search a table for the top-*k* nearest vectors to *query*.
 
@@ -250,6 +314,10 @@ def search(
                      ``"chunk_text"``).
         bm25_weight: Weight for BM25 signal in RRF fusion — ``0.0`` = pure vector,
                      ``1.0`` = pure BM25 (default ``0.5``).
+        ef_search: HNSW beam width override. ``None`` = 50.
+        rerank_factor: When set, fetches ``top_k * rerank_factor`` HNSW candidates
+                       and reranks with exact F32 distances before truncating —
+                       corrects PQ approximation error on IVF-PQ-indexed tables.
 
     Returns:
         List of dicts with keys ``row_id`` (int), ``distance`` (float),
@@ -366,10 +434,13 @@ def decay_memories(
 ) -> int:
     """Recompute ``recency_weight`` for all rows in an episodic memory table.
 
-    Reads the ``last_accessed_at`` column (ISO-8601 date string) from each
-    data file, applies ``recency_weight = exp(-lambda × days_since_access)``,
-    rewrites the file with the updated column, and commits a new Iceberg
-    snapshot via ``SnapshotOperation::Overwrite``.
+    Reads the ``last_accessed_at`` column from each data file — accepts
+    ``Timestamp(Nanosecond/Microsecond, UTC)`` (write via
+    ``TimestampNs(now_ns())`` in ``extra_columns``) or a legacy ISO-8601 date
+    string; any other Arrow type raises ``ValueError``. Applies
+    ``recency_weight = exp(-lambda × days_since_access)``, rewrites the file
+    with the updated column, and commits a new Iceberg snapshot via
+    ``SnapshotOperation::Overwrite``.
 
     Call periodically (e.g. nightly) to ensure stale memories are naturally
     down-ranked in hybrid recall scoring.
@@ -391,8 +462,22 @@ def search_with_data(
     query: Sequence[float],
     top_k: int = 10,
     partition_filter: Optional[str] = None,
+    hybrid_text: Optional[str] = None,
+    text_column: str = "chunk_text",
+    bm25_weight: float = 0.5,
+    pruning_threshold: Optional[float] = None,
+    ef_search: Optional[int] = None,
+    rerank_factor: Optional[int] = None,
 ) -> bytes:
     """Search and return full row data serialized as Arrow IPC bytes.
+
+    Also exposed as ``ailake.scan`` — same capability as ailake-go's ``Scan()``
+    and ailake-jni's ``ailake_scan_json`` (search + full-row fetch, no JOIN
+    needed against a separately-registered table).
+
+    Full parameter parity with :func:`search` — hybrid BM25+vector search,
+    pruning, ``ef_search``, and ``rerank_factor`` are all honored here too
+    (previously this function silently dropped all of them).
 
     Deserialize in Python with::
 
@@ -406,6 +491,12 @@ def search_with_data(
         partition_filter: When set, only files tagged with this partition value are
                           searched (manifest-level pruning). Pass ``agent_id`` for
                           per-agent isolated search without post-scan filtering.
+        hybrid_text: Optional text query for BM25 hybrid search (see :func:`search`).
+        text_column: Parquet column used for BM25 scoring (default ``"chunk_text"``).
+        bm25_weight: BM25 weight in RRF fusion (default ``0.5``).
+        pruning_threshold: Geometric pruning distance (default ``None`` = no pruning).
+        ef_search: HNSW beam width override. ``None`` = 50.
+        rerank_factor: Exact-distance reranking multiplier (see :func:`search`).
 
     Returns:
         Arrow IPC file-format bytes.  Deserialize to a ``pyarrow.Table``
@@ -419,20 +510,27 @@ def assemble_context(
     chunks: list[dict[str, object]],
     max_tokens: int = 4096,
     dedup_threshold: float = 0.05,
-) -> str:
+    group_by_document: bool = True,
+    max_chunks_per_document: int = 10,
+) -> dict[str, object]:
     """Assemble chunks into structured XML context for LLM input.
 
     Args:
         chunks: List of dicts with keys ``document_id`` (str),
                 ``chunk_index`` (int), ``chunk_text`` (str), and optional
                 ``document_title``, ``section_path``, ``source_uri``,
-                ``distance``.
+                ``distance``, ``embedding`` (``list[float]`` — enables
+                cosine-distance dedup via *dedup_threshold*; chunks without
+                an ``"embedding"`` key are never deduplicated).
         max_tokens: Token budget — 4 chars ≈ 1 token (default 4096).
-        dedup_threshold: Cosine distance below which near-duplicate chunks
-                         are deduplicated (default 0.05).
+        dedup_threshold: Cosine distance below which two chunks that both
+                         carry an ``"embedding"`` are considered duplicates.
+        group_by_document: Group and sort chunks by ``document_id``/``chunk_index``
+                           before rendering (default ``True``).
+        max_chunks_per_document: Cap chunks per document group (default 10).
 
     Returns:
-        XML string ready to pass to an LLM as context.
+        ``{"text": str, "chunk_count": int, "token_estimate": int}``.
     """
     ...
 
@@ -489,6 +587,9 @@ def search_multimodal(
     top_k: int = 10,
     dim: Optional[int] = None,
     partition_filter: Optional[str] = None,
+    ef_search: Optional[int] = None,
+    pruning_threshold: Optional[float] = None,
+    rerank_factor: Optional[int] = None,
 ) -> list[dict[str, object]]:
     """Cross-modal search: fuse results from N vector columns via Reciprocal Rank Fusion.
 
@@ -521,99 +622,12 @@ def search_multimodal(
     ...
 
 
-# ── Agent (Phase 9) ────────────────────────────────────────────────────────────
-
-_Vector = Union[Sequence[float], Any]  # list[float] or numpy/torch array with .tolist()
-
-class Agent:
-    """High-level agent memory helper — Phase 9.
-
-    Wraps ``TableWriter`` + vector search + ``assemble_context`` for agent
-    frameworks (LangChain, CrewAI, AutoGen).
-
-    Args:
-        table_path: Local path or object-storage URI for the memory table.
-        embed_fn:   ``Callable[[list[str]], list[list[float]]]``.
-        agent_id:   Stable UUID string (auto-generated if omitted).
-        session_id: Current session UUID (auto-generated if omitted).
-        metric:     Distance metric (default ``"cosine"``).
-        lambda_:    Recency decay rate (default 0.099 ≈ weekly half-life).
-    """
-
-    def __init__(
-        self,
-        table_path: str,
-        embed_fn: Callable[[list[str]], list[list[float]]],
-        agent_id: Optional[str] = None,
-        session_id: Optional[str] = None,
-        metric: str = "cosine",
-        lambda_: float = 0.099,
-    ) -> None: ...
-
-    @property
-    def agent_id(self) -> str: ...
-
-    @property
-    def session_id(self) -> str: ...
-
-    def remember(self, text: str, importance: float = 1.0) -> str:
-        """Buffer *text* as an episodic memory.  Returns ``mem_id`` UUID.
-
-        Call :meth:`commit` to persist.
-        """
-        ...
-
-    def log_tool_call(
-        self,
-        name: str,
-        input: object,
-        output: object,
-        outcome: str = "success",
-        latency_ms: int = 0,
-        importance: float = 0.5,
-    ) -> str:
-        """Buffer a tool-call record.  Returns ``call_id`` UUID.
-
-        Call :meth:`commit` to persist.
-        """
-        ...
-
-    def commit(self) -> int:
-        """Persist buffered records as a new Iceberg snapshot.  Returns snapshot id."""
-        ...
-
-    def recall(
-        self,
-        query: _Vector,
-        top_k: int = 10,
-        oversample: int = 3,
-    ) -> list[dict]:
-        """Retrieve *top_k* memories with hybrid scoring.
-
-        Uses manifest-level partition pruning: only files written by this agent
-        (tagged with ``partition_value=agent_id``) are searched — no post-scan filter.
-
-        Returns list of dicts sorted by hybrid score (lower = better), each with:
-        ``text``, ``distance``, ``score``, ``recency``, ``importance``,
-        ``type`` (``"memory"`` or ``"tool_call"``), ``agent_id``, ``session_id``,
-        ``created_at``, and type-specific fields (``mem_id`` or ``call_id``,
-        ``tool_name``, ``tool_input_json``, ``tool_output_json``, ``outcome``).
-        """
-        ...
-
-    def assemble_context(self, query: _Vector, max_tokens: int = 4096) -> str:
-        """Recall memories and format as XML context for an LLM.
-
-        Returns XML string ready for inclusion in a Claude / GPT-4 prompt.
-        """
-        ...
-
-    async def remember_async(self, text: str, importance: float = 1.0) -> str: ...
-    async def recall_async(self, query: _Vector, top_k: int = 10) -> list[dict]: ...
-    async def commit_async(self) -> int: ...
-
-    def __enter__(self) -> "Agent": ...
-    def __exit__(self, *_: Any) -> None: ...
+# NOTE: `Agent`, `Table`, and `SearchQuery` are pure-Python classes defined
+# directly in ailake/__init__.py — NOT part of the compiled `_ailake`
+# extension. Their types come from __init__.py's own inline annotations;
+# they intentionally have no stub here (a duplicate, divergent stub in this
+# file previously declared nonexistent `Agent.agent_id`/`session_id`
+# properties and a stale `str`-returning `assemble_context` — removed).
 
 def delete_where(path: str, column: str, values: list[str]) -> None: ...
 def delete_rows(table_path: str, file_path: str, row_ids: list[int]) -> None: ...
@@ -629,3 +643,61 @@ def add_column(
 ) -> int: ...
 def rename_column(path: str, old_name: str, new_name: str) -> int: ...
 def hardware_info() -> dict[str, str]: ...
+
+def add_vector_column(
+    table_path: str,
+    column: str,
+    dim: int,
+    metric: str = "cosine",
+    precision: str = "f16",
+    pre_normalize: bool = False,
+    hnsw_m: Optional[int] = None,
+    hnsw_ef_construction: Optional[int] = None,
+) -> int:
+    """Add a new vector column to an existing table schema without rewriting
+    data files. Old files return ``null`` for this column until
+    :func:`backfill_vector_column` is run. Returns the new schema-id.
+    """
+    ...
+
+def backfill_vector_column(
+    table_path: str,
+    column: str,
+    embed_fn: Callable[[list[str]], list[list[float]]],
+    text_column: str = "chunk_text",
+    batch_size: int = 512,
+) -> None:
+    """Backfill a new vector column (added via :func:`add_vector_column`) in
+    all existing files. Reads each file, calls *embed_fn* on *text_column*,
+    and rewrites the file with both the original and new vector columns.
+    Idempotent — files that already have the new column are skipped.
+    """
+    ...
+
+def compact(
+    path: str,
+    min_files: int = 4,
+    target_size_bytes: int = 536_870_912,
+    max_files_per_pass: int = 20,
+    deferred: bool = False,
+) -> dict[str, object]:
+    """Compact small files in a table into a larger merged file. Native
+    binding — no external ``ailake`` CLI binary required.
+
+    Returns ``{"ok": True, "files_compacted": int, "output_path": str | None}``.
+    """
+    ...
+
+def estimate(
+    rows: int,
+    dim: int,
+    hnsw_m: int = 16,
+    pq_m: Optional[int] = None,
+) -> list[dict[str, object]]:
+    """Estimate storage usage before writing a table (pure math, no I/O).
+
+    Returns a list of dicts, one per storage-precision mode:
+    ``{"mode": str, "vectors_bytes": int, "index_bytes": int, "total_bytes": int,
+    "reduction_vs_f32_hnsw": float, "recall": str, "note": str}``.
+    """
+    ...

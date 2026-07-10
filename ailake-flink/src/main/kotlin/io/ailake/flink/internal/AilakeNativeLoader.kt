@@ -217,6 +217,64 @@ object AilakeNativeLoader {
         }
     }
 
+    // ── Scan (Fase 11 — search + full-row fetch, no JOIN needed) ──────────────
+
+    /** One column of a [scan] response — `type` is one of the tags `ailake_scan_json` emits: `int64`, `float32`, `float64`, `utf8`, `bool`, `list_float32`. */
+    data class ScanColumn(val name: String, val type: String)
+
+    data class ScanResponse(
+        val ok: Boolean,
+        val schema: List<ScanColumn> = emptyList(),
+        val num_rows: Int = 0,
+        val columns: Map<String, List<Any?>> = emptyMap(),
+        val error: String? = null,
+    )
+
+    /**
+     * Vector search + full-row fetch in one native call — closes the "SQL search only returns
+     * row_id/distance/file_path" gap: previously the only way to get real columns
+     * (chunk_text, document_title, ...) back from a search was a manual JOIN against a
+     * separately-registered Iceberg table pointing at the same physical location. Result is
+     * columnar; every stored column comes back (vector column decoded to nested float lists),
+     * plus a trailing `_distance` column — no column-subset filter on the native side.
+     */
+    fun scan(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        vecCol: String,
+        dim: Int,
+        query: FloatArray,
+        topK: Int = 10,
+        partitionFilter: String? = null,
+    ): ScanResponse {
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse,
+            "namespace" to namespace,
+            "table" to table,
+            "vec_col" to vecCol,
+            "dim" to dim,
+            "query" to query.toList(),
+            "top_k" to topK,
+        )
+        if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        val req = mapper.writeValueAsString(payload)
+        val ptr = lib.ailake_scan_json(req)
+            ?: throw RuntimeException("ailake_scan_json returned null for table=$namespace.$table")
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<ScanResponse>(json)
+            if (!resp.ok) {
+                log.error("[ailake] ailake_scan_json returned error for table={}.{}: {}", namespace, table, resp.error)
+                throw RuntimeException("ailake_scan_json error: ${resp.error}")
+            }
+            log.debug("[ailake] scan OK table={}.{} top_k={} num_rows={}", namespace, table, topK, resp.num_rows)
+            resp
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
     // ── Write ─────────────────────────────────────────────────────────────────
 
     data class WriteResponse(
@@ -323,6 +381,89 @@ object AilakeNativeLoader {
                 throw RuntimeException("ailake_write_batch_json error: ${resp.error}")
             }
             log.info("[ailake] write OK table={}.{} rows={} snapshot_id={}", namespace, table, ids.size, resp.snapshot_id)
+            resp.snapshot_id
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    /**
+     * One vector column in a multi-column (Phase 8 multimodal) write batch — e.g. text +
+     * image embeddings on the same row, each with its own HNSW index. See [writeBatchMulti].
+     */
+    data class VectorColSpec(
+        val column: String,
+        val dim: Int,
+        val metric: String = "cosine",
+        val precision: String = "f16",
+        val modality: String? = null,
+    )
+
+    /**
+     * Write a batch of rows with N independent vector columns (Phase 8 multimodal). Each
+     * column gets its own HNSW section in the same AI-Lake file. Was already exposed from
+     * Spark (`ailakeWriteMulti`) but had no wrapper here — same "dead capability" gap as
+     * DELETE/schema evolution before them, closed the same way. Throws on native error,
+     * matching [writeBatch]'s existing contract.
+     *
+     * @param vectorColumns  one spec per vector column, paired with its per-row embeddings
+     *                       (`embeddings[i]` has one entry per row, in the same order as `ids`).
+     *                       First entry is primary (used for geometric pruning in the manifest).
+     */
+    fun writeBatchMulti(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        ids: LongArray,
+        vectorColumns: List<Pair<VectorColSpec, Array<FloatArray>>>,
+        embeddingModel: String? = null,
+        formatVersion: Int = 2,
+        ftsColumns: List<String> = emptyList(),
+        ftsTokenizer: String = "default",
+        deferred: Boolean = false,
+        columns: Map<String, List<String>> = emptyMap(),
+    ): Long {
+        require(vectorColumns.isNotEmpty()) { "vectorColumns must not be empty" }
+        vectorColumns.forEach { (spec, embeddings) ->
+            require(ids.size == embeddings.size) { "ids.size != embeddings.size for column '${spec.column}'" }
+        }
+        val vecColsPayload = vectorColumns.map { (spec, embeddings) ->
+            val m = mutableMapOf<String, Any>(
+                "col" to spec.column,
+                "dim" to spec.dim,
+                "metric" to spec.metric,
+                "precision" to spec.precision,
+                "embeddings" to embeddings.map { it.toList() },
+            )
+            if (spec.modality != null) m["modality"] = spec.modality
+            m
+        }
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse,
+            "namespace" to namespace,
+            "table" to table,
+            "ids" to ids.toList(),
+            "vector_columns" to vecColsPayload,
+            "format_version" to formatVersion,
+        )
+        if (embeddingModel != null) payload["embedding_model"] = embeddingModel
+        if (ftsColumns.isNotEmpty()) {
+            payload["fts_columns"] = ftsColumns
+            payload["fts_tokenizer"] = ftsTokenizer
+        }
+        if (deferred) payload["deferred"] = true
+        if (columns.isNotEmpty()) payload["columns"] = columns
+        val req = mapper.writeValueAsString(payload)
+        val ptr = lib.ailake_write_batch_multi_json(req)
+            ?: throw RuntimeException("ailake_write_batch_multi_json returned null for table=$namespace.$table")
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<WriteResponse>(json)
+            if (!resp.ok) {
+                log.error("[ailake] ailake_write_batch_multi_json returned error for table={}.{}: {}", namespace, table, resp.error)
+                throw RuntimeException("ailake_write_batch_multi_json error: ${resp.error}")
+            }
+            log.info("[ailake] writeBatchMulti OK table={}.{} rows={} snapshot_id={}", namespace, table, ids.size, resp.snapshot_id)
             resp.snapshot_id
         } finally {
             lib.ailake_free_string(ptr)

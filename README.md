@@ -116,9 +116,9 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 **Rust** (add to `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.0.27"
-ailake-query = "0.0.27"   # search(), TableWriter, ContextAssembler, search_multimodal
-ailake-store = "0.0.27"   # S3 / GCS / Azure / local backends
+ailake-core  = "0.1.1"
+ailake-query = "0.1.1"   # search(), TableWriter, ContextAssembler, search_multimodal
+ailake-store = "0.1.1"   # S3 / GCS / Azure / local backends
 ```
 
 **Python**:
@@ -153,19 +153,20 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-VERSION=0.0.27
+TAG=v0.1.1          # GitHub release tag (Rust/PyPI version)
+JAR_VERSION=0.1.1   # JVM plugin version (gradle, versioned independently — check the release page)
 
 # Spark plugin
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/spark-plugin-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/spark-plugin-${JAR_VERSION}-plugin.jar
 
 # Trino plugin
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/trino-plugin-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/trino-plugin-${JAR_VERSION}-plugin.jar
 
 # Flink connector
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/ailake-flink-${VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/ailake-flink-${JAR_VERSION}-plugin.jar
 
 # Native library (required by all three — place on java.library.path)
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/v${VERSION}/libailake_jni.so
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/libailake_jni.so
 ```
 
 See [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) for installation and configuration.

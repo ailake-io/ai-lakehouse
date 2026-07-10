@@ -36,9 +36,9 @@ class AilakeHook(BaseHook):
 
     Usage::
 
-        hook = AilakeHook(conn_id="ailake_prod")
+        hook = AilakeHook(ailake_conn_id="ailake_prod")
         info = hook.get_table_info("default.docs")
-        results = hook.search("default.docs", query_vector=[0.1, 0.2, ...], top_k=10)
+        results = hook.search("default.docs", query=[0.1, 0.2, ...], top_k=10)
     """
 
     conn_name_attr = "ailake_conn_id"
@@ -226,16 +226,19 @@ class AilakeHook(BaseHook):
         *,
         target_size: int = 536_870_912,
         min_files: int = 4,
+        max_files_per_pass: int = 20,
         deferred: bool = False,
     ) -> int:
         """Compact small files in an AI-Lake table.
 
-        Wraps ``ailake compact <table> --target-size <n> --min-files <n>``.
+        Wraps ``ailake compact <table> --target-size <n> --min-files <n>
+        --max-files-per-pass <n> --format json``.
 
         Args:
             table: Fully-qualified table name (``namespace.table``).
             target_size: Target output file size in bytes (default 512 MiB).
             min_files: Minimum eligible files required to trigger compaction (default 4).
+            max_files_per_pass: Bounds peak RAM / HNSW rebuild cost (default 20).
             deferred: Build HNSW index in the background when ``True`` (default ``False``).
 
         Returns:
@@ -249,15 +252,14 @@ class AilakeHook(BaseHook):
             table,
             "--target-size", str(target_size),
             "--min-files", str(min_files),
+            "--max-files-per-pass", str(max_files_per_pass),
+            "--format", "json",
             *extra,
         )
-        for line in result.stdout.splitlines():
-            if "files_compacted:" in line:
-                try:
-                    return int(line.split("files_compacted:")[1].strip().split()[0])
-                except (ValueError, IndexError):
-                    pass
-        return 0
+        try:
+            return json.loads(result.stdout).get("files_compacted", 0)
+        except json.JSONDecodeError:
+            return 0
 
     def decay_memories(
         self,
@@ -324,3 +326,149 @@ class AilakeHook(BaseHook):
                 except (ValueError, IndexError):
                     pass
         return -1
+
+    def migrate(
+        self,
+        table: str,
+        *,
+        embed_cmd: str,
+        old_column: str = "embedding",
+        new_column: str = "embedding_v2",
+        text_column: str = "chunk_text",
+        strategy: str = "dual-write-then-cutover",
+        batch_size: int = 512,
+        model_name: str | None = None,
+        model_version: str | None = None,
+    ) -> None:
+        """Re-embed a table's vector column via an external embed command.
+
+        Wraps ``ailake migrate <table> --old-column <c> --new-column <c>
+        --text-column <c> --embed-cmd <cmd> --strategy <s> --batch-size <n>
+        [--model-name <name>] [--model-version <v>]``.
+
+        ``embed_cmd`` is a shell command that reads a JSON array of strings
+        from stdin and writes a JSON array of float arrays to stdout.
+
+        Raises ``RuntimeError`` on failure (see :meth:`run_cli`).
+        """
+        extra: list[str] = [
+            "--old-column", old_column,
+            "--new-column", new_column,
+            "--text-column", text_column,
+            "--embed-cmd", embed_cmd,
+            "--strategy", strategy,
+            "--batch-size", str(batch_size),
+        ]
+        if model_name:
+            extra += ["--model-name", model_name]
+        if model_version:
+            extra += ["--model-version", model_version]
+        self.run_cli("migrate", table, *extra)
+
+    def delete_rows(self, table: str, file: str, row_positions: list[int]) -> None:
+        """Mark rows as deleted in a V3 table using Iceberg Deletion Vectors.
+
+        Wraps ``ailake delete-rows <table> --file <file> --rows <v1,v2,...>``.
+        ``file`` is the Parquet data file path as reported by
+        :meth:`get_table_info` (e.g. ``"data/part-00001.parquet"``).
+        No-op when ``row_positions`` is empty.
+
+        Requires the table to have been created with ``format_version=3``
+        (Deletion Vectors are a V3-only Iceberg feature) — the CLI raises a
+        clear error on a V2 table rather than corrupting it. For V2 tables,
+        use :meth:`delete_where` (equality predicate) instead.
+        """
+        if not row_positions:
+            return
+        rows_csv = ",".join(str(r) for r in row_positions)
+        self.run_cli("delete-rows", table, "--file", file, "--rows", rows_csv)
+
+    def add_vector_column(
+        self,
+        table: str,
+        column: str,
+        dim: int,
+        *,
+        metric: str = "cosine",
+        precision: str = "f16",
+        pre_normalize: bool = False,
+        hnsw_m: int | None = None,
+        hnsw_ef: int | None = None,
+    ) -> int:
+        """Add a new vector column to an existing table schema (no data files rewritten).
+
+        Wraps ``ailake add-vector-column <table> --column <c> --dim <n> [...]``.
+        Old files return null for the new column until :meth:`backfill_vector_column`
+        is run. Returns the new schema_id, or ``-1`` when not parseable from CLI output.
+        """
+        extra = [
+            "--column", column,
+            "--dim", str(dim),
+            "--metric", metric,
+            "--precision", precision,
+        ]
+        if pre_normalize:
+            extra += ["--pre-normalize"]
+        if hnsw_m is not None:
+            extra += ["--hnsw-m", str(hnsw_m)]
+        if hnsw_ef is not None:
+            extra += ["--hnsw-ef", str(hnsw_ef)]
+        result = self.run_cli("add-vector-column", table, *extra)
+        for line in result.stdout.splitlines():
+            if "new_schema_id:" in line:
+                try:
+                    return int(line.split("new_schema_id:")[1].strip().split()[0])
+                except (ValueError, IndexError):
+                    pass
+        return -1
+
+    def backfill_vector_column(
+        self,
+        table: str,
+        column: str,
+        *,
+        embed_cmd: str,
+        text_column: str = "chunk_text",
+        batch_size: int = 512,
+    ) -> None:
+        """Backfill a new vector column in all existing files.
+
+        Wraps ``ailake backfill-vector-column <table> --column <c>
+        --text-column <c> --embed-cmd <cmd> --batch-size <n>``. Requires
+        :meth:`add_vector_column` to have been run first for ``column``.
+        Idempotent: files already containing the column are skipped.
+        Raises ``RuntimeError`` on failure.
+        """
+        self.run_cli(
+            "backfill-vector-column", table,
+            "--column", column,
+            "--text-column", text_column,
+            "--embed-cmd", embed_cmd,
+            "--batch-size", str(batch_size),
+        )
+
+    def estimate(
+        self,
+        rows: str,
+        dim: int,
+        *,
+        hnsw_m: int = 16,
+        pq_m: int | None = None,
+    ) -> dict[str, Any]:
+        """Estimate storage usage before writing (no I/O — pure math).
+
+        Wraps ``ailake estimate --rows <n> --dim <d> --hnsw-m <m>
+        [--pq-m <m>] --format json``. ``rows`` supports K/M/B suffixes
+        (e.g. ``"1M"``, ``"500K"``).
+
+        Returns ``{"rows", "dim", "hnsw_m", "pq_m", "estimates": [...]}``,
+        or ``{}`` on parse failure.
+        """
+        extra = ["--rows", rows, "--dim", str(dim), "--hnsw-m", str(hnsw_m), "--format", "json"]
+        if pq_m is not None:
+            extra += ["--pq-m", str(pq_m)]
+        result = self.run_cli("estimate", *extra)
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {}

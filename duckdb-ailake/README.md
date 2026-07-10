@@ -34,7 +34,8 @@ SELECT row_id, distance, file_path
 FROM ailake_search('file:///data/my_table', [0.1, 0.2, 0.3]::FLOAT[], 10)
 ORDER BY distance;
 
--- Combine with parquet_scan for full row data
+-- Combine with parquet_scan for full row data (legacy — prefer ailake_scan() below,
+-- which does this in one call with no JOIN required)
 SELECT p.id, p.text, s.distance
 FROM ailake_search('file:///data/docs', my_query_vec, 20) s
 JOIN parquet_scan('file:///data/docs/data/*.parquet') p
@@ -58,6 +59,26 @@ SELECT * FROM ailake_search(
     10,
     partition_filter='agent-42'
 ) ORDER BY distance;
+```
+
+### `ailake_scan` — vector search + full row fetch, no JOIN required
+
+```sql
+SELECT * FROM ailake_scan(
+    table_path VARCHAR,    -- path/URI to AI-Lake table root
+    query      FLOAT[],    -- query embedding (LIST(FLOAT))
+    top_k      INTEGER     -- number of nearest neighbors
+) → TABLE(<all Parquet columns>, _distance FLOAT)
+```
+
+Unlike `ailake_search()`, which returns only `(row_id, distance, file_path)` pointers and needs a manual `JOIN` against `parquet_scan(...)` to get real columns, `ailake_scan()` performs the search and full-row fetch in one native call — every Parquet column comes back alongside `_distance`. Backed by `ailake_scan_json` C-ABI. The full result is fetched at bind time and cached, so `LIMIT` does not reduce Rust-side I/O — use `top_k` to control how many rows are fetched.
+
+**Example:**
+
+```sql
+SELECT id, chunk_text, _distance
+FROM ailake_scan('file:///data/my_table', [0.1, 0.2, 0.3]::FLOAT[], 10)
+ORDER BY _distance;
 ```
 
 ### `ailake_search_multimodal` — cross-modal RRF search (Phase 8)
@@ -226,6 +247,113 @@ SELECT ailake_write_batch(
 );
 ```
 
+### `ailake_write_batch_multi` — multi-column (multimodal) write (Phase 8)
+
+```sql
+SELECT ailake_write_batch_multi(
+    table_path      VARCHAR,                 -- table root path/URI
+    ids             BIGINT[],                -- row identifiers
+    vector_columns  LIST(STRUCT(
+                       col        VARCHAR,   -- column name
+                       dim        INTEGER,   -- dimensionality
+                       embeddings FLOAT[][], -- one embedding per id, same order
+                       metric     VARCHAR,   -- cosine | euclidean | dot
+                       precision  VARCHAR,   -- f32 | f16 | i8
+                       modality   VARCHAR)), -- '' | text | image | audio | video
+    -- named (optional):
+    namespace       VARCHAR,                 -- default 'default'
+    table_name      VARCHAR,                 -- default 'table'
+    format_version  INTEGER,                 -- 2 (default) or 3
+    deferred        BOOLEAN                  -- default false — persist Parquet
+                                              --   immediately, build all HNSW
+                                              --   indexes in the background
+) → BIGINT  -- snapshot_id, or -1 on error
+```
+
+Writes a batch of rows with **N independent vector columns** (e.g. text + image embeddings on the same row), each getting its own HNSW section in the same AI-Lake file — searchable via `ailake_search_multimodal`'s RRF fusion. The **first entry in `vector_columns` is primary** (used for geometric pruning in the manifest). Backed by `ailake_write_batch_multi_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_write_batch_multi(
+    'file:///data/media',
+    [0, 1]::BIGINT[],
+    [
+        {'col': 'embedding',       'dim': 4, 'embeddings': [[0.1,0.2,0.3,0.4],[0.5,0.6,0.7,0.8]]::FLOAT[][], 'metric': 'cosine', 'precision': 'f16', 'modality': ''},
+        {'col': 'image_embedding', 'dim': 2, 'embeddings': [[0.9,1.0],[1.1,1.2]]::FLOAT[][], 'metric': 'cosine', 'precision': 'f16', 'modality': 'image'}
+    ]
+);
+```
+
+### `ailake_delete_where` — logical delete
+
+```sql
+SELECT ailake_delete_where(
+    table_path VARCHAR,    -- path/URI to AI-Lake table root
+    column     VARCHAR,    -- column name to match against
+    values     VARCHAR[]   -- values to delete
+) → BOOLEAN                -- TRUE on success, FALSE on any error or if the lib isn't loaded
+```
+
+Writes an Iceberg equality delete file for all rows where `column` equals any value in `values`. No data files are rewritten. Backed by `ailake_delete_where_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_delete_where(
+    'file:///data/my_table',
+    'document_id',
+    ['doc-a', 'doc-b', 'doc-c']
+);
+```
+
+### `ailake_evolve_schema` — metadata-only ADD/RENAME COLUMN
+
+```sql
+SELECT ailake_evolve_schema(
+    table_path          VARCHAR,  -- path/URI to AI-Lake table root
+    add_columns_json    VARCHAR,  -- JSON array: [{"name":"col","type":"string","initial_default":null}]
+    rename_columns_json VARCHAR   -- JSON array: [{"from":"old_name","to":"new_name"}]
+) → INTEGER               -- new schema_id on success, -1 on any error
+```
+
+Either argument may be `'[]'` or `''` to skip. No data files are rewritten. Backed by `ailake_evolve_schema_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_evolve_schema(
+    'file:///data/my_table',
+    '[{"name":"score","type":"float","initial_default":0.0}]',
+    '[{"from":"old_col","to":"new_col"}]'
+);
+```
+
+### `ailake_compact` — merge small files
+
+```sql
+SELECT ailake_compact(
+    table_path          VARCHAR,   -- table root path/URI
+    -- named or positional (optional), in order:
+    min_files            BIGINT,   -- default 4   — min small files required to trigger
+    target_size_bytes    BIGINT,   -- default 128 MiB — target output file size
+    max_files_per_pass   BIGINT,   -- default 20  — bounds peak RAM / HNSW rebuild cost
+    deferred              BOOLEAN, -- default false — write merged Parquet immediately,
+                                   --   build the HNSW index in the background
+    namespace             VARCHAR, -- default 'default'
+    table_name            VARCHAR  -- default 'table'
+) → BIGINT  -- number of files compacted (0 = nothing eligible), -1 on error
+```
+
+Compacts small files in an AI-Lake table into a larger merged file. Backed by `ailake_compact_json` C-ABI.
+
+**Example:**
+
+```sql
+-- Force a merge even with just 2 small files present
+SELECT ailake_compact('file:///data/my_table', min_files := 2);
+```
+
 ## Build
 
 ```bash
@@ -281,7 +409,7 @@ D SELECT * FROM ailake_search('file:///data/docs', [0.1, 0.2]::FLOAT[], 5);
 
 ## Design
 
-- C-ABI bridge: `dlopen("libailake_jni.so")` → `ailake_search_json` / `ailake_search_multimodal_json` / `ailake_write_batch_json`
+- C-ABI bridge: `dlopen("libailake_jni.so")` → `ailake_search_json` / `ailake_scan_json` / `ailake_search_multimodal_json` / `ailake_search_text_json` / `ailake_write_batch_json` / `ailake_write_batch_multi_json` / `ailake_delete_where_json` / `ailake_evolve_schema_json` / `ailake_compact_json`
 - Same JSON-envelope protocol as Spark (`AilakeNative.scala`) and Trino (`AilakeNative.kt`)
 - `ailake_search` executes the full search (pruning + HNSW) inside Rust; DuckDB sees a virtual table
 - Graceful degradation: if `libailake_jni.so` is not found, search returns 0 rows instead of aborting
@@ -293,6 +421,8 @@ D SELECT * FROM ailake_search('file:///data/docs', [0.1, 0.2]::FLOAT[], 5);
 | Vector search | `VectorScanExec` | `VectorScanRecordSet` | `ailake_search()` table fn |
 | Cross-modal search | `searchMultimodal()` | `searchMultimodal()` | `ailake_search_multimodal()` table fn |
 | INSERT INTO / write | `AilakeWriteSupport` | `AilakePageSink` | `ailake_write_batch()` scalar fn |
+| Multi-column (multimodal) write | `ailakeWriteMulti()` | `ailake.vector-columns` catalog property | `ailake_write_batch_multi()` scalar fn |
+| Compact | `spark.ailakeCompact(...)` | `CALL ailake.system.compact()` | `ailake_compact()` scalar fn |
 | Catalog integration | `AilakeCatalog` | — | — (use `parquet_scan` for joins) |
 | Native lib loading | JNA | JNA | `dlopen` |
 

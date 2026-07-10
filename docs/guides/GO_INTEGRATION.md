@@ -383,6 +383,7 @@ func main() {
 | `catalog.LoadTable(ns, name)` | method | No | Returns `TableInfo` (dim, metric, files, rows, schema) |
 | `catalog.ListFiles(ns, name)` | method | No | Returns `[]DataFileEntry` with centroid, HNSW offset |
 | `Search(catalog, ns, name, query, opts)` | func | No | Vector search (geometric pruning + HNSW/IVF-PQ) |
+| `Scan(catalog, ns, name, query, opts)` | func | No | Search + full-row fetch in one call (no JOIN needed) |
 | `SearchMultimodal(catalog, ns, name, queries, opts)` | func | No | Cross-modal RRF fusion |
 | `ReadAilakeHeader(path)` | func | No | Introspect AILK section of any `.parquet` file |
 | `DecodeF16Vector(raw, dim)` | func | No | Decode F16 Parquet column to `[]float32` |
@@ -402,6 +403,7 @@ func main() {
 | `WriteBatchOptions` | All write parameters (see §3) |
 | `ModalQuery` | `{Column, Query, Weight}` for multimodal search |
 | `FileSearchResult` | `{RowID, Distance, FilePath}` |
+| `ScanRow` | `{RowID, Distance, FilePath, Fields}` — `Fields` holds every Parquet column |
 | `RRFResult` | `{RowID, RRFScore, FilePath}` |
 | `SearchHybridResult` | `{RowID, Distance, FilePath}` |
 | `SearchTextResult` | `{RowID, Score, FilePath}` |

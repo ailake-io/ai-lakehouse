@@ -44,6 +44,18 @@ struct MultimodalRow {
     std::string file_path;
 };
 
+// One vector column in a multi-column (Phase 8 multimodal) write batch — e.g.
+// text + image embeddings on the same row, each with its own HNSW index. See
+// AilakeLib::write_batch_multi.
+struct VectorColSpecArg {
+    std::string                     col;
+    int32_t                         dim = 0;
+    std::string                     metric    = "cosine";
+    std::string                     precision = "f16";
+    std::string                     modality; // empty = unset
+    std::vector<std::vector<float>> embeddings;
+};
+
 // ── ailake_scan column types ──────────────────────────────────────────────────
 
 enum class ScanColType { INT64, FLOAT32, FLOAT64, VARCHAR, BOOL, LIST_FLOAT32, UNKNOWN };
@@ -83,6 +95,8 @@ public:
     using search_text_fn_t   = char *(*)(const char *);
     using delete_where_fn_t  = char *(*)(const char *);
     using evolve_schema_fn_t = char *(*)(const char *);
+    using write_multi_fn_t   = char *(*)(const char *);
+    using compact_fn_t       = char *(*)(const char *);
     using free_fn_t          = void (*)(char *);
 
     static AilakeLib &get();
@@ -97,6 +111,8 @@ public:
     bool is_search_text_ready()  const { return search_text_fn_   != nullptr; }
     bool is_delete_ready()       const { return delete_where_fn_  != nullptr; }
     bool is_evolve_ready()       const { return evolve_schema_fn_ != nullptr; }
+    bool is_write_multi_ready()  const { return write_multi_fn_   != nullptr; }
+    bool is_compact_ready()      const { return compact_fn_       != nullptr; }
 
     // Execute ailake_search_json. Returns empty on any error.
     // hybrid_text: when non-empty, enables hybrid BM25+vector RRF fusion.
@@ -200,6 +216,32 @@ public:
         const std::string &ns = "default"
     ) const;
 
+    // Execute ailake_write_batch_multi_json (Phase 8 multimodal write — N
+    // independent vector columns, each getting its own HNSW section in the
+    // same AI-Lake file). Returns snapshot_id, or -1 on error.
+    int64_t write_batch_multi(
+        const std::string                   &warehouse,
+        const std::string                   &ns,
+        const std::string                   &table_name,
+        const std::vector<int64_t>          &ids,
+        const std::vector<VectorColSpecArg> &vector_columns,
+        int                                   format_version = 2,
+        bool                                  deferred       = false
+    ) const;
+
+    // Execute ailake_compact_json. Returns files_compacted count, or -1 on
+    // error/lib-not-ready. -1 sentinel for min_files/target_size_bytes/
+    // max_files_per_pass means "use the native default" (4 / 128MiB / 20).
+    int64_t compact(
+        const std::string &warehouse,
+        const std::string &table_name,
+        int64_t             min_files          = -1,
+        int64_t             target_size_bytes  = -1,
+        int64_t             max_files_per_pass = -1,
+        bool                deferred           = false,
+        const std::string  &ns                 = "default"
+    ) const;
+
 private:
     AilakeLib() = default;
 
@@ -211,6 +253,8 @@ private:
     search_text_fn_t   search_text_fn_   = nullptr;
     delete_where_fn_t  delete_where_fn_  = nullptr;
     evolve_schema_fn_t evolve_schema_fn_ = nullptr;
+    write_multi_fn_t   write_multi_fn_   = nullptr;
+    compact_fn_t       compact_fn_       = nullptr;
     free_fn_t          free_fn_          = nullptr;
 };
 

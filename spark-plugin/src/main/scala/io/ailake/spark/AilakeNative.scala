@@ -19,6 +19,12 @@ object AilakeNative {
 
   case class SearchRow(rowId: Long, distance: Float, filePath: String)
 
+  /** One column of a [[scan]] response — `dataType` is one of the tags `ailake_scan_json` emits: `int64`, `float32`, `float64`, `utf8`, `bool`, `list_float32`. */
+  case class ScanColumn(name: String, dataType: String)
+
+  /** Result of [[scan]] — search + full-row fetch in one native call. Columnar, `_distance` always last. */
+  case class ScanResult(schema: Seq[ScanColumn], numRows: Int, columns: Map[String, Seq[Any]])
+
   /** Partition field definition for multi-column partition specs (Phase K). */
   case class PartitionFieldDef(column: String, transform: String, columnType: String)
 
@@ -27,6 +33,19 @@ object AilakeNative {
 
   /** Column rename request for schema evolution. */
   case class RenameColReq(from: String, to: String)
+
+  /**
+   * One vector column in a multi-column (Phase 8 multimodal) write batch —
+   * e.g. text + image embeddings on the same row, each with its own HNSW index.
+   * See [[writeBatchMulti]].
+   */
+  case class VectorColSpec(
+    column:    String,
+    dim:       Int,
+    metric:    String         = "cosine",
+    precision: String         = "f16",
+    modality:  Option[String] = None,
+  )
 
   private trait Lib extends Library {
     /** Returns ailake-jni version string. Static — do NOT free this pointer. */
@@ -38,8 +57,14 @@ object AilakeNative {
     /** Cross-modal RRF. Returns `{"ok":true,"results":[{"row_id":N,"rrf_score":F,"file_path":"..."}]}`. Caller must free. */
     def ailake_search_multimodal_json(requestJson: String): Pointer
 
+    /** Search + full-row fetch. Returns `{"ok":true,"schema":[...],"num_rows":N,"columns":{...}}`. Caller must free. */
+    def ailake_scan_json(requestJson: String): Pointer
+
     /** JSON-envelope write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
     def ailake_write_batch_json(requestJson: String): Pointer
+
+    /** Multi-column (Phase 8 multimodal) write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
+    def ailake_write_batch_multi_json(requestJson: String): Pointer
 
     /** Logical delete via equality delete file. Returns `{"ok":true}`. Caller must free. */
     def ailake_delete_where_json(requestJson: String): Pointer
@@ -164,9 +189,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_write_batch_json returned null for table=$tableName")
           return None
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read writeBatch result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return None
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] writeBatch ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -176,8 +206,88 @@ object AilakeNative {
           if (sid.isMissingNode) None else Some(sid.asLong())
         } catch {
           case e: Exception =>
-            log.error(s"[ailake] Exception in writeBatch for table=$tableName: ${e.getMessage}", e)
+            log.error(s"[ailake] Exception parsing writeBatch response for table=$tableName: ${e.getMessage}", e)
+            None
+        }
+    }
+  }
+
+  /**
+   * Write a batch with N independent vector columns into a single AI-Lake file
+   * (Phase 8 multimodal tables — e.g. text + image embeddings on the same row,
+   * searchable via [[searchMultimodal]]). Each column gets its own HNSW section;
+   * the first entry in `vectorColumns` is the primary column used for geometric
+   * pruning in the manifest.
+   *
+   * @param vectorColumns  one or more (spec, embeddings) pairs; `embeddings(i)` must
+   *                       have `ids.size` rows for every column. First entry is primary.
+   * @param columns        extra string columns sent with the batch (same as [[writeBatch]]).
+   */
+  def writeBatchMulti(
+    tableUri:       String,
+    namespace:      String,
+    tableName:      String,
+    ids:            Seq[Long],
+    vectorColumns:  Seq[(VectorColSpec, Seq[Seq[Float]])],
+    embeddingModel: Option[String] = None,
+    formatVersion:  Int = 2,
+    ftsColumns:     Seq[String] = Seq.empty,
+    ftsTokenizer:   String = "default",
+    deferred:       Boolean = false,
+    columns:        Map[String, Seq[String]] = Map.empty,
+  ): Option[Long] = {
+    if (ids.isEmpty || vectorColumns.isEmpty) return None
+    lib match {
+      case None => None
+      case Some(native) =>
+        val idsJson = ids.mkString("[", ",", "]")
+        val vecColsJson = vectorColumns.map { case (spec, embeddings) =>
+          val embJson = embeddings.map(_.mkString("[", ",", "]")).mkString("[", ",", "]")
+          val modalityJson = spec.modality.map(m => s""","modality":${jsonStr(m)}""").getOrElse("")
+          s"""{"col":${jsonStr(spec.column)},"dim":${spec.dim},"metric":${jsonStr(spec.metric)},""" +
+          s""""precision":${jsonStr(spec.precision)}$modalityJson,"embeddings":$embJson}"""
+        }.mkString("[", ",", "]")
+        val modelJson = embeddingModel.map(m => s""","embedding_model":${jsonStr(m)}""").getOrElse("")
+        val fvJson  = s""","format_version":$formatVersion"""
+        val ftsJson = if (ftsColumns.nonEmpty) {
+          val arr = ftsColumns.map(c => jsonStr(c)).mkString("[", ",", "]")
+          s""","fts_columns":$arr,"fts_tokenizer":${jsonStr(ftsTokenizer)}"""
+        } else ""
+        val deferredJson = if (deferred) ""","deferred":true""" else ""
+        val colsJson = if (columns.nonEmpty) {
+          val inner = columns.map { case (col, vals) =>
+            val arr = vals.map(v => jsonStr(v)).mkString("[", ",", "]")
+            s"""${jsonStr(col)}:$arr"""
+          }.mkString("{", ",", "}")
+          s""","columns":$inner"""
+        } else ""
+        val requestJson =
+          s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
+          s""""table":${jsonStr(tableName)},"ids":$idsJson,"vector_columns":$vecColsJson""" +
+          s"""$modelJson$fvJson$ftsJson$deferredJson$colsJson}"""
+        val ptr = native.ailake_write_batch_multi_json(requestJson)
+        if (ptr == null) {
+          log.warn(s"[ailake] ailake_write_batch_multi_json returned null for table=$tableName")
+          return None
+        }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read writeBatchMulti result string for table=$tableName: ${e.getMessage}", e)
             Try(native.ailake_free_string(ptr))
+            return None
+        }
+        native.ailake_free_string(ptr)
+        try {
+          val root = mapper.readTree(json)
+          if (!root.path("ok").asBoolean(false)) {
+            log.warn(s"[ailake] writeBatchMulti ok=false for table=$tableName: ${root.path("error").asText()}")
+            return None
+          }
+          val sid = root.path("snapshot_id")
+          if (sid.isMissingNode) None else Some(sid.asLong())
+        } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Exception parsing writeBatchMulti response for table=$tableName: ${e.getMessage}", e)
             None
         }
     }
@@ -208,9 +318,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_delete_where_json returned null for table=$tableName")
           return false
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read deleteWhere result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return false
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] deleteWhere ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -218,8 +333,7 @@ object AilakeNative {
           } else true
         } catch {
           case e: Exception =>
-            log.error(s"[ailake] Exception in deleteWhere for table=$tableName: ${e.getMessage}", e)
-            Try(native.ailake_free_string(ptr))
+            log.error(s"[ailake] Exception parsing deleteWhere response for table=$tableName: ${e.getMessage}", e)
             false
         }
     }
@@ -258,9 +372,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_evolve_schema_json returned null for table=$tableName")
           return -1
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read evolveSchema result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return -1
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] evolveSchema ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -270,8 +389,7 @@ object AilakeNative {
           if (sid.isMissingNode) -1 else sid.asInt(-1)
         } catch {
           case e: Exception =>
-            log.error(s"[ailake] Exception in evolveSchema for table=$tableName: ${e.getMessage}", e)
-            Try(native.ailake_free_string(ptr))
+            log.error(s"[ailake] Exception parsing evolveSchema response for table=$tableName: ${e.getMessage}", e)
             -1
         }
     }
@@ -327,6 +445,59 @@ object AilakeNative {
           case e: Exception =>
             log.error(s"[ailake] Failed to parse search response for tableUri=$tableUri: ${e.getMessage}", e)
             Seq.empty
+        }
+    }
+  }
+
+  /**
+   * Vector search + full-row fetch in one native call (`ailake_scan_json`) — closes the
+   * "SQL search only returns row_id/distance/file_path" gap: previously the only way to get
+   * real columns (chunk_text, document_title, ...) back from a search was a manual DataFrame
+   * `JOIN` against a separately-registered Iceberg table pointing at the same physical
+   * location. Result is columnar; every stored column comes back (vector column decoded to
+   * `list_float32`), plus a trailing `_distance` column — there's no column-subset filter on
+   * the native side, it always returns the full row width.
+   *
+   * @param tableUri    path/URI of the AI-Lake table root
+   * @param query       f32 query vector
+   * @param topK        number of nearest neighbors
+   * @param vectorColumn vector column to search (default "embedding")
+   */
+  def scan(
+    tableUri:        String,
+    query:           Array[Float],
+    topK:            Int,
+    vectorColumn:    String = "embedding",
+    partitionFilter: Option[String] = None,
+    namespace:       String = "default",
+    tableName:       String = "",
+  ): ScanResult = {
+    if (query.isEmpty) return ScanResult(Seq.empty, 0, Map.empty)
+    lib match {
+      case None => ScanResult(Seq.empty, 0, Map.empty)
+      case Some(native) =>
+        val effectiveTable = if (tableName.nonEmpty) tableName else tableUri.stripSuffix("/").split("/").last
+        val queryJson = query.mkString("[", ",", "]")
+        val partJson = partitionFilter.map(v => s""","partition_filter":${jsonStr(v)}""").getOrElse("")
+        val requestJson =
+          s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},"table":${jsonStr(effectiveTable)},""" +
+          s""""vec_col":${jsonStr(vectorColumn)},"query":$queryJson,"dim":${query.length},"top_k":$topK$partJson}"""
+        val ptr = native.ailake_scan_json(requestJson)
+        if (ptr == null) {
+          log.warn("[ailake] ailake_scan_json returned null pointer for tableUri={}", tableUri)
+          return ScanResult(Seq.empty, 0, Map.empty)
+        }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read scan result string for tableUri=$tableUri: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return ScanResult(Seq.empty, 0, Map.empty)
+        }
+        native.ailake_free_string(ptr)
+        try { parseScanResponse(json, tableUri) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to parse scan response for tableUri=$tableUri: ${e.getMessage}", e)
+            ScanResult(Seq.empty, 0, Map.empty)
         }
     }
   }
@@ -476,9 +647,14 @@ object AilakeNative {
           log.warn(s"[ailake] ailake_compact_json returned null for table=$tableName")
           return None
         }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read compact result string for table=$tableName: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return None
+        }
+        native.ailake_free_string(ptr)
         try {
-          val json = ptr.getString(0)
-          native.ailake_free_string(ptr)
           val root = mapper.readTree(json)
           if (!root.path("ok").asBoolean(false)) {
             log.warn(s"[ailake] compact ok=false for table=$tableName: ${root.path("error").asText()}")
@@ -491,13 +667,46 @@ object AilakeNative {
         } catch {
           case e: Exception =>
             log.error(s"[ailake] Failed to parse compact response for table=$tableName: ${e.getMessage}", e)
-            Try(native.ailake_free_string(ptr))
             None
         }
     }
   }
 
   private def jsonStr(s: String): String = mapper.writeValueAsString(s)
+
+  private def parseScanResponse(json: String, tableUri: String): ScanResult = {
+    val root = mapper.readTree(json)
+    if (!root.path("ok").asBoolean(false)) {
+      val err = root.path("error").asText("<no error field>")
+      log.warn(s"[ailake] Native scan returned ok=false for tableUri=$tableUri: $err")
+      return ScanResult(Seq.empty, 0, Map.empty)
+    }
+    val schemaNodes = root.path("schema")
+    val schema = (0 until schemaNodes.size()).map { i =>
+      val n = schemaNodes.get(i)
+      ScanColumn(n.get("name").asText(), n.get("type").asText())
+    }.toSeq
+    val numRows = root.path("num_rows").asInt(0)
+    val columnsNode = root.path("columns")
+    val columns: Map[String, Seq[Any]] = schema.map { col =>
+      val arr = columnsNode.path(col.name)
+      val values: Seq[Any] = col.dataType match {
+        case "int64"   => (0 until arr.size()).map(i => if (arr.get(i).isNull) null else arr.get(i).asLong())
+        case "float32" => (0 until arr.size()).map(i => if (arr.get(i).isNull) null else arr.get(i).floatValue())
+        case "float64" => (0 until arr.size()).map(i => if (arr.get(i).isNull) null else arr.get(i).doubleValue())
+        case "bool"    => (0 until arr.size()).map(i => if (arr.get(i).isNull) null else arr.get(i).asBoolean())
+        case "list_float32" =>
+          (0 until arr.size()).map { i =>
+            val inner = arr.get(i)
+            (0 until inner.size()).map(j => inner.get(j).floatValue())
+          }
+        case _ /* utf8 and anything else */ =>
+          (0 until arr.size()).map(i => if (arr.get(i).isNull) null else arr.get(i).asText())
+      }
+      col.name -> values
+    }.toMap
+    ScanResult(schema, numRows, columns)
+  }
 
   private def parseResponse(json: String, tableUri: String): Seq[SearchRow] = {
     Try {

@@ -117,3 +117,84 @@ func TestEvolveSchemaIntegration(t *testing.T) {
 		t.Errorf("EvolveSchema: expected non-negative schema_id, got %d", schemaID)
 	}
 }
+
+// ── VectorColSpec / CompactOptions ───────────────────────────────────────────
+
+func TestVectorColSpec_Fields(t *testing.T) {
+	spec := VectorColSpec{Column: "image_embedding", Dim: 512, Metric: "euclidean", Modality: "image"}
+	if spec.Column != "image_embedding" || spec.Dim != 512 || spec.Metric != "euclidean" || spec.Modality != "image" {
+		t.Errorf("unexpected field values: %+v", spec)
+	}
+}
+
+func TestCompactOptions_Fields(t *testing.T) {
+	opts := CompactOptions{TargetSize: 1024, MinFiles: 2, MaxFilesPerPass: 10, Deferred: true}
+	if opts.TargetSize != 1024 || opts.MinFiles != 2 || opts.MaxFilesPerPass != 10 || !opts.Deferred {
+		t.Errorf("unexpected field values: %+v", opts)
+	}
+}
+
+// ── Integration tests: multi-column write + compact (own temp warehouse,
+// require only AILAKE_BIN — no shared AILAKE_FIXTURE needed since these
+// write their own data via testdata/multimodal_fixture.parquet) ────────────
+
+func TestWriteBatchMultiColumnIntegration(t *testing.T) {
+	bin := os.Getenv("AILAKE_BIN")
+	if bin == "" {
+		t.Skip("AILAKE_BIN not set")
+	}
+
+	catalog := &HadoopCatalog{Warehouse: t.TempDir()}
+	err := WriteBatch(catalog, "default", "media", "testdata/multimodal_fixture.parquet", WriteBatchOptions{
+		VectorCols: []VectorColSpec{
+			{Column: "embedding", Dim: 4, Metric: "cosine"},
+			{Column: "image_embedding", Dim: 2, Metric: "cosine", Modality: "image"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("WriteBatch (multi-column): %v", err)
+	}
+
+	results, err := SearchMultimodal(catalog, "default", "media", []ModalQuery{
+		{Column: "embedding", Query: []float32{0.1, 0.2, 0.3, 0.4}, Weight: 0.7},
+		{Column: "image_embedding", Query: []float32{0.5, 0.6}, Weight: 0.3},
+	}, SearchOptions{TopK: 3})
+	if err != nil {
+		t.Fatalf("SearchMultimodal: %v", err)
+	}
+	if len(results) != 3 {
+		t.Errorf("SearchMultimodal: expected 3 results, got %d", len(results))
+	}
+}
+
+func TestCompactIntegration(t *testing.T) {
+	bin := os.Getenv("AILAKE_BIN")
+	if bin == "" {
+		t.Skip("AILAKE_BIN not set")
+	}
+
+	catalog := &HadoopCatalog{Warehouse: t.TempDir()}
+	opts := WriteBatchOptions{VecCol: "embedding"}
+	if err := WriteBatch(catalog, "default", "docs", "testdata/multimodal_fixture.parquet", opts); err != nil {
+		t.Fatalf("WriteBatch (batch 1): %v", err)
+	}
+	if err := WriteBatch(catalog, "default", "docs", "testdata/multimodal_fixture.parquet", opts); err != nil {
+		t.Fatalf("WriteBatch (batch 2): %v", err)
+	}
+
+	filesCompacted, err := Compact(catalog, "default", "docs", CompactOptions{MinFiles: 2})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if filesCompacted != 1 {
+		t.Errorf("Compact: expected 1 file compacted, got %d", filesCompacted)
+	}
+
+	results, err := Search(catalog, "default", "docs", []float32{0.1, 0.2, 0.3, 0.4}, SearchOptions{TopK: 20})
+	if err != nil {
+		t.Fatalf("Search after compact: %v", err)
+	}
+	if len(results) != 12 {
+		t.Errorf("Search after compact: expected 12 rows searchable (2 batches x 6 rows), got %d", len(results))
+	}
+}

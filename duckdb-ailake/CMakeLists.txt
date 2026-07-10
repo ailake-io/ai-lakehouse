@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # Copyright (c) 2026 Thiago Egon Lange
 cmake_minimum_required(VERSION 3.20)
-project(duckdb_ailake VERSION 0.0.17 LANGUAGES CXX)
+project(duckdb_ailake VERSION 0.1.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,6 +40,8 @@ add_library(duckdb_ailake MODULE
     src/ailake_scan_table.cpp
     src/ailake_delete.cpp
     src/ailake_evolve_schema.cpp
+    src/ailake_write_batch_multi.cpp
+    src/ailake_compact.cpp
 )
 
 target_include_directories(duckdb_ailake PRIVATE

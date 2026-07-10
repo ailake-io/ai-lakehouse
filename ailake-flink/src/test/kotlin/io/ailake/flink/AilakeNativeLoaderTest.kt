@@ -14,6 +14,42 @@ import org.junit.jupiter.api.Test
  */
 class AilakeNativeLoaderTest {
 
+    // ── VectorColSpec (Phase 8 multimodal write) ──────────────────────────────
+
+    @Test
+    fun vectorColSpecDefaults() {
+        val spec = AilakeNativeLoader.VectorColSpec("embedding", 1536)
+        assertEquals("cosine", spec.metric)
+        assertEquals("f16", spec.precision)
+        assertNull(spec.modality)
+    }
+
+    @Test
+    fun vectorColSpecEquality() {
+        val s1 = AilakeNativeLoader.VectorColSpec("embedding", 4, modality = "text")
+        val s2 = AilakeNativeLoader.VectorColSpec("embedding", 4, modality = "text")
+        assertEquals(s1, s2)
+    }
+
+    // ── ScanColumn / ScanResponse (Fase 11) ───────────────────────────────────
+
+    @Test
+    fun scanColumnEquality() {
+        val c1 = AilakeNativeLoader.ScanColumn("id", "int64")
+        val c2 = AilakeNativeLoader.ScanColumn("id", "int64")
+        assertEquals(c1, c2)
+    }
+
+    @Test
+    fun scanResponseDefaultsToEmptyOkTrue() {
+        val r = AilakeNativeLoader.ScanResponse(ok = true)
+        assertTrue(r.ok)
+        assertEquals(0, r.num_rows)
+        assertTrue(r.schema.isEmpty())
+        assertTrue(r.columns.isEmpty())
+        assertNull(r.error)
+    }
+
     // ── PartitionFieldDef ─────────────────────────────────────────────────────
 
     @Test

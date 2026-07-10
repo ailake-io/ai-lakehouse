@@ -249,8 +249,11 @@ func (c *HadoopCatalog) ListFiles(namespace, name string) ([]DataFileEntry, erro
 		return nil, errors.New("catalog: no manifest-list found for current snapshot")
 	}
 
-	// manifest-list path may be absolute or relative to warehouse
-	manifestListPath := c.resolveAvroPath(dir, manifestList)
+	// manifest-list path may be absolute or relative to the warehouse root
+	// (the Rust catalog writer always stores paths relative to the warehouse
+	// root, e.g. "default/docs/metadata/snap-....avro" — NOT relative to the
+	// table directory, which would double-prefix namespace/table).
+	manifestListPath := c.resolveAvroPath(manifestList)
 
 	// Read manifest list → list of manifest file paths
 	manifestPaths, err := readManifestList(manifestListPath)
@@ -261,7 +264,7 @@ func (c *HadoopCatalog) ListFiles(namespace, name string) ([]DataFileEntry, erro
 	// Read each manifest file
 	var entries []DataFileEntry
 	for _, mp := range manifestPaths {
-		mp = c.resolveAvroPath(dir, mp)
+		mp = c.resolveAvroPath(mp)
 		fileEntries, err := readManifestFile(mp)
 		if err != nil {
 			return nil, fmt.Errorf("catalog: read manifest %s: %w", mp, err)
@@ -288,11 +291,16 @@ func (c *HadoopCatalog) readMetadata(tableDir string) (map[string]any, error) {
 	return m, json.Unmarshal(data, &m)
 }
 
-func (c *HadoopCatalog) resolveAvroPath(tableDir, path string) string {
+// resolveAvroPath resolves a manifest-list/manifest-file path emitted by the
+// Rust catalog writer. These paths are always relative to the warehouse
+// root (e.g. "default/docs/metadata/snap-....avro"), never to the table
+// directory — joining against the table directory would double-prefix
+// namespace/table (see hadoop.rs's table_root()/manifest_list_path).
+func (c *HadoopCatalog) resolveAvroPath(path string) string {
 	if filepath.IsAbs(path) {
 		return path
 	}
-	return filepath.Join(tableDir, path)
+	return filepath.Join(c.Warehouse, path)
 }
 
 // readManifestList reads an Iceberg manifest list (Avro OCF) and returns manifest file paths.

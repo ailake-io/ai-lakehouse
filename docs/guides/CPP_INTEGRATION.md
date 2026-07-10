@@ -276,6 +276,30 @@ PARQUET_THROW_NOT_OK(
 
 Then call `ailake::write_batch("/data/warehouse", "default.docs", "/tmp/batch.parquet", opts)`.
 
+**Multi-column (multimodal) writes:**
+
+`write_batch_multi` wraps `ailake insert --vector-cols` — each column gets its
+own independent HNSW index in the AILK footer (Phase 8 multimodal). Requires
+at least one `VectorColSpec`.
+
+```cpp
+ailake::write_batch_multi(
+    "/data/warehouse",
+    "default.media",
+    "/tmp/batch.parquet",
+    {
+        {"embedding", 1536, "cosine", ""},          // text column
+        {"image_embedding", 512, "cosine", "image"}, // image column
+    }
+);
+```
+
+Multi-column mode hardcodes F16 precision and carries metric per-column via
+`VectorColSpec::metric` — `WriteBatchOptions::metric`/`precision` don't apply
+in this mode (same contract as `ailake insert --vector-cols`). An optional
+trailing `WriteBatchOptions` argument still applies for
+`partition_by`/`partition_value`/`format_version`/`fts_columns`/`deferred`.
+
 ---
 
 ## 9. Deletes and schema evolution
@@ -514,8 +538,10 @@ target_link_libraries(my_rag PRIVATE ailake ailake_catalog)
 | `search_multimodal(catalog, ns, tbl, queries, opts)` | `ailake.hpp` | No | Cross-modal RRF fusion |
 | `search_text(catalog, ns, tbl, text, cols, k)` | `ailake.hpp` | **Yes** | FTS (Tantivy or BM25 fallback) |
 | `write_batch(warehouse, table_id, parquet, opts)` | `write.hpp` | **Yes** | Ingest Parquet batch + build HNSW |
+| `write_batch_multi(warehouse, table_id, parquet, cols, opts)` | `write.hpp` | **Yes** | Multi-column (multimodal) ingest |
 | `delete_where(warehouse, table_id, col, vals)` | `write.hpp` | **Yes** | Iceberg equality delete |
 | `evolve_schema(warehouse, table_id, add, rename)` | `write.hpp` | **Yes** | Add/rename columns (metadata-only) |
+| `compact(warehouse, table_id, opts)` | `write.hpp` | **Yes** | Merge small files, returns files compacted |
 | `detect_hardware()` | `hardware.hpp` | No | Returns `HardwareProfile` (CUDA/ROCm/SIMD flags) |
 | `parse_header(bytes)` | `footer.hpp` | No | Parse AILK header from 64-byte buffer |
 | `deserialize_hnsw(data, len)` | `hnsw.hpp` | No | Deserialize HNSW graph from bincode bytes |
@@ -536,6 +562,8 @@ target_link_libraries(my_rag PRIVATE ailake ailake_catalog)
 | `DataFileEntry` | Per-file: `centroid`, `radius`, `hnsw_offset`, `hnsw_len`, `index_status` |
 | `AddColumnReq` | `{name, type, initial_default}` for schema evolution |
 | `RenameColumnReq` | `{from, to}` for schema evolution |
+| `VectorColSpec` | `{column, dim, metric, modality}` for `write_batch_multi` |
+| `CompactOptions` | `target_size`, `min_files`, `max_files_per_pass`, `deferred` |
 | `HardwareProfile` | `has_cuda`, `has_rocm`, `has_avx2`, `has_avx512` |
 
 ---

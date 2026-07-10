@@ -159,6 +159,73 @@ inline void write_batch(
     detail::run_cmd(cmd);
 }
 
+// VectorColSpec describes one vector column in a multi-column (Phase 8
+// multimodal) write — e.g. text + image embeddings on the same row.
+struct VectorColSpec {
+    std::string column;
+    int         dim = 0;
+    std::string metric = "cosine";
+    std::string modality; // optional: text | image | audio | video
+};
+
+// write_batch_multi inserts a Parquet file with N independent vector columns
+// via `ailake insert --vector-cols` (Phase 8 multimodal write). Each column
+// gets its own HNSW index in the AILK footer.
+//
+// Throws std::runtime_error if `vector_cols` is empty, the CLI binary is not
+// found, or the CLI exits non-zero.
+inline void write_batch_multi(
+    const std::string&    warehouse,
+    const std::string&    table_id,      // "namespace.table"
+    const std::string&    parquet_file,
+    const std::vector<VectorColSpec>& vector_cols,
+    const WriteBatchOptions& opts = {})
+{
+    if (vector_cols.empty())
+        throw std::runtime_error("ailake: write_batch_multi requires at least one VectorColSpec");
+
+    std::string bin = detail::resolve_bin();
+
+    std::string spec;
+    for (size_t i = 0; i < vector_cols.size(); ++i) {
+        if (i > 0) spec += ',';
+        const auto& c = vector_cols[i];
+        spec += c.column + ":" + std::to_string(c.dim) + ":"
+              + (c.metric.empty() ? "cosine" : c.metric);
+        if (!c.modality.empty()) spec += ":" + c.modality;
+    }
+
+    std::string cmd = detail::shell_quote(bin)
+        + " --store " + detail::shell_quote(warehouse)
+        + " insert " + detail::shell_quote(table_id)
+        + " " + detail::shell_quote(parquet_file)
+        + " --vector-cols " + detail::shell_quote(spec);
+
+    // Multi-column mode hardcodes F16 precision and ignores --metric/--precision
+    // (metric travels per-column in --vector-cols) — same contract as the CLI's
+    // own Insert handler and ailake-go's WriteBatch multi-column branch.
+    if (!opts.partition_by.empty())
+        cmd += " --partition-by " + detail::shell_quote(opts.partition_by);
+    if (!opts.partition_value.empty())
+        cmd += " --partition-value " + detail::shell_quote(opts.partition_value);
+    if (opts.format_version != 0 && opts.format_version != 2)
+        cmd += " --format-version " + std::to_string(opts.format_version);
+    if (!opts.fts_columns.empty()) {
+        std::string cols;
+        for (size_t i = 0; i < opts.fts_columns.size(); ++i) {
+            if (i > 0) cols += ',';
+            cols += opts.fts_columns[i];
+        }
+        cmd += " --fts-columns " + detail::shell_quote(cols);
+        if (!opts.fts_tokenizer.empty() && opts.fts_tokenizer != "default")
+            cmd += " --fts-tokenizer " + detail::shell_quote(opts.fts_tokenizer);
+    }
+    if (opts.deferred)
+        cmd += " --deferred";
+
+    detail::run_cmd(cmd);
+}
+
 // delete_where logically deletes all rows where `column` equals any value in
 // `values`. Writes an Iceberg equality delete file via the `ailake` CLI.
 //
@@ -227,6 +294,51 @@ inline int evolve_schema(
         try { schema_id = std::stoi(out.substr(pos)); } catch (...) {}
     }
     return schema_id;
+}
+
+// CompactOptions controls optional parameters for compact.
+struct CompactOptions {
+    int64_t target_size = 0;        // bytes, 0 = CLI default (512 MiB)
+    int     min_files = 0;          // 0 = CLI default (4)
+    int     max_files_per_pass = 0; // 0 = CLI default (20)
+    bool    deferred = false;
+};
+
+// compact merges small files in an AI-Lake table via `ailake compact`.
+// Returns the number of files compacted (0 = nothing eligible).
+inline int compact(
+    const std::string&    warehouse,
+    const std::string&    table_id,
+    const CompactOptions& opts = {})
+{
+    std::string bin = detail::resolve_bin();
+    std::string cmd = detail::shell_quote(bin)
+        + " --store " + detail::shell_quote(warehouse)
+        + " compact " + detail::shell_quote(table_id)
+        + " --format json";
+
+    if (opts.target_size > 0)
+        cmd += " --target-size " + std::to_string(opts.target_size);
+    if (opts.min_files > 0)
+        cmd += " --min-files " + std::to_string(opts.min_files);
+    if (opts.max_files_per_pass > 0)
+        cmd += " --max-files-per-pass " + std::to_string(opts.max_files_per_pass);
+    if (opts.deferred)
+        cmd += " --deferred";
+
+    std::string out = detail::run_cmd(cmd);
+
+    // Parse "files_compacted":N from JSON output (no JSON dependency in this
+    // header — same substring-parse style as evolve_schema's new_schema_id).
+    int files_compacted = 0;
+    std::string key = "\"files_compacted\":";
+    auto pos = out.find(key);
+    if (pos != std::string::npos) {
+        pos += key.size();
+        while (pos < out.size() && out[pos] == ' ') ++pos;
+        try { files_compacted = std::stoi(out.substr(pos)); } catch (...) {}
+    }
+    return files_compacted;
 }
 
 } // namespace ailake

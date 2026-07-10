@@ -22,12 +22,54 @@ class VectorScanSplitManager : ConnectorSplitManager {
         dynamicFilter: DynamicFilter,
         constraint: Constraint,
     ): ConnectorSplitSource {
-        val handle = table as VectorScanTableHandle
-        val queryVectorCsv = session.getProperty("query_vector", String::class.java) ?: ""
         val topK = session.getProperty("top_k", Int::class.java) ?: 10
+        if (table is MultimodalScanTableHandle) {
+            val queriesJson = session.getProperty("multimodal_queries", String::class.java) ?: ""
+            return FixedSplitSource(
+                MultimodalScanSplit(
+                    tableUri    = table.tableUri,
+                    namespace   = table.namespace,
+                    tableName   = table.tableName,
+                    queriesJson = queriesJson,
+                    topK        = topK,
+                )
+            )
+        }
+        val queryVectorCsv = session.getProperty("query_vector", String::class.java) ?: ""
+        val queryText = session.getProperty("query_text", String::class.java) ?: ""
+        val hybridWeight = session.getProperty("hybrid_weight", Double::class.java)?.toFloat() ?: 0.5f
         // Parse CSV→bytes once at planning; split carries compact Base64 binary.
         val queryBytes = csvFloatsToBase64(queryVectorCsv)
-        return FixedSplitSource(VectorScanSplit(handle.tableUri, queryBytes, topK))
+        // ScanTableHandle (ailake.default.search_full, Fase 11) reuses VectorScanSplit as-is —
+        // same fields cover it, AilakeNative.scan vs .search is decided by table handle type
+        // in VectorScanRecordSetProvider, not by a distinct split type.
+        if (table is ScanTableHandle) {
+            return FixedSplitSource(
+                VectorScanSplit(
+                    tableUri     = table.tableUri,
+                    queryBytes   = queryBytes,
+                    topK         = topK,
+                    namespace    = table.namespace,
+                    tableName    = table.tableName,
+                    vectorColumn = table.vectorColumn,
+                    queryText    = queryText,
+                    hybridWeight = hybridWeight,
+                )
+            )
+        }
+        val handle = table as VectorScanTableHandle
+        return FixedSplitSource(
+            VectorScanSplit(
+                tableUri     = handle.tableUri,
+                queryBytes   = queryBytes,
+                topK         = topK,
+                namespace    = handle.namespace,
+                tableName    = handle.tableName,
+                vectorColumn = handle.vectorColumn,
+                queryText    = queryText,
+                hybridWeight = hybridWeight,
+            )
+        )
     }
 
     companion object {
