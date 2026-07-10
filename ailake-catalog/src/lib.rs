@@ -28,6 +28,9 @@ pub mod nessie;
 #[cfg(feature = "catalog-jdbc")]
 pub mod jdbc;
 
+#[cfg(feature = "catalog-ducklake")]
+pub mod ducklake;
+
 pub use avro_manifest::{
     build_manifest_entry_schema, read_equality_delete_values, write_equality_delete_avro,
     write_equality_delete_manifest, write_manifest_list_multi_typed, write_partition_stats_parquet,
@@ -59,3 +62,6 @@ pub use nessie::{NessieBranch, NessieCatalog, NessieCatalogConfig};
 
 #[cfg(feature = "catalog-jdbc")]
 pub use jdbc::JdbcCatalog;
+
+#[cfg(feature = "catalog-ducklake")]
+pub use ducklake::DuckLakeCatalog;

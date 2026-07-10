@@ -9,10 +9,11 @@ keywords    = ["iceberg", "catalog", "lakehouse", "parquet", "metadata"]
 categories  = ["database", "data-structures"]
 
 [features]
-rest-catalog   = ["dep:reqwest"]           # REST + Nessie HTTP catalog backends
-catalog-glue   = ["dep:aws-sdk-glue", "dep:aws-config"]
-catalog-nessie = ["rest-catalog"]
-catalog-jdbc   = ["dep:sqlx"]
+rest-catalog     = ["dep:reqwest"]           # REST + Nessie HTTP catalog backends
+catalog-glue     = ["dep:aws-sdk-glue", "dep:aws-config"]
+catalog-nessie   = ["rest-catalog"]
+catalog-jdbc     = ["dep:sqlx"]
+catalog-ducklake = ["dep:duckdb"]
 
 [dependencies]
 ailake-core  = { path = "../ailake-core", version = "0.1.2" }
@@ -40,6 +41,9 @@ aws-config   = { version = "1", features = ["behavior-version-latest"], optional
 
 # catalog-jdbc optional deps
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite", "any"], optional = true }
+
+# catalog-ducklake optional deps
+duckdb = { version = "1", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 tempfile    = { workspace = true }
