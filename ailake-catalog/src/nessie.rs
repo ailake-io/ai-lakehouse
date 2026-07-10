@@ -26,10 +26,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::provider::{
-    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, TableIdent, TableMetadata,
-    TableProperties,
+    CatalogProvider, DataFileEntry, EqualityDeleteFile, NewSnapshot, SnapshotId, TableIdent,
+    TableMetadata, TableProperties,
 };
 use crate::rest::{RestCatalog, RestCatalogAuth, RestCatalogConfig};
+use crate::schema_evolution::SchemaEvolution;
 use ailake_store::Store;
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -353,6 +354,26 @@ impl CatalogProvider for NessieCatalog {
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()> {
         self.inner.drop_table(name).await
+    }
+
+    // Without these, `evolve_schema`/`list_equality_deletes` would silently fall
+    // back to the CatalogProvider trait's own defaults (unsupported / empty)
+    // instead of the inner RestCatalog's real implementation — Rust doesn't
+    // forward trait methods automatically just because the struct wraps one.
+    async fn evolve_schema(
+        &self,
+        table: &TableIdent,
+        evolution: SchemaEvolution,
+    ) -> AilakeResult<i32> {
+        self.inner.evolve_schema(table, evolution).await
+    }
+
+    async fn list_equality_deletes(
+        &self,
+        table: &TableIdent,
+        snapshot_id: Option<SnapshotId>,
+    ) -> AilakeResult<Vec<EqualityDeleteFile>> {
+        self.inner.list_equality_deletes(table, snapshot_id).await
     }
 }
 

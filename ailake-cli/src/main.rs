@@ -31,8 +31,20 @@ struct Cli {
     #[arg(long, global = true, env = "AILAKE_STORE_URL", default_value = ".")]
     store: String,
 
+    /// Catalog backend. `ducklake` requires a local filesystem `--store` (no
+    /// s3://gs://az:// scheme) and the `catalog-ducklake` build feature — see
+    /// docs/guides/DUCKLAKE_CATALOG.md.
+    #[arg(long, global = true, value_enum, default_value = "hadoop")]
+    catalog: CatalogBackendArg,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(ValueEnum, Clone)]
+enum CatalogBackendArg {
+    Hadoop,
+    Ducklake,
 }
 
 #[derive(Subcommand)]
@@ -486,6 +498,47 @@ fn parse_table_ident(s: &str) -> TableIdent {
     }
 }
 
+/// Build a `DuckLakeCatalog` rooted at `--store` (must be a local filesystem path —
+/// DuckLake's metadata store isn't wired for object storage in this CLI; see
+/// docs/guides/DUCKLAKE_CATALOG.md). Layout: `<store>/catalog/{ailake_root,ducklake_meta}.db`,
+/// `<store>/data/` — created on first use.
+#[cfg(feature = "catalog-ducklake")]
+async fn build_ducklake_catalog(store_arg: &str) -> Result<Arc<dyn CatalogProvider>, String> {
+    if store_arg.contains("://") {
+        return Err(
+            "--catalog ducklake only supports a local filesystem --store (no s3://, gs://, \
+             az:// — see docs/guides/DUCKLAKE_CATALOG.md)"
+                .to_string(),
+        );
+    }
+    let warehouse = std::path::Path::new(store_arg);
+    let catalog_dir = warehouse.join("catalog");
+    let data_dir = warehouse.join("data");
+    std::fs::create_dir_all(&catalog_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    let root_db = catalog_dir.join("ailake_root.db");
+    let meta_db = catalog_dir.join("ducklake_meta.db");
+    let catalog = ailake_catalog::DuckLakeCatalog::connect(
+        root_db.to_str().ok_or("--store path is not valid UTF-8")?,
+        meta_db.to_str().ok_or("--store path is not valid UTF-8")?,
+        data_dir.to_str().ok_or("--store path is not valid UTF-8")?,
+        "lake",
+        store_arg,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(Arc::new(catalog) as Arc<dyn CatalogProvider>)
+}
+
+#[cfg(not(feature = "catalog-ducklake"))]
+async fn build_ducklake_catalog(_store_arg: &str) -> Result<Arc<dyn CatalogProvider>, String> {
+    Err(
+        "this `ailake` binary was built without the catalog-ducklake feature — rebuild with \
+         `cargo build --features catalog-ducklake` (or the equivalent release asset)"
+            .to_string(),
+    )
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -517,7 +570,10 @@ async fn run(cli: Cli) -> Result<(), String> {
     }
 
     let store = store_from_url(&cli.store).map_err(|e| e.to_string())?;
-    let catalog = Arc::new(HadoopCatalog::new(Arc::clone(&store), ""));
+    let catalog: Arc<dyn CatalogProvider> = match cli.catalog {
+        CatalogBackendArg::Hadoop => Arc::new(HadoopCatalog::new(Arc::clone(&store), "")),
+        CatalogBackendArg::Ducklake => build_ducklake_catalog(&cli.store).await?,
+    };
 
     match cli.command {
         Commands::Create {

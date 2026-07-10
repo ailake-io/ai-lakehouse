@@ -11,6 +11,7 @@ pub mod avro_raw;
 #[cfg(feature = "rest-catalog")]
 pub mod databricks;
 pub mod hadoop;
+mod manifest_commit;
 pub mod metadata;
 pub mod provider;
 pub mod puffin;
@@ -27,6 +28,9 @@ pub mod nessie;
 
 #[cfg(feature = "catalog-jdbc")]
 pub mod jdbc;
+
+#[cfg(feature = "catalog-ducklake")]
+pub mod ducklake;
 
 pub use avro_manifest::{
     build_manifest_entry_schema, read_equality_delete_values, write_equality_delete_avro,
@@ -59,3 +63,6 @@ pub use nessie::{NessieBranch, NessieCatalog, NessieCatalogConfig};
 
 #[cfg(feature = "catalog-jdbc")]
 pub use jdbc::JdbcCatalog;
+
+#[cfg(feature = "catalog-ducklake")]
+pub use ducklake::DuckLakeCatalog;
