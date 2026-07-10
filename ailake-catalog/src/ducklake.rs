@@ -60,9 +60,13 @@
 //     machine.
 //   - Table columns beyond the primary vector column are declared lazily via
 //     `evolve_schema`/`add_vector_column` (`ALTER TABLE ... ADD COLUMN`), mirroring
-//     the other backends. Physical Parquet files may carry columns not yet declared
-//     in DuckLake — `ducklake_add_data_files(..., ignore_extra_columns => true)`
-//     accepts this, but those columns aren't selectable through plain DuckDB SQL
+//     the other backends. `ducklake_add_data_files` is always called with both
+//     `ignore_extra_columns => true` (source file has columns DuckLake hasn't been
+//     told about yet) and `allow_missing => true` (source file predates a column
+//     DuckLake now expects — the common case right after `evolve_schema` adds one;
+//     confirmed the hard way, the default `allow_missing => false` rejects any
+//     older file outright). Columns DuckLake doesn't know about yet aren't
+//     selectable through plain DuckDB SQL until declared.
 //     until declared.
 
 use std::collections::{HashMap, HashSet};
@@ -93,6 +97,21 @@ fn quote_ident(name: &str) -> String {
 
 fn table_key(table: &TableIdent) -> String {
     format!("{}.{}", table.namespace, table.name)
+}
+
+/// `DataFileEntry::path` is relative to the warehouse/store root — the same
+/// convention `Store::get`/`Store::put` (and every other `CatalogProvider`
+/// backend) uses. DuckDB's `ducklake_add_data_files`/`filename` predicate need a
+/// real filesystem path instead, so this is resolved only at the SQL call site
+/// (`commit_snapshot`, `query_active_files`'s foreign-file check) — the sidecar
+/// table and every `DataFileEntry` returned to callers keep the original
+/// relative form, so `store.get(&entry.path)` downstream keeps working.
+fn resolve_path(warehouse: &str, path: &str) -> String {
+    if path.starts_with('/') || path.contains("://") {
+        path.to_string()
+    } else {
+        format!("{warehouse}/{path}")
+    }
 }
 
 fn cat_err(context: &str, e: impl std::fmt::Display) -> AilakeError {
@@ -348,6 +367,7 @@ fn query_active_files(
     alias: &str,
     table: &TableIdent,
     key: &str,
+    warehouse: &str,
 ) -> AilakeResult<Vec<DataFileEntry>> {
     let mut stmt = conn
         .prepare(
@@ -367,11 +387,16 @@ fn query_active_files(
     let mut known_stmt = conn
         .prepare("SELECT path FROM main.ailake_vector_index WHERE table_key = ?")
         .map_err(|e| cat_err("known paths prepare", e))?;
-    let known_paths: HashSet<String> = known_stmt
+    // Compare against DuckLake's absolute-path file list using the same
+    // resolution `commit_snapshot` applies when registering files.
+    let known_paths_abs: HashSet<String> = known_stmt
         .query_map(duckdb::params![key], |row| row.get::<_, String>(0))
         .map_err(|e| cat_err("known paths query", e))?
-        .collect::<Result<HashSet<_>, _>>()
-        .map_err(|e| cat_err("known paths rows", e))?;
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(|e| cat_err("known paths rows", e))?
+        .into_iter()
+        .map(|p| resolve_path(warehouse, &p))
+        .collect();
 
     let list_files_sql = format!(
         "SELECT data_file, data_file_size_bytes FROM ducklake_list_files('{}', '{}', schema => '{}') WHERE data_file IS NOT NULL",
@@ -392,10 +417,19 @@ fn query_active_files(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| cat_err("list_files rows", e))?;
 
+    let warehouse_prefix = format!("{warehouse}/");
     for (path, size) in ducklake_files {
-        if !known_paths.contains(&path) {
+        if !known_paths_abs.contains(&path) {
+            // Best-effort: report the path warehouse-relative (matching the
+            // convention every other `DataFileEntry.path` uses) when it lives
+            // under the warehouse; fall back to the absolute form for a
+            // genuinely foreign file registered outside the warehouse tree.
+            let relative_path = path
+                .strip_prefix(&warehouse_prefix)
+                .map(str::to_string)
+                .unwrap_or(path);
             out.push(DataFileEntry {
-                path,
+                path: relative_path,
                 record_count: 0,
                 file_size_bytes: size as u64,
                 centroid_b64: None,
@@ -631,7 +665,7 @@ impl CatalogProvider for DuckLakeCatalog {
                 (snapshot.files.clone(), vec![], vec![])
             }
             SnapshotOperation::Overwrite | SnapshotOperation::Replace => {
-                let current = query_active_files(&conn, &alias, table, &key)?;
+                let current = query_active_files(&conn, &alias, table, &key, &self.warehouse)?;
                 let current_paths: HashSet<String> =
                     current.iter().map(|f| f.path.clone()).collect();
                 let new_paths: HashSet<String> =
@@ -673,18 +707,21 @@ impl CatalogProvider for DuckLakeCatalog {
             .map_err(|e| cat_err("begin (lake)", e))?;
         let lake_result: AilakeResult<()> = (|| {
             for path in &to_remove {
+                let abs_path = resolve_path(&self.warehouse, path);
                 conn.execute(
                     &format!("DELETE FROM {full_table} WHERE filename = ?"),
-                    duckdb::params![path],
+                    duckdb::params![abs_path],
                 )
                 .map_err(|e| cat_err("retire file", e))?;
             }
             for entry in &to_add {
+                let abs_path = resolve_path(&self.warehouse, &entry.path);
                 let call_sql = format!(
-                    "CALL ducklake_add_data_files('{}', '{}', '{}', schema => '{}', ignore_extra_columns => true);",
+                    "CALL ducklake_add_data_files('{}', '{}', '{}', schema => '{}', \
+                     ignore_extra_columns => true, allow_missing => true);",
                     alias.replace('\'', "''"),
                     table.name.replace('\'', "''"),
-                    entry.path.replace('\'', "''"),
+                    abs_path.replace('\'', "''"),
                     table.namespace.replace('\'', "''"),
                 );
                 conn.execute_batch(&call_sql)
@@ -770,7 +807,7 @@ impl CatalogProvider for DuckLakeCatalog {
                 ));
             }
         }
-        query_active_files(&conn, &self.catalog_alias, table, &key)
+        query_active_files(&conn, &self.catalog_alias, table, &key, &self.warehouse)
     }
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()> {

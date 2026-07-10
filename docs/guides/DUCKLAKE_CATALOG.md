@@ -7,12 +7,15 @@ real DuckDB `ducklake` extension — no hand-rolled catalog DDL. It sits
 alongside `HadoopCatalog` (file-based, default), `JdbcCatalog`
 (Postgres/MySQL/SQLite pointer), `GlueCatalog`, and `NessieCatalog`.
 
-Like `JdbcCatalog`/`GlueCatalog`/`NessieCatalog`, this is a catalog *backend*
-— it implements `CatalogProvider` and is fully tested on its own, but (as of
-this writing) none of the alternative backends are wired into
-`ailake-cli`/`ailake-py`'s catalog selection surface yet. That wiring is a
-separate, not-yet-started piece of work for every alternative backend, not a
-DuckLake-specific gap.
+Wired into `ailake-cli` behind the same feature flag (`--catalog ducklake`,
+see "CLI usage" below). `JdbcCatalog`/`GlueCatalog`/`NessieCatalog` remain
+backend-only (implemented and tested, but not selectable from the CLI or
+`ailake-py`) — that wiring is separate, not-yet-started work for each of
+those, not something this backend's CLI wiring implies is now easy/expected
+for the others (DuckLake's embedded, local-file nature is what made a single
+`--catalog ducklake` flag — no extra connection-string flags — a reasonable
+CLI surface; JDBC/Glue/Nessie need real connection config a CLI flag alone
+can't sensibly default).
 
 ## Why not just hand-roll the DuckLake catalog schema?
 
@@ -147,11 +150,14 @@ gracefully, never incorrectly:
 - **Lazy column declaration**: like the Iceberg backends, only the primary
   vector column (and the partition column, if any) is declared at
   `create_table` time. Other columns arrive via `evolve_schema`/
-  `add_vector_column` (`ALTER TABLE ... ADD COLUMN`). Physical Parquet files
-  may carry columns not yet declared to DuckLake —
-  `ducklake_add_data_files(..., ignore_extra_columns => true)` accepts this,
-  but those columns aren't selectable through plain DuckDB SQL until
-  declared.
+  `add_vector_column` (`ALTER TABLE ... ADD COLUMN`). `ducklake_add_data_files`
+  is always called with `ignore_extra_columns => true` (source file has
+  columns DuckLake hasn't been told about yet) and `allow_missing => true`
+  (source file predates a column DuckLake now expects — the common case for
+  any file written before an `evolve_schema` call; the default
+  `allow_missing => false` rejects such a file outright, confirmed against a
+  live extension while building this backend). Columns DuckLake doesn't know
+  about yet aren't selectable through plain DuckDB SQL until declared.
 
 ## Sidecar schema
 
@@ -186,9 +192,21 @@ let catalog = DuckLakeCatalog::connect(
     "/warehouse/catalog/ducklake_meta.db", // DuckLake's own metadata store
     "/warehouse/data",                     // DATA_PATH — where DuckLake writes/expects data files
     "lake",                                // catalog alias used in ATTACH
-    "/warehouse",                          // warehouse root (for table_root() paths)
+    "/warehouse",                          // warehouse root — see "path resolution" below
 ).await?;
 ```
+
+The `warehouse` argument matters beyond `table_root()`: `DataFileEntry::path`
+is warehouse-relative by convention (`Store::get`/`put` and every other
+`CatalogProvider` backend use this convention too), but DuckDB's
+`ducklake_add_data_files`/`filename` predicate need a real filesystem path —
+`commit_snapshot`/`list_files`'s foreign-file check resolve relative paths
+against `warehouse` internally (`resolve_path` in `ducklake.rs`); an
+already-absolute path or a URI-scheme path is left untouched. Get `warehouse`
+wrong (e.g. pointing at the table directory instead of the true warehouse
+root) and file registration fails with something like `No files found that
+match the pattern "data/part-00000.parquet"` — found and fixed the hard way
+while wiring this into `ailake-cli` (see "Real bugs found" below).
 
 `CatalogProvider` methods implemented: `create_table`, `load_table`,
 `commit_snapshot` (Append/Overwrite/Replace/Delete all supported —
@@ -196,3 +214,83 @@ Overwrite/Replace diff old-vs-new file lists and retire/add as needed;
 Delete's real payload is `equality_delete_files`, stored in the sidecar and
 returned by `list_equality_deletes`), `list_files`, `drop_table`,
 `evolve_schema` (real `ALTER TABLE ADD/RENAME COLUMN`).
+
+## CLI usage
+
+```bash
+# --catalog ducklake only supports a local filesystem --store (no s3://, gs://,
+# az://). Layout under --store: catalog/{ailake_root,ducklake_meta}.db, data/ —
+# created on first use. Requires the ailake-cli catalog-ducklake build feature.
+ailake --store /warehouse --catalog ducklake create default.docs \
+    --dim 4 --metric cosine --precision f16 --column embedding
+
+ailake --store /warehouse --catalog ducklake insert default.docs batch.parquet \
+    --embeddings embedding --metric cosine --precision f16
+
+ailake --store /warehouse --catalog ducklake search default.docs \
+    --query "0.1,0.2,0.3,0.4" --top-k 10
+
+ailake --store /warehouse --catalog ducklake evolve default.docs --add tag:string
+
+ailake --store /warehouse --catalog ducklake compact default.docs
+
+ailake --store /warehouse --catalog ducklake info default.docs
+```
+
+Build with the feature: `cargo build -p ailake-cli --features catalog-ducklake`
+(not part of the default build — it pulls in `duckdb`'s bundled C++ build,
+several minutes on a cold cache). Without the feature, `--catalog ducklake`
+fails fast with a clear "built without catalog-ducklake feature" error rather
+than silently falling back to Hadoop.
+
+`drop_table` has no CLI subcommand for *any* backend (not a DuckLake-specific
+gap) — use the Rust API directly if you need it.
+
+## Real bugs found wiring this into `ailake-cli`
+
+Verified by actually running the built `ailake` binary against a real DuckLake
+catalog end to end (create → insert → evolve → insert-after-evolve → search →
+compact → info), not just unit tests. Three real bugs caught this way — two in
+this backend's own code, one pre-existing in the shared read path (reproduces
+identically with `HadoopCatalog`, found and fixed in the same pass since it
+blocked verifying `compact` through DuckLake):
+
+1. **Relative-path resolution was missing entirely (`ducklake.rs`).**
+   `TableWriter` writes `DataFileEntry::path` as warehouse-relative
+   (`"data/part-00000.parquet"`), the same convention every other backend and
+   `Store::get`/`put` use. The first version of `commit_snapshot` passed this
+   straight to `ducklake_add_data_files`, which resolves relative paths
+   against DuckDB's own process working directory, not the warehouse — failed
+   immediately with `No files found that match the pattern
+   "data/part-00000.parquet"` on the very first real `ailake insert`. Fixed by
+   resolving to an absolute path (`resolve_path`) only at the SQL call sites,
+   keeping `DataFileEntry::path` itself warehouse-relative everywhere else so
+   `store.get()` downstream keeps working.
+2. **`ducklake_add_data_files` needs `allow_missing => true`, not just
+   `ignore_extra_columns => true` (`ducklake.rs`).** Once `evolve_schema` adds
+   a column, any subsequently-inserted file that predates that column (the
+   normal case — AI-Lake never rewrites old files just because the schema
+   grew) was rejected outright by the extension's default `allow_missing =>
+   false`. Fixed by always passing both flags.
+3. **`ParquetVectorReader::read_all()` (`ailake-parquet/src/reader.rs`) always
+   decoded the vector column as F16, ignoring the file's actual stored
+   precision.** Every AI-Lake writer embeds `ailake.precision` in the Parquet
+   file's own KV metadata, but the reader used by `AilakeFileReader::
+   read_parquet()` — the path both compaction and the scanner's foreign-file
+   flat scan go through — never read it back, unconditionally calling
+   `Quantizer::f16_bytes_to_f32` (2 bytes/element). For any table written with
+   `--precision f32` (4 bytes/element), this silently produced a `Vec<f32>` of
+   the wrong length (byte-width mismatch), surfacing downstream as a
+   `debug_assert_eq!` panic in `ailake-vec`'s `cosine_distance`
+   (`dimension mismatch 8 vs 4` for `dim=4`) in debug builds — and would have
+   silently misbehaved instead of panicking in release builds, where the
+   assert compiles out. Affects **any** F32-precision table run through
+   `ailake compact`, independent of catalog backend — not a DuckLake-specific
+   or synthetic-test-only bug. Fixed by reading `ailake.precision` from the
+   file's own KV metadata and decoding accordingly (`f16`/`f32` supported;
+   other precisions error clearly instead of silently misreading — I8's
+   scaling params aren't currently persisted anywhere to reconstruct exact
+   values from raw bytes, a separate, pre-existing gap not addressed here).
+   Absent `ailake.precision` (raw external source files fed to `ailake
+   insert`, which predate any AI-Lake writer touching them) still defaults to
+   F16, preserving that path's existing documented contract.

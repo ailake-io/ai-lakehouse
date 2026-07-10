@@ -25,6 +25,15 @@ impl Quantizer {
             .collect()
     }
 
+    /// Reinterpret raw little-endian F32 bytes (4 bytes/element) — the identity
+    /// decode for `VectorPrecision::F32` columns, no quantization involved.
+    pub fn f32_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
+        bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect()
+    }
+
     pub fn f32_to_i8(v: &[f32]) -> (Vec<i8>, ScalingParams) {
         let min = v.iter().cloned().fold(f32::INFINITY, f32::min);
         let max = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);

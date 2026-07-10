@@ -8,6 +8,9 @@ repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["cli", "iceberg", "vector", "lakehouse", "vector-search"]
 categories  = ["command-line-utilities", "database"]
 
+[features]
+catalog-ducklake = ["ailake-catalog/catalog-ducklake"]
+
 [[bin]]
 name = "ailake"
 path = "src/main.rs"
