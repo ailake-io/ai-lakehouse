@@ -1,15 +1,31 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Shared Iceberg V2/V3 manifest read/write logic for every backend that owns
-//! its own `metadata.json` (Hadoop, Glue, Jdbc) — real Avro manifests + manifest-
-//! list chaining, V3 `first_row_id` assignment, Phase F Puffin stats, Phase J
-//! partition stats, Phase I partition-spec source-id remap. Extracted from
-//! `HadoopCatalog` (the original, most complete implementation) so Glue/Jdbc
-//! can't silently drift from it — before this, they wrote a much simpler flat-
-//! JSON manifest (`crate::snapshot::Manifest`) that never adopted any of these
-//! V3/partition features and silently dropped `equality_delete_files` entirely.
+//! Shared Iceberg V2/V3 manifest read/write logic for every backend — real
+//! Avro manifests + manifest-list chaining, V3 `first_row_id` assignment,
+//! Phase F Puffin stats, Phase J partition stats, Phase I partition-spec
+//! source-id remap. Extracted from `HadoopCatalog` (the original, most
+//! complete implementation) so other backends can't silently drift from it —
+//! before this, Glue/Jdbc wrote a much simpler flat-JSON manifest
+//! (`crate::snapshot::Manifest`) that never adopted any of these V3/partition
+//! features and silently dropped `equality_delete_files` entirely.
 //!
-//! Backends that delegate metadata management to a server (Rest/Nessie) don't
-//! use this — they have their own protocol-native equivalent (`rest.rs`).
+//! Two layers, split so backends that own a local `metadata.json`
+//! (Hadoop/Glue/Jdbc) and backends that delegate metadata to a server
+//! (Rest/Nessie) can both reuse the *same* Avro-manifest-writing logic without
+//! forcing the REST backend to fake an owned `IcebergMetadata`:
+//!
+//! - [`build_commit`] does all the actual work (writes the Avro manifest(s) to
+//!   `Store`, assigns V3 `first_row_id`s, writes Puffin/partition-stats files)
+//!   and returns a [`CommitArtifacts`] bundle — it never mutates `meta`.
+//! - [`apply_commit`] applies a `CommitArtifacts` bundle to an owned
+//!   `IcebergMetadata` in place (push snapshot, patch schema, merge
+//!   properties/stats refs) — what Hadoop/Glue/Jdbc persist as their next
+//!   `metadata.json`. [`commit_into_metadata`] is a thin `build_commit` +
+//!   `apply_commit` convenience wrapper for them.
+//! - `rest.rs` calls `build_commit` directly and translates the same
+//!   `CommitArtifacts` into REST protocol `TableUpdate`s instead of an owned
+//!   `IcebergMetadata` write — see `rest.rs::commit_snapshot`.
+
+use std::collections::HashMap;
 
 use base64::Engine as _;
 
@@ -59,20 +75,54 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// Apply one commit to `meta` in place: writes the Avro data manifest (+ delete
-/// manifest, if any), chains the manifest list, assigns V3 `first_row_id`, writes
-/// Phase F Puffin stats + Phase J partition stats, applies any `iceberg_schema`/
-/// `extra_properties` update, and pushes the new `IcebergSnapshot`. Does **not**
-/// persist `meta` — the caller owns that. Each backend has its own pointer-write
-/// and OCC/CAS mechanism: `HadoopCatalog::save_metadata`, Glue's version-id-
-/// guarded `update_table`, Jdbc's conditional `UPDATE` on `metadata_location`.
-pub(crate) async fn commit_into_metadata(
+/// Schema change to apply as part of a commit (from `NewSnapshot::iceberg_schema`,
+/// Phase G/I). `new_schema_fields` is the *complete* replacement fields array for
+/// schema-id 0 (matches `IcebergSchemaUpdate::fields`'s existing "already the full
+/// set, not incremental" contract). `remapped_partition_specs`, when non-empty, is
+/// the *complete* replacement `partition_specs` array with any partition field's
+/// `source-id` corrected to match where the column actually landed once the real
+/// schema (not the table-creation bootstrap schema) was written — see the
+/// long-form comment this was extracted from in `HadoopCatalog::commit_snapshot`.
+pub(crate) struct SchemaPatch {
+    pub new_schema_fields: Vec<serde_json::Value>,
+    pub last_column_id: i32,
+    pub name_mapping_json: String,
+    pub remapped_partition_specs: Vec<serde_json::Value>,
+}
+
+/// Everything produced by committing one snapshot, independent of how the
+/// caller persists it: an owned `metadata.json` (Hadoop/Glue/Jdbc, via
+/// [`apply_commit`]) or REST protocol `TableUpdate`s (`rest.rs`).
+pub(crate) struct CommitArtifacts {
+    pub snapshot: IcebergSnapshot,
+    /// `IcebergMetadata::next_row_id` value after this commit. Only meaningful
+    /// for format-version >= 3; V2 tables always get `0` back (matches the
+    /// pre-split behavior, where the `if meta.format_version >= 3` guard left
+    /// `meta.next_row_id` untouched for V2). REST callers can ignore this —
+    /// the spec's own `next-row-id` field description says the server derives
+    /// it from `first_row_id`/`record_count` already present in the manifest.
+    pub next_row_id: i64,
+    pub last_sequence_number: i64,
+    pub last_updated_ms: i64,
+    pub schema_patch: Option<SchemaPatch>,
+    pub extra_properties: HashMap<String, String>,
+    pub statistics: Option<crate::metadata::IcebergStatisticsRef>,
+    pub partition_statistics: Option<IcebergPartitionStatsRef>,
+}
+
+/// Write the Avro data manifest (+ delete manifest, if any), chain the
+/// manifest list, assign V3 `first_row_id`s, and write Phase F Puffin stats +
+/// Phase J partition stats — all as real `Store` writes. Returns everything
+/// needed to reflect this commit in a table's metadata, without touching
+/// `meta` itself (read-only: current schema/snapshots/next-row-id are read
+/// from it, nothing more).
+pub(crate) async fn build_commit(
     store: &dyn Store,
     table_root: &str,
     warehouse: &str,
-    meta: &mut IcebergMetadata,
+    meta: &IcebergMetadata,
     snapshot: NewSnapshot,
-) -> AilakeResult<SnapshotId> {
+) -> AilakeResult<CommitArtifacts> {
     let snap_id = snapshot.snapshot_id;
     let seq = meta.last_sequence_number + 1;
 
@@ -119,17 +169,16 @@ pub(crate) async fn commit_into_metadata(
         })
         .collect();
 
+    let mut next_row_id = meta.next_row_id;
     if meta.format_version >= 3 {
-        let mut next_id = meta.next_row_id;
         for f in abs_files.iter_mut() {
             // Compaction pre-sets first_row_id from source files — respect it.
             // Only allocate fresh IDs (and advance the counter) for brand-new files.
             if f.first_row_id.is_none() {
-                f.first_row_id = Some(next_id);
-                next_id += f.record_count as i64;
+                f.first_row_id = Some(next_row_id);
+                next_row_id += f.record_count as i64;
             }
         }
-        meta.next_row_id = next_id;
     }
     let added_rows: i64 = abs_files.iter().map(|f| f.record_count as i64).sum();
     let manifest_file_path = format!("{}/metadata/{}-m0.avro", table_root, snap_id);
@@ -203,7 +252,7 @@ pub(crate) async fn commit_into_metadata(
         sequence_number: seq,
         timestamp_ms: commit_now_ms,
         manifest_list: manifest_list_path,
-        summary: std::collections::HashMap::from([
+        summary: HashMap::from([
             (
                 "operation".to_string(),
                 format!("{:?}", operation).to_lowercase(),
@@ -215,12 +264,8 @@ pub(crate) async fn commit_into_metadata(
         ]),
         schema_id: Some(0),
     };
-    meta.last_sequence_number = seq;
-    meta.last_updated_ms = commit_now_ms;
-    meta.current_snapshot_id = Some(snap_id);
-    meta.snapshots.push(iceberg_snap);
 
-    if let Some(schema_update) = snapshot.iceberg_schema {
+    let schema_patch = snapshot.iceberg_schema.map(|schema_update| {
         // Bootstrap metadata (IcebergMetadata::new, for partition_by /
         // partition_fields tables) assigns the partition column field-id
         // assuming it is the *only* schema field at table-creation time.
@@ -232,12 +277,13 @@ pub(crate) async fn commit_into_metadata(
         // name now has — otherwise readers (Trino/Spark iceberg-java)
         // reject the table with "Cannot create identity partition
         // sourced from different field in schema".
-        let new_id_by_name: std::collections::HashMap<&str, i64> = schema_update
+        let new_id_by_name: HashMap<&str, i64> = schema_update
             .fields
             .iter()
             .filter_map(|f| Some((f["name"].as_str()?, f["id"].as_i64()?)))
             .collect();
-        for spec in meta.partition_specs.iter_mut() {
+        let mut remapped_partition_specs = meta.partition_specs.clone();
+        for spec in remapped_partition_specs.iter_mut() {
             if let Some(fields) = spec["fields"].as_array_mut() {
                 for pf in fields.iter_mut() {
                     if let Some(name) = pf["name"].as_str() {
@@ -248,23 +294,16 @@ pub(crate) async fn commit_into_metadata(
                 }
             }
         }
-
-        if let Some(schema) = meta.schemas.first_mut() {
-            schema["fields"] = serde_json::Value::Array(schema_update.fields);
+        SchemaPatch {
+            new_schema_fields: schema_update.fields,
+            last_column_id: schema_update.last_column_id,
+            name_mapping_json: schema_update.name_mapping_json,
+            remapped_partition_specs,
         }
-        meta.last_column_id = schema_update.last_column_id;
-        meta.properties.insert(
-            "schema.name-mapping.default".to_string(),
-            schema_update.name_mapping_json,
-        );
-    }
-
-    // Merge secondary-column properties (ailake.dim-<col>, ailake.metric-<col>).
-    for (k, v) in snapshot.extra_properties {
-        meta.properties.insert(k, v);
-    }
+    });
 
     // Phase F: write Puffin stats file for V3 tables (vector stats + BM25 bloom).
+    let mut statistics = None;
     if meta.format_version >= 3 {
         let vector_stats = collect_vector_stats(&abs_files);
         let bm25_blooms: Vec<crate::puffin::BM25BloomEntry> = snapshot
@@ -307,7 +346,7 @@ pub(crate) async fn commit_into_metadata(
                                 length: len,
                             });
                         }
-                        meta.statistics.push(IcebergStatisticsRef {
+                        statistics = Some(IcebergStatisticsRef {
                             snapshot_id: snap_id,
                             statistics_path: puffin_path,
                             file_size_in_bytes: puffin_len,
@@ -326,6 +365,7 @@ pub(crate) async fn commit_into_metadata(
     // Phase J: write partition statistics Parquet file for partitioned tables.
     // Covers ALL data files in this snapshot (reads every data manifest) so that
     // Spark/Trino can do partition-level aggregations without scanning data files.
+    let mut partition_statistics = None;
     if let Some(spec) = &active_partition_spec {
         if !spec.is_unpartitioned() {
             let mut all_data_entries: Vec<DataFileEntry> = Vec::new();
@@ -353,7 +393,7 @@ pub(crate) async fn commit_into_metadata(
                     let stats_len = stats_bytes.len() as u64;
                     match store.put(&stats_path, stats_bytes).await {
                         Ok(()) => {
-                            meta.partition_statistics.push(IcebergPartitionStatsRef {
+                            partition_statistics = Some(IcebergPartitionStatsRef {
                                 snapshot_id: snap_id,
                                 statistics_path: stats_path,
                                 file_size_in_bytes: stats_len,
@@ -373,6 +413,65 @@ pub(crate) async fn commit_into_metadata(
         }
     }
 
+    Ok(CommitArtifacts {
+        snapshot: iceberg_snap,
+        next_row_id,
+        last_sequence_number: seq,
+        last_updated_ms: commit_now_ms,
+        schema_patch,
+        extra_properties: snapshot.extra_properties,
+        statistics,
+        partition_statistics,
+    })
+}
+
+/// Apply a [`CommitArtifacts`] bundle to an owned `IcebergMetadata` in place —
+/// what `HadoopCatalog`/`GlueCatalog`/`JdbcCatalog` persist as the table's next
+/// `metadata.json`. Does not persist `meta` itself; the caller does that with
+/// its own pointer-write + OCC/CAS mechanism.
+pub(crate) fn apply_commit(meta: &mut IcebergMetadata, artifacts: CommitArtifacts) {
+    meta.last_sequence_number = artifacts.last_sequence_number;
+    meta.last_updated_ms = artifacts.last_updated_ms;
+    meta.current_snapshot_id = Some(artifacts.snapshot.snapshot_id);
+    if meta.format_version >= 3 {
+        meta.next_row_id = artifacts.next_row_id;
+    }
+    meta.snapshots.push(artifacts.snapshot);
+
+    if let Some(patch) = artifacts.schema_patch {
+        meta.partition_specs = patch.remapped_partition_specs;
+        if let Some(schema) = meta.schemas.first_mut() {
+            schema["fields"] = serde_json::Value::Array(patch.new_schema_fields);
+        }
+        meta.last_column_id = patch.last_column_id;
+        meta.properties.insert(
+            "schema.name-mapping.default".to_string(),
+            patch.name_mapping_json,
+        );
+    }
+
+    for (k, v) in artifacts.extra_properties {
+        meta.properties.insert(k, v);
+    }
+    if let Some(s) = artifacts.statistics {
+        meta.statistics.push(s);
+    }
+    if let Some(p) = artifacts.partition_statistics {
+        meta.partition_statistics.push(p);
+    }
+}
+
+/// `build_commit` + `apply_commit` in one call — what Hadoop/Glue/Jdbc use.
+pub(crate) async fn commit_into_metadata(
+    store: &dyn Store,
+    table_root: &str,
+    warehouse: &str,
+    meta: &mut IcebergMetadata,
+    snapshot: NewSnapshot,
+) -> AilakeResult<SnapshotId> {
+    let artifacts = build_commit(store, table_root, warehouse, meta, snapshot).await?;
+    let snap_id = artifacts.snapshot.snapshot_id;
+    apply_commit(meta, artifacts);
     Ok(snap_id)
 }
 

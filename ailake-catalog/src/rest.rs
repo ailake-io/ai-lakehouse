@@ -18,17 +18,15 @@ use std::time::{Duration, Instant};
 
 use ailake_core::{AilakeError, AilakeResult};
 use async_trait::async_trait;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::metadata::IcebergMetadata;
 use crate::provider::{
-    CatalogProvider, DataFileEntry, EqualityDeleteFile, NewSnapshot, SnapshotId, SnapshotOperation,
-    TableIdent, TableMetadata, TableProperties,
+    CatalogProvider, DataFileEntry, EqualityDeleteFile, NewSnapshot, SnapshotId, TableIdent,
+    TableMetadata, TableProperties,
 };
 use crate::schema_evolution::SchemaEvolution;
-use crate::snapshot::{manifest_path, Manifest};
 use ailake_store::Store;
 
 // ── Public configuration types ───────────────────────────────────────────────
@@ -245,35 +243,15 @@ impl RestCatalog {
         )))
     }
 
-    /// Fetch current table state and read back the flat JSON manifest for the
-    /// given (or current) snapshot. `Ok(None)` only when no snapshot id can be
-    /// resolved at all (fresh table, never committed) — an explicit
-    /// `snapshot_id` that doesn't match any known snapshot is a hard error.
-    async fn load_manifest(
-        &self,
-        table: &TableIdent,
-        snapshot_id: Option<SnapshotId>,
-    ) -> AilakeResult<Option<Manifest>> {
+    /// Fetch current table metadata from the REST server.
+    async fn load_metadata(&self, table: &TableIdent) -> AilakeResult<IcebergMetadata> {
         let resp = self.get(&self.table_url(table)).await?;
-        let resp = Self::require_ok(resp, "load_manifest").await?;
+        let resp = Self::require_ok(resp, "load_metadata").await?;
         let result: LoadTableResult = resp
             .json()
             .await
-            .map_err(|e| AilakeError::Catalog(format!("load_manifest parse: {e}")))?;
-        let meta = &result.metadata;
-        let snap_id = match snapshot_id.or(meta.current_snapshot_id) {
-            Some(id) => id,
-            None => return Ok(None),
-        };
-        let snap = meta
-            .snapshots
-            .iter()
-            .find(|s| s.snapshot_id == snap_id)
-            .ok_or_else(|| AilakeError::Catalog(format!("snapshot {snap_id} not found")))?;
-        let manifest_bytes = self.store.get(&snap.manifest_list).await?;
-        let manifest_json = std::str::from_utf8(&manifest_bytes)
-            .map_err(|e| AilakeError::Catalog(e.to_string()))?;
-        Ok(Some(Manifest::from_json(manifest_json)?))
+            .map_err(|e| AilakeError::Catalog(format!("load_metadata parse: {e}")))?;
+        Ok(result.metadata)
     }
 }
 
@@ -365,15 +343,16 @@ impl CatalogProvider for RestCatalog {
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
         let snap_id = snapshot.snapshot_id;
+        let table_root = self.table_storage_root(table);
 
-        // Real OCC: read current state, build the new manifest against it, commit
-        // with an `assert-ref-snapshot-id` requirement pinned to the snapshot we
-        // read. If another writer moves `main` first, the server rejects the
-        // commit (409) and we retry from a fresh read — same retry×5 w/ backoff
-        // pattern glue.rs/jdbc.rs already use for their own CAS mechanisms. This
-        // replaces the previous "the REST server owns conflict resolution, we
-        // never send requirements" assumption, which left concurrent writers free
-        // to silently clobber each other's commits.
+        // Real OCC: read current state, build the real Avro manifest against it
+        // (`build_commit` — shared with Hadoop/Glue/Jdbc, gives this backend the
+        // same V3 first_row_id/Puffin-stats/partition-stats support they have),
+        // commit with an `assert-ref-snapshot-id` requirement pinned to the
+        // snapshot we read. If another writer moves `main` first, the server
+        // rejects the commit (409) and we retry from a fresh read — same
+        // retry×5 w/ backoff pattern glue.rs/jdbc.rs use for their own CAS
+        // mechanisms.
         const MAX_RETRIES: u32 = 5;
         for attempt in 0..MAX_RETRIES {
             let resp = self.get(&self.table_url(table)).await?;
@@ -382,88 +361,106 @@ impl CatalogProvider for RestCatalog {
                 .json()
                 .await
                 .map_err(|e| AilakeError::Catalog(format!("commit_snapshot parse: {e}")))?;
-            let current_snapshot_id = result.metadata.current_snapshot_id;
+            let meta = result.metadata;
+            let current_snapshot_id = meta.current_snapshot_id;
+            let current_schema_id = meta.current_schema_id;
 
-            // Append/Delete inherit the previous snapshot's full file/eq-delete list
-            // (this catalog writes one flat manifest per snapshot, not an Iceberg
-            // manifest chain, so the new manifest must already contain the complete
-            // resulting state). Replace/Overwrite treat `snapshot.files`/
-            // `snapshot.equality_delete_files` as the complete state — callers
-            // already rebuild it (see hadoop.rs's identical contract).
-            let (effective_files, effective_eq_deletes): (
-                Vec<DataFileEntry>,
-                Vec<EqualityDeleteFile>,
-            ) = if matches!(
-                snapshot.operation,
-                SnapshotOperation::Append | SnapshotOperation::Delete
-            ) {
-                let mut prev_files = match current_snapshot_id {
-                    Some(id) => self.list_files(table, Some(id)).await?,
-                    None => vec![],
-                };
-                prev_files.extend(snapshot.files.iter().cloned());
-                let mut prev_deletes = self
-                    .list_equality_deletes(table, current_snapshot_id)
-                    .await?;
-                prev_deletes.extend(snapshot.equality_delete_files.iter().cloned());
-                (prev_files, prev_deletes)
-            } else {
-                (
-                    snapshot.files.clone(),
-                    snapshot.equality_delete_files.clone(),
-                )
-            };
+            let artifacts = crate::manifest_commit::build_commit(
+                &*self.store,
+                &table_root,
+                self.config.warehouse.as_deref().unwrap_or(""),
+                &meta,
+                snapshot.clone(),
+            )
+            .await?;
 
-            // 1. Write manifest JSON to object storage
-            let root = self.table_storage_root(table);
-            let rel_path = manifest_path(snap_id);
-            let abs_path = format!("{root}/{rel_path}");
-            let manifest = Manifest {
-                snapshot_id: snap_id,
-                files: effective_files,
-                equality_delete_files: effective_eq_deletes,
-            };
-            self.store
-                .put(&abs_path, Bytes::from(manifest.to_json()?.into_bytes()))
-                .await?;
-
-            // 2. Register snapshot with the REST catalog, guarded by an OCC requirement.
-            let now_ms = now_ms();
             let rest_snap = RestSnapshot {
-                snapshot_id: snap_id,
-                parent_snapshot_id: snapshot.parent_snapshot_id,
-                sequence_number: 1,
-                timestamp_ms: now_ms,
-                manifest_list: abs_path,
-                summary: HashMap::from([
-                    (
-                        "operation".into(),
-                        format!("{:?}", snapshot.operation).to_lowercase(),
-                    ),
-                    ("added-data-files".into(), snapshot.files.len().to_string()),
-                ]),
-                schema_id: Some(0),
+                snapshot_id: artifacts.snapshot.snapshot_id,
+                parent_snapshot_id: artifacts.snapshot.parent_snapshot_id,
+                sequence_number: artifacts.snapshot.sequence_number,
+                timestamp_ms: artifacts.snapshot.timestamp_ms,
+                manifest_list: artifacts.snapshot.manifest_list.clone(),
+                summary: artifacts.snapshot.summary.clone(),
+                schema_id: artifacts.snapshot.schema_id,
             };
+
+            let mut updates = vec![
+                TableUpdate::AddSnapshot {
+                    snapshot: rest_snap,
+                },
+                TableUpdate::SetSnapshotRef {
+                    ref_name: "main".into(),
+                    snapshot_type: "branch".into(),
+                    snapshot_id: snap_id,
+                },
+            ];
+            let mut requirements = vec![TableRequirement::AssertRefSnapshotId {
+                r#ref: "main".into(),
+                snapshot_id: current_snapshot_id,
+            }];
+
+            // Phase I: schema/partition-spec patch (only present when the caller
+            // supplied `NewSnapshot::iceberg_schema` — same trigger as Hadoop/Glue/Jdbc).
+            if let Some(patch) = artifacts.schema_patch {
+                let new_schema_id = current_schema_id + 1;
+                updates.push(TableUpdate::AddSchema {
+                    schema: serde_json::json!({
+                        "schema-id": new_schema_id,
+                        "type": "struct",
+                        "fields": patch.new_schema_fields,
+                    }),
+                });
+                updates.push(TableUpdate::SetCurrentSchema { schema_id: -1 });
+                updates.push(TableUpdate::SetProperties {
+                    updates: HashMap::from([(
+                        "schema.name-mapping.default".to_string(),
+                        patch.name_mapping_json,
+                    )]),
+                });
+                // The REST protocol has no "modify an existing spec's source-id in
+                // place" update — the closest spec-correct equivalent is adding the
+                // corrected spec as new and making it the default. Only the *last*
+                // (highest spec-id) entry in `remapped_partition_specs` is genuinely
+                // new — the earlier ones are the same specs already registered.
+                if let Some(new_spec) = patch.remapped_partition_specs.last() {
+                    updates.push(TableUpdate::AddPartitionSpec {
+                        spec: new_spec.clone(),
+                    });
+                    updates.push(TableUpdate::SetDefaultSpec { spec_id: -1 });
+                }
+                requirements.push(TableRequirement::AssertCurrentSchemaId { current_schema_id });
+            }
+            if !artifacts.extra_properties.is_empty() {
+                updates.push(TableUpdate::SetProperties {
+                    updates: artifacts.extra_properties,
+                });
+            }
+            // Phase F / Phase J: Puffin vector+BM25 stats and partition-stats Parquet
+            // refs, mapped 1:1 onto the REST spec's own `StatisticsFile`/
+            // `PartitionStatisticsFile` shapes (confirmed field-for-field against
+            // apache/iceberg's rest-catalog-open-api.yaml, including the
+            // `blob-metadata` key name already pinned to match it in `metadata.rs`).
+            if let Some(stats) = &artifacts.statistics {
+                updates.push(TableUpdate::SetStatistics {
+                    statistics: serde_json::to_value(stats)
+                        .map_err(|e| AilakeError::Catalog(format!("stats serialize: {e}")))?,
+                });
+            }
+            if let Some(pstats) = &artifacts.partition_statistics {
+                updates.push(TableUpdate::SetPartitionStatistics {
+                    partition_statistics: serde_json::to_value(pstats).map_err(|e| {
+                        AilakeError::Catalog(format!("partition stats serialize: {e}"))
+                    })?,
+                });
+            }
 
             let commit_req = CommitTableRequest {
                 identifier: TableIdentifier {
                     namespace: vec![table.namespace.clone()],
                     name: table.name.clone(),
                 },
-                requirements: vec![TableRequirement::AssertRefSnapshotId {
-                    r#ref: "main".into(),
-                    snapshot_id: current_snapshot_id,
-                }],
-                updates: vec![
-                    TableUpdate::AddSnapshot {
-                        snapshot: rest_snap,
-                    },
-                    TableUpdate::SetSnapshotRef {
-                        ref_name: "main".into(),
-                        snapshot_type: "branch".into(),
-                        snapshot_id: snap_id,
-                    },
-                ],
+                requirements,
+                updates,
             };
 
             let resp = self.post(&self.table_url(table), &commit_req).await?;
@@ -487,11 +484,8 @@ impl CatalogProvider for RestCatalog {
         table: &TableIdent,
         snapshot_id: Option<SnapshotId>,
     ) -> AilakeResult<Vec<DataFileEntry>> {
-        let manifest = self
-            .load_manifest(table, snapshot_id)
-            .await?
-            .ok_or_else(|| AilakeError::Catalog("table has no snapshots".into()))?;
-        Ok(manifest.files)
+        let meta = self.load_metadata(table).await?;
+        crate::manifest_commit::list_files_from_metadata(&*self.store, &meta, snapshot_id).await
     }
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()> {
@@ -597,10 +591,13 @@ impl CatalogProvider for RestCatalog {
         table: &TableIdent,
         snapshot_id: Option<SnapshotId>,
     ) -> AilakeResult<Vec<EqualityDeleteFile>> {
-        let manifest = self.load_manifest(table, snapshot_id).await?;
-        Ok(manifest
-            .map(|m| m.equality_delete_files)
-            .unwrap_or_default())
+        let meta = self.load_metadata(table).await?;
+        crate::manifest_commit::list_equality_deletes_from_metadata(
+            &*self.store,
+            &meta,
+            snapshot_id,
+        )
+        .await
     }
 }
 
@@ -700,6 +697,25 @@ enum TableUpdate {
     SetProperties {
         updates: HashMap<String, String>,
     },
+    /// Phase F: Puffin vector-stats + BM25-bloom file ref. Payload is a
+    /// `StatisticsFile`-shaped JSON value (see `manifest_commit::CommitArtifacts`).
+    SetStatistics {
+        statistics: serde_json::Value,
+    },
+    /// Phase J: partition-stats Parquet file ref (`PartitionStatisticsFile`-shaped).
+    SetPartitionStatistics {
+        #[serde(rename = "partition-statistics")]
+        partition_statistics: serde_json::Value,
+    },
+    /// Phase I: register the partition-spec-with-corrected-source-id — the REST
+    /// spec has no update to edit an existing spec's `source-id` in place.
+    AddPartitionSpec {
+        spec: serde_json::Value,
+    },
+    SetDefaultSpec {
+        #[serde(rename = "spec-id")]
+        spec_id: i32,
+    },
 }
 
 #[derive(Serialize)]
@@ -717,13 +733,6 @@ struct RestSnapshot {
     summary: HashMap<String, String>,
     #[serde(rename = "schema-id", skip_serializing_if = "Option::is_none")]
     schema_id: Option<i32>,
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
