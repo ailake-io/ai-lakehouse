@@ -22,12 +22,15 @@ use aws_sdk_glue::types::{StorageDescriptor, TableInput};
 use bytes::Bytes;
 use uuid::Uuid;
 
-use crate::metadata::{IcebergMetadata, IcebergSnapshot};
+use crate::manifest_commit::{
+    commit_into_metadata, list_equality_deletes_from_metadata, list_files_from_metadata,
+};
+use crate::metadata::IcebergMetadata;
 use crate::provider::{
-    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, SnapshotOperation, TableIdent,
+    CatalogProvider, DataFileEntry, EqualityDeleteFile, NewSnapshot, SnapshotId, TableIdent,
     TableMetadata, TableProperties,
 };
-use crate::snapshot::{manifest_path, Manifest};
+use crate::schema_evolution::SchemaEvolution;
 use ailake_store::Store;
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -231,69 +234,27 @@ impl CatalogProvider for GlueCatalog {
         table: &TableIdent,
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
-        let snap_id = snapshot.snapshot_id;
-        let operation_str = format!("{:?}", snapshot.operation).to_lowercase();
-        let root = self.table_root(table);
-        let abs_manifest = format!("{root}/{}", manifest_path(snap_id));
-
-        // OCC retry: read → rebuild effective file list → write manifest + metadata →
-        // update_table with version_id. Glue rejects update_table when version_id doesn't
-        // match (ConcurrentModificationException), so we re-read and retry with the fresh
-        // version_id. The effective file list is recomputed from the freshly-read metadata
-        // on every attempt so a concurrent Append/Delete that won a prior iteration isn't
-        // lost by an in-flight retry that captured a stale file list.
+        // OCC retry: read -> apply commit to a fresh copy of `meta` -> update_table
+        // with version_id. Glue rejects update_table when version_id doesn't match
+        // (ConcurrentModificationException), so we re-read and retry with the fresh
+        // version_id + freshly-read `meta` on every attempt, so a concurrent
+        // Append/Delete that won a prior iteration isn't lost by an in-flight retry
+        // that captured stale state. `commit_into_metadata` (shared with Hadoop) owns
+        // the actual Avro manifest / Puffin / partition-stats / first_row_id logic.
         const MAX_RETRIES: u32 = 5;
         let table_root = self.table_root(table);
         for attempt in 0..MAX_RETRIES {
             let (old_location, version_id) = self.get_table_state(table).await?;
             let mut meta = self.load_iceberg_metadata(&old_location).await?;
 
-            // Append/Delete inherit the previous snapshot's full file list (this catalog
-            // stores one flat manifest per snapshot, not an Iceberg manifest chain, so
-            // the new manifest must already contain the complete resulting file list).
-            // Replace/Overwrite treat `snapshot.files` as the complete state — callers
-            // already rebuild it (see hadoop.rs's identical contract).
-            let effective_files: Vec<DataFileEntry> = if matches!(
-                snapshot.operation,
-                SnapshotOperation::Append | SnapshotOperation::Delete
-            ) {
-                let mut prev = if meta.current_snapshot_id.is_some() {
-                    self.list_files(table, meta.current_snapshot_id).await?
-                } else {
-                    vec![]
-                };
-                prev.extend(snapshot.files.iter().cloned());
-                prev
-            } else {
-                snapshot.files.clone()
-            };
-            let files_count = effective_files.len();
-
-            let manifest = Manifest {
-                snapshot_id: snap_id,
-                files: effective_files,
-            };
-            self.store
-                .put(&abs_manifest, Bytes::from(manifest.to_json()?.into_bytes()))
-                .await?;
-
-            let now_ms = now_ms();
-            let iceberg_snap = IcebergSnapshot {
-                snapshot_id: snap_id,
-                parent_snapshot_id: meta.current_snapshot_id,
-                sequence_number: meta.last_sequence_number + 1,
-                timestamp_ms: now_ms,
-                manifest_list: abs_manifest.clone(),
-                summary: HashMap::from([
-                    ("operation".into(), operation_str.clone()),
-                    ("added-data-files".into(), files_count.to_string()),
-                ]),
-                schema_id: Some(0),
-            };
-            meta.last_sequence_number += 1;
-            meta.last_updated_ms = now_ms;
-            meta.current_snapshot_id = Some(snap_id);
-            meta.snapshots.push(iceberg_snap);
+            let snap_id = commit_into_metadata(
+                &*self.store,
+                &table_root,
+                &self.config.warehouse,
+                &mut meta,
+                snapshot.clone(),
+            )
+            .await?;
 
             let new_uuid = Uuid::new_v4().to_string();
             let new_location = self.metadata_path(table, &new_uuid);
@@ -340,19 +301,7 @@ impl CatalogProvider for GlueCatalog {
     ) -> AilakeResult<Vec<DataFileEntry>> {
         let location = self.get_metadata_location(table).await?;
         let meta = self.load_iceberg_metadata(&location).await?;
-        let snap_id = snapshot_id
-            .or(meta.current_snapshot_id)
-            .ok_or_else(|| AilakeError::Catalog("table has no snapshots".into()))?;
-        let snap = meta
-            .snapshots
-            .iter()
-            .find(|s| s.snapshot_id == snap_id)
-            .ok_or_else(|| AilakeError::Catalog(format!("snapshot {snap_id} not found")))?;
-        let manifest_bytes = self.store.get(&snap.manifest_list).await?;
-        let manifest_json = std::str::from_utf8(&manifest_bytes)
-            .map_err(|e| AilakeError::Catalog(e.to_string()))?;
-        let manifest = crate::snapshot::Manifest::from_json(manifest_json)?;
-        Ok(manifest.files)
+        list_files_from_metadata(&*self.store, &meta, snapshot_id).await
     }
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()> {
@@ -375,6 +324,126 @@ impl CatalogProvider for GlueCatalog {
                 }
             }
         }
+    }
+
+    async fn list_equality_deletes(
+        &self,
+        table: &TableIdent,
+        snapshot_id: Option<SnapshotId>,
+    ) -> AilakeResult<Vec<EqualityDeleteFile>> {
+        let location = self.get_metadata_location(table).await?;
+        let meta = self.load_iceberg_metadata(&location).await?;
+        list_equality_deletes_from_metadata(&*self.store, &meta, snapshot_id).await
+    }
+
+    /// Apply schema evolution without rewriting data files — mirrors
+    /// `HadoopCatalog::evolve_schema` exactly (same metadata.json schema-patch
+    /// logic), swapping the pointer-update mechanism for Glue's own
+    /// version_id-guarded `update_table` OCC retry loop, since evolving the
+    /// schema still means writing a new metadata.json and re-pointing the Glue
+    /// table's `metadata_location` parameter at it.
+    async fn evolve_schema(
+        &self,
+        table: &TableIdent,
+        evolution: SchemaEvolution,
+    ) -> AilakeResult<i32> {
+        let table_root = self.table_root(table);
+        const MAX_RETRIES: u32 = 5;
+        for attempt in 0..MAX_RETRIES {
+            let (old_location, version_id) = self.get_table_state(table).await?;
+            let mut meta = self.load_iceberg_metadata(&old_location).await?;
+            let current_id = meta.current_schema_id;
+
+            let current_schema = meta
+                .schemas
+                .iter()
+                .find(|s| s["schema-id"].as_i64() == Some(current_id as i64))
+                .ok_or_else(|| AilakeError::Catalog("current schema not found in metadata".into()))?
+                .clone();
+            let mut fields: Vec<serde_json::Value> = current_schema["fields"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+
+            for rename in &evolution.renames {
+                for field in fields.iter_mut() {
+                    if field["name"].as_str() == Some(rename.old_name.as_str()) {
+                        field["name"] = serde_json::Value::String(rename.new_name.clone());
+                    }
+                }
+            }
+
+            let mut last_col_id = meta.last_column_id;
+            for add in &evolution.adds {
+                last_col_id += 1;
+                let mut field = serde_json::json!({
+                    "id": last_col_id,
+                    "name": add.name,
+                    "required": add.required,
+                    "type": add.iceberg_type,
+                });
+                let init_default = add
+                    .initial_default
+                    .clone()
+                    .or_else(|| add.write_default.clone());
+                if let Some(d) = init_default {
+                    field["initial-default"] = d;
+                }
+                if let Some(wd) = &add.write_default {
+                    field["write-default"] = wd.clone();
+                }
+                if let Some(doc) = &add.doc {
+                    field["doc"] = serde_json::Value::String(doc.clone());
+                }
+                fields.push(field);
+            }
+
+            let new_schema_id = current_id + 1;
+            let new_schema = serde_json::json!({
+                "schema-id": new_schema_id,
+                "type": "struct",
+                "fields": fields,
+            });
+            meta.schemas.push(new_schema);
+            meta.current_schema_id = new_schema_id;
+            meta.last_column_id = last_col_id;
+            meta.last_updated_ms = now_ms();
+            for (k, v) in &evolution.extra_properties {
+                meta.properties.insert(k.clone(), v.clone());
+            }
+
+            let new_uuid = Uuid::new_v4().to_string();
+            let new_location = self.metadata_path(table, &new_uuid);
+            let json = meta.to_json()?;
+            self.store
+                .put(&new_location, Bytes::from(json.into_bytes()))
+                .await?;
+
+            let table_input = Self::build_table_input(&table.name, &table_root, &new_location)?;
+            match self
+                .client
+                .update_table()
+                .database_name(&self.config.database)
+                .table_input(table_input)
+                .set_version_id(version_id.clone())
+                .send()
+                .await
+            {
+                Ok(_) => return Ok(new_schema_id),
+                Err(e) => {
+                    let svc = e.into_service_error();
+                    if svc.is_concurrent_modification_exception() && attempt + 1 < MAX_RETRIES {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100 << attempt))
+                            .await;
+                        continue;
+                    }
+                    return Err(AilakeError::Catalog(format!("Glue update_table: {svc}")));
+                }
+            }
+        }
+        Err(AilakeError::Catalog(format!(
+            "Glue evolve_schema: {MAX_RETRIES} retries exhausted (concurrent modification)"
+        )))
     }
 }
 

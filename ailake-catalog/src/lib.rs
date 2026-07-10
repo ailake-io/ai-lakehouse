@@ -11,6 +11,7 @@ pub mod avro_raw;
 #[cfg(feature = "rest-catalog")]
 pub mod databricks;
 pub mod hadoop;
+mod manifest_commit;
 pub mod metadata;
 pub mod provider;
 pub mod puffin;

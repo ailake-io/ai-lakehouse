@@ -6,7 +6,7 @@
 use ailake_core::AilakeResult;
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{DataFileEntry, NewSnapshot, SnapshotId};
+use crate::provider::{DataFileEntry, EqualityDeleteFile, NewSnapshot, SnapshotId};
 
 /// Phase 1 manifest: a JSON list of DataFileEntry records.
 /// Iceberg-compatible Avro manifest is Phase 2.
@@ -14,6 +14,13 @@ use crate::provider::{DataFileEntry, NewSnapshot, SnapshotId};
 pub struct Manifest {
     pub snapshot_id: SnapshotId,
     pub files: Vec<DataFileEntry>,
+    /// Equality delete files active as of this snapshot (accumulated the same
+    /// way `files` is: Append/Delete inherit the previous snapshot's list and
+    /// extend it, Overwrite/Replace treat the caller-supplied list as complete).
+    /// `#[serde(default)]` keeps old manifests (written before this field
+    /// existed) readable.
+    #[serde(default)]
+    pub equality_delete_files: Vec<EqualityDeleteFile>,
 }
 
 impl Manifest {
@@ -30,6 +37,7 @@ pub fn build_manifest(snapshot: &NewSnapshot) -> Manifest {
     Manifest {
         snapshot_id: snapshot.snapshot_id,
         files: snapshot.files.clone(),
+        equality_delete_files: snapshot.equality_delete_files.clone(),
     }
 }
 
@@ -65,6 +73,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
             }],
+            equality_delete_files: vec![],
         };
         let json = manifest.to_json().unwrap();
         let m2 = Manifest::from_json(&json).unwrap();
