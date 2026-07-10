@@ -12,7 +12,7 @@
 #   enabled at build time. Binary distributions of this SDK must not bundle
 #   NVIDIA or AMD proprietary libraries.
 cmake_minimum_required(VERSION 3.20)
-project(ailake-cpp VERSION 0.1.1 LANGUAGES CXX)
+project(ailake-cpp VERSION 0.1.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
