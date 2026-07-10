@@ -216,9 +216,13 @@ async fn hadoop_overwrite_and_append_no_corruption() {
 // proving no commit was silently lost to a concurrent writer overwriting the
 // metadata_location pointer.
 //
-// Note: JdbcCatalog uses a simple per-snapshot JSON manifest (no cross-snapshot
-// accumulation), so list_files(None) returns only the current snapshot's files.
-// To verify all N commits persisted we query each snap_id individually.
+// Note: JdbcCatalog shares HadoopCatalog's real Avro manifest-list chain
+// (via ailake-catalog/src/manifest_commit.rs) — each Append's manifest list
+// inherits the previous snapshot's manifests, so an individual snap_id's
+// list_files() result can legitimately hold fewer files than the final
+// count (whichever files existed when that commit's retry attempt read
+// state), while list_files(None) (current state) accumulates all of them.
+// That's expected, not a lost update — see the assertion below.
 
 #[tokio::test]
 async fn jdbc_4_concurrent_commits_no_lost_update() {

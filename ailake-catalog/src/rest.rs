@@ -18,16 +18,15 @@ use std::time::{Duration, Instant};
 
 use ailake_core::{AilakeError, AilakeResult};
 use async_trait::async_trait;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::metadata::IcebergMetadata;
 use crate::provider::{
-    CatalogProvider, DataFileEntry, NewSnapshot, SnapshotId, SnapshotOperation, TableIdent,
+    CatalogProvider, DataFileEntry, EqualityDeleteFile, NewSnapshot, SnapshotId, TableIdent,
     TableMetadata, TableProperties,
 };
-use crate::snapshot::{manifest_path, Manifest};
+use crate::schema_evolution::SchemaEvolution;
 use ailake_store::Store;
 
 // ── Public configuration types ───────────────────────────────────────────────
@@ -243,6 +242,17 @@ impl RestCatalog {
             "{ctx}: HTTP {status}: {body}"
         )))
     }
+
+    /// Fetch current table metadata from the REST server.
+    async fn load_metadata(&self, table: &TableIdent) -> AilakeResult<IcebergMetadata> {
+        let resp = self.get(&self.table_url(table)).await?;
+        let resp = Self::require_ok(resp, "load_metadata").await?;
+        let result: LoadTableResult = resp
+            .json()
+            .await
+            .map_err(|e| AilakeError::Catalog(format!("load_metadata parse: {e}")))?;
+        Ok(result.metadata)
+    }
 }
 
 // ── CatalogProvider ───────────────────────────────────────────────────────────
@@ -252,36 +262,68 @@ impl CatalogProvider for RestCatalog {
     async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
         let location = self.table_storage_root(name);
 
-        let mut properties: HashMap<String, String> = HashMap::from([
-            ("ailake.format-version".into(), "1".into()),
-            (
-                "ailake.vector-column".into(),
-                props.policy.column_name.clone(),
-            ),
-            ("ailake.vector-dim".into(), props.policy.dim.to_string()),
-            (
-                "ailake.vector-metric".into(),
-                format!("{:?}", props.policy.metric).to_lowercase(),
-            ),
-            (
-                "ailake.vector-precision".into(),
-                format!("{:?}", props.policy.precision).to_lowercase(),
-            ),
-        ]);
+        // Reuse the exact same schema/partition-spec/properties construction the
+        // file-based backends use (IcebergMetadata::new) instead of duplicating it —
+        // guarantees this backend's tables carry the same ailake.* properties and
+        // real (not empty) schema/partition-spec as Hadoop/Glue/Jdbc for the same
+        // TableProperties. format-version isn't a field the REST CreateTableRequest
+        // accepts (checked against the spec's CreateTableRequest schema) — servers
+        // create V2 by default, so a V3 request needs a follow-up
+        // `upgrade-format-version` commit right after create.
+        let pct = props
+            .partition_column_type
+            .as_deref()
+            .or(props.policy.partition_column_type.as_deref());
+        let meta = IcebergMetadata::new(
+            &location,
+            &props.policy,
+            props.format_version,
+            pct,
+            &props.policy.partition_fields,
+        );
+        let mut properties = meta.properties.clone();
         for (k, v) in &props.extra {
             properties.insert(k.clone(), v.clone());
         }
+        let schema = meta
+            .schemas
+            .first()
+            .cloned()
+            .unwrap_or_else(RestSchema::empty_value);
+        let partition_spec = if meta.default_spec_id > 0 {
+            meta.partition_specs
+                .get(meta.default_spec_id as usize)
+                .cloned()
+        } else {
+            None
+        };
 
         let req = CreateTableRequest {
             name: name.name.clone(),
             location: Some(location),
-            schema: RestSchema::empty(),
+            schema,
+            partition_spec,
             properties,
         };
 
         let url = self.namespace_tables_url(&name.namespace);
         let resp = self.post(&url, &req).await?;
         Self::require_ok(resp, "create_table").await?;
+
+        if meta.format_version >= 3 {
+            let commit_req = CommitTableRequest {
+                identifier: TableIdentifier {
+                    namespace: vec![name.namespace.clone()],
+                    name: name.name.clone(),
+                },
+                requirements: vec![],
+                updates: vec![TableUpdate::UpgradeFormatVersion {
+                    format_version: meta.format_version,
+                }],
+            };
+            let resp = self.post(&self.table_url(name), &commit_req).await?;
+            Self::require_ok(resp, "create_table (upgrade-format-version)").await?;
+        }
         Ok(())
     }
 
@@ -301,70 +343,48 @@ impl CatalogProvider for RestCatalog {
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
         let snap_id = snapshot.snapshot_id;
+        let table_root = self.table_storage_root(table);
 
-        // Append/Delete inherit the previous snapshot's full file list (this catalog writes
-        // one flat manifest per snapshot, not an Iceberg manifest chain, so the new manifest
-        // must already contain the complete resulting file list). Replace/Overwrite treat
-        // `snapshot.files` as the complete state — callers already rebuild it (see
-        // hadoop.rs's identical contract). No local OCC retry here: the REST server owns
-        // conflict resolution for the metadata pointer itself (`requirements`, unused today).
-        let effective_files: Vec<DataFileEntry> = if matches!(
-            snapshot.operation,
-            SnapshotOperation::Append | SnapshotOperation::Delete
-        ) {
+        // Real OCC: read current state, build the real Avro manifest against it
+        // (`build_commit` — shared with Hadoop/Glue/Jdbc, gives this backend the
+        // same V3 first_row_id/Puffin-stats/partition-stats support they have),
+        // commit with an `assert-ref-snapshot-id` requirement pinned to the
+        // snapshot we read. If another writer moves `main` first, the server
+        // rejects the commit (409) and we retry from a fresh read — same
+        // retry×5 w/ backoff pattern glue.rs/jdbc.rs use for their own CAS
+        // mechanisms.
+        const MAX_RETRIES: u32 = 5;
+        for attempt in 0..MAX_RETRIES {
             let resp = self.get(&self.table_url(table)).await?;
             let resp = Self::require_ok(resp, "commit_snapshot (read current state)").await?;
             let result: LoadTableResult = resp
                 .json()
                 .await
                 .map_err(|e| AilakeError::Catalog(format!("commit_snapshot parse: {e}")))?;
-            let mut prev = match result.metadata.current_snapshot_id {
-                Some(id) => self.list_files(table, Some(id)).await?,
-                None => vec![],
-            };
-            prev.extend(snapshot.files.iter().cloned());
-            prev
-        } else {
-            snapshot.files.clone()
-        };
+            let meta = result.metadata;
+            let current_snapshot_id = meta.current_snapshot_id;
+            let current_schema_id = meta.current_schema_id;
 
-        // 1. Write manifest JSON to object storage
-        let root = self.table_storage_root(table);
-        let rel_path = manifest_path(snap_id);
-        let abs_path = format!("{root}/{rel_path}");
-        let manifest = Manifest {
-            snapshot_id: snap_id,
-            files: effective_files,
-        };
-        self.store
-            .put(&abs_path, Bytes::from(manifest.to_json()?.into_bytes()))
+            let artifacts = crate::manifest_commit::build_commit(
+                &*self.store,
+                &table_root,
+                self.config.warehouse.as_deref().unwrap_or(""),
+                &meta,
+                snapshot.clone(),
+            )
             .await?;
 
-        // 2. Register snapshot with the REST catalog
-        let now_ms = now_ms();
-        let rest_snap = RestSnapshot {
-            snapshot_id: snap_id,
-            parent_snapshot_id: snapshot.parent_snapshot_id,
-            sequence_number: 1,
-            timestamp_ms: now_ms,
-            manifest_list: abs_path,
-            summary: HashMap::from([
-                (
-                    "operation".into(),
-                    format!("{:?}", snapshot.operation).to_lowercase(),
-                ),
-                ("added-data-files".into(), snapshot.files.len().to_string()),
-            ]),
-            schema_id: Some(0),
-        };
+            let rest_snap = RestSnapshot {
+                snapshot_id: artifacts.snapshot.snapshot_id,
+                parent_snapshot_id: artifacts.snapshot.parent_snapshot_id,
+                sequence_number: artifacts.snapshot.sequence_number,
+                timestamp_ms: artifacts.snapshot.timestamp_ms,
+                manifest_list: artifacts.snapshot.manifest_list.clone(),
+                summary: artifacts.snapshot.summary.clone(),
+                schema_id: artifacts.snapshot.schema_id,
+            };
 
-        let commit_req = CommitTableRequest {
-            identifier: TableIdentifier {
-                namespace: vec![table.namespace.clone()],
-                name: table.name.clone(),
-            },
-            requirements: vec![],
-            updates: vec![
+            let mut updates = vec![
                 TableUpdate::AddSnapshot {
                     snapshot: rest_snap,
                 },
@@ -373,12 +393,90 @@ impl CatalogProvider for RestCatalog {
                     snapshot_type: "branch".into(),
                     snapshot_id: snap_id,
                 },
-            ],
-        };
+            ];
+            let mut requirements = vec![TableRequirement::AssertRefSnapshotId {
+                r#ref: "main".into(),
+                snapshot_id: current_snapshot_id,
+            }];
 
-        let resp = self.post(&self.table_url(table), &commit_req).await?;
-        Self::require_ok(resp, "commit_snapshot").await?;
-        Ok(snap_id)
+            // Phase I: schema/partition-spec patch (only present when the caller
+            // supplied `NewSnapshot::iceberg_schema` — same trigger as Hadoop/Glue/Jdbc).
+            if let Some(patch) = artifacts.schema_patch {
+                let new_schema_id = current_schema_id + 1;
+                updates.push(TableUpdate::AddSchema {
+                    schema: serde_json::json!({
+                        "schema-id": new_schema_id,
+                        "type": "struct",
+                        "fields": patch.new_schema_fields,
+                    }),
+                });
+                updates.push(TableUpdate::SetCurrentSchema { schema_id: -1 });
+                updates.push(TableUpdate::SetProperties {
+                    updates: HashMap::from([(
+                        "schema.name-mapping.default".to_string(),
+                        patch.name_mapping_json,
+                    )]),
+                });
+                // The REST protocol has no "modify an existing spec's source-id in
+                // place" update — the closest spec-correct equivalent is adding the
+                // corrected spec as new and making it the default. Only the *last*
+                // (highest spec-id) entry in `remapped_partition_specs` is genuinely
+                // new — the earlier ones are the same specs already registered.
+                if let Some(new_spec) = patch.remapped_partition_specs.last() {
+                    updates.push(TableUpdate::AddPartitionSpec {
+                        spec: new_spec.clone(),
+                    });
+                    updates.push(TableUpdate::SetDefaultSpec { spec_id: -1 });
+                }
+                requirements.push(TableRequirement::AssertCurrentSchemaId { current_schema_id });
+            }
+            if !artifacts.extra_properties.is_empty() {
+                updates.push(TableUpdate::SetProperties {
+                    updates: artifacts.extra_properties,
+                });
+            }
+            // Phase F / Phase J: Puffin vector+BM25 stats and partition-stats Parquet
+            // refs, mapped 1:1 onto the REST spec's own `StatisticsFile`/
+            // `PartitionStatisticsFile` shapes (confirmed field-for-field against
+            // apache/iceberg's rest-catalog-open-api.yaml, including the
+            // `blob-metadata` key name already pinned to match it in `metadata.rs`).
+            if let Some(stats) = &artifacts.statistics {
+                updates.push(TableUpdate::SetStatistics {
+                    statistics: serde_json::to_value(stats)
+                        .map_err(|e| AilakeError::Catalog(format!("stats serialize: {e}")))?,
+                });
+            }
+            if let Some(pstats) = &artifacts.partition_statistics {
+                updates.push(TableUpdate::SetPartitionStatistics {
+                    partition_statistics: serde_json::to_value(pstats).map_err(|e| {
+                        AilakeError::Catalog(format!("partition stats serialize: {e}"))
+                    })?,
+                });
+            }
+
+            let commit_req = CommitTableRequest {
+                identifier: TableIdentifier {
+                    namespace: vec![table.namespace.clone()],
+                    name: table.name.clone(),
+                },
+                requirements,
+                updates,
+            };
+
+            let resp = self.post(&self.table_url(table), &commit_req).await?;
+            if resp.status().as_u16() == 409 {
+                if attempt + 1 < MAX_RETRIES {
+                    tokio::time::sleep(std::time::Duration::from_millis(50 << attempt)).await;
+                    continue;
+                }
+                return Err(AilakeError::Catalog(format!(
+                    "commit_snapshot: {MAX_RETRIES} retries exhausted (concurrent modification)"
+                )));
+            }
+            Self::require_ok(resp, "commit_snapshot").await?;
+            return Ok(snap_id);
+        }
+        unreachable!("loop always returns via Ok/Err before exhausting MAX_RETRIES iterations")
     }
 
     async fn list_files(
@@ -386,29 +484,8 @@ impl CatalogProvider for RestCatalog {
         table: &TableIdent,
         snapshot_id: Option<SnapshotId>,
     ) -> AilakeResult<Vec<DataFileEntry>> {
-        let resp = self.get(&self.table_url(table)).await?;
-        let resp = Self::require_ok(resp, "list_files").await?;
-        let result: LoadTableResult = resp
-            .json()
-            .await
-            .map_err(|e| AilakeError::Catalog(format!("list_files parse: {e}")))?;
-
-        let meta = &result.metadata;
-        let snap_id = snapshot_id
-            .or(meta.current_snapshot_id)
-            .ok_or_else(|| AilakeError::Catalog("table has no snapshots".into()))?;
-
-        let snap = meta
-            .snapshots
-            .iter()
-            .find(|s| s.snapshot_id == snap_id)
-            .ok_or_else(|| AilakeError::Catalog(format!("snapshot {snap_id} not found")))?;
-
-        let manifest_bytes = self.store.get(&snap.manifest_list).await?;
-        let manifest_json = std::str::from_utf8(&manifest_bytes)
-            .map_err(|e| AilakeError::Catalog(e.to_string()))?;
-        let manifest = crate::snapshot::Manifest::from_json(manifest_json)?;
-        Ok(manifest.files)
+        let meta = self.load_metadata(table).await?;
+        crate::manifest_commit::list_files_from_metadata(&*self.store, &meta, snapshot_id).await
     }
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()> {
@@ -418,6 +495,109 @@ impl CatalogProvider for RestCatalog {
         }
         Self::require_ok(resp, "drop_table").await?;
         Ok(())
+    }
+
+    async fn evolve_schema(
+        &self,
+        table: &TableIdent,
+        evolution: SchemaEvolution,
+    ) -> AilakeResult<i32> {
+        let resp = self.get(&self.table_url(table)).await?;
+        let resp = Self::require_ok(resp, "evolve_schema (read current state)").await?;
+        let result: LoadTableResult = resp
+            .json()
+            .await
+            .map_err(|e| AilakeError::Catalog(format!("evolve_schema parse: {e}")))?;
+        let meta = &result.metadata;
+
+        let current_schema = meta
+            .schemas
+            .iter()
+            .find(|s| s["schema-id"].as_i64() == Some(meta.current_schema_id as i64))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"schema-id": 0, "type": "struct", "fields": []}));
+        let mut fields: Vec<serde_json::Value> = current_schema["fields"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        for rename in &evolution.renames {
+            for field in fields.iter_mut() {
+                if field["name"].as_str() == Some(rename.old_name.as_str()) {
+                    field["name"] = serde_json::Value::String(rename.new_name.clone());
+                }
+            }
+        }
+
+        let mut last_col_id = meta.last_column_id;
+        for add in &evolution.adds {
+            last_col_id += 1;
+            let mut field = serde_json::json!({
+                "id": last_col_id,
+                "name": add.name,
+                "required": add.required,
+                "type": add.iceberg_type,
+            });
+            let init_default = add
+                .initial_default
+                .clone()
+                .or_else(|| add.write_default.clone());
+            if let Some(d) = init_default {
+                field["initial-default"] = d;
+            }
+            if let Some(wd) = &add.write_default {
+                field["write-default"] = wd.clone();
+            }
+            if let Some(doc) = &add.doc {
+                field["doc"] = serde_json::Value::String(doc.clone());
+            }
+            fields.push(field);
+        }
+
+        let new_schema_id = meta.current_schema_id + 1;
+        let new_schema = serde_json::json!({
+            "schema-id": new_schema_id,
+            "type": "struct",
+            "fields": fields,
+        });
+
+        let mut updates = vec![
+            TableUpdate::AddSchema { schema: new_schema },
+            TableUpdate::SetCurrentSchema { schema_id: -1 },
+        ];
+        if !evolution.extra_properties.is_empty() {
+            updates.push(TableUpdate::SetProperties {
+                updates: evolution.extra_properties.clone(),
+            });
+        }
+
+        let commit_req = CommitTableRequest {
+            identifier: TableIdentifier {
+                namespace: vec![table.namespace.clone()],
+                name: table.name.clone(),
+            },
+            requirements: vec![TableRequirement::AssertCurrentSchemaId {
+                current_schema_id: meta.current_schema_id,
+            }],
+            updates,
+        };
+        let resp = self.post(&self.table_url(table), &commit_req).await?;
+        Self::require_ok(resp, "evolve_schema").await?;
+        Ok(new_schema_id)
+    }
+
+    async fn list_equality_deletes(
+        &self,
+        table: &TableIdent,
+        snapshot_id: Option<SnapshotId>,
+    ) -> AilakeResult<Vec<EqualityDeleteFile>> {
+        let meta = self.load_metadata(table).await?;
+        crate::manifest_commit::list_equality_deletes_from_metadata(
+            &*self.store,
+            &meta,
+            snapshot_id,
+        )
+        .await
     }
 }
 
@@ -434,28 +614,24 @@ struct CreateTableRequest {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     location: Option<String>,
-    schema: RestSchema,
+    schema: serde_json::Value,
+    #[serde(rename = "partition-spec", skip_serializing_if = "Option::is_none")]
+    partition_spec: Option<serde_json::Value>,
     properties: HashMap<String, String>,
 }
 
-#[derive(Serialize)]
-struct RestSchema {
-    #[serde(rename = "type")]
-    schema_type: &'static str,
-    fields: Vec<serde_json::Value>,
-    #[serde(rename = "schema-id")]
-    schema_id: i32,
-}
-
 impl RestSchema {
-    fn empty() -> Self {
-        Self {
-            schema_type: "struct",
-            fields: vec![],
-            schema_id: 0,
-        }
+    /// Fallback empty struct schema (`{"type":"struct","fields":[]}`) for the
+    /// unreachable case `IcebergMetadata::new` produces no schema at all.
+    fn empty_value() -> serde_json::Value {
+        serde_json::json!({"schema-id": 0, "type": "struct", "fields": []})
     }
 }
+
+/// Marker type only used to namespace `empty_value()` — `CreateTableRequest.schema`
+/// itself is a raw `serde_json::Value` (reusing `IcebergMetadata::new`'s output
+/// directly, see `create_table`), not a fixed Rust shape.
+struct RestSchema;
 
 /// Subset of `LoadTableResult` — only fields AI-Lake needs.
 #[derive(Deserialize)]
@@ -466,7 +642,7 @@ struct LoadTableResult {
 #[derive(Serialize)]
 struct CommitTableRequest {
     identifier: TableIdentifier,
-    requirements: Vec<serde_json::Value>,
+    requirements: Vec<TableRequirement>,
     updates: Vec<TableUpdate>,
 }
 
@@ -474,6 +650,23 @@ struct CommitTableRequest {
 struct TableIdentifier {
     namespace: Vec<String>,
     name: String,
+}
+
+/// `TableRequirement` — Iceberg REST OCC guards sent with a commit. Server
+/// rejects (409) if the named ref/schema doesn't match what's asserted here,
+/// preventing a commit from silently clobbering a concurrent writer's changes.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum TableRequirement {
+    AssertRefSnapshotId {
+        r#ref: String,
+        #[serde(rename = "snapshot-id")]
+        snapshot_id: Option<SnapshotId>,
+    },
+    AssertCurrentSchemaId {
+        #[serde(rename = "current-schema-id")]
+        current_schema_id: i32,
+    },
 }
 
 #[derive(Serialize)]
@@ -489,6 +682,39 @@ enum TableUpdate {
         snapshot_type: String,
         #[serde(rename = "snapshot-id")]
         snapshot_id: SnapshotId,
+    },
+    UpgradeFormatVersion {
+        #[serde(rename = "format-version")]
+        format_version: i32,
+    },
+    AddSchema {
+        schema: serde_json::Value,
+    },
+    SetCurrentSchema {
+        #[serde(rename = "schema-id")]
+        schema_id: i32,
+    },
+    SetProperties {
+        updates: HashMap<String, String>,
+    },
+    /// Phase F: Puffin vector-stats + BM25-bloom file ref. Payload is a
+    /// `StatisticsFile`-shaped JSON value (see `manifest_commit::CommitArtifacts`).
+    SetStatistics {
+        statistics: serde_json::Value,
+    },
+    /// Phase J: partition-stats Parquet file ref (`PartitionStatisticsFile`-shaped).
+    SetPartitionStatistics {
+        #[serde(rename = "partition-statistics")]
+        partition_statistics: serde_json::Value,
+    },
+    /// Phase I: register the partition-spec-with-corrected-source-id — the REST
+    /// spec has no update to edit an existing spec's `source-id` in place.
+    AddPartitionSpec {
+        spec: serde_json::Value,
+    },
+    SetDefaultSpec {
+        #[serde(rename = "spec-id")]
+        spec_id: i32,
     },
 }
 
@@ -507,13 +733,6 @@ struct RestSnapshot {
     summary: HashMap<String, String>,
     #[serde(rename = "schema-id", skip_serializing_if = "Option::is_none")]
     schema_id: Option<i32>,
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -622,11 +841,49 @@ mod tests {
         let req = CreateTableRequest {
             name: "docs".into(),
             location: Some("s3://bucket/warehouse/default/docs".into()),
-            schema: RestSchema::empty(),
+            schema: RestSchema::empty_value(),
+            partition_spec: None,
             properties: properties.clone(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("ailake.vector-column"));
         assert!(json.contains("ailake.vector-dim"));
+    }
+
+    #[test]
+    fn schema_update_serializes_correctly() {
+        let req = CommitTableRequest {
+            identifier: TableIdentifier {
+                namespace: vec!["default".into()],
+                name: "docs".into(),
+            },
+            requirements: vec![TableRequirement::AssertCurrentSchemaId {
+                current_schema_id: 0,
+            }],
+            updates: vec![
+                TableUpdate::AddSchema {
+                    schema: serde_json::json!({"schema-id": 1, "type": "struct", "fields": []}),
+                },
+                TableUpdate::SetCurrentSchema { schema_id: -1 },
+            ],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"action\":\"add-schema\""));
+        assert!(json.contains("\"action\":\"set-current-schema\""));
+        assert!(json.contains("\"schema-id\":-1"));
+        assert!(json.contains("\"type\":\"assert-current-schema-id\""));
+        assert!(json.contains("\"current-schema-id\":0"));
+    }
+
+    #[test]
+    fn assert_ref_snapshot_id_serializes_correctly() {
+        let req = TableRequirement::AssertRefSnapshotId {
+            r#ref: "main".into(),
+            snapshot_id: Some(42),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"type\":\"assert-ref-snapshot-id\""));
+        assert!(json.contains("\"ref\":\"main\""));
+        assert!(json.contains("\"snapshot-id\":42"));
     }
 }

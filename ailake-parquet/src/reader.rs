@@ -46,6 +46,27 @@ impl ParquetVectorReader {
             })
             .unwrap_or(false);
 
+        // `ailake.precision` (written by every AI-Lake writer path — see
+        // ailake-parquet/src/writer.rs) tells us how to decode the raw vector
+        // bytes for THIS column, which was previously hardcoded to F16
+        // regardless of the file's actual stored precision — silently
+        // misreading any table written with F32 (or other) precision (wrong
+        // element count from a byte-width mismatch, corrupting every
+        // downstream read: compaction, scanner's foreign-file flat scan).
+        // Absent for raw external source files fed to `ailake insert` (no
+        // AI-Lake writer touched them yet) — default to F16 there, preserving
+        // that path's existing documented "F16-encoded input" contract.
+        let precision = builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|kvs| {
+                kvs.iter()
+                    .find(|kv| kv.key == "ailake.precision")
+                    .and_then(|kv| kv.value.clone())
+            })
+            .unwrap_or_else(|| "f16".to_string());
+
         // Use a large batch size to avoid splitting single-row-group files across batches.
         // concatenate_all() handles the multi-batch case transparently.
         let record_count = builder.metadata().file_metadata().num_rows() as usize;
@@ -97,8 +118,19 @@ impl ParquetVectorReader {
                 ))
             })?;
 
+        let decode: fn(&[u8]) -> Vec<f32> = match precision.as_str() {
+            "f16" => Quantizer::f16_bytes_to_f32,
+            "f32" => Quantizer::f32_bytes_to_f32,
+            other => {
+                return Err(AilakeError::Parquet(format!(
+                    "vector column '{}': raw embedding decode not supported for precision '{other}' \
+                     (only f16/f32 can be losslessly reconstructed from stored bytes)",
+                    self.vector_column
+                )));
+            }
+        };
         let embeddings: Vec<Vec<f32>> = (0..vec_col.len())
-            .map(|i| Quantizer::f16_bytes_to_f32(vec_col.value(i)))
+            .map(|i| decode(vec_col.value(i)))
             .collect();
 
         // Return tabular batch without the vector column
