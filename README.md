@@ -49,7 +49,7 @@ Vector-native Lakehouse format built on Apache Iceberg Spec v2/v3, written in Ru
 Spin up a local environment with MinIO, Nessie, and JupyterLab pre-loaded with 500 synthetic documents and an HNSW index — no cloud account, no credentials:
 
 ```bash
-# From the repository root — builds ailake-py wheel on first run (~3-5 min, cached after)
+# From the repository root — builds ailake-py wheel + ailake CLI (catalog-ducklake) on first run (~8-12 min, cached after)
 docker compose -f tests/docker/compose-demo.yml up -d
 ```
 
@@ -62,14 +62,16 @@ Then open **http://localhost:8888** and run the notebooks:
 | `03_spark.ipynb` | PySpark local[*], Iceberg SQL, snapshot history, time-travel `VERSION AS OF`, partitioned v3 table read, delete_demo visibility, schema evolution read |
 | `04_trino.ipynb` | Trino SQL, AI-Lake table properties, `$files` / `$manifests` system tables, `partition_fields` DDL inspection, equality delete visibility |
 | `05_bigquery.ipynb` | BigQuery emulator inserts, F16 BYTES decode, production GCS + BigQuery Omni pattern |
+| `06_airbyte_destination.ipynb` | Airbyte destination connector — record stream to `TableWriter`, Iceberg snapshot commits |
 | `07_multimodal.ipynb` | `VectorColSpec`, `write_batch_multi`, modality tags, cross-modal RRF fusion, weight ablation, `MultimodalContextSchema` column constants |
 | `08_agents.ipynb` | `ailake.Agent`, episodic memory, `ToolCallSchema`, `EpisodicMemorySchema`, `WorkingMemoryBuffer`, `decay_memories`, per-agent partition isolation |
 | `09_hybrid_search.ipynb` | BM25 write (`bm25_text_column`), `search_text` pure lexical, hybrid RRF (vector + BM25), weight ablation |
-| `10_gpu_demo.ipynb` | `hardware_info()`, `write_batch_auto_deferred`, timing comparison HNSW vs deferred, search QPS, recall@10, CPU fallback |
+| `10_gpu_demo.ipynb` | `hardware_info()`, `write_batch_auto_deferred`, forced `write_batch_ivf_pq(_deferred)` vs immediate HNSW timing, search QPS, recall@10, CPU fallback |
 | `11_fts.ipynb` | Tantivy per-file FTS (`fts_text_columns`), `search_text` O(log N) fast path, multi-column indexing, query syntax, BM25 brute-force fallback for legacy files, FTS + HNSW hybrid re-ranking, storage layout |
 | `12_airflow.ipynb` | Apache Airflow 2.9 + AI-Lake provider: `AilakeWriteOperator`, `AilakeSearchOperator`, `AilakeFtsSearchOperator`, REST API DAG trigger, XCom result inspection, direct PythonOperator pattern, production connection setup |
+| `13_ducklake.ipynb` | DuckLake catalog backend via the `ailake` CLI (`--catalog ducklake`): create/insert/search/evolve/compact/info, then direct SQL against the sidecar and the real DuckLake attachment |
 
-Notebooks 03 and 04 require the `engines` profile (adds Trino). Notebook 10 requires the `gpu` profile (NVIDIA Container Toolkit). Notebook 12 requires the `airflow` profile:
+Notebooks 04 and 05 require the `engines` profile (adds Trino + BigQuery emulator). Notebook 10 requires the `gpu` profile (NVIDIA Container Toolkit). Notebook 12 requires the `airflow` profile:
 
 ```bash
 docker compose -f tests/docker/compose-demo.yml --profile engines up -d   # Trino
@@ -109,7 +111,7 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Rust conventions, error handling, unsafe policy, testing rules |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | ADR log — why each key choice was made |
 | [`SETUP.md`](./SETUP.md) | Local dev setup — run the full stack (MinIO, Nessie, compat tests) on your machine |
-| [`docs/guides/DEMO_NOTEBOOKS.md`](./docs/guides/DEMO_NOTEBOOKS.md) | Step-by-step demo guide — prerequisites, all 12 notebooks, profiles, troubleshooting |
+| [`docs/guides/DEMO_NOTEBOOKS.md`](./docs/guides/DEMO_NOTEBOOKS.md) | Step-by-step demo guide — prerequisites, all 13 notebooks, profiles, troubleshooting |
 
 ## Install
 

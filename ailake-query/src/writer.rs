@@ -179,6 +179,7 @@ impl TableWriter {
         batch: &RecordBatch,
         embeddings: &[Vec<f32>],
     ) -> AilakeResult<()> {
+        self.ensure_deferred_supported()?;
         self.validate_embedding_dim(embeddings)?;
         self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
@@ -253,6 +254,7 @@ impl TableWriter {
         embeddings: &[Vec<f32>],
         ivf_config: IvfPqConfig,
     ) -> AilakeResult<()> {
+        self.ensure_deferred_supported()?;
         self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = format!("data/part-{:05}.parquet", part_num);
@@ -340,6 +342,25 @@ impl TableWriter {
     /// incompatible vectors (same error type used across write paths for consistency).
     fn validate_embedding_dim(&self, embeddings: &[Vec<f32>]) -> AilakeResult<()> {
         Self::validate_embedding_dim_for_policy(embeddings, &self.policy)
+    }
+
+    /// Deferred writes persist a Parquet-only file first and later patch the
+    /// full AILK file **in place at the same path**. Refuse up front on catalog
+    /// backends where a committed path's bytes must never change (DuckLake:
+    /// stats and footer size are trusted from registration time — an in-place
+    /// grow breaks every subsequent native read of the file, verified live, and
+    /// the physical put happens *before* any commit-time guard could stop it).
+    fn ensure_deferred_supported(&self) -> AilakeResult<()> {
+        if self.catalog.supports_in_place_rewrite() {
+            Ok(())
+        } else {
+            Err(AilakeError::Catalog(
+                "deferred writes are not supported with this catalog backend: the \
+                 background index build patches the data file in place at its committed \
+                 path, which this catalog cannot re-register — use a blocking write"
+                    .into(),
+            ))
+        }
     }
 
     fn validate_embedding_dim_for_policy(
@@ -700,6 +721,7 @@ impl TableWriter {
         columns: &[MultiVectorBatch<'_>],
     ) -> AilakeResult<()> {
         use ailake_core::AilakeError;
+        self.ensure_deferred_supported()?;
         if columns.is_empty() {
             return Err(AilakeError::InvalidArgument(
                 "write_batch_multi_deferred requires at least one column".into(),

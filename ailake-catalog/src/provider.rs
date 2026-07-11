@@ -325,6 +325,28 @@ pub trait CatalogProvider: Send + Sync {
         true
     }
 
+    /// Whether data files, once committed at a path, may have their bytes
+    /// rewritten in place at that same path.
+    ///
+    /// True for manifest-based backends: the manifest entry the caller commits
+    /// alongside the rewrite is the only statistics record, so a same-path
+    /// rewrite is self-consistent.
+    ///
+    /// `DuckLakeCatalog` overrides this to `false`: DuckLake snapshots record
+    /// per-file zone-map stats and the exact footer size at
+    /// `ducklake_add_data_files` time and trust both afterwards — verified
+    /// against a live extension: a same-length rewrite silently returns wrong
+    /// filtered rows (stale zone-map prunes the file), and a changed-length
+    /// rewrite breaks every subsequent read of the file outright ("Parquet
+    /// footer length stored in file is not equal to footer length provided"),
+    /// including the row-`DELETE` needed to retire it — an unrecoverable state
+    /// through sanctioned SQL. Writers that rewrite files (memory decay,
+    /// deferred index patching) must either write to a fresh path and retire
+    /// the old one, or refuse to run against catalogs returning `false` here.
+    fn supports_in_place_rewrite(&self) -> bool {
+        true
+    }
+
     /// Apply schema evolution (add columns / rename columns) without rewriting data files.
     ///
     /// Returns the new `schema-id` assigned in `metadata.json`.
