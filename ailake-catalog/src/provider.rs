@@ -306,6 +306,25 @@ pub trait CatalogProvider: Send + Sync {
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()>;
 
+    /// Whether a retired data file (one dropped by a `Replace`/`Overwrite` commit,
+    /// e.g. compaction's merged-away inputs) should be physically deleted from the
+    /// object store immediately after that commit succeeds.
+    ///
+    /// True for manifest-based backends (`HadoopCatalog` and friends): once a file
+    /// drops out of the Iceberg manifest, the catalog has no other record of it, so
+    /// deleting the bytes right away is safe.
+    ///
+    /// `DuckLakeCatalog` overrides this to `false` — see "The retirement problem"
+    /// in `docs/guides/DUCKLAKE_CATALOG.md`: its `commit_snapshot` only issues a
+    /// row-level `DELETE`, which attaches a deletion vector but leaves the file
+    /// registered in `ducklake_list_files()` until an operator runs DuckLake's own
+    /// `ducklake_expire_snapshots`/`ducklake_cleanup_files`. Deleting the bytes
+    /// immediately (the default here) would leave that still-registered path
+    /// dangling — breaking any subsequent DuckLake-native read that touches it.
+    fn retires_files_physically(&self) -> bool {
+        true
+    }
+
     /// Apply schema evolution (add columns / rename columns) without rewriting data files.
     ///
     /// Returns the new `schema-id` assigned in `metadata.json`.

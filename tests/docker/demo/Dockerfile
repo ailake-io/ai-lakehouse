@@ -1,17 +1,23 @@
 # AI-Lake Demo Image
 #
 # Two-stage build:
-#   Stage 1 (builder): installs Rust + maturin, compiles ailake-py wheel
-#   Stage 2 (runtime): JupyterLab with the wheel + Python data stack
+#   Stage 1 (builder): installs Rust + maturin, compiles ailake-py wheel +
+#                       the ailake-cli binary (with catalog-ducklake, for
+#                       notebook 13_ducklake.ipynb)
+#   Stage 2 (runtime): JupyterLab with the wheel + CLI binary + Python data stack
 #
 # Build context must be the repository root (set in compose-demo.yml).
 
 # ── Stage 1: build ailake-py wheel ───────────────────────────────────────────
 FROM python:3.12-slim AS builder
 
+# cmake is required by the `duckdb` crate's bundled C++ build, pulled in by
+# ailake-cli's catalog-ducklake feature (docs/guides/DUCKLAKE_CATALOG.md) —
+# adds several minutes to a cold-cache build.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         build-essential \
+        cmake \
         pkg-config \
         libssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -44,6 +50,11 @@ COPY tests            tests/
 WORKDIR /ailake-py
 RUN maturin build --release --out /wheels
 
+# ailake-cli with catalog-ducklake — local-fs-only DuckLake catalog backend,
+# CLI-only surface (no ailake-py binding, see docs/guides/DUCKLAKE_CATALOG.md).
+# Built separately from the wheel above since it's a distinct binary target.
+RUN cargo build --release --manifest-path /Cargo.toml -p ailake-cli --features catalog-ducklake
+
 # ── Stage 2: JupyterLab runtime ───────────────────────────────────────────────
 FROM python:3.12-slim
 
@@ -57,6 +68,8 @@ ENV JAVA_HOME=/usr/lib/jvm/default-java
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 COPY --from=builder /wheels /wheels
+COPY --from=builder /target/release/ailake /usr/local/bin/ailake
+RUN chmod +x /usr/local/bin/ailake && ailake --version
 
 RUN pip install --no-cache-dir \
         /wheels/*.whl \

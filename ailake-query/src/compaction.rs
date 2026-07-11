@@ -748,7 +748,15 @@ impl CompactionExecutor {
             output_path
         );
 
-        delete_old_files(&self.store, &to_compact).await;
+        if catalog.retires_files_physically() {
+            delete_old_files(&self.store, &to_compact).await;
+        } else {
+            info!(
+                "ailake: compaction — leaving {} retired file(s) in place; catalog backend \
+                 manages physical reclamation itself (see docs/guides/DUCKLAKE_CATALOG.md)",
+                to_compact.len()
+            );
+        }
 
         Ok(Some(merged))
     }
@@ -813,7 +821,15 @@ impl CompactionExecutor {
             output_path
         );
 
-        delete_old_files(&self.store, &to_compact).await;
+        if catalog.retires_files_physically() {
+            delete_old_files(&self.store, &to_compact).await;
+        } else {
+            info!(
+                "ailake: compaction — leaving {} retired file(s) in place; catalog backend \
+                 manages physical reclamation itself (see docs/guides/DUCKLAKE_CATALOG.md)",
+                to_compact.len()
+            );
+        }
 
         Ok(Some(merged))
     }

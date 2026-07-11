@@ -142,7 +142,12 @@ gracefully, never incorrectly:
   passes `None` or `table_meta.current_snapshot_id`, never an arbitrary past
   id).
 - **Retired files are not physically reclaimed** by this module — see "The
-  retirement problem" above.
+  retirement problem" above. `CatalogProvider::retires_files_physically()`
+  returns `false` for this backend specifically so generic callers (currently
+  `CompactionExecutor` — `ailake-query/src/compaction.rs`) know not to
+  `store.delete()` a file's bytes right after `commit_snapshot` retires it;
+  doing so would leave the file's still-registered `ducklake_list_files()`
+  entry dangling and break any subsequent DuckLake-native SQL read of it.
 - **Network dependency on first use**: the `ducklake` extension is not
   bundled with the `duckdb` crate; `connect()` runs `INSTALL ducklake; LOAD
   ducklake;`, which fetches the extension from DuckDB's extension repository

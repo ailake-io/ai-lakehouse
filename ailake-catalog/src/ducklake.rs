@@ -504,6 +504,14 @@ fn row_to_entry(row: &duckdb::Row) -> duckdb::Result<DataFileEntry> {
 
 #[async_trait]
 impl CatalogProvider for DuckLakeCatalog {
+    fn retires_files_physically(&self) -> bool {
+        // See "The retirement problem" in docs/guides/DUCKLAKE_CATALOG.md — a
+        // retired file stays registered in ducklake_list_files() until an
+        // operator runs ducklake_expire_snapshots/ducklake_cleanup_files.
+        // Deleting the bytes now would leave that registration dangling.
+        false
+    }
+
     async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
         let key = table_key(name);
         let location = self.table_root(name);

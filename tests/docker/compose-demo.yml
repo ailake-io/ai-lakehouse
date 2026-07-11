@@ -2,7 +2,8 @@
 #
 # Usage (from repo root):
 #
-#   Basic demo (notebooks 01-03 + 07-12, vector search + Iceberg compat + DuckDB + Spark + multimodal):
+#   Basic demo (notebooks 01-03 + 07-13, vector search + Iceberg compat + DuckDB + Spark + multimodal
+#   + DuckLake catalog):
 #     docker compose -f tests/docker/compose-demo.yml up -d
 #
 #   Full demo with engine plugins (notebooks 04-05, adds Trino + BigQuery emulator):
@@ -26,8 +27,9 @@
 #   airflow — Apache Airflow 2.9 standalone (http://localhost:8090, admin/admin)
 #             Uses SequentialExecutor + SQLite — demo-only, not for production.
 #
-# First run builds the ailake-py wheel via maturin (~3-5 min).
-# Subsequent runs are instant (Docker layer cache).
+# First run builds the ailake-py wheel via maturin plus the ailake-cli binary
+# (with catalog-ducklake, for notebook 13 — pulls duckdb's bundled C++ build,
+# ~8-12 min cold). Subsequent runs are instant (Docker layer cache).
 
 services:
 
@@ -97,6 +99,7 @@ services:
       DEMO_MULTIMODAL_PATH: /data/ailake_multimodal
       DEMO_AGENT_PATH: /data/ailake_agent
       DEMO_FTS_PATH: /data/ailake_fts
+      DEMO_DUCKLAKE_STORE: /data/ailake_ducklake
       DEMO_DIM: "32"
       # Engine endpoints — consumed by notebooks 04/05 when engines profile is active.
       # Values match container names so they also work without the profile
@@ -237,6 +240,7 @@ services:
       DEMO_MULTIMODAL_PATH: /data/ailake_multimodal
       DEMO_AGENT_PATH: /data/ailake_agent
       DEMO_FTS_PATH: /data/ailake_fts
+      DEMO_DUCKLAKE_STORE: /data/ailake_ducklake
       DEMO_DIM: "32"
       TRINO_HOST: trino
       TRINO_PORT: "8080"
