@@ -281,7 +281,19 @@ async fn write_backfilled_file(
     store: &Arc<dyn Store>,
     idx: usize,
 ) -> AilakeResult<DataFileEntry> {
-    let file_path = format!("data/backfill-{:05}.parquet", idx);
+    // Timestamped so a second backfill run (another column, or a retry) never
+    // reuses a path from an earlier run — the old plain-index name made run 2
+    // overwrite the committed backfill-00000 it was itself reading, an in-place
+    // rewrite of a live file (breaks readers holding the old entry; hard error
+    // under catalogs with supports_in_place_rewrite() == false).
+    let file_path = format!(
+        "data/backfill-{}-{:05}.parquet",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|e| e.duration())
+            .as_millis(),
+        idx
+    );
 
     let writer = AilakeFileWriter::new(primary_policy.clone());
     let file_bytes = writer.write_multi(

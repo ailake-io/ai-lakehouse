@@ -859,6 +859,12 @@ fn parse_metric(s: &str) -> VectorMetric {
 ///
 /// Useful for benchmarks and servers that issue many queries against the same
 /// snapshot. Avoids re-loading and re-deserializing indexes on every call.
+///
+/// **Deleted rows are NOT filtered here**: unlike [`search`]/[`search_text`],
+/// this session does not load deletion vectors or equality delete files —
+/// rows removed via `delete_rows`/`delete_where` still appear in results.
+/// Use [`search`] when delete visibility matters; this type trades that for
+/// raw throughput on static snapshots (its benchmark use case).
 pub struct SearchSession {
     shards: Vec<LoadedShard>,
     metric: VectorMetric,

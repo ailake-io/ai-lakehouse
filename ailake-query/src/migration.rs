@@ -279,7 +279,19 @@ impl MigrationJob {
         store: &Arc<dyn Store>,
         idx: usize,
     ) -> AilakeResult<DataFileEntry> {
-        let file_path = format!("data/migrated-{:05}.parquet", idx);
+        // Timestamped so a second migration (e.g. v2 -> v3 after v1 -> v2) never
+        // reuses a path from an earlier run — the old plain-index name made run 2
+        // overwrite the committed migrated-00000 it was itself reading, an
+        // in-place rewrite of a live file (breaks readers holding the old entry;
+        // hard error under catalogs with supports_in_place_rewrite() == false).
+        let file_path = format!(
+            "data/migrated-{}-{:05}.parquet",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_else(|e| e.duration())
+                .as_millis(),
+            idx
+        );
 
         let writer = AilakeFileWriter::new(policy.clone());
         let file_bytes = writer.write(batch, embeddings)?;

@@ -244,9 +244,15 @@ impl MemoryDecayJob {
             return Ok(0);
         }
 
+        let parent_snapshot_id = self
+            .catalog
+            .load_table(table)
+            .await
+            .ok()
+            .and_then(|m| m.current_snapshot_id);
         let snap = NewSnapshot {
             snapshot_id: new_snapshot_id(),
-            parent_snapshot_id: None,
+            parent_snapshot_id,
             files: new_entries,
             operation: SnapshotOperation::Overwrite,
             iceberg_schema: None,

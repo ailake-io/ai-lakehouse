@@ -165,6 +165,14 @@ Consequences wired into the code:
 - **Deferred writes/compaction not supported** — `ailake insert --deferred` and
   `ailake compact --deferred` error out immediately (see "In-place rewrites are
   rejected" above). Blocking writes and compaction are fully supported.
+- **Row-level deletes are invisible to DuckLake-native readers** —
+  `delete_where` (equality deletes) and `delete_rows` (V3 deletion vectors)
+  live in AI-Lake's sidecar and are applied by AI-Lake readers only; a plain
+  `SELECT ... FROM lake.<ns>.<table>` still sees the deleted rows. This is
+  asymmetric with file *retirement* (compaction, decay, backfill), which uses
+  a real row-`DELETE` that native readers do observe. Possible future fix:
+  translate equality deletes into `DELETE FROM lake.tbl WHERE col IN (...)`
+  when the predicate column is DuckLake-declared.
 - **No multi-writer support**: the metadata catalog is a local DuckDB file
   (SQLite-class single-writer constraint). Concurrent processes writing to
   the same table are not safe. A Postgres-backed DuckLake metadata catalog
