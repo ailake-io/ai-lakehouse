@@ -706,7 +706,8 @@ mod tests {
     async fn dual_write_cutover_updates_vector_column_property() {
         let dim = 4u32;
         let policy = make_policy(dim);
-        let (catalog, store, table, _dir, _catalog_dir) = setup_single_file_table(dim, &policy).await;
+        let (catalog, store, table, _dir, _catalog_dir) =
+            setup_single_file_table(dim, &policy).await;
 
         let job = MigrationJob {
             table: table.clone(),
@@ -725,7 +726,9 @@ mod tests {
 
         let meta = catalog.load_table(&table).await.unwrap();
         assert_eq!(
-            meta.properties.get("ailake.vector-column").map(|s| s.as_str()),
+            meta.properties
+                .get("ailake.vector-column")
+                .map(|s| s.as_str()),
             Some("embedding_v2"),
             "ailake.vector-column must point at the new column after cutover"
         );
@@ -735,7 +738,8 @@ mod tests {
     async fn atomic_replace_updates_vector_column_property() {
         let dim = 4u32;
         let policy = make_policy(dim);
-        let (catalog, store, table, _dir, _catalog_dir) = setup_single_file_table(dim, &policy).await;
+        let (catalog, store, table, _dir, _catalog_dir) =
+            setup_single_file_table(dim, &policy).await;
 
         let job = MigrationJob {
             table: table.clone(),
@@ -754,7 +758,9 @@ mod tests {
 
         let meta = catalog.load_table(&table).await.unwrap();
         assert_eq!(
-            meta.properties.get("ailake.vector-column").map(|s| s.as_str()),
+            meta.properties
+                .get("ailake.vector-column")
+                .map(|s| s.as_str()),
             Some("embedding_v2"),
             "ailake.vector-column must point at the new column after cutover"
         );

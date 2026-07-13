@@ -1608,7 +1608,10 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         let schema_fields = match rt().block_on(scan_catalog.load_table(&scan_table)) {
             Ok(meta) => meta.schema_fields,
             Err(e) => {
-                warn!("ailake_scan_json: load_table for schema fields failed: {}", e);
+                warn!(
+                    "ailake_scan_json: load_table for schema fields failed: {}",
+                    e
+                );
                 Vec::new()
             }
         };

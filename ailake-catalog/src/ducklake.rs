@@ -690,8 +690,7 @@ impl CatalogProvider for DuckLakeCatalog {
                     .collect();
                 let new_paths: HashSet<String> =
                     snapshot.files.iter().map(|f| f.path.clone()).collect();
-                let removed: Vec<String> =
-                    current_paths.difference(&new_paths).cloned().collect();
+                let removed: Vec<String> = current_paths.difference(&new_paths).cloned().collect();
                 // Anything in the new state — whether the path already existed
                 // (metadata-only patch, e.g. deferred index status / deletion
                 // vector) or is brand new — gets upserted into the sidecar table.
@@ -1352,8 +1351,14 @@ mod tests {
             assert!(!files[0].is_foreign());
 
             let (filtered, total) = count_where_w_gt_5(&catalog).await;
-            assert_eq!(filtered, 10, "stale zone-map must not survive a fresh-path rewrite");
-            assert_eq!(total, 10, "old path must be fully retired — no duplicate rows");
+            assert_eq!(
+                filtered, 10,
+                "stale zone-map must not survive a fresh-path rewrite"
+            );
+            assert_eq!(
+                total, 10,
+                "old path must be fully retired — no duplicate rows"
+            );
         }
     }
 }

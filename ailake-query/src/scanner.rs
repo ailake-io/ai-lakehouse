@@ -1931,9 +1931,15 @@ mod tests {
         assert_eq!(results.len(), 3);
 
         let table_meta = catalog.load_table(&table).await.unwrap();
-        let batch = fetch_rows(&results, store, "embedding", dim as u32, &table_meta.schema_fields)
-            .await
-            .unwrap();
+        let batch = fetch_rows(
+            &results,
+            store,
+            "embedding",
+            dim as u32,
+            &table_meta.schema_fields,
+        )
+        .await
+        .unwrap();
 
         let note_col = batch
             .column_by_name("note")
@@ -1990,9 +1996,15 @@ mod tests {
         .unwrap();
 
         let table_meta = catalog.load_table(&table).await.unwrap();
-        let batch = fetch_rows(&results, store, "embedding", dim as u32, &table_meta.schema_fields)
-            .await
-            .unwrap();
+        let batch = fetch_rows(
+            &results,
+            store,
+            "embedding",
+            dim as u32,
+            &table_meta.schema_fields,
+        )
+        .await
+        .unwrap();
 
         let batch_schema = batch.schema();
         let embedding_fields: Vec<_> = batch_schema
