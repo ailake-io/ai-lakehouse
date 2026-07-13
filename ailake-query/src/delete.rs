@@ -230,11 +230,20 @@ pub async fn delete_where(
         ailake_catalog::write_equality_delete_avro(column_name, field_id, &iceberg_type, values)
             .map_err(|e| AilakeError::Catalog(e.to_string()))?;
     let file_size = eq_del_avro.len() as u64;
-    let eq_del_path = format!("{table_root}/metadata/eq-del-{snap_id}.avro");
+    let eq_del_rel_path = format!("metadata/eq-del-{snap_id}.avro");
+    let eq_del_path = format!("{table_root}/{eq_del_rel_path}");
     store.put(&eq_del_path, eq_del_avro).await?;
 
+    // `EqualityDeleteFile.path` must be relative to table_root — commit_snapshot's
+    // build_commit() (manifest_commit.rs) re-prefixes any non-absolute/non-URI path
+    // with table_root before writing the delete manifest. Passing the already-
+    // table_root-prefixed `eq_del_path` here double-prefixed it (table_root/table_root/
+    // metadata/...), so the delete manifest pointed at a file that never existed —
+    // list_equality_deletes' store.get() silently 404'd, the filter fell back to
+    // empty, and delete-where became a no-op: deleted rows kept appearing in every
+    // search(). Caught live while exercising `ailake delete-where` end-to-end.
     let eq_del_file = ailake_catalog::EqualityDeleteFile {
-        path: eq_del_path,
+        path: eq_del_rel_path,
         equality_ids: vec![field_id],
         record_count: values.len() as u64,
         file_size_bytes: file_size,
@@ -404,6 +413,66 @@ mod tests {
         let bm = load_deletion_vector(&store, dv).await.unwrap();
         assert!(bm.contains(1) && bm.contains(2) && bm.contains(3) && bm.contains(4));
         assert_eq!(bm.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn delete_where_eq_delete_file_is_loadable_after_commit() {
+        // Regression test: delete_where() used to pass an already table_root-prefixed
+        // path into EqualityDeleteFile.path, which build_commit() (manifest_commit.rs)
+        // re-prefixed with table_root again — the delete manifest pointed at a file
+        // that never existed on disk. list_equality_deletes()'s store.get() 404'd,
+        // EqualityDeleteFilter::from_files() returned Err, and the caller (scanner.rs)
+        // silently fell back to an empty filter: delete-where became a no-op. This test
+        // exercises the real end-to-end path (write → commit → list → load), not just
+        // EqualityDeleteFilter in isolation with a hand-constructed relative path — the
+        // isolation tests already in this file passed both before and after the bug.
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let (catalog, table) = setup_v3_table("", Arc::clone(&store)).await;
+
+        delete_where(
+            Arc::clone(&catalog),
+            Arc::clone(&store),
+            &table,
+            "document_id",
+            &["doc-1", "doc-2"],
+        )
+        .await
+        .unwrap();
+
+        let edfs = catalog.list_equality_deletes(&table, None).await.unwrap();
+        assert_eq!(edfs.len(), 1, "expected exactly one equality delete file");
+
+        // This is the assertion that catches the regression: from_files() reads each
+        // edf.path via store.get() — it errors if the path was double-prefixed.
+        let filter = crate::equality_delete::EqualityDeleteFilter::from_files(&store, &edfs)
+            .await
+            .expect("equality delete file must be loadable from its committed path");
+        assert!(!filter.is_empty());
+
+        let batch = arrow_array::RecordBatch::try_new(
+            std::sync::Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+                "document_id",
+                arrow_schema::DataType::Utf8,
+                false,
+            )])),
+            vec![std::sync::Arc::new(arrow_array::StringArray::from(vec![
+                "doc-1", "doc-2", "doc-3",
+            ]))],
+        )
+        .unwrap();
+        let filtered = filter.apply(batch).unwrap();
+        assert_eq!(
+            filtered.num_rows(),
+            1,
+            "only doc-3 should survive the filter"
+        );
+        let ids = filtered
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .unwrap();
+        assert_eq!(ids.value(0), "doc-3");
     }
 
     #[tokio::test]
