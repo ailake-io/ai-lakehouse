@@ -26,3 +26,7 @@ s3:/
 data/
 compat-fixture/
 actions-runner/
+
+# graphify (local knowledge-graph tooling, machine-specific)
+graphify-out/
+.claude/
