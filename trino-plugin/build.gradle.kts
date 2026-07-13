@@ -18,8 +18,12 @@ dependencies {
     compileOnly("io.airlift:slice:2.2")
     compileOnly("com.fasterxml.jackson.core:jackson-annotations:2.15.2")
 
-    // SLF4J — provided at runtime by the Trino server; needed for compile resolution
-    compileOnly("org.slf4j:slf4j-api:2.0.9")
+    // SLF4J — Trino's isolated per-plugin classloader does NOT expose slf4j-api to
+    // plugins (confirmed live: compileOnly here produced NoClassDefFoundError:
+    // org/slf4j/LoggerFactory at connector construction, VectorScanMetadata.<init>,
+    // on a real Trino 460 server — unlike trino-spi/airlift-slice, which the
+    // classloader does share). Must be bundled in the shadowJar.
+    implementation("org.slf4j:slf4j-api:2.0.9")
 
     // JNA — bundled in the plugin fat-jar
     implementation("net.java.dev.jna:jna:5.14.0")

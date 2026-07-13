@@ -74,6 +74,7 @@ class TableWriter:
         vector_column: str = "embedding",
         dim: int = 1536,
         metric: str = "cosine",
+        precision: str = "f16",
         pre_normalize: bool = False,
         hnsw_m: Optional[int] = None,
         hnsw_ef_construction: Optional[int] = None,
@@ -100,6 +101,9 @@ class TableWriter:
             dim: Embedding dimension (default 1536).
             metric: Distance metric — one of ``"cosine"``, ``"euclidean"``,
                     ``"dot_product"``, ``"normalized_cosine"``.
+            precision: Storage precision for this column's vectors —
+                       ``"f16"`` (default, 2 bytes/dim) | ``"f32"`` (4 bytes/dim,
+                       max precision) | ``"i8"`` (1 byte/dim, ~1-3% recall loss).
             pre_normalize: Normalise vectors to unit-L2 at write time for a
                            ~12-20 % speedup on cosine search (default ``False``).
             hnsw_m: HNSW graph degree *M* per layer.  ``None`` uses the

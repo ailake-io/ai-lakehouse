@@ -100,10 +100,11 @@ async fn pruning_eliminates_distant_file() {
     .await
     .unwrap();
 
-    // All results must come from file A (data/part-00000.parquet)
+    // All results must come from file A — the first part written this session
+    // (paths are data/part-<session_ts>-NNNNN.parquet).
     for r in &results {
         assert!(
-            r.file_path.contains("part-00000"),
+            r.file_path.ends_with("-00000.parquet"),
             "result {:?} should come from file A, not file B",
             r
         );

@@ -1,0 +1,58 @@
+# AI-Lake Demo Flink Image
+#
+# Two-stage build:
+#   Stage 1 (rust-builder): builds ailake-jni cdylib (same C-ABI bridge every
+#                       plugin uses)
+#   Stage 2 (jvm-builder): Gradle/JDK image, builds the ailake Flink connector
+#                       shadowJar
+#   Stage 3 (runtime): stock flink image (Java 17 — the connector's Kotlin
+#                       toolchain targets JVM 17 bytecode) + both artifacts
+#
+# Single-container standalone session cluster (JobManager + TaskManager in one
+# process via start-cluster.sh) — matches the scale of every other engine
+# service in this demo (Trino, MinIO, Nessie), not a real multi-node
+# deployment. See 14_flink.ipynb for the SQL Client walkthrough.
+#
+# Build context must be the repository root (set in compose-demo.yml).
+
+# ── Stage 1: ailake-jni cdylib ──────────────────────────────────────────────────
+FROM rust:1-slim AS rust-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY ailake-core      ailake-core/
+COPY ailake-vec       ailake-vec/
+COPY ailake-parquet   ailake-parquet/
+COPY ailake-index     ailake-index/
+COPY ailake-file      ailake-file/
+COPY ailake-fts       ailake-fts/
+COPY ailake-catalog   ailake-catalog/
+COPY ailake-store     ailake-store/
+COPY ailake-query     ailake-query/
+COPY ailake-jni       ailake-jni/
+COPY ailake-py        ailake-py/
+COPY ailake-cli       ailake-cli/
+COPY tests            tests/
+
+RUN cargo build --release -p ailake-jni
+
+# ── Stage 2: ailake Flink connector (Gradle/Kotlin) ─────────────────────────────
+FROM gradle:8.7-jdk17 AS jvm-builder
+
+COPY ailake-flink /ailake-flink
+WORKDIR /ailake-flink
+# shadowJar bundles JNA + jackson-module-kotlin/jackson-databind (Flink does not
+# provide either); excludes Flink itself (provided by the cluster at runtime).
+RUN gradle shadowJar -x test --no-daemon --no-configuration-cache
+
+# ── Stage 3: Flink runtime ───────────────────────────────────────────────────────
+FROM flink:1.18.1-scala_2.12-java17
+
+USER root
+COPY --from=jvm-builder /ailake-flink/build/libs/ailake-flink-*-plugin.jar /opt/flink/lib/ailake-flink-plugin.jar
+COPY --from=rust-builder /target/release/libailake_jni.so /usr/local/lib/libailake_jni.so
+ENV AILAKE_NATIVE_LIB=/usr/local/lib/libailake_jni.so
+USER flink

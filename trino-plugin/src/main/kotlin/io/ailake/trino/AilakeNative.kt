@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Thiago Egon Lange
 package io.ailake.trino
 
+import com.fasterxml.jackson.annotation.JsonCreator
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
@@ -35,8 +37,21 @@ object AilakeNative {
         val columns: Map<String, List<Any?>> = emptyMap(),
     )
 
-    /** Partition field definition for multi-column partition specs (Phase K). */
-    data class PartitionFieldDef(val column: String, val transform: String, val columnType: String)
+    /**
+     * Partition field definition for multi-column partition specs (Phase K).
+     *
+     * Explicit @JsonCreator/@param:/@get: annotations (not just plain field
+     * names) — this is embedded as a List<PartitionFieldDef> field inside
+     * [AilakeIngestTableHandle], which round-trips through Trino's internal
+     * cross-process JSON codec (ObjectMapperProvider disables
+     * MapperFeature.AUTO_DETECT_GETTERS/FIELDS globally). See the note atop
+     * VectorScanHandles.kt.
+     */
+    data class PartitionFieldDef @JsonCreator constructor(
+        @param:JsonProperty("column") @get:JsonProperty("column") val column: String,
+        @param:JsonProperty("transform") @get:JsonProperty("transform") val transform: String,
+        @param:JsonProperty("columnType") @get:JsonProperty("columnType") val columnType: String,
+    )
 
     /** Column addition request for schema evolution. */
     data class AddColReq(val name: String, val colType: String, val initialDefault: String? = null)
@@ -48,12 +63,12 @@ object AilakeNative {
      * One vector column in a multi-column (Phase 8 multimodal) write batch — e.g. text +
      * image embeddings on the same row, each with its own HNSW index. See [writeBatchMulti].
      */
-    data class VectorColSpec(
-        val column: String,
-        val dim: Int,
-        val metric: String = "cosine",
-        val precision: String = "f16",
-        val modality: String? = null,
+    data class VectorColSpec @JsonCreator constructor(
+        @param:JsonProperty("column") @get:JsonProperty("column") val column: String,
+        @param:JsonProperty("dim") @get:JsonProperty("dim") val dim: Int,
+        @param:JsonProperty("metric") @get:JsonProperty("metric") val metric: String = "cosine",
+        @param:JsonProperty("precision") @get:JsonProperty("precision") val precision: String = "f16",
+        @param:JsonProperty("modality") @get:JsonProperty("modality") val modality: String? = null,
     )
 
     private interface Lib : Library {

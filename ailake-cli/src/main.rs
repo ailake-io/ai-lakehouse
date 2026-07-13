@@ -656,6 +656,16 @@ async fn run(cli: Cli) -> Result<(), String> {
             pre_normalize,
             deferred,
         } => {
+            if deferred && !catalog.supports_in_place_rewrite() {
+                return Err(
+                    "--deferred is not supported with this catalog backend: the \
+                            background index build patches the data file in place at its \
+                            committed path, which DuckLake cannot re-register (it trusts \
+                            the stats and footer size recorded at registration). Use a \
+                            blocking insert instead."
+                        .into(),
+                );
+            }
             let ident = parse_table_ident(&table);
             let fts_cfg: Option<ailake_fts::FtsConfig> =
                 fts_columns.map(|cols| ailake_fts::FtsConfig {
@@ -1060,6 +1070,16 @@ async fn run(cli: Cli) -> Result<(), String> {
             deferred,
             format,
         } => {
+            if deferred && !catalog.supports_in_place_rewrite() {
+                return Err(
+                    "--deferred is not supported with this catalog backend: the \
+                            background index build patches the merged file in place at its \
+                            committed path, which DuckLake cannot re-register (it trusts \
+                            the stats and footer size recorded at registration). Run a \
+                            blocking compact instead."
+                        .into(),
+                );
+            }
             let ident = parse_table_ident(&table);
 
             let meta = catalog

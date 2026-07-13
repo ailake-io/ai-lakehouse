@@ -177,7 +177,9 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
                 vecCol    = opts.get(VEC_COL),
                 dim       = opts.get(VEC_DIM),
                 topK      = opts.get(SEARCH_TOPK),
-                schema    = context.catalogTable.resolvedSchema,
+                columns   = context.catalogTable.resolvedSchema.columns.map {
+                    ScanColumnSpec(it.name, it.dataType.logicalType.typeRoot)
+                },
             )
         } else {
             validateSearchResultSchema(context.catalogTable.resolvedSchema)

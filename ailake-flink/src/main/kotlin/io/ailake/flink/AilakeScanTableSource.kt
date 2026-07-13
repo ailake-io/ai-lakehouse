@@ -17,6 +17,11 @@ import org.apache.flink.table.data.RowData
 import org.apache.flink.table.data.StringData
 import org.apache.flink.table.types.logical.LogicalTypeRoot
 import org.slf4j.LoggerFactory
+import java.io.Serializable
+
+/** (name, type root) pair for one declared DDL column — both fields are actually
+ *  Serializable (String, enum), unlike [ResolvedSchema] itself (see below). */
+data class ScanColumnSpec(val name: String, val typeRoot: LogicalTypeRoot) : Serializable
 
 /**
  * AI-Lake Flink table source for `search.mode = 'full'` (Fase 11 — search + full-row fetch,
@@ -29,6 +34,14 @@ import org.slf4j.LoggerFactory
  *
  * Same runtime contract as [AilakeVectorTableSource]: query vector via the
  * `ailake.query.vector` job parameter (comma-separated f32 values).
+ *
+ * Takes [columns] (a plain `List<ScanColumnSpec>`), not `ResolvedSchema` directly —
+ * `ResolvedSchema` is not `Serializable`, and Flink serializes the `InputFormat` this class
+ * builds to ship it to TaskManagers; holding onto the full schema object failed every
+ * `search.mode=full` query with `NotSerializableException:
+ * org.apache.flink.table.catalog.ResolvedSchema` on a real (non-local-only) cluster —
+ * confirmed live, not caught by any test in this repo. Callers extract [columns] from
+ * `ResolvedSchema` once, in [AilakeVectorConnectorFactory] (planning-time, not distributed).
  */
 class AilakeScanTableSource(
     private val warehouse: String,
@@ -37,7 +50,7 @@ class AilakeScanTableSource(
     private val vecCol: String,
     private val dim: Int,
     private val topK: Int,
-    private val schema: ResolvedSchema,
+    private val columns: List<ScanColumnSpec>,
     private val partitionFilter: String? = null,
 ) : ScanTableSource {
 
@@ -51,14 +64,14 @@ class AilakeScanTableSource(
             vecCol          = vecCol,
             dim             = dim,
             topK            = topK,
-            schema          = schema,
+            columns         = columns,
             partitionFilter = partitionFilter,
         )
         return InputFormatProvider.of(format)
     }
 
     override fun copy(): DynamicTableSource = AilakeScanTableSource(
-        warehouse, namespace, tableName, vecCol, dim, topK, schema, partitionFilter
+        warehouse, namespace, tableName, vecCol, dim, topK, columns, partitionFilter
     )
 
     override fun asSummaryString(): String = "AI-Lake-Scan[$namespace.$tableName]"
@@ -75,12 +88,12 @@ class AilakeScanInputFormat(
     private val vecCol: String,
     private val dim: Int,
     private val topK: Int,
-    private val schema: ResolvedSchema,
+    private val columns: List<ScanColumnSpec>,
     private val partitionFilter: String? = null,
 ) : GenericInputFormat<RowData>() {
 
-    @Transient private var response: AilakeNativeLoader.ScanResponse = AilakeNativeLoader.ScanResponse(ok = true)
-    @Transient private var position: Int = -1
+    // Iterator over pre-built rows, not a manual position index into `response` — see [open].
+    @Transient private var rows: Iterator<RowData> = emptyList<RowData>().iterator()
 
     override fun open(split: GenericInputSplit) {
         val params = runtimeContext.executionConfig.globalJobParameters.toMap()
@@ -93,7 +106,7 @@ class AilakeScanInputFormat(
 
         // Same graceful-degradation contract as AilakeInputFormat — missing native lib fails
         // this source with an empty result set instead of crashing the whole Flink task.
-        response = try {
+        val response = try {
             AilakeNativeLoader.scan(
                 warehouse = warehouse, namespace = namespace, table = tableName,
                 vecCol = vecCol, dim = dim, query = query, topK = topK, partitionFilter = effectivePartition,
@@ -103,24 +116,38 @@ class AilakeScanInputFormat(
                 namespace, tableName, e.message)
             AilakeNativeLoader.ScanResponse(ok = true)
         }
+        // Materialize every row up front (response is already fully in memory — same
+        // native call already returned it as one JSON blob, no extra I/O here) and hand
+        // out a plain Iterator, exactly like AilakeInputFormat's *working* pattern.
+        //
+        // Regression: a manual `position: Int` field + `reachedEnd() = position + 1 >=
+        // response.num_rows` looks equivalent on paper but silently dropped row 0 on a
+        // real (non-local) Flink cluster — `search.top-k=1` returned 0 rows, `top-k=5`
+        // returned 4 (always missing the first/lowest-distance row), confirmed live and
+        // cross-checked against the same request via ailake_scan_json directly (correct)
+        // and via the sibling `search`-mode InputFormat (correct, iterator-based) — not
+        // root-caused further than "index-based reachedEnd/nextRecord loses the first
+        // element in Flink's InputFormatSourceFunction driver loop, iterator-based
+        // doesn't." Matching the already-correct sibling implementation exactly, rather
+        // than continuing to debug an index-based scheme against undocumented Flink
+        // runtime iteration order, is the safer fix.
+        rows = (0 until response.num_rows).map { position ->
+            val row = GenericRowData(columns.size)
+            columns.forEachIndexed { i, col ->
+                val raw = response.columns[col.name]?.getOrNull(position)
+                row.setField(i, convert(raw, col.typeRoot))
+            }
+            row as RowData
+        }.iterator()
     }
 
     companion object {
         private val log = LoggerFactory.getLogger(AilakeScanInputFormat::class.java)
     }
 
-    override fun reachedEnd(): Boolean = position + 1 >= response.num_rows
+    override fun reachedEnd(): Boolean = !rows.hasNext()
 
-    override fun nextRecord(reuse: RowData?): RowData {
-        position++
-        val columns = schema.columns
-        val row = GenericRowData(columns.size)
-        columns.forEachIndexed { i, col ->
-            val raw = response.columns[col.name]?.getOrNull(position)
-            row.setField(i, convert(raw, col.dataType.logicalType.typeRoot))
-        }
-        return row
-    }
+    override fun nextRecord(reuse: RowData?): RowData = rows.next()
 
     /** Converts a scan-response value (Jackson's generic JSON representation) to Flink's internal row representation. */
     private fun convert(raw: Any?, root: LogicalTypeRoot): Any? {

@@ -122,8 +122,12 @@ def ailake_ingest_search():
             for r in vector_results[:5]
         ]
 
-        context = ailake.assemble_context(chunks=chunks, max_tokens=512, dedup_threshold=0.1)
-        print(f"Context assembled: {len(context)} chars")
+        # assemble_context() returns {"text": str, "chunk_count": int, "token_estimate": int}
+        # (Fase 15) — not a plain string.
+        result = ailake.assemble_context(chunks=chunks, max_tokens=512, dedup_threshold=0.1)
+        context = result["text"]
+        print(f"Context assembled: {len(context)} chars, chunk_count={result['chunk_count']}, "
+              f"token_estimate={result['token_estimate']}")
         print(context[:400])
         return context[:400]
 
