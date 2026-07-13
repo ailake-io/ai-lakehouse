@@ -144,7 +144,18 @@ impl MigrationJob {
                         files: current_files.clone(),
                         operation: SnapshotOperation::Replace,
                         iceberg_schema: None,
-                        extra_properties: std::collections::HashMap::new(),
+                        // Every property-driven consumer (CLI search/decay-memories/info,
+                        // ailake.search() when the caller doesn't override vector_column,
+                        // etc.) resolves "the primary vector column" from this property —
+                        // previously never updated here, so it kept pointing at
+                        // `old_column`, which the newly-written file (physically named
+                        // `new_column`) doesn't have. Confirmed live:
+                        // `ailake decay-memories` failed with "vector dimension mismatch:
+                        // expected N, got 0" on the very first file migrated.
+                        extra_properties: std::collections::HashMap::from([(
+                            "ailake.vector-column".to_string(),
+                            new_policy.column_name.clone(),
+                        )]),
                         bloom_filters: vec![],
                         equality_delete_files: vec![],
                     },
@@ -224,7 +235,15 @@ impl MigrationJob {
                     files: new_entries,
                     operation: SnapshotOperation::Replace,
                     iceberg_schema: None,
-                    extra_properties: std::collections::HashMap::new(),
+                    // See the identical comment in run_atomic_replace — this cutover commit
+                    // is the one place DualWriteThenCutover ever touches table properties;
+                    // without it every property-driven vector-column consumer (CLI
+                    // search/decay-memories/info, etc.) keeps resolving to `old_column`
+                    // after migration, which no longer exists in any file.
+                    extra_properties: std::collections::HashMap::from([(
+                        "ailake.vector-column".to_string(),
+                        new_policy.column_name.clone(),
+                    )]),
                     bloom_filters: vec![],
                     equality_delete_files: vec![],
                 },
@@ -582,5 +601,162 @@ mod tests {
             assert_eq!(batch.num_rows(), 2);
             assert!(embs.iter().all(|v| v == &vec![9.0f32; 4]));
         }
+    }
+
+    /// Sets up a table with one file (`chunk_text`/`embedding`) and returns
+    /// `(catalog, store, table, _dir, _catalog_dir)`, shared by both cutover-property
+    /// regression tests below. Callers must keep the two `TempDir` guards alive for the
+    /// duration of the test — dropping them deletes the backing directories even though
+    /// `store`/`catalog` still hold paths into them.
+    async fn setup_single_file_table(
+        dim: u32,
+        policy: &VectorStoragePolicy,
+    ) -> (
+        Arc<dyn CatalogProvider>,
+        Arc<dyn Store>,
+        TableIdent,
+        TempDir,
+        TempDir,
+    ) {
+        let dir = TempDir::new().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog_dir = TempDir::new().unwrap();
+        let catalog_store = Arc::new(LocalStore::new(catalog_dir.path()));
+        let catalog: Arc<dyn CatalogProvider> = Arc::new(HadoopCatalog::new(catalog_store, ""));
+        let table = TableIdent::new("ns", "tbl");
+
+        catalog
+            .create_table(
+                &table,
+                &TableProperties {
+                    policy: policy.clone(),
+                    extra: std::collections::HashMap::new(),
+                    format_version: 2,
+                    partition_column_type: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("chunk_text", DataType::Utf8, false),
+        ]));
+        let ids = vec![0i32, 1];
+        let embs: Vec<Vec<f32>> = ids.iter().map(|&v| vec![v as f32; dim as usize]).collect();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(ids.clone())),
+                Arc::new(StringArray::from(vec!["a0", "a1"])),
+            ],
+        )
+        .unwrap();
+        let bytes = AilakeFileWriter::new(policy.clone())
+            .write(&batch, &embs)
+            .unwrap();
+        let path = "data/old_0.parquet".to_string();
+        store.put(&path, bytes.clone()).await.unwrap();
+
+        let centroid = compute_centroid_and_radius(&embs, policy.metric);
+        let reader = AilakeFileReader::new(bytes.clone(), "embedding", dim);
+        let header = reader.read_header().unwrap();
+        let ailk_start = reader.ailk_offset().unwrap();
+        let entry = make_data_file_entry(
+            &path,
+            ids.len() as u64,
+            bytes.len() as u64,
+            &centroid,
+            VectorIndexInfo {
+                column: "embedding",
+                dim,
+                hnsw_offset: ailk_start + header.hnsw_offset,
+                hnsw_len: header.hnsw_len,
+            },
+        );
+        catalog
+            .commit_snapshot(
+                &table,
+                NewSnapshot {
+                    snapshot_id: new_snapshot_id(),
+                    parent_snapshot_id: None,
+                    files: vec![entry],
+                    operation: SnapshotOperation::Append,
+                    iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
+                    equality_delete_files: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        (catalog, store, table, dir, catalog_dir)
+    }
+
+    /// Regression: neither migration strategy ever updated the `ailake.vector-column`
+    /// table property to the new column name on cutover — every property-driven
+    /// consumer (CLI `search`/`decay-memories`/`info`, `MemoryDecayJob`, etc.) kept
+    /// resolving "the primary vector column" to `old_column`, which the freshly
+    /// written file (physically named `new_column`) doesn't have. Confirmed live:
+    /// `ailake decay-memories` failed with "vector dimension mismatch: expected N,
+    /// got 0" on the very first file migrated; `ailake search` with no `--vec-col`
+    /// override silently searched a column that no longer existed.
+    #[tokio::test]
+    async fn dual_write_cutover_updates_vector_column_property() {
+        let dim = 4u32;
+        let policy = make_policy(dim);
+        let (catalog, store, table, _dir, _catalog_dir) = setup_single_file_table(dim, &policy).await;
+
+        let job = MigrationJob {
+            table: table.clone(),
+            old_column: "embedding".into(),
+            new_column: "embedding_v2".into(),
+            text_column: "chunk_text".into(),
+            embed_fn: Arc::new(|texts: &[String]| {
+                Ok(texts.iter().map(|_| vec![9.0f32; 4]).collect())
+            }),
+            strategy: MigrationStrategy::DualWriteThenCutover,
+            batch_size: 10,
+            new_model: None,
+            on_progress: None,
+        };
+        job.run(catalog.clone(), store.clone()).await.unwrap();
+
+        let meta = catalog.load_table(&table).await.unwrap();
+        assert_eq!(
+            meta.properties.get("ailake.vector-column").map(|s| s.as_str()),
+            Some("embedding_v2"),
+            "ailake.vector-column must point at the new column after cutover"
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_replace_updates_vector_column_property() {
+        let dim = 4u32;
+        let policy = make_policy(dim);
+        let (catalog, store, table, _dir, _catalog_dir) = setup_single_file_table(dim, &policy).await;
+
+        let job = MigrationJob {
+            table: table.clone(),
+            old_column: "embedding".into(),
+            new_column: "embedding_v2".into(),
+            text_column: "chunk_text".into(),
+            embed_fn: Arc::new(|texts: &[String]| {
+                Ok(texts.iter().map(|_| vec![9.0f32; 4]).collect())
+            }),
+            strategy: MigrationStrategy::AtomicReplace,
+            batch_size: 10,
+            new_model: None,
+            on_progress: None,
+        };
+        job.run(catalog.clone(), store.clone()).await.unwrap();
+
+        let meta = catalog.load_table(&table).await.unwrap();
+        assert_eq!(
+            meta.properties.get("ailake.vector-column").map(|s| s.as_str()),
+            Some("embedding_v2"),
+            "ailake.vector-column must point at the new column after cutover"
+        );
     }
 }

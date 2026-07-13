@@ -1,0 +1,66 @@
+# AI-Lake Demo Trino Image
+#
+# Three-stage build:
+#   Stage 1 (rust-builder): builds ailake-jni cdylib (same C-ABI bridge every
+#                       plugin uses)
+#   Stage 2 (jvm-builder): Gradle/JDK image, builds the ailake Trino plugin
+#                       shadowJar
+#   Stage 3 (runtime): stock trinodb/trino image + both artifacts installed
+#
+# Pinned to Trino 430 to match trino-plugin/build.gradle.kts's compileOnly SPI
+# version — Trino 460 (this demo's previous stock image tag) breaks the plugin
+# outright with `ConnectorMetadata getTableHandle() is not implemented`, a real
+# Trino SPI signature change between 430 and 460. See CHANGELOG.md for the two
+# real bugs found and fixed getting this far (slf4j classloading, Kotlin
+# session-property boxing) and the one found-but-NOT-fixed (SELECT execution
+# against ailake_native fails with a NullPointerException reconstructing
+# VectorScanTableHandle inside Trino's internal TaskUpdateRequest JSON codec —
+# EXPLAIN/catalog registration/session properties all work; only actual task
+# execution hits it). Demonstrated in 04_trino.ipynb with the real repro.
+#
+# Build context must be the repository root (set in compose-demo.yml).
+
+# ── Stage 1: ailake-jni cdylib ──────────────────────────────────────────────────
+FROM rust:1-slim AS rust-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY ailake-core      ailake-core/
+COPY ailake-vec       ailake-vec/
+COPY ailake-parquet   ailake-parquet/
+COPY ailake-index     ailake-index/
+COPY ailake-file      ailake-file/
+COPY ailake-fts       ailake-fts/
+COPY ailake-catalog   ailake-catalog/
+COPY ailake-store     ailake-store/
+COPY ailake-query     ailake-query/
+COPY ailake-jni       ailake-jni/
+# Workspace members not needed here, but cargo metadata requires every member
+# listed in the root Cargo.toml to exist in the build context.
+COPY ailake-py        ailake-py/
+COPY ailake-cli       ailake-cli/
+COPY tests            tests/
+
+RUN cargo build --release -p ailake-jni
+
+# ── Stage 2: ailake Trino plugin (Gradle/Kotlin) ───────────────────────────────
+FROM gradle:8.7-jdk17 AS jvm-builder
+
+COPY trino-plugin /trino-plugin
+WORKDIR /trino-plugin
+# shadowJar bundles JNA + slf4j-api + jackson-module-kotlin (Trino's isolated
+# per-plugin classloader does not expose slf4j-api — see build.gradle.kts);
+# excludes Trino SPI/airlift-slice (provided by the server).
+RUN gradle shadowJar -x test --no-daemon --no-configuration-cache
+
+# ── Stage 3: Trino runtime ──────────────────────────────────────────────────────
+FROM trinodb/trino:430
+
+USER root
+COPY --from=jvm-builder /trino-plugin/build/libs/trino-plugin-*-plugin.jar /usr/lib/trino/plugin/ailake/ailake-trino-plugin.jar
+COPY --from=rust-builder /target/release/libailake_jni.so /usr/local/lib/libailake_jni.so
+ENV AILAKE_NATIVE_LIB=/usr/local/lib/libailake_jni.so
+USER trino

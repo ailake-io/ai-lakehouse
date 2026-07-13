@@ -1523,6 +1523,8 @@ fn record_batch_to_scan_json(batch: &arrow_array::RecordBatch) -> Result<String,
 #[no_mangle]
 pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c_char {
     catch_ffi_panic("ailake_scan_json", move || {
+        use ailake_catalog::provider::CatalogProvider;
+
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
@@ -1598,7 +1600,26 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         // Separate store for fetching row data (do_search owns its own store internally).
         let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
 
-        let batch = match rt().block_on(rs_fetch_rows(&results, store, &req.vec_col, req.dim)) {
+        // Current Iceberg schema — so a file written before a metadata-only
+        // evolve_schema/add_column still gets the new column projected in as null
+        // instead of silently omitted (see fetch_rows's doc comment).
+        let scan_catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let scan_table = TableIdent::new(&req.namespace, &req.table);
+        let schema_fields = match rt().block_on(scan_catalog.load_table(&scan_table)) {
+            Ok(meta) => meta.schema_fields,
+            Err(e) => {
+                warn!("ailake_scan_json: load_table for schema fields failed: {}", e);
+                Vec::new()
+            }
+        };
+
+        let batch = match rt().block_on(rs_fetch_rows(
+            &results,
+            store,
+            &req.vec_col,
+            req.dim,
+            &schema_fields,
+        )) {
             Ok(b) => b,
             Err(e) => {
                 warn!("ailake_scan_json: fetch_rows failed: {}", e);

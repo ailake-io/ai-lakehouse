@@ -374,20 +374,37 @@ The extension must be built against the same DuckDB version as the Python/CLI cl
 ```bash
 cmake -S duckdb-ailake -B duckdb-ailake/build \
   -DCMAKE_BUILD_TYPE=Release \
-  -DDUCKDB_VERSION=v1.1.3
+  -DDUCKDB_VERSION=v1.5.0
 ```
 
-Match the pip package: `pip install duckdb==1.1.3`.
+Match the pip package: `pip install duckdb==1.5.0` (see `.github/workflows/ci-duckdb.yml` for the
+version this project's CI actually tests against — keep this section in sync with it).
 
 ## Load in Python
 
+**`sys.setdlopenflags(os.RTLD_GLOBAL)` before `import duckdb` is required**, not optional — without
+it, `LOAD '...duckdb_extension'` fails with a misleading `undefined symbol:
+_ZTIN6duckdb28SimpleNamedParameterFunctionE` (or similar) IO error. Root cause: Python's import
+machinery loads C-extension modules (`_duckdb...so`) with `RTLD_LOCAL` by default, which hides its
+symbols from any library `dlopen`'d afterwards — including this extension, which resolves DuckDB
+internal symbols from the host process at load time (see "Design" above). This is unrelated to
+`ailake`'s own native lib (which is already loaded `RTLD_GLOBAL` below) — both libraries need
+global symbol visibility. All of `duckdb-ailake/test/*.py` already do this; it was previously
+undocumented here.
+
 ```python
-import ctypes, duckdb
+import os, sys
+_old_flags = sys.getdlopenflags()
+sys.setdlopenflags(_old_flags | os.RTLD_GLOBAL)
+import duckdb
+sys.setdlopenflags(_old_flags)   # restore — don't leak RTLD_GLOBAL to unrelated imports
+
+import ctypes
 
 # Pre-load native lib so DuckDB extension resolves symbols
 ctypes.CDLL("./target/release/libailake_jni.so", ctypes.RTLD_GLOBAL)
 
-conn = duckdb.connect()
+conn = duckdb.connect(config={"allow_unsigned_extensions": True})
 conn.execute("LOAD './duckdb-ailake/build/ailake.duckdb_extension'")
 
 rows = conn.execute("""
@@ -401,11 +418,18 @@ rows = conn.execute("""
 
 ```bash
 # Set LD_LIBRARY_PATH so the extension finds libailake_jni.so
-LD_LIBRARY_PATH=./target/release duckdb
+LD_LIBRARY_PATH=./target/release duckdb -unsigned
 
 D LOAD './duckdb-ailake/build/ailake.duckdb_extension';
 D SELECT * FROM ailake_search('file:///data/docs', [0.1, 0.2]::FLOAT[], 5);
 ```
+
+> **Known limitation**: verified against the official `duckdb.org`-distributed CLI binary
+> (v1.5.4) — `LOAD` fails with `undefined symbol:
+> _ZTIN6duckdb28SimpleNamedParameterFunctionE`. `nm -D` on that binary confirms the symbol
+> is genuinely not exported (unlike the Python wheel's `_duckdb...so`, which does export it —
+> see the `RTLD_GLOBAL` note above). Not yet root-caused or fixed; the Python path above is
+> the verified-working one and what this project's own tests and demo notebooks use.
 
 ## Design
 

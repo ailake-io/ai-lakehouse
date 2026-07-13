@@ -349,6 +349,7 @@ class Table:
         vector_column: str = "embedding",
         dim: int = 1536,
         metric: str = "cosine",
+        precision: str = "f16",
         pre_normalize: bool = False,
         hnsw_m: int | None = None,
         hnsw_ef_construction: int | None = None,
@@ -371,6 +372,7 @@ class Table:
         self._vector_column = vector_column
         self._dim = dim
         self._metric = metric
+        self._precision = precision
         self._pre_normalize = pre_normalize
         self._hnsw_m = hnsw_m
         self._hnsw_ef = hnsw_ef_construction
@@ -384,6 +386,7 @@ class Table:
             vector_column=vector_column,
             dim=dim,
             metric=metric,
+            precision=precision,
             pre_normalize=pre_normalize,
             hnsw_m=hnsw_m,
             hnsw_ef_construction=hnsw_ef_construction,
@@ -707,6 +710,7 @@ def open_table(
     vector_column: str = "embedding",
     dim: int = 1536,
     metric: str = "cosine",
+    precision: str = "f16",
     pre_normalize: bool = False,
     hnsw_m: int | None = None,
     hnsw_ef_construction: int | None = None,
@@ -733,6 +737,7 @@ def open_table(
         dim: Embedding dimension (default 1536).
         metric: Distance metric — ``"cosine"``, ``"euclidean"``, ``"dot_product"``,
                 ``"normalized_cosine"``.
+        precision: Storage precision — ``"f16"`` (default) | ``"f32"`` | ``"i8"``.
         pre_normalize: Normalise vectors to unit-L2 at write time (~12-20 % search speedup).
         hnsw_m: HNSW graph degree *M* per layer.
         hnsw_ef_construction: HNSW build-time beam width.
@@ -766,6 +771,7 @@ def open_table(
         vector_column=vector_column,
         dim=dim,
         metric=metric,
+        precision=precision,
         pre_normalize=pre_normalize,
         hnsw_m=hnsw_m,
         hnsw_ef_construction=hnsw_ef_construction,

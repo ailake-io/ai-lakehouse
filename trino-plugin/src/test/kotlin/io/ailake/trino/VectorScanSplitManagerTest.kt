@@ -27,10 +27,16 @@ class VectorScanSplitManagerTest {
         hybridWeight: Double? = null,
     ): ConnectorSession =
         mock {
+            // javaObjectType (boxed Integer/Double), not the primitive `.java` Kotlin gives —
+            // must match VectorScanSplitManager's real call exactly, itself fixed for the
+            // same reason: PropertyMetadata.integerProperty/doubleProperty register the boxed
+            // Class, and Trino's real getProperty() rejects a primitive Class lookup key
+            // (confirmed live against Trino 430 — see CHANGELOG.md). These mocks previously
+            // stubbed the (wrong) primitive overload too, so they never caught the bug.
             on { getProperty("query_vector", String::class.java) } doReturn queryVector
-            on { getProperty("top_k", Int::class.java) } doReturn topK
+            on { getProperty("top_k", Int::class.javaObjectType) } doReturn topK
             on { getProperty("query_text", String::class.java) } doReturn queryText
-            on { getProperty("hybrid_weight", Double::class.java) } doReturn hybridWeight
+            on { getProperty("hybrid_weight", Double::class.javaObjectType) } doReturn hybridWeight
         }
 
     @Test
@@ -150,7 +156,7 @@ class VectorScanSplitManagerTest {
     ): ConnectorSession =
         mock {
             on { getProperty("multimodal_queries", String::class.java) } doReturn queriesJson
-            on { getProperty("top_k", Int::class.java) } doReturn topK
+            on { getProperty("top_k", Int::class.javaObjectType) } doReturn topK
         }
 
     @Test

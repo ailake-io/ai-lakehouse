@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 use tracing::{debug, error, warn};
 
-use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, TableIdent};
+use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, SchemaField, TableIdent};
 use ailake_core::{AilakeError, AilakeResult, EmbeddingModelInfo, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
 use ailake_index::AnyIndex;
@@ -1332,6 +1332,7 @@ pub async fn fetch_rows(
     store: Arc<dyn Store>,
     vector_column: &str,
     dim: u32,
+    schema_fields: &[SchemaField],
 ) -> AilakeResult<RecordBatch> {
     use std::collections::HashMap;
 
@@ -1354,13 +1355,39 @@ pub async fn fetch_rows(
 
     use arrow_array::FixedSizeListArray;
 
+    // `vector_column` is deliberately excluded from the batch AilakeFileReader::read_parquet()
+    // returns — it's decoded separately into `vectors: Vec<Vec<f32>>` and re-appended below as
+    // a FixedSizeList<Float32> field. SchemaFiller has no way to know that; left unfiltered it
+    // treats the vector column as "missing" (it genuinely isn't in the tabular batch) and
+    // injects a synthetic column for it — wrong type (falls through iceberg_type_to_arrow's
+    // Utf8 fallback for the vector column's Iceberg type string) and a duplicate field name
+    // once the real decoded vector column is appended, breaking pandas' arrow->pandas
+    // conversion (`Unsupported cast from fixed_size_list<...> to large_utf8`). Found writing
+    // the regression test for the *other* schema-projection bug this function has — filtering
+    // it out here is required for schema-filling to be correct at all in fetch_rows.
+    let schema_fields_for_fill: Vec<SchemaField> = schema_fields
+        .iter()
+        .filter(|sf| sf.name != vector_column)
+        .cloned()
+        .collect();
+
     // (original_index, distance, single-row RecordBatch, decoded F32 vector)
     let mut collected: Vec<(usize, f32, RecordBatch, Vec<f32>)> = Vec::with_capacity(results.len());
 
     for (file_path, rows) in &by_file {
         let bytes = store.get(file_path).await?;
         let reader = AilakeFileReader::new(bytes, vector_column, dim);
-        let (batch, vectors) = reader.read_parquet()?;
+        let (raw_batch, vectors) = reader.read_parquet()?;
+        // Project against the table's *current* Iceberg schema — old files written
+        // before a metadata-only evolve_schema/add_column don't physically have the
+        // new column. Without this, a file that happens to land first in `collected`
+        // silently drives `base_schema` below and the new column never appears in the
+        // response at all (not even as null) — confirmed live via Spark's
+        // AilakeNative.scan() and ailake.search(fetch_data=True), both of which call
+        // this function. Same fix SchemaFiller::fill already applies on the
+        // pointer-search path (search()); this was the one full-row-fetch path it
+        // never reached.
+        let batch = SchemaFiller::fill(raw_batch, &schema_fields_for_fill)?;
 
         for &(row_id, distance, pos) in rows {
             let idx = row_id as usize;
@@ -1842,5 +1869,147 @@ mod tests {
         assert!(results[0].distance <= 0.0, "distance is -rrf_score");
         // Row 0 is nearest to both q_text=[1,0,0,0] and q_img=[1,0]
         assert_eq!(results[0].row_id.as_u64(), 0, "row 0 should rank first");
+    }
+
+    /// Regression: `fetch_rows` used to build its output schema from whichever file's
+    /// physical Parquet schema happened to be read first — a file written before a
+    /// metadata-only `evolve_schema`/`add_column` never physically has the new column,
+    /// so it was silently absent from the response instead of projected as null.
+    /// Confirmed live via Spark's `AilakeNative.scan()` and
+    /// `ailake.search(fetch_data=True)`, both backed by this function.
+    #[tokio::test]
+    async fn fetch_rows_projects_evolved_column_as_null() {
+        use ailake_catalog::schema_evolution::{AddColumnRequest, SchemaEvolution};
+
+        let dir = TempDir::new().unwrap();
+        let dim = 8usize;
+        write_demo_table(&dir, dim, 8).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        // Metadata-only schema evolution — no data files rewritten, so every existing
+        // file on disk still physically lacks the "note" column.
+        catalog
+            .evolve_schema(
+                &table,
+                SchemaEvolution::new().add_column(AddColumnRequest {
+                    name: "note".to_string(),
+                    iceberg_type: "string".to_string(),
+                    required: false,
+                    initial_default: None,
+                    write_default: None,
+                    doc: None,
+                }),
+            )
+            .await
+            .unwrap();
+
+        let query = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let config = SearchConfig {
+            top_k: 3,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
+            hybrid: None,
+        };
+        let results = search(
+            &table,
+            &query,
+            config,
+            "embedding",
+            dim as u32,
+            Arc::clone(&catalog),
+            Arc::clone(&store),
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 3);
+
+        let table_meta = catalog.load_table(&table).await.unwrap();
+        let batch = fetch_rows(&results, store, "embedding", dim as u32, &table_meta.schema_fields)
+            .await
+            .unwrap();
+
+        let note_col = batch
+            .column_by_name("note")
+            .expect("evolved 'note' column must be present, not silently dropped");
+        assert_eq!(note_col.len(), 3);
+        assert_eq!(
+            note_col.null_count(),
+            3,
+            "old files predate 'note' — every value must be null, not an error or a missing column"
+        );
+    }
+
+    /// Regression: the schema-projection fix above (`fetch_rows_projects_evolved_column_as_null`)
+    /// initially introduced its own bug — `SchemaFiller::fill` was called with the *unfiltered*
+    /// current-schema field list, which includes the vector column itself. Since
+    /// `AilakeFileReader::read_parquet()` deliberately returns the vector column out-of-band
+    /// (as `vectors: Vec<Vec<f32>>`, not as part of the tabular `RecordBatch`), the filler saw
+    /// it as "missing" and injected a synthetic column for it — wrong-typed (`iceberg_type_to_arrow`'s
+    /// `Utf8` fallback) and a duplicate of the real decoded vector column appended a few lines
+    /// later, breaking pandas' arrow→pandas conversion for *every* `fetch_data=True`/`scan()`
+    /// call, not just evolved-schema ones. Caught immediately by testing against real
+    /// pandas conversion (not just the Rust arrow API) — this test guards it at the Rust level too.
+    #[tokio::test]
+    async fn fetch_rows_does_not_duplicate_vector_column() {
+        let dir = TempDir::new().unwrap();
+        let dim = 8usize;
+        write_demo_table(&dir, dim, 8).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        let query = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let config = SearchConfig {
+            top_k: 3,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
+            hybrid: None,
+        };
+        let results = search(
+            &table,
+            &query,
+            config,
+            "embedding",
+            dim as u32,
+            Arc::clone(&catalog),
+            Arc::clone(&store),
+        )
+        .await
+        .unwrap();
+
+        let table_meta = catalog.load_table(&table).await.unwrap();
+        let batch = fetch_rows(&results, store, "embedding", dim as u32, &table_meta.schema_fields)
+            .await
+            .unwrap();
+
+        let batch_schema = batch.schema();
+        let embedding_fields: Vec<_> = batch_schema
+            .fields()
+            .iter()
+            .filter(|f| f.name() == "embedding")
+            .collect();
+        assert_eq!(
+            embedding_fields.len(),
+            1,
+            "exactly one 'embedding' field expected, got: {:?}",
+            batch_schema
+        );
+        assert!(
+            matches!(embedding_fields[0].data_type(), arrow_schema::DataType::FixedSizeList(_, d) if *d == dim as i32),
+            "embedding field must be the decoded FixedSizeList<Float32>, got {:?}",
+            embedding_fields[0].data_type()
+        );
     }
 }

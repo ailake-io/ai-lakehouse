@@ -200,13 +200,14 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, partition_column_type=None, partition_fields=None, partition_values=None, bm25_text_column=None, format_version=2, fts_text_columns=None, fts_tokenizer="default"))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", precision="f16", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, partition_column_type=None, partition_fields=None, partition_values=None, bm25_text_column=None, format_version=2, fts_text_columns=None, fts_tokenizer="default"))]
     fn new(
         py: Python<'_>,
         path: &str,
         vector_column: &str,
         dim: u32,
         metric: &str,
+        precision: &str,
         pre_normalize: bool,
         hnsw_m: Option<u32>,
         hnsw_ef_construction: Option<u32>,
@@ -233,11 +234,12 @@ impl TableWriter {
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
-            "ailake-py: TableWriter::new path={} dim={} metric={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} pq_only={} ivf_residual={} embedding_model={:?} partition_by={:?}",
-            path, dim, metric, pre_normalize, hnsw_m, hnsw_ef_construction, pq_only, ivf_residual, embedding_model, partition_by
+            "ailake-py: TableWriter::new path={} dim={} metric={} precision={} pre_normalize={} hnsw_m={:?} hnsw_ef={:?} pq_only={} ivf_residual={} embedding_model={:?} partition_by={:?}",
+            path, dim, metric, precision, pre_normalize, hnsw_m, hnsw_ef_construction, pq_only, ivf_residual, embedding_model, partition_by
         );
         let mut policy =
             VectorStoragePolicy::default_f16(vector_column, dim, parse_metric(metric)?);
+        policy.precision = parse_precision(precision);
         policy.pre_normalize = pre_normalize;
         policy.hnsw_m = hnsw_m;
         policy.hnsw_ef_construction = hnsw_ef_construction;
@@ -859,7 +861,13 @@ fn search_with_data(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let batch = rt
-        .block_on(rs_fetch_rows(&results, store, &vector_column, dim))
+        .block_on(rs_fetch_rows(
+            &results,
+            store,
+            &vector_column,
+            dim,
+            &meta.schema_fields,
+        ))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let ipc_bytes = record_batch_to_ipc(&batch)?;
