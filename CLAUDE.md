@@ -365,14 +365,33 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
      a. Lê custom-properties: centroid, radius
      b. Calcula distance(query, centroid)
      c. Se distance - radius > threshold → PRUNE
-5. Para arquivos sobreviventes (em paralelo, via Tokio):
-     a. GET parcial do footer Parquet → extrai hnsw_offset/len
-     b. GET parcial do rodapé HNSW → mmap local
-     c. Deserializa HNSW via bincode
-     d. Busca top-k local no grafo
+5. Para arquivos sobreviventes, buscados concorrentemente (`try_join_all` — sem
+   `tokio::spawn`/thread pool, concorrência cooperativa sobre I/O na mesma task;
+   `ailake-query/src/scanner.rs::search_one_file` + `search()`):
+     a. GET do arquivo inteiro (`store.get`, não range-GET — ver nota abaixo)
+     b. Se `SearchConfig::column_filter` setado: resolve o conjunto de row-ids
+        que satisfazem o predicado via `AilakeFileReader::matching_row_ids`
+        (skip de row-group inteiro por estatísticas min/max do Parquet + leitura
+        só da coluna do filtro — ver `ailake-parquet::ParquetVectorReader`).
+        Conjunto vazio → arquivo inteiro pulado, sem HNSW nem decode de vetores
+     c. Extrai hnsw_offset/len do footer, deserializa HNSW via bincode (mmap
+        local a partir dos bytes já residentes em memória do passo 5a)
+     d. Busca top-k local no grafo; linhas fora do conjunto do passo 5b
+        (quando setado) são descartadas
 6. Merge global dos resultados (top-k de todos os arquivos)
-7. Para os k vencedores: lê linhas via Parquet reader (com predicate pushdown)
+7. Para os k vencedores: lê linhas via Parquet reader
 8. Retorna RecordBatch (todas as colunas + _distance)
+```
+
+> **Nota — GET é sempre do arquivo inteiro, não range-GET**: o passo 5a busca
+> `store.get(&file_entry.path)` (todo o arquivo) — não os range-GETs
+> incrementais (footer → header AILK → blob HNSW) descritos na §4 como
+> pseudocódigo de carga via mmap. O trecho da §4 é o design pretendido pro
+> caminho `AilakeFileReader`/mmap de baixo nível; a busca real (`ailake-query`)
+> nunca foi conectada a ele — todo processamento pós-GET é CPU-bound sobre um
+> buffer já 100% em memória, não I/O incremental. Skip de row-group por
+> predicado (5b) economiza decode de CPU, não bytes de rede. Gap real, não
+> corrigido nesta revisão — rastreado como item de roadmap na Fase 16.
 ```
 
 ---
@@ -572,6 +591,19 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] **`.pyi` stale declarava classe `Agent` fictícia** — com `@property agent_id`/`session_id` e `assemble_context()` retornando `str`, nunca batendo com a classe `Agent` real (Python puro, definida em `__init__.py`, atributos privados) — `Agent`/`Table`/`SearchQuery` não fazem parte da extensão `_ailake` compilada e não pertencem a esse stub. Bloco fictício removido; adicionados stubs de `TimestampNs`, `compact`, `estimate`, `add_vector_column`, `backfill_vector_column`, e atualizadas todas as assinaturas tocadas acima.
 - [x] **Zero cobertura de teste** — explica por que os bugs de dedup morto, params derrubados e crash de Timestamp acima nunca foram pegos; só existia um compat script sem infra `pytest`. Adicionado `ailake-py/tests/test_capability_parity.py` (16 testes, build real via `maturin develop`, sem mocks) cobrindo cada fix acima; integrado no job `compat-ailake-py` do CI. `tests/compat/check_ailake_py.py` também atualizado pras novas asserções de `assemble_context` (era assert contra string pura com `dedup_threshold` que provadamente não fazia nada).
 - Verificado com build real `maturin develop --release` contra venv real (Python 3.14, pyarrow 24, sem pandas — achou limitação real de `pyarrow.TimestampScalar.as_py()` em resolução nanossegundo, contornada com `.value`), suite pytest nova (16 testes), `tests/compat/check_ailake_py.py` completo (60+ checks, 0 regressões), `mypy` (0 erros), `cargo clippy --release -p ailake-py` (0 warnings). Docs (`ailake-py/README.md`, `_ailake.pyi`, `CHANGELOG.md`) atualizados.
+
+### Fase 16 — Predicate pushdown real + busca concorrente no scanner
+
+> **Contexto (2026-07-14)**: auditoria achou §8 (Fluxo Fim-a-Fim da Consulta) afirmando dois comportamentos que o código nunca implementou: busca por arquivo "em paralelo, via Tokio" (`ailake-query/src/scanner.rs::search()` rodava um `for` sequencial sobre `surviving_files`, sem concorrência nenhuma) e leitura de linhas vencedoras "com predicate pushdown" (não existia nenhum conceito de filtro por coluna em `SearchConfig` — nem pushdown real no nível Parquet, nem sequer um pós-filtro; scanner só tinha o filtro de equality-delete, que é um mecanismo diferente).
+
+- [x] **`ailake-core::ColumnFilter`/`FilterOp`/`FilterValue`** — predicado de coluna única (`column op value`, `Eq/Ne/Lt/Lte/Gt/Gte`, valores `I64/F64/Str/Bool`) em `ailake-core/src/filter.rs`. Deliberadamente não é uma árvore de expressão genérica — combinar predicados fica pra uma camada acima se algum dia for preciso.
+- [x] **`ailake-parquet::ParquetVectorReader::read_all_filtered`** — pushdown real em duas camadas que nunca podem discordar (mesma função `compare()` nas duas): (1) skip de row-group inteiro via `parquet::file::statistics::Statistics` min/max (`.with_row_groups(...)`, grupos provavelmente sem match nunca são decodificados); (2) `RowFilter`/`ArrowPredicateFn` exato sobre os grupos sobreviventes. Coluna do filtro ausente no schema físico do arquivo (ex: adicionada via schema evolution, só materializada depois por `SchemaFiller`) → resultado conservador de zero linhas, documentado no doc comment. 6 testes reais (round-trip write→filter→assert, incluindo cross-check contra filtro manual de `read_all()`).
+- [x] **`ParquetVectorReader::matching_row_ids`** — variante que preserva identidade de linha (retorna `HashSet<u64>` de posições originais no arquivo, não um batch compactado). Necessária porque `read_all_filtered` sozinha é **incorreta** para os dois call sites reais do scanner: `row_id` do HNSW (`index.search()`) e de `flat_search()` são usados depois como índice posicional direto (`vecs.get(idx)`, `dv_bitmap.contains(row_id)`, e retornados em `SearchResult.row_id` pra fetch futuro) — um `read_all_filtered` ali silenciosamente devolveria o `row_id` errado (índice no batch filtrado, não no arquivo). `matching_row_ids` faz skip de row-group igual, mas decodifica só a coluna do filtro (via `.with_projection`) e rastreia o offset real de cada grupo a partir de `ParquetMetaData` — sem RowFilter, sem compactar nada. 3 testes reais, incluindo verificação explícita de que a posição original é preservada.
+- [x] **`SearchConfig::column_filter`** — plumbing em `ailake-query/src/scanner.rs::search()`/`search_multimodal()`: antes de decidir HNSW vs. flat-scan, resolve `matching_row_ids` uma vez por arquivo; conjunto vazio pula o arquivo inteiro (sem HNSW, sem decode Parquet — o ganho real de perf, arquivos que não têm a coluna filtrada nunca são escaneados, só pós-filtrados); conjunto não-vazio aplica como checagem de pertencimento adicional nos dois loops por linha existentes (mesmo padrão do `dv_bitmap`/`eq_del_filter` já usados ali), preservando 100% a identidade de `row_id`. Todos os 9 outros pontos de construção de `SearchConfig` no workspace (CLI, JNI, Python×3, testes×8) atualizados com `column_filter: None` — superfície pública (CLI/Python/JNI) não expõe o campo ainda, é plumbing interno por enquanto. 3 testes de integração no scanner comprovando: linha correta retornada sob filtro no path indexado (`row_id` seguro), linhas não-correspondentes excluídas, arquivo sem match nenhum retorna vazio sem erro.
+- [x] **Busca concorrente por arquivo** — `search()`'s `for file_entry in &surviving_files` sequencial extraído pra `search_one_file()` (mesmo corpo, sem mudança de lógica) e despachado via `futures::future::try_join_all` — concorrência cooperativa sobre I/O na mesma task (sem `tokio::spawn`, sem thread pool novo), correta pro volume que esse ponto do pipeline já opera (dezenas de arquivos pós-poda geométrica, não milhares — ver §3). Estado mutável do loop original (`all_results`/`raw_candidates`/contadores de flat-scan) virou retorno por valor (`FileSearchOutcome`), sem necessidade de `Mutex`/`Arc` — cada arquivo processado é independente, resultado é dobrado (fold) depois que todas as buscas terminam.
+- [x] **§8 (Fluxo Fim-a-Fim) corrigido** — texto agora bate com o código: concorrência via `try_join_all` (não "Tokio" genérico), pushdown de predicado descrito onde ele realmente acontece (passo 5, seleção de linha por arquivo — não no passo 7, fetch das linhas vencedoras). Nota nova documentando que o GET de arquivo é sempre integral (`store.get`, não range-GET incremental como a §4 descreve em pseudocódigo pro caminho mmap de baixo nível) — gap real, não fechado nesta revisão.
+- [ ] **Range-GET real no caminho de busca** — `search_one_file` faz `store.get()` do arquivo inteiro; a estratégia de range-GET incremental (footer → header AILK → blob HNSW) que a §4 documenta como pseudocódigo nunca foi conectada ao `scanner.rs` real — só existe como design pretendido pro `AilakeFileReader`/mmap de baixo nível. Corrigir exigiria mudar `AilakeFileReader` de "recebe `Bytes` já 100% em memória" pra um modo que aceita `Store + path` e faz GETs incrementais sob demanda — mudança estrutural maior, fora do escopo desta fase (que só entregou pushdown de predicado + concorrência entre arquivos, ambos operando sobre bytes já residentes).
+- Verificado com build real (`cargo build --workspace`), suite completa (`cargo test --workspace`, 314 passed / 7 ignored, 0 regressões), `cargo clippy --workspace --all-targets -D warnings` (0 warnings), `cargo fmt --all --check` limpo.
 
 ---
 

@@ -138,6 +138,7 @@ fn do_search(
         score_fn: None,
         partition_filter,
         hybrid,
+        column_filter: None,
     };
     rt().block_on(rs_search(
         &table, &query, config, vec_col, dim, catalog, store,
