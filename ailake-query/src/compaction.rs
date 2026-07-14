@@ -346,6 +346,10 @@ impl CompactionExecutor {
             },
         );
         entry.first_row_id = source_first_row_id;
+        // Preserve idempotency keys: a retry of a source write must still see itself
+        // as already-committed after this merge (see `DataFileEntry::merge_batch_ids`
+        // and `write_batch_idempotent`).
+        entry.batch_id = DataFileEntry::merge_batch_ids(files);
         Ok(entry)
     }
 
@@ -603,6 +607,7 @@ impl CompactionExecutor {
             },
         );
         entry.first_row_id = source_first_row_id;
+        entry.batch_id = DataFileEntry::merge_batch_ids(files);
 
         info!(
             "ailake: compact_incremental — merged {} files into {} \
@@ -667,6 +672,7 @@ impl CompactionExecutor {
             self.policy.dim,
         );
         entry.first_row_id = source_first_row_id;
+        entry.batch_id = DataFileEntry::merge_batch_ids(files);
 
         // Spawn background index build; errors are logged, not propagated.
         let store = self.store.clone();
@@ -2053,6 +2059,113 @@ mod tests {
         let pq_reader = ailake_parquet::ParquetVectorReader::new(merged_bytes, "embedding");
         let count = pq_reader.record_count().unwrap();
         assert_eq!(count, 4);
+    }
+
+    /// Regression test (ADR-018 / CLAUDE.md Fase 5 "Idempotência batch_id sobrevivendo
+    /// a compaction"): before `DataFileEntry::merge_batch_ids` existed, `compact()`
+    /// always produced `batch_id: None` on the merged file — a retry of either source
+    /// write, dispatched after compaction swept up its file, would find no existing
+    /// entry carrying its key and silently re-insert. All three merge entry-points
+    /// (`compact`, `compact_incremental`, `compact_deferred`) must aggregate source
+    /// `batch_id`s; this covers the plain (non-deferred) `compact()` path.
+    #[tokio::test]
+    async fn compact_aggregates_batch_ids_from_sources() {
+        use ailake_core::{VectorMetric, VectorPrecision};
+        use ailake_store::LocalStore;
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let policy = VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim: 4,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let embs_a: Vec<Vec<f32>> = vec![vec![1.0, 0.0, 0.0, 0.0]];
+        let batch_a =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![0i32]))])
+                .unwrap();
+        let bytes_a = AilakeFileWriter::new(policy.clone())
+            .write(&batch_a, &embs_a)
+            .unwrap();
+        store.put("data/a.parquet", bytes_a.clone()).await.unwrap();
+
+        let embs_b: Vec<Vec<f32>> = vec![vec![0.0, 1.0, 0.0, 0.0]];
+        let batch_b =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1i32]))])
+                .unwrap();
+        let bytes_b = AilakeFileWriter::new(policy.clone())
+            .write(&batch_b, &embs_b)
+            .unwrap();
+        store.put("data/b.parquet", bytes_b.clone()).await.unwrap();
+
+        // A file compacted with no batch_id at all (e.g. written via plain
+        // `write_batch`, never idempotently) — must not inject a spurious key.
+        let embs_c: Vec<Vec<f32>> = vec![vec![0.0, 0.0, 1.0, 0.0]];
+        let batch_c =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![2i32]))]).unwrap();
+        let bytes_c = AilakeFileWriter::new(policy.clone())
+            .write(&batch_c, &embs_c)
+            .unwrap();
+        store.put("data/c.parquet", bytes_c.clone()).await.unwrap();
+
+        fn entry(path: &str, size: u64, batch_id: Option<&str>) -> DataFileEntry {
+            DataFileEntry {
+                path: path.into(),
+                record_count: 1,
+                file_size_bytes: size,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                index_error: None,
+                batch_id: batch_id.map(String::from),
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
+            }
+        }
+        let entries = vec![
+            entry("data/a.parquet", bytes_a.len() as u64, Some("k-a")),
+            entry("data/b.parquet", bytes_b.len() as u64, Some("k-b")),
+            entry("data/c.parquet", bytes_c.len() as u64, None),
+        ];
+
+        let executor = CompactionExecutor::new(store.clone(), policy);
+        let merged = executor
+            .compact(&entries, "data/merged.parquet")
+            .await
+            .unwrap();
+
+        assert_eq!(merged.record_count, 3);
+        assert_eq!(
+            merged.batch_ids(),
+            vec!["k-a".to_string(), "k-b".to_string()],
+            "merged file must carry every source's idempotency key, none invented"
+        );
     }
 
     /// Regression test: `CompactionExecutor::run()` must not drop files that fall

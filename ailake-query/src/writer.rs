@@ -343,10 +343,13 @@ impl TableWriter {
         embeddings: &[Vec<f32>],
         batch_id: &str,
     ) -> AilakeResult<()> {
+        // `batch_ids()` decodes both a plain single key and a compaction-merged
+        // JSON array (see `DataFileEntry::merge_batch_ids`) — a retry must still
+        // no-op after the original file it wrote to has since been compacted away.
         let existing = self.catalog.list_files(&self.table, None).await?;
         if existing
             .iter()
-            .any(|f| f.batch_id.as_deref() == Some(batch_id))
+            .any(|f| f.batch_ids().iter().any(|id| id == batch_id))
         {
             return Ok(());
         }
@@ -2110,6 +2113,132 @@ mod tests {
         assert!(
             !session1_paths.contains(new_part),
             "session 2 reused a retired part name: {new_part} (session 1 wrote {session1_paths:?})"
+        );
+    }
+
+    /// Regression test (ADR-018 / CLAUDE.md Fase 5 "Idempotência batch_id sobrevivendo
+    /// a compaction"): a retry of an idempotent write must still no-op after the
+    /// original file it wrote to has been compacted into a merged file. Before
+    /// `DataFileEntry::merge_batch_ids` + this method's `batch_ids()`-based
+    /// membership check, `write_batch_idempotent` compared `batch_id` for exact
+    /// equality against a merged file's `None` and silently re-inserted the row.
+    #[tokio::test]
+    async fn write_batch_idempotent_no_ops_after_source_file_compacted() {
+        use ailake_catalog::{
+            new_snapshot_id, DataFileEntry, HadoopCatalog, NewSnapshot, SnapshotOperation,
+            TableIdent,
+        };
+        use ailake_store::LocalStore;
+        use arrow_schema::{DataType, Field, Schema};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: std::sync::Arc<dyn ailake_store::Store> =
+            std::sync::Arc::new(LocalStore::new(dir.path().to_str().unwrap()));
+        let catalog: std::sync::Arc<dyn CatalogProvider> =
+            std::sync::Arc::new(HadoopCatalog::new(std::sync::Arc::clone(&store), ""));
+        let ident = TableIdent::new("default", "t");
+
+        let schema =
+            std::sync::Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let batch = arrow_array::RecordBatch::try_new(
+            schema,
+            vec![std::sync::Arc::new(arrow_array::StringArray::from(vec![
+                "hello",
+            ]))],
+        )
+        .unwrap();
+        let embeddings = vec![vec![1.0f32, 0.0, 0.0, 0.0]];
+
+        // Two idempotent writes, two distinct keys, two files.
+        let mut w1 = TableWriter::create_or_open(
+            catalog.clone(),
+            store.clone(),
+            policy("embedding", 4),
+            ident.clone(),
+            2,
+        )
+        .await
+        .unwrap();
+        w1.write_batch_idempotent(&batch, &embeddings, "k-a")
+            .await
+            .unwrap();
+        w1.commit().await.unwrap();
+
+        let mut w2 = TableWriter::create_or_open(
+            catalog.clone(),
+            store.clone(),
+            policy("embedding", 4),
+            ident.clone(),
+            2,
+        )
+        .await
+        .unwrap();
+        w2.write_batch_idempotent(&batch, &embeddings, "k-b")
+            .await
+            .unwrap();
+        w2.commit().await.unwrap();
+
+        let sources = catalog.list_files(&ident, None).await.unwrap();
+        assert_eq!(sources.len(), 2);
+
+        // Simulate compaction: merge both into one file, aggregating batch_ids via
+        // the real production helper — same call `compaction.rs` makes.
+        let mut merged = sources[0].clone();
+        merged.path = "data/compacted-test.parquet".to_string();
+        merged.record_count = sources.iter().map(|f| f.record_count).sum();
+        merged.batch_id = DataFileEntry::merge_batch_ids(&sources);
+        store
+            .put(&merged.path, store.get(&sources[0].path).await.unwrap())
+            .await
+            .unwrap();
+        let parent = catalog
+            .load_table(&ident)
+            .await
+            .unwrap()
+            .current_snapshot_id;
+        catalog
+            .commit_snapshot(
+                &ident,
+                NewSnapshot {
+                    snapshot_id: new_snapshot_id(),
+                    parent_snapshot_id: parent,
+                    files: vec![merged],
+                    operation: SnapshotOperation::Replace,
+                    iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
+                    equality_delete_files: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(catalog.list_files(&ident, None).await.unwrap().len(), 1);
+
+        // Retry of either original write, on a fresh writer session, must no-op —
+        // not add a second file back.
+        let mut w3 = TableWriter::create_or_open(
+            catalog.clone(),
+            store.clone(),
+            policy("embedding", 4),
+            ident.clone(),
+            2,
+        )
+        .await
+        .unwrap();
+        w3.write_batch_idempotent(&batch, &embeddings, "k-a")
+            .await
+            .unwrap();
+        assert!(
+            w3.pending_files.is_empty(),
+            "retry of an already-compacted batch_id must not stage a new file"
+        );
+        w3.commit().await.unwrap();
+
+        let final_files = catalog.list_files(&ident, None).await.unwrap();
+        assert_eq!(
+            final_files.len(),
+            1,
+            "retry after compaction must not re-insert — table must still have exactly 1 file"
         );
     }
 }

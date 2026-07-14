@@ -129,6 +129,47 @@ impl DataFileEntry {
     pub fn is_foreign(&self) -> bool {
         self.centroid_b64.is_none()
     }
+
+    /// Decode `batch_id` into the set of original idempotency keys it covers.
+    ///
+    /// A freshly-written file's `batch_id` is a plain string (the caller-supplied
+    /// key). A file produced by compaction (`merge_batch_ids`) instead carries a
+    /// JSON-encoded array of every source file's key(s), since one merged file can
+    /// supersede several idempotent writes at once. This tries the JSON-array form
+    /// first and falls back to treating the raw string as a single key — the two
+    /// encodings share the same `Option<String>` field so this is the only place
+    /// that needs to know the difference. Returns `[]` when `batch_id` is `None`.
+    pub fn batch_ids(&self) -> Vec<String> {
+        match &self.batch_id {
+            None => vec![],
+            Some(raw) => {
+                serde_json::from_str::<Vec<String>>(raw).unwrap_or_else(|_| vec![raw.clone()])
+            }
+        }
+    }
+
+    /// Build the `batch_id` value for a file merging `sources` (compaction).
+    ///
+    /// Flattens every source's `batch_ids()` (not just `source.batch_id` verbatim —
+    /// a source may itself already be a previous merge, so this must decode before
+    /// re-encoding to avoid nesting JSON arrays deeper on every subsequent compaction
+    /// pass), dedups while preserving first-seen order, and re-encodes as a JSON
+    /// array. Returns `None` when no source carried a `batch_id` — compaction of
+    /// files that were never written idempotently produces a plain, key-less file,
+    /// same as before this method existed.
+    pub fn merge_batch_ids(sources: &[DataFileEntry]) -> Option<String> {
+        let mut seen = std::collections::HashSet::new();
+        let ids: Vec<String> = sources
+            .iter()
+            .flat_map(DataFileEntry::batch_ids)
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+        if ids.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&ids).expect("Vec<String> always serializes"))
+        }
+    }
 }
 
 /// One field from the current Iceberg table schema (Phase G).
@@ -581,4 +622,99 @@ pub fn new_snapshot_id() -> SnapshotId {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_micros() as i64
+}
+
+#[cfg(test)]
+mod batch_id_tests {
+    use super::*;
+
+    fn entry_with_batch_id(batch_id: Option<&str>) -> DataFileEntry {
+        DataFileEntry {
+            path: "data/x.parquet".into(),
+            record_count: 1,
+            file_size_bytes: 1,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: None,
+            vector_dim: None,
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            index_error: None,
+            batch_id: batch_id.map(String::from),
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+        }
+    }
+
+    #[test]
+    fn batch_ids_decodes_plain_string_as_single_key() {
+        let e = entry_with_batch_id(Some("dag_run_2026-05-28_taskA"));
+        assert_eq!(e.batch_ids(), vec!["dag_run_2026-05-28_taskA".to_string()]);
+    }
+
+    #[test]
+    fn batch_ids_empty_when_none() {
+        assert!(entry_with_batch_id(None).batch_ids().is_empty());
+    }
+
+    #[test]
+    fn merge_batch_ids_aggregates_plain_source_keys() {
+        let sources = vec![
+            entry_with_batch_id(Some("a")),
+            entry_with_batch_id(Some("b")),
+        ];
+        let merged = DataFileEntry::merge_batch_ids(&sources);
+        let mut merged_entry = entry_with_batch_id(None);
+        merged_entry.batch_id = merged;
+        assert_eq!(
+            merged_entry.batch_ids(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_batch_ids_none_when_no_source_has_one() {
+        let sources = vec![entry_with_batch_id(None), entry_with_batch_id(None)];
+        assert_eq!(DataFileEntry::merge_batch_ids(&sources), None);
+    }
+
+    #[test]
+    fn merge_batch_ids_dedups_repeated_keys() {
+        let sources = vec![
+            entry_with_batch_id(Some("a")),
+            entry_with_batch_id(Some("a")),
+        ];
+        let mut merged_entry = entry_with_batch_id(None);
+        merged_entry.batch_id = DataFileEntry::merge_batch_ids(&sources);
+        assert_eq!(merged_entry.batch_ids(), vec!["a".to_string()]);
+    }
+
+    /// Compacting an already-compacted file (merge of a merge) must flatten to a
+    /// single-level list of the *original* keys, not nest a nother JSON array
+    /// inside the string — otherwise every subsequent compaction pass grows the
+    /// encoding unboundedly and `batch_ids()` would need recursive decoding.
+    #[test]
+    fn merge_batch_ids_flattens_a_previous_merge_without_nesting() {
+        let first_pass = vec![
+            entry_with_batch_id(Some("a")),
+            entry_with_batch_id(Some("b")),
+        ];
+        let mut already_merged = entry_with_batch_id(None);
+        already_merged.batch_id = DataFileEntry::merge_batch_ids(&first_pass);
+
+        let second_pass = vec![already_merged, entry_with_batch_id(Some("c"))];
+        let mut twice_merged = entry_with_batch_id(None);
+        twice_merged.batch_id = DataFileEntry::merge_batch_ids(&second_pass);
+
+        assert_eq!(
+            twice_merged.batch_ids(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        // Sanity: the encoding itself must be a flat array, not `["[\"a\",\"b\"]","c"]`.
+        assert_eq!(twice_merged.batch_id.as_deref(), Some(r#"["a","b","c"]"#));
+    }
 }
