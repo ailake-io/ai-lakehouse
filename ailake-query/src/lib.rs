@@ -12,6 +12,7 @@ pub mod context_assembler;
 pub mod delete;
 pub mod dv;
 pub mod equality_delete;
+pub mod index_loader;
 pub mod mem_table;
 pub mod memory_decay;
 pub mod migration;

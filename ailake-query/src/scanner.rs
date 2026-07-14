@@ -537,10 +537,9 @@ async fn search_one_file(
 ) -> AilakeResult<FileSearchOutcome> {
     let mut outcome = FileSearchOutcome::default();
 
-    let file_bytes: Bytes = store.get(&file_entry.path).await?;
-    let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
-
     // V3 Deletion Vector: fetch bitmap once per file (range GET from Puffin .dvd).
+    // Independent of the file's own bytes — fetched first so both the range-GET
+    // fast path below and the full-file fallback path can use it.
     // None for V2 tables or V3 files with no deletes. On fetch error: warn + continue
     // without mask (surfacing deleted rows is safer than hard-failing the search).
     let dv_bitmap: Option<roaring::RoaringBitmap> = if let Some(ref dv) = file_entry.deletion_vector
@@ -565,6 +564,60 @@ async fn search_one_file(
     } else {
         None
     };
+
+    // Range-GET fast path (Fase 16): when this query needs nothing from the
+    // file besides the index itself, skip the whole-file GET and range-GET
+    // just the HNSW/IVF-PQ blob (typically 10-20% of the file's total size —
+    // see CLAUDE.md §6). Every condition here is knowable from the catalog
+    // manifest / query config alone, with no file bytes fetched yet. Limited
+    // to the primary vector column and `IndexStatus::Ready` — see
+    // `index_loader`'s module doc for why secondary columns can't use it, and
+    // `crate::index_loader::load_primary_index`'s contract: any failure there
+    // is safe to treat as "use the full-file path", never a hard error.
+    let primary_col = table_meta
+        .properties
+        .get("ailake.vector-column")
+        .map(String::as_str)
+        .unwrap_or("");
+    let fast_path_eligible = config.column_filter.is_none()
+        && config.rerank_factor.is_none()
+        && config.score_fn.is_none()
+        && !use_hybrid
+        && eq_del_filter.is_empty()
+        && file_entry.index_status == IndexStatus::Ready
+        && !file_entry.is_foreign()
+        && vector_column == primary_col;
+
+    if fast_path_eligible {
+        match crate::index_loader::load_primary_index(store, &file_entry.path).await {
+            Ok(index) => {
+                let local_results = index.search(query, candidate_k, config.ef_search);
+                for (row_id, approx_dist) in local_results {
+                    if dv_bitmap
+                        .as_ref()
+                        .is_some_and(|bm| bm.contains(row_id.as_u64() as u32))
+                    {
+                        continue;
+                    }
+                    outcome.results.push(SearchResult {
+                        row_id,
+                        distance: approx_dist,
+                        file_path: file_entry.path.clone(),
+                    });
+                }
+                return Ok(outcome);
+            }
+            Err(e) => {
+                debug!(
+                    "ailake: range-GET fast path failed for {} ({e}) — falling back to full-file GET",
+                    file_entry.path
+                );
+            }
+        }
+    }
+
+    let file_bytes: Bytes = store.get(&file_entry.path).await?;
+    let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
 
     // Predicate pushdown: resolve which original row positions in this file
     // satisfy `config.column_filter`, without disturbing row identity (see
@@ -1888,6 +1941,225 @@ mod tests {
         .await
         .unwrap();
         assert!(results.is_empty());
+    }
+
+    /// Wraps a `Store`, recording every `get`/`get_range` call's byte range
+    /// per path — used to prove the Fase 16 range-GET fast path never
+    /// touches the row-group tabular/vector data section of a file, not just
+    /// to assert it doesn't crash. A whole-file `get` is recorded as
+    /// `0..file_size` (its full extent), since that's what it touches even
+    /// though the `Store` trait doesn't expose a byte offset for it.
+    struct CountingStore {
+        inner: Arc<dyn Store>,
+        ranges_by_path: std::sync::Mutex<std::collections::HashMap<String, Vec<(u64, u64)>>>,
+    }
+
+    impl CountingStore {
+        fn new(inner: Arc<dyn Store>) -> Self {
+            Self {
+                inner,
+                ranges_by_path: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+
+        fn record(&self, path: &str, start: u64, end: u64) {
+            self.ranges_by_path
+                .lock()
+                .unwrap()
+                .entry(path.to_string())
+                .or_default()
+                .push((start, end));
+        }
+
+        /// Lowest byte offset fetched for `path` across every recorded call —
+        /// the precise, ratio-independent proof that the tabular/vector data
+        /// section (everything before the AILK section) was never touched.
+        fn min_offset_for(&self, path: &str) -> Option<u64> {
+            self.ranges_by_path
+                .lock()
+                .unwrap()
+                .get(path)
+                .and_then(|ranges| ranges.iter().map(|(s, _)| *s).min())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Store for CountingStore {
+        async fn get(&self, path: &str) -> AilakeResult<Bytes> {
+            let b = self.inner.get(path).await?;
+            self.record(path, 0, b.len() as u64);
+            Ok(b)
+        }
+        async fn get_range(&self, path: &str, range: std::ops::Range<u64>) -> AilakeResult<Bytes> {
+            let b = self.inner.get_range(path, range.clone()).await?;
+            self.record(path, range.start, range.end);
+            Ok(b)
+        }
+        async fn put(&self, path: &str, data: Bytes) -> AilakeResult<()> {
+            self.inner.put(path, data).await
+        }
+        async fn list(&self, prefix: &str) -> AilakeResult<Vec<String>> {
+            self.inner.list(prefix).await
+        }
+        async fn file_size(&self, path: &str) -> AilakeResult<u64> {
+            self.inner.file_size(path).await
+        }
+        async fn exists(&self, path: &str) -> AilakeResult<bool> {
+            self.inner.exists(path).await
+        }
+        async fn delete(&self, path: &str) -> AilakeResult<()> {
+            self.inner.delete(path).await
+        }
+    }
+
+    #[tokio::test]
+    async fn range_get_fast_path_never_touches_tabular_data_section() {
+        let dir = TempDir::new().unwrap();
+        let dim = 64usize;
+        write_demo_table(&dir, dim, 400).await;
+
+        let local: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let data_files = local.list("data").await.unwrap();
+        assert_eq!(
+            data_files.len(),
+            1,
+            "expect a single part file for this test"
+        );
+        let data_path = data_files[0].clone();
+
+        // Ground truth: the exact tabular/data-section boundary, from a plain
+        // full-file read+parse — independent of the fast path under test.
+        let full_bytes = local.get(&data_path).await.unwrap();
+        let ailk_offset = ailake_file::AilakeFileReader::new(full_bytes, "embedding", dim as u32)
+            .ailk_offset()
+            .unwrap();
+
+        let counting = Arc::new(CountingStore::new(local.clone()));
+        let store: Arc<dyn Store> = counting.clone();
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        let mut query = vec![0.0f32; dim];
+        query[3] = 1.0;
+        let config = SearchConfig {
+            top_k: 5,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
+            hybrid: None,
+            column_filter: None,
+        };
+
+        let results = search(
+            &table,
+            &query,
+            config,
+            "embedding",
+            dim as u32,
+            catalog,
+            store,
+        )
+        .await
+        .unwrap();
+        assert!(!results.is_empty());
+
+        // The precise, ratio-independent guarantee this feature exists for:
+        // regardless of how large the HNSW blob happens to be relative to the
+        // tabular data (small synthetic tables can skew that ratio either
+        // way — see `range_get_fast_path_matches_full_file_path_results` for
+        // the separate correctness-parity proof), the fast path must never
+        // fetch a single byte positioned before the AILK section starts.
+        let min_offset = counting
+            .min_offset_for(&data_path)
+            .expect("should have fetched something from the data file");
+        assert!(
+            min_offset >= ailk_offset,
+            "fast path fetched bytes from the tabular/vector data section: \
+             min_offset={min_offset} < ailk_offset={ailk_offset}"
+        );
+    }
+
+    #[tokio::test]
+    async fn range_get_fast_path_matches_full_file_path_results() {
+        // Forces the full-file fallback via a column_filter that matches
+        // every row (id >= 0) — same semantic query and identical distances,
+        // just disqualified from the fast path (config.column_filter.is_some()).
+        // Comparing the two proves the fast path isn't silently returning
+        // different (or wrong-row-identity) results.
+        let dir = TempDir::new().unwrap();
+        let dim = 16usize;
+        write_demo_table(&dir, dim, 20).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        let mut query = vec![0.0f32; dim];
+        query[3] = 1.0;
+
+        let fast_config = SearchConfig {
+            top_k: 5,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
+            hybrid: None,
+            column_filter: None,
+        };
+        let fast_results = search(
+            &table,
+            &query,
+            fast_config,
+            "embedding",
+            dim as u32,
+            catalog.clone(),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+
+        let slow_config = SearchConfig {
+            top_k: 5,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
+            hybrid: None,
+            column_filter: Some(ailake_core::ColumnFilter::new(
+                "id",
+                ailake_core::FilterOp::Gte,
+                ailake_core::FilterValue::I64(0),
+            )),
+        };
+        let slow_results = search(
+            &table,
+            &query,
+            slow_config,
+            "embedding",
+            dim as u32,
+            catalog,
+            store,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fast_results.len(), slow_results.len());
+        assert!(!fast_results.is_empty());
+        for (f, s) in fast_results.iter().zip(slow_results.iter()) {
+            assert_eq!(f.row_id, s.row_id, "fast/slow path row_id mismatch");
+            assert!(
+                (f.distance - s.distance).abs() < 1e-4,
+                "fast/slow path distance mismatch: {} vs {}",
+                f.distance,
+                s.distance
+            );
+        }
     }
 
     #[tokio::test]
