@@ -1,17 +1,30 @@
 # AI-Lake Demo Image
 #
-# Two-stage build:
-#   Stage 1 (builder): installs Rust + maturin, compiles ailake-py wheel
-#   Stage 2 (runtime): JupyterLab with the wheel + Python data stack
+# Three-stage build:
+#   Stage 1 (builder): installs Rust + maturin, compiles ailake-py wheel +
+#                       the ailake-cli binary (with catalog-ducklake, for
+#                       notebook 13_ducklake.ipynb) + ailake-jni cdylib +
+#                       the duckdb-ailake C++ extension
+#   Stage 2 (jvm-builder): Gradle/JDK image, builds the ailake Spark plugin
+#                       shadowJar (notebook 03_spark.ipynb) and the ailake
+#                       Flink connector shadowJar (notebook 14_flink.ipynb —
+#                       needed here for the Flink *client*; the Flink *server*
+#                       gets its own copy via Dockerfile.flink)
+#   Stage 3 (runtime): JupyterLab with the wheel + CLI binary + Python data
+#                       stack + a remote-only Flink SQL Client install
 #
 # Build context must be the repository root (set in compose-demo.yml).
 
 # ── Stage 1: build ailake-py wheel ───────────────────────────────────────────
 FROM python:3.12-slim AS builder
 
+# cmake is required by the `duckdb` crate's bundled C++ build, pulled in by
+# ailake-cli's catalog-ducklake feature (docs/guides/DUCKLAKE_CATALOG.md) —
+# adds several minutes to a cold-cache build.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         build-essential \
+        cmake \
         pkg-config \
         libssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -44,7 +57,47 @@ COPY tests            tests/
 WORKDIR /ailake-py
 RUN maturin build --release --out /wheels
 
-# ── Stage 2: JupyterLab runtime ───────────────────────────────────────────────
+# ailake-cli with catalog-ducklake — local-fs-only DuckLake catalog backend,
+# CLI-only surface (no ailake-py binding, see docs/guides/DUCKLAKE_CATALOG.md).
+# Built separately from the wheel above since it's a distinct binary target.
+RUN cargo build --release --manifest-path /Cargo.toml -p ailake-cli --features catalog-ducklake
+
+# ── duckdb-ailake C++ extension (notebook 02_duckdb.ipynb) ────────────────────
+# ailake-jni cdylib — same C-ABI bridge used by the Spark/Trino/Flink plugins.
+RUN cargo build --release --manifest-path /Cargo.toml -p ailake-jni
+
+COPY duckdb-ailake /duckdb-ailake
+
+# DUCKDB_VERSION must match the `duckdb` pip package pinned in stage 2 below —
+# see duckdb-ailake/README.md "DuckDB version" and .github/workflows/ci-duckdb.yml
+# (this is the version CI actually tests against; v1.1.3 from an older README
+# revision does not build against current duckdb-ailake sources).
+RUN cmake -S /duckdb-ailake -B /duckdb-ailake/build \
+        -DCMAKE_BUILD_TYPE=Release -DDUCKDB_VERSION=v1.5.0 \
+    && cmake --build /duckdb-ailake/build --parallel
+
+# ── Stage 2: ailake Spark + Flink plugins (Gradle/Scala/Kotlin — separate JDK base,
+#    decoupled from the Rust/Python builder above) ─────────────────────────────
+FROM gradle:8.7-jdk17 AS jvm-builder
+
+COPY spark-plugin /spark-plugin
+WORKDIR /spark-plugin
+# shadowJar bundles JNA (Spark doesn't provide it); excludes Spark/Scala itself
+# (provided by the cluster at runtime). See spark-plugin/build.gradle.kts.
+RUN gradle shadowJar -x test --no-daemon --no-configuration-cache
+
+# ailake-flink connector — needed here (not just in Dockerfile.flink's server image)
+# because Flink's SQL Client resolves DynamicTableFactory implementations via
+# ServiceLoader against its *own* classpath during query planning, which happens
+# client-side before submission — confirmed live: the jar must be in the *client's*
+# lib/ dir too, or every CREATE TABLE fails with "Could not find any factory for
+# identifier 'ailake'" even though the connector is correctly installed on the
+# (remote) server. See 14_flink.ipynb intro.
+COPY ailake-flink /ailake-flink
+WORKDIR /ailake-flink
+RUN gradle shadowJar -x test --no-daemon --no-configuration-cache
+
+# ── Stage 3: JupyterLab runtime ───────────────────────────────────────────────
 FROM python:3.12-slim
 
 # Java is required by PySpark (notebook 03_spark.ipynb uses local[*] mode).
@@ -57,12 +110,47 @@ ENV JAVA_HOME=/usr/lib/jvm/default-java
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 COPY --from=builder /wheels /wheels
+COPY --from=builder /target/release/ailake /usr/local/bin/ailake
+RUN chmod +x /usr/local/bin/ailake && ailake --version
+
+# duckdb-ailake extension + its native lib — pinned duckdb==1.5.0 below must match
+# -DDUCKDB_VERSION=v1.5.0 in the builder stage (see duckdb-ailake/README.md).
+COPY --from=builder /target/release/libailake_jni.so /usr/local/lib/libailake_jni.so
+COPY --from=builder /duckdb-ailake/build/ailake.duckdb_extension /usr/local/lib/ailake.duckdb_extension
+ENV AILAKE_JNI_LIB=/usr/local/lib/libailake_jni.so
+ENV AILAKE_DUCKDB_EXT=/usr/local/lib/ailake.duckdb_extension
+
+# ailake Spark plugin — glob-copied since the shadowJar filename embeds the
+# project version (spark-plugin-<version>-plugin.jar).
+COPY --from=jvm-builder /spark-plugin/build/libs/spark-plugin-*-plugin.jar /usr/local/lib/ailake-spark-plugin.jar
+ENV AILAKE_SPARK_JAR=/usr/local/lib/ailake-spark-plugin.jar
+
+# Flink SQL Client — a plain client install (no local cluster started here), configured
+# to submit to the `flink` compose service over the network. Notebook 14_flink.ipynb
+# needs it because query vectors are passed as Flink *job parameters*
+# (`-Dpipeline.global-job-parameters.ailake.query.vector=...`, a process-launch flag —
+# see Dockerfile.flink), which no lightweight REST/DB-API client can set; PyFlink was
+# considered and rejected — apache-flink==1.18.1 pins numpy==1.21.4 via its apache-beam
+# dependency, which requires Python <3.11 and cannot install on this image's Python 3.12.
+# execution.target=remote is the fixed baseline (this client never starts its own
+# minicluster); rest.address/rest.port are passed per-invocation as -D flags from the
+# notebook (FLINK_HOST/FLINK_PORT env vars — same convention as TRINO_HOST/TRINO_PORT),
+# not baked in here, so the image doesn't hardcode the compose service name.
+RUN curl -fsSL https://archive.apache.org/dist/flink/flink-1.18.1/flink-1.18.1-bin-scala_2.12.tgz \
+        -o /tmp/flink.tgz \
+    && mkdir -p /opt/flink-client \
+    && tar -xzf /tmp/flink.tgz -C /opt/flink-client --strip-components=1 \
+    && rm /tmp/flink.tgz \
+    && printf 'execution.target: remote\n' >> /opt/flink-client/conf/flink-conf.yaml
+COPY --from=jvm-builder /ailake-flink/build/libs/ailake-flink-*-plugin.jar /opt/flink-client/lib/ailake-flink-plugin.jar
+ENV FLINK_CLIENT_HOME=/opt/flink-client
+ENV PATH="${FLINK_CLIENT_HOME}/bin:${PATH}"
 
 RUN pip install --no-cache-dir \
         /wheels/*.whl \
         jupyterlab \
         "pyiceberg[pyarrow,sql-sqlite]" \
-        duckdb \
+        duckdb==1.5.0 \
         "pyspark<4.0" \
         trino \
         "google-cloud-bigquery>=3.13" \

@@ -81,6 +81,7 @@ impl MemoryDecayJob {
 
         let today_day = current_day_since_epoch();
         let mut new_entries = Vec::with_capacity(files.len());
+        let mut retired_paths: Vec<String> = Vec::new();
         let mut updated = 0usize;
 
         for file_entry in &files {
@@ -171,7 +172,21 @@ impl MemoryDecayJob {
             let new_size = new_bytes.len() as u64;
             // Clone before moving into the primary reader used for header parsing.
             let new_bytes_ref = new_bytes.clone();
-            self.store.put(&file_entry.path, new_bytes.clone()).await?;
+            // Fresh path, never in place: catalogs may record per-file stats and
+            // footer size at registration time and trust them afterwards
+            // (DuckLake does — `supports_in_place_rewrite() == false`; a
+            // same-path rewrite there silently breaks filtered native reads or
+            // the whole file read, verified live). A decayed-<ts>-<idx> path +
+            // retiring the old entry works uniformly on every backend.
+            let new_path = format!(
+                "data/decayed-{}-{:05}.parquet",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_else(|e| e.duration())
+                    .as_millis(),
+                updated
+            );
+            self.store.put(&new_path, new_bytes.clone()).await?;
 
             let centroid = compute_centroid_and_radius(&embeddings, self.policy.metric);
             let new_reader =
@@ -198,7 +213,7 @@ impl MemoryDecayJob {
                 .collect();
 
             let mut new_entry = make_multi_column_data_file_entry(
-                &file_entry.path,
+                &new_path,
                 updated_batch.num_rows() as u64,
                 new_size,
                 &centroid,
@@ -210,12 +225,15 @@ impl MemoryDecayJob {
                 },
                 &new_extra,
             );
-            // Decay rewrites the file in place (same row count/order — `apply_decay` only
-            // replaces/adds a column, never filters rows), so any existing DV bitmap is
-            // still positionally valid and must be carried forward, or the rows it masks
-            // reappear on the very next search.
+            // Decay preserves row count and order (`apply_decay` only replaces/adds
+            // a column, never filters rows), so any existing DV bitmap is still
+            // positionally valid against the new file and must be carried forward,
+            // or the rows it masks reappear on the very next search. The DV points
+            // at its own Puffin `.dvd` file, not the data file — the path change
+            // here doesn't touch it.
             new_entry.deletion_vector = file_entry.deletion_vector.clone();
             new_entries.push(new_entry);
+            retired_paths.push(file_entry.path.clone());
             updated += 1;
         }
 
@@ -226,9 +244,15 @@ impl MemoryDecayJob {
             return Ok(0);
         }
 
+        let parent_snapshot_id = self
+            .catalog
+            .load_table(table)
+            .await
+            .ok()
+            .and_then(|m| m.current_snapshot_id);
         let snap = NewSnapshot {
             snapshot_id: new_snapshot_id(),
-            parent_snapshot_id: None,
+            parent_snapshot_id,
             files: new_entries,
             operation: SnapshotOperation::Overwrite,
             iceberg_schema: None,
@@ -237,6 +261,22 @@ impl MemoryDecayJob {
             equality_delete_files: vec![],
         };
         self.catalog.commit_snapshot(table, snap).await?;
+        // Old files are out of the committed state now. Physically reclaim them
+        // only when the catalog backend allows it — DuckLake keeps a retired
+        // path registered until its own maintenance runs, so deleting the bytes
+        // there would break subsequent native reads (same gating as compaction,
+        // see docs/guides/DUCKLAKE_CATALOG.md "The retirement problem").
+        if self.catalog.retires_files_physically() {
+            for path in &retired_paths {
+                if let Err(e) = self.store.delete(path).await {
+                    warn!(
+                        "ailake: MemoryDecayJob cleanup — could not delete retired {}: {} \
+                         (orphan file; delete manually to reclaim storage)",
+                        path, e
+                    );
+                }
+            }
+        }
         info!(
             "ailake: MemoryDecayJob — updated recency_weight in {} files (lambda={})",
             updated, self.decay_lambda

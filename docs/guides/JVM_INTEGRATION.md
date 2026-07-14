@@ -21,7 +21,7 @@ Engine (Spark / Trino / Flink)
 | Gradle | 8+ (or use `./gradlew` wrapper) |
 | Rust + Cargo | 1.75+ stable (only for source build) |
 | Spark | 3.5.x |
-| Trino | 430+ |
+| Trino | **430** (pinned — see §5A note; Trino 460 breaks connector construction) |
 | Flink | 1.18+ |
 
 ---
@@ -216,6 +216,23 @@ val snapshotId = AilakeNative.writeBatch(
   formatVersion   = 2,
   ftsColumns      = Seq("chunk_text"),
   deferred        = false,             // true = Parquet now, index async
+)
+
+// Multi-column (Phase 8 multimodal) write — e.g. text + image embeddings on the same
+// row, each with its own HNSW index (Trino's equivalent: catalog property
+// `ailake.vector-columns`; Flink's: DDL option `vector.columns`, see §5B/§6B).
+// Collects `df` to the driver and issues a single native `writeBatchMulti` call — every
+// non-id, non-vector column in `df` must be StringType (written as AI-Lake extra metadata).
+import io.ailake.spark.implicits._
+import io.ailake.spark.AilakeNative.VectorColSpec
+
+val snapshotId2: Option[Long] = spark.ailakeWriteMulti(
+  tableUri      = "s3://my-lake/media/",
+  df            = mediaDF,          // columns: id (Long), embedding (Array), image_embedding (Array)
+  vectorColumns = Seq(
+    VectorColSpec("embedding",       dim = 1536, metric = "cosine"),
+    VectorColSpec("image_embedding", dim = 512,  metric = "cosine", modality = Some("image")),
+  ),
 )
 ```
 
@@ -537,6 +554,24 @@ cp libailake_jni.so /opt/ailake/lib/
 # 3. JVM config — add to etc/jvm.config
 echo "-Djava.library.path=/opt/ailake/lib" >> $TRINO_HOME/etc/jvm.config
 ```
+
+> **Pin the Trino server to 430**, matching `trino-plugin/build.gradle.kts`'s `trinoVersion`
+> compileOnly target. Trino 460 breaks connector construction outright
+> (`ConnectorMetadata getTableHandle() is not implemented`) — a real Trino SPI signature
+> change between the two versions not yet accounted for in this plugin.
+>
+> **`SELECT` execution works end-to-end** (verified live against a real Trino 430 server,
+> 2026-07-13). This was previously blocked by two distinct Jackson serialization bugs in
+> Trino's internal `TaskUpdateRequest` codec (coordinator → worker HTTP call, exercised even
+> in single-node mode) — a table handle that rendered correctly in `EXPLAIN` plan text came
+> back with `tableUri` (and every other field) `null` on the worker side, then a second bug
+> (`IllegalAccessException` reflecting on `VectorScanTransactionHandle`'s private Kotlin
+> `object` constructor) surfaced once the first was fixed. Both are fixed in the current
+> plugin (`VectorScanHandles.kt`, `AilakeIngestTableHandle.kt`, `AilakeNative.kt`'s
+> `PartitionFieldDef`/`VectorColSpec`, and `VectorScanHandles.kt`'s
+> `VectorScanTransactionHandle`) — `search`, `search_full`, and `search_multimodal` all
+> execute real `SELECT` queries, not just `EXPLAIN`/planning. Full root-cause writeup in
+> `docs/specs/JVM_PLUGINS.md`'s Trino section and `CHANGELOG.md` ("Fixed (cont. 4)").
 
 ### 5B — Catalog configuration
 
@@ -1063,6 +1098,8 @@ delete, matching the native equality-delete-file mechanism.
 | Spark: empty DataFrame | Native lib absent (graceful degradation) | Verify `java.library.path` points to `libailake_jni.so` |
 | Trino: 0 rows | `query_vector` session prop empty | `SET SESSION ailake.query_vector = '...'` |
 | Trino: `ailake.table-uri is required` | Missing catalog property | Add `ailake.table-uri=...` to `ailake.properties` |
+| Trino: `ConnectorMetadata getTableHandle() is not implemented` at catalog startup | Running Trino 460 (or another version past the plugin's SPI target) | Pin the server to Trino **430**, matching `trino-plugin/build.gradle.kts`'s `trinoVersion` |
+| Trino: `NullPointerException` / `IllegalAccessException` on `SELECT` | Stale plugin JAR predating the Jackson serialization fix | Rebuild/redownload the plugin — fixed in current `trino-plugin` (see §5A note) |
 | Flink: `dim mismatch` | `dim` DDL option ≠ table dim | Match the value used when writing |
 | All: `query dim=N does not match table dim=M` | Wrong embedding model | Use the model named in the error; it matches `ailake.embedding-model` in Iceberg metadata |
 | Databricks: lib not found after init script | Init script not run yet | Restart cluster after adding init script; verify DBFS path |

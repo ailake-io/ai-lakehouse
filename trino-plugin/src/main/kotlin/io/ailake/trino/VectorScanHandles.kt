@@ -10,21 +10,44 @@ import io.trino.spi.connector.ConnectorSplit
 import io.trino.spi.connector.ConnectorTableHandle
 import io.trino.spi.connector.ConnectorTransactionHandle
 
-object VectorScanTransactionHandle : ConnectorTransactionHandle
+// A Kotlin `object` compiles to a class with a private synthetic no-arg
+// constructor — Trino's internal Jackson mapper (no kotlin-module registered,
+// same root cause as the NB below) reflects on that constructor directly and
+// fails with IllegalAccessException: "cannot access a member of class
+// VectorScanTransactionHandle with modifiers 'private'" (confirmed live
+// against a real Trino 430 server — this surfaced only after fixing the
+// tableUri NPE below, since a real SELECT never got past that first). A
+// @JsonCreator static factory sidesteps the constructor entirely.
+object VectorScanTransactionHandle : ConnectorTransactionHandle {
+    @JsonCreator
+    @JvmStatic
+    fun jsonCreator(): VectorScanTransactionHandle = VectorScanTransactionHandle
+}
 
+// NB: every property below carries BOTH @param: and @get: use-site targets.
+// Trino's ObjectMapperProvider disables MapperFeature.AUTO_DETECT_GETTERS/FIELDS
+// globally (it relies on io.airlift.json.RecordAutoDetectModule for genuine
+// java.lang.Record types instead) — a bare @JsonProperty on a Kotlin primary-
+// constructor `val` defaults to the PARAMETER site only, which is enough for
+// deserialization (creator param resolution) but invisible to serialization
+// (no getter/field Jackson is allowed to read), so every field silently
+// serializes as absent. Root cause of the Trino SELECT NPE ("Parameter
+// specified as non-null is null: ... parameter tableUri") — the coordinator's
+// TaskUpdateRequest JSON never carried the handle's fields at all. See
+// CHANGELOG.md and docs/specs/JVM_PLUGINS.md.
 data class VectorScanTableHandle @JsonCreator constructor(
-    @JsonProperty("tableUri") val tableUri: String,
-    @JsonProperty("vectorColumn") val vectorColumn: String,
-    @JsonProperty("dim") val dim: Int,
-    @JsonProperty("namespace") val namespace: String,
-    @JsonProperty("tableName") val tableName: String,
+    @param:JsonProperty("tableUri") @get:JsonProperty("tableUri") val tableUri: String,
+    @param:JsonProperty("vectorColumn") @get:JsonProperty("vectorColumn") val vectorColumn: String,
+    @param:JsonProperty("dim") @get:JsonProperty("dim") val dim: Int,
+    @param:JsonProperty("namespace") @get:JsonProperty("namespace") val namespace: String,
+    @param:JsonProperty("tableName") @get:JsonProperty("tableName") val tableName: String,
 ) : ConnectorTableHandle
 
 /** Table handle for `ailake.default.search_multimodal` — see [VectorScanMetadata]. */
 data class MultimodalScanTableHandle @JsonCreator constructor(
-    @JsonProperty("tableUri") val tableUri: String,
-    @JsonProperty("namespace") val namespace: String,
-    @JsonProperty("tableName") val tableName: String,
+    @param:JsonProperty("tableUri") @get:JsonProperty("tableUri") val tableUri: String,
+    @param:JsonProperty("namespace") @get:JsonProperty("namespace") val namespace: String,
+    @param:JsonProperty("tableName") @get:JsonProperty("tableName") val tableName: String,
 ) : ConnectorTableHandle
 
 /**
@@ -34,16 +57,16 @@ data class MultimodalScanTableHandle @JsonCreator constructor(
  * instead of `AilakeNative.search` by table handle type. See [VectorScanMetadata].
  */
 data class ScanTableHandle @JsonCreator constructor(
-    @JsonProperty("tableUri") val tableUri: String,
-    @JsonProperty("vectorColumn") val vectorColumn: String,
-    @JsonProperty("dim") val dim: Int,
-    @JsonProperty("namespace") val namespace: String,
-    @JsonProperty("tableName") val tableName: String,
+    @param:JsonProperty("tableUri") @get:JsonProperty("tableUri") val tableUri: String,
+    @param:JsonProperty("vectorColumn") @get:JsonProperty("vectorColumn") val vectorColumn: String,
+    @param:JsonProperty("dim") @get:JsonProperty("dim") val dim: Int,
+    @param:JsonProperty("namespace") @get:JsonProperty("namespace") val namespace: String,
+    @param:JsonProperty("tableName") @get:JsonProperty("tableName") val tableName: String,
 ) : ConnectorTableHandle
 
 data class VectorScanColumnHandle @JsonCreator constructor(
-    @JsonProperty("name") val name: String,
-    @JsonProperty("ordinal") val ordinal: Int,
+    @param:JsonProperty("name") @get:JsonProperty("name") val name: String,
+    @param:JsonProperty("ordinal") @get:JsonProperty("ordinal") val ordinal: Int,
 ) : ColumnHandle
 
 /**
@@ -56,14 +79,14 @@ data class VectorScanColumnHandle @JsonCreator constructor(
  * not on every worker execution.
  */
 data class VectorScanSplit @JsonCreator constructor(
-    @JsonProperty("tableUri") val tableUri: String,
-    @JsonProperty("queryBytes") val queryBytes: String,
-    @JsonProperty("topK") val topK: Int,
-    @JsonProperty("namespace") val namespace: String,
-    @JsonProperty("tableName") val tableName: String,
-    @JsonProperty("vectorColumn") val vectorColumn: String,
-    @JsonProperty("queryText") val queryText: String = "",
-    @JsonProperty("hybridWeight") val hybridWeight: Float = 0.5f,
+    @param:JsonProperty("tableUri") @get:JsonProperty("tableUri") val tableUri: String,
+    @param:JsonProperty("queryBytes") @get:JsonProperty("queryBytes") val queryBytes: String,
+    @param:JsonProperty("topK") @get:JsonProperty("topK") val topK: Int,
+    @param:JsonProperty("namespace") @get:JsonProperty("namespace") val namespace: String,
+    @param:JsonProperty("tableName") @get:JsonProperty("tableName") val tableName: String,
+    @param:JsonProperty("vectorColumn") @get:JsonProperty("vectorColumn") val vectorColumn: String,
+    @param:JsonProperty("queryText") @get:JsonProperty("queryText") val queryText: String = "",
+    @param:JsonProperty("hybridWeight") @get:JsonProperty("hybridWeight") val hybridWeight: Float = 0.5f,
 ) : ConnectorSplit {
     override fun isRemotelyAccessible(): Boolean = true
     override fun getAddresses(): List<HostAddress> = emptyList()
@@ -77,11 +100,11 @@ data class VectorScanSplit @JsonCreator constructor(
  * JSON straight through and is parsed once at execution in [VectorScanRecordSetProvider].
  */
 data class MultimodalScanSplit @JsonCreator constructor(
-    @JsonProperty("tableUri") val tableUri: String,
-    @JsonProperty("namespace") val namespace: String,
-    @JsonProperty("tableName") val tableName: String,
-    @JsonProperty("queriesJson") val queriesJson: String,
-    @JsonProperty("topK") val topK: Int,
+    @param:JsonProperty("tableUri") @get:JsonProperty("tableUri") val tableUri: String,
+    @param:JsonProperty("namespace") @get:JsonProperty("namespace") val namespace: String,
+    @param:JsonProperty("tableName") @get:JsonProperty("tableName") val tableName: String,
+    @param:JsonProperty("queriesJson") @get:JsonProperty("queriesJson") val queriesJson: String,
+    @param:JsonProperty("topK") @get:JsonProperty("topK") val topK: Int,
 ) : ConnectorSplit {
     override fun isRemotelyAccessible(): Boolean = true
     override fun getAddresses(): List<HostAddress> = emptyList()

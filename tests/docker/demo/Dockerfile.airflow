@@ -40,6 +40,11 @@ COPY tests            tests/
 WORKDIR /ailake-py
 RUN maturin build --release --out /wheels
 
+# ailake-cli — required by AilakeHook.run_cli() (migrate, delete-rows,
+# add-vector-column, backfill-vector-column, estimate, decay-memories all
+# shell out to this binary; see dag_ailake_hook_ops.py).
+RUN cargo build --release --manifest-path /Cargo.toml -p ailake-cli
+
 # ── Stage 2: Airflow runtime ──────────────────────────────────────────────────
 FROM apache/airflow:2.9.2
 
@@ -47,10 +52,15 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /target/release/ailake /usr/local/bin/ailake
+RUN chmod +x /usr/local/bin/ailake && ailake --version
+
 USER airflow
 
 COPY --from=builder /wheels /opt/ailake/wheels
 COPY airflow-providers-ailake /opt/ailake/providers
+COPY airbyte-destination-ailake/demo/embed_cmd.py /opt/ailake/embed_cmd.py
 
 # Install ailake Python wheel + providers into the Airflow Python environment.
 # numpy + pyarrow are needed by the demo DAGs (synthetic embeddings, Arrow I/O).

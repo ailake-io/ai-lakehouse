@@ -504,6 +504,22 @@ fn row_to_entry(row: &duckdb::Row) -> duckdb::Result<DataFileEntry> {
 
 #[async_trait]
 impl CatalogProvider for DuckLakeCatalog {
+    fn retires_files_physically(&self) -> bool {
+        // See "The retirement problem" in docs/guides/DUCKLAKE_CATALOG.md — a
+        // retired file stays registered in ducklake_list_files() until an
+        // operator runs ducklake_expire_snapshots/ducklake_cleanup_files.
+        // Deleting the bytes now would leave that registration dangling.
+        false
+    }
+
+    fn supports_in_place_rewrite(&self) -> bool {
+        // DuckLake trusts the zone-map stats and footer size it recorded at
+        // ducklake_add_data_files time — see the trait doc for the two live-
+        // verified failure modes. `commit_snapshot` backs this up with a hard
+        // error if a same-path entry arrives with a different size.
+        false
+    }
+
     async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
         let key = table_key(name);
         let location = self.table_root(name);
@@ -668,6 +684,10 @@ impl CatalogProvider for DuckLakeCatalog {
                 let current = query_active_files(&conn, &alias, table, &key, &self.warehouse)?;
                 let current_paths: HashSet<String> =
                     current.iter().map(|f| f.path.clone()).collect();
+                let current_sizes: HashMap<&str, u64> = current
+                    .iter()
+                    .map(|f| (f.path.as_str(), f.file_size_bytes))
+                    .collect();
                 let new_paths: HashSet<String> =
                     snapshot.files.iter().map(|f| f.path.clone()).collect();
                 let removed: Vec<String> = current_paths.difference(&new_paths).cloned().collect();
@@ -675,18 +695,38 @@ impl CatalogProvider for DuckLakeCatalog {
                 // (metadata-only patch, e.g. deferred index status / deletion
                 // vector) or is brand new — gets upserted into the sidecar table.
                 // Only genuinely new paths need `ducklake_add_data_files`.
-                let added: Vec<DataFileEntry> = snapshot
-                    .files
-                    .iter()
-                    .filter(|f| !current_paths.contains(&f.path))
-                    .cloned()
-                    .collect();
-                let metadata_only: Vec<DataFileEntry> = snapshot
-                    .files
-                    .iter()
-                    .filter(|f| current_paths.contains(&f.path))
-                    .cloned()
-                    .collect();
+                //
+                // Guard rail: a same-path entry whose size differs from the
+                // registered one means a writer rewrote the file's bytes in
+                // place — unsupported here (`supports_in_place_rewrite` is
+                // false). Verified against a live extension: DuckLake trusts
+                // the footer size recorded at registration, so the rewritten
+                // file's native reads all fail, and there is no sanctioned SQL
+                // to fix the registration afterwards (the row-`DELETE` needed
+                // to retire it scans with the stale size and fails too). Fail
+                // the commit loudly instead of registering that dead end. The
+                // entry's `file_size_bytes` always derives from the bytes the
+                // writer actually produced, so equal sizes are the norm for
+                // pure metadata patches (index status, deletion vector).
+                let mut added: Vec<DataFileEntry> = Vec::new();
+                let mut metadata_only: Vec<DataFileEntry> = Vec::new();
+                for f in &snapshot.files {
+                    if !current_paths.contains(&f.path) {
+                        added.push(f.clone());
+                    } else if current_sizes.get(f.path.as_str()) != Some(&f.file_size_bytes) {
+                        return Err(ailake_core::AilakeError::Catalog(format!(
+                            "in-place rewrite detected for '{}' ({} -> {} bytes): the DuckLake \
+                             catalog records per-file stats and footer size at registration \
+                             time and cannot re-register a rewritten path — write the new \
+                             bytes to a fresh path and retire the old one instead",
+                            f.path,
+                            current_sizes.get(f.path.as_str()).copied().unwrap_or(0),
+                            f.file_size_bytes
+                        )));
+                    } else {
+                        metadata_only.push(f.clone());
+                    }
+                }
                 (added, removed, metadata_only)
             }
         };
@@ -1142,6 +1182,183 @@ mod tests {
 
             catalog.drop_table(&table).await.unwrap();
             assert!(catalog.load_table(&table).await.is_err());
+        }
+
+        /// Writes a Parquet file with an `embedding` BLOB column (each blob
+        /// `blob_pad` bytes of padding + the row index, letting tests force a
+        /// different file size on rewrite) plus a `w` DOUBLE column set to
+        /// `w_value` for every row.
+        fn write_source_parquet_with_w(out_path: &str, n: i64, w_value: f64, blob_pad: usize) {
+            let conn = duckdb::Connection::open_in_memory().unwrap();
+            let pad = "x".repeat(blob_pad);
+            conn.execute_batch(&format!(
+                "COPY (SELECT ('{pad}' || i::VARCHAR)::BLOB AS embedding, \
+                 CAST({w_value} AS DOUBLE) AS w \
+                 FROM range({n}) t(i)) TO '{out_path}' (FORMAT PARQUET);"
+            ))
+            .unwrap();
+        }
+
+        /// Shared setup: catalog + table with a DuckLake-declared `w` DOUBLE
+        /// column, and an initial file (w = 0.5 everywhere) committed via Append —
+        /// so DuckLake's zone-map stats say min=max=0.5.
+        async fn setup_rewrite_fixture(
+            dir: &TempDir,
+            blob_pad: usize,
+        ) -> (DuckLakeCatalog, TableIdent, std::path::PathBuf, SnapshotId) {
+            let root_db = dir.path().join("ailake_root.db");
+            let meta_db = dir.path().join("ducklake_meta.db");
+            let data_path = dir.path().join("data");
+            std::fs::create_dir_all(&data_path).unwrap();
+
+            let catalog = DuckLakeCatalog::connect(
+                root_db.to_str().unwrap(),
+                meta_db.to_str().unwrap(),
+                data_path.to_str().unwrap(),
+                "lake",
+                dir.path().to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+
+            let table = TableIdent::new("default", "docs");
+            let props = TableProperties {
+                policy: policy(),
+                extra: HashMap::new(),
+                format_version: 2,
+                partition_column_type: None,
+            };
+            catalog.create_table(&table, &props).await.unwrap();
+
+            // Declare `w` to DuckLake so a native reader can filter on it.
+            let evolution =
+                SchemaEvolution::new().add_column(crate::schema_evolution::AddColumnRequest {
+                    name: "w".to_string(),
+                    iceberg_type: "double".to_string(),
+                    required: false,
+                    initial_default: None,
+                    write_default: None,
+                    doc: None,
+                });
+            catalog.evolve_schema(&table, evolution).await.unwrap();
+
+            let file1 = data_path.join("part-00001.parquet");
+            write_source_parquet_with_w(file1.to_str().unwrap(), 10, 0.5, blob_pad);
+            let mut e1 = entry(file1.to_str().unwrap(), 10);
+            e1.file_size_bytes = std::fs::metadata(&file1).unwrap().len();
+            let snap = NewSnapshot {
+                snapshot_id: new_snapshot_id(),
+                parent_snapshot_id: None,
+                files: vec![e1],
+                operation: SnapshotOperation::Append,
+                iceberg_schema: None,
+                extra_properties: HashMap::new(),
+                bloom_filters: vec![],
+                equality_delete_files: vec![],
+            };
+            let snap_id = catalog.commit_snapshot(&table, snap).await.unwrap();
+            (catalog, table, file1, snap_id)
+        }
+
+        async fn count_where_w_gt_5(catalog: &DuckLakeCatalog) -> (i64, i64) {
+            let conn = catalog.conn.lock().await;
+            let filtered: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM \"lake\".\"default\".\"docs\" WHERE w > 5",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let total: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM \"lake\".\"default\".\"docs\"",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (filtered, total)
+        }
+
+        /// Guard rail: committing a same-path entry whose size differs from the
+        /// registered one means a writer rewrote the file's bytes in place —
+        /// which DuckLake cannot re-register (it trusts the footer size recorded
+        /// at registration; even the row-`DELETE` needed to retire the path
+        /// scans with the stale size and fails, verified live). The commit must
+        /// fail loudly instead of leaving a file whose native reads all error.
+        #[tokio::test]
+        async fn in_place_rewrite_size_change_rejected() {
+            let dir = TempDir::new().unwrap();
+            let (catalog, table, file1, snap_id) = setup_rewrite_fixture(&dir, 0).await;
+
+            // Rewrite in place with longer blobs — file size provably differs.
+            let size_before = std::fs::metadata(&file1).unwrap().len();
+            write_source_parquet_with_w(file1.to_str().unwrap(), 10, 9.9, 64);
+            let size_after = std::fs::metadata(&file1).unwrap().len();
+            assert_ne!(
+                size_before, size_after,
+                "test precondition: rewrite must change the byte length"
+            );
+
+            let mut e2 = entry(file1.to_str().unwrap(), 10);
+            e2.file_size_bytes = size_after;
+            let snap2 = NewSnapshot {
+                snapshot_id: new_snapshot_id(),
+                parent_snapshot_id: Some(snap_id),
+                files: vec![e2],
+                operation: SnapshotOperation::Overwrite,
+                iceberg_schema: None,
+                extra_properties: HashMap::new(),
+                bloom_filters: vec![],
+                equality_delete_files: vec![],
+            };
+            let err = catalog.commit_snapshot(&table, snap2).await.unwrap_err();
+            assert!(
+                err.to_string().contains("in-place rewrite"),
+                "expected the in-place-rewrite guard, got: {err}"
+            );
+        }
+
+        /// The `MemoryDecayJob` shape after its fix: rewritten content goes to a
+        /// fresh path and the old path is retired by the same `Overwrite` commit.
+        /// A DuckLake-native filtered read must see the new values — this is the
+        /// scenario that silently returned 0 rows when decay still rewrote in
+        /// place and DuckLake pruned on the stale zone-map (verified live).
+        #[tokio::test]
+        async fn rewrite_to_fresh_path_refreshes_stats() {
+            let dir = TempDir::new().unwrap();
+            let (catalog, table, file1, snap_id) = setup_rewrite_fixture(&dir, 0).await;
+
+            // Decay-style rewrite: same rows, `w` now 9.9, written to a NEW path.
+            let file2 = file1.parent().unwrap().join("decayed-00001.parquet");
+            write_source_parquet_with_w(file2.to_str().unwrap(), 10, 9.9, 0);
+            let mut e2 = entry(file2.to_str().unwrap(), 10);
+            e2.file_size_bytes = std::fs::metadata(&file2).unwrap().len();
+            let snap2 = NewSnapshot {
+                snapshot_id: new_snapshot_id(),
+                parent_snapshot_id: Some(snap_id),
+                files: vec![e2],
+                operation: SnapshotOperation::Overwrite,
+                iceberg_schema: None,
+                extra_properties: HashMap::new(),
+                bloom_filters: vec![],
+                equality_delete_files: vec![],
+            };
+            let snap2_id = catalog.commit_snapshot(&table, snap2).await.unwrap();
+
+            let files = catalog.list_files(&table, Some(snap2_id)).await.unwrap();
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, file2.to_str().unwrap());
+            assert!(!files[0].is_foreign());
+
+            let (filtered, total) = count_where_w_gt_5(&catalog).await;
+            assert_eq!(
+                filtered, 10,
+                "stale zone-map must not survive a fresh-path rewrite"
+            );
+            assert_eq!(
+                total, 10,
+                "old path must be fully retired — no duplicate rows"
+            );
         }
     }
 }

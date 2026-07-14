@@ -103,10 +103,12 @@ writer = ailake.TableWriter(
 | Method | Description |
 |---|---|
 | `write_batch(texts, embeddings, extra_columns)` | Buffer batch; call `commit()` to persist |
-| `write_batch_auto_deferred(texts, embeddings)` | Parquet persisted immediately (~200k vec/s); index built async |
-| `write_batch_idempotent(texts, embeddings, batch_id)` | No-op if `batch_id` already committed (Airflow restart-safe) |
-| `write_batch_multi(texts, [(spec, embs), ...])` | N independent vector columns, each with own HNSW |
-| `write_batch_multi_deferred(texts, [...])` | Deferred variant of `write_batch_multi` |
+| `write_batch_auto_deferred(texts, embeddings, extra_columns)` | Parquet persisted immediately (~200k vec/s); index built async (HNSW or IVF-PQ, hardware-detected) |
+| `write_batch_idempotent(texts, embeddings, batch_id, extra_columns)` | No-op if `batch_id` already committed (Airflow restart-safe) |
+| `write_batch_ivf_pq(texts, embeddings, extra_columns)` | Force IVF-PQ indexing (synchronous build), regardless of hardware/batch-size heuristic |
+| `write_batch_ivf_pq_deferred(texts, embeddings, extra_columns)` | Deferred variant of `write_batch_ivf_pq` — Parquet immediate, IVF-PQ built async |
+| `write_batch_multi(texts, [(spec, embs), ...], extra_columns)` | N independent vector columns, each with own HNSW |
+| `write_batch_multi_deferred(texts, [...], extra_columns)` | Deferred variant of `write_batch_multi` |
 | `commit()` | Persist all buffered batches as new Iceberg snapshot; returns snapshot id |
 
 **Extra columns:**
@@ -123,7 +125,33 @@ writer.write_batch(
 )
 ```
 
-Types inferred: `bool → Boolean`, `float → Float32`, `int → Int64`, `str → Utf8`.
+Types inferred from the first element of each list: `bool → Boolean`, `float → Float32`,
+`int → Int64`, `str → Utf8`.
+
+**Timestamp columns — `ailake.TimestampNs`:**
+
+A plain Python `int` in `extra_columns` always becomes an `Int64` column — including
+nanosecond timestamps from `ailake.now_ns()`. If you intend a column to be a real Arrow
+`Timestamp(Nanosecond, UTC)` (required by `last_accessed_at`/`created_at` for
+`decay_memories()` — see [§16](#16-memory-decay)), wrap the value in `ailake.TimestampNs`:
+
+```python
+now = ailake.TimestampNs(ailake.now_ns())   # now_ns() = wall-clock Unix epoch nanoseconds (UTC)
+
+writer.write_batch(
+    texts,
+    embs.tolist(),
+    extra_columns={
+        "created_at":       [now] * len(texts),
+        "last_accessed_at": [now] * len(texts),
+    },
+)
+```
+
+`decay_memories()` accepts `Timestamp(Nanosecond/Microsecond, UTC)` or a legacy ISO-8601
+date string in that column — an `Int64` column raises `ValueError`. This is an easy
+footgun: `now_ns()` alone returns a plain `int`, so it must always be wrapped in
+`TimestampNs` before going into `extra_columns`.
 
 ---
 
@@ -151,8 +179,8 @@ df = results.to_pandas()
 
 **`open_table` / `Table.__init__` parameters:**
 
-Same as `TableWriter` minus partition/format_version (use `TableWriter` directly for those).
-Key extras on `Table`:
+Same full parameter set as `TableWriter` — including `partition_by`, `partition_value`,
+`partition_column_type`, `partition_fields`, `partition_values`, and `format_version`.
 
 ```python
 table = ailake.open_table(
@@ -160,6 +188,9 @@ table = ailake.open_table(
     embed_fn=my_embed_fn,   # auto-embed: table.insert(texts) without embeddings arg
     bm25_text_column="chunk_text",
     fts_text_columns=["chunk_text"],
+    partition_by="agent_id",
+    partition_value="agent-001",
+    format_version=2,
 )
 ```
 
@@ -169,6 +200,16 @@ table = ailake.open_table(
 with ailake.open_table("s3://my-lake/docs/") as table:
     table.insert(texts, embeddings=embs.tolist())
     table.commit()
+```
+
+**Additional write methods on `Table`** (mirroring `TableWriter`, previously only on the
+low-level writer):
+
+```python
+table.write_batch_idempotent(texts, embs.tolist(), batch_id="airflow-run-42")
+table.write_batch_multi(texts, [(text_spec, text_embs), (image_spec, image_embs)])
+table.write_batch_multi_deferred(texts, [(text_spec, text_embs), (image_spec, image_embs)])
+table.commit()
 ```
 
 ---
@@ -213,6 +254,12 @@ df = results.to_pandas()
 # columns: chunk_id, chunk_text, embedding, ..., _distance
 ```
 
+`fetch_data=True` has **full parameter parity** with pointer-only search — `hybrid_text`,
+`text_column`, `bm25_weight`, `ef_search`, `pruning_threshold`, and `rerank_factor` all
+apply equally whether or not you fetch full row data. (Prior to Fase 15 these were
+silently dropped when `fetch_data=True`; a `SearchQuery` built with the same arguments
+now returns consistent results whether you call `.to_list()` or `.to_pandas()`.)
+
 **All search parameters:**
 
 ```python
@@ -226,7 +273,9 @@ results = ailake.search(
     text_column       = "chunk_text",
     bm25_weight       = 0.5,          # 0.0=pure vector, 1.0=pure BM25
     pruning_threshold = 0.5,          # geometric pruning; None=no pruning
-    ef_search         = 50,           # HNSW ef_search; None=top_k*5
+    ef_search         = 50,           # HNSW beam width; None=50
+    rerank_factor     = None,         # fetch top_k*rerank_factor HNSW candidates, rerank with
+                                       # exact F32 distances; corrects PQ error on IVF-PQ tables
     score_fn          = None,         # Callable[(distance, row) → float]; requires fetch_data=True
 )
 ```
@@ -327,30 +376,57 @@ results = ailake.search_multimodal(
         ("image_embedding", image_vec, 0.3),
     ],
     top_k=20,
+    dim=None,               # auto-detected from Iceberg metadata when None
+    partition_filter=None,
+    ef_search=None,
+    pruning_threshold=None,
+    rerank_factor=None,     # exact-distance reranking multiplier, same semantics as search()
 )
 # results: list[dict] with row_id, rrf_score, file — sorted descending by rrf_score
 ```
 
 **Writing multimodal tables:**
 
+`VectorColSpec` takes a spec per secondary vector column — `column`, `dim`, `metric`,
+`modality`, plus per-column overrides for `precision`, `pre_normalize`, `hnsw_m`, and
+`hnsw_ef_construction` (previously every secondary column silently used the library
+defaults; now each column can be tuned independently):
+
 ```python
 text_spec  = ailake.VectorColSpec("embedding",       1536, "cosine", "text")
-image_spec = ailake.VectorColSpec("image_embedding",  512, "cosine", "image")
+image_spec = ailake.VectorColSpec(
+    "image_embedding", 512, "cosine", "image",
+    precision="f32",              # this column keeps full precision
+    pre_normalize=True,
+    hnsw_m=32,
+    hnsw_ef_construction=200,
+)
 
 writer = ailake.TableWriter("s3://my-lake/media/", dim=1536)
 writer.write_batch_multi(
     texts,
     [(text_spec, text_embs), (image_spec, image_embs)],
+    extra_columns={"media_uri": uris, "media_caption": captions},  # MultimodalContextSchema companions
 )
 writer.commit()
+
+# Deferred variant — Parquet immediate, all N column indexes built async:
+writer.write_batch_multi_deferred(
+    texts,
+    [(text_spec, text_embs), (image_spec, image_embs)],
+    extra_columns={"media_uri": uris},
+)
 ```
 
 ---
 
-## 8. Full row data — `search_with_data`
+## 8. Full row data — `search_with_data` / `scan`
 
 Returns Arrow IPC bytes — useful when you need all Parquet columns with zero
-copy to numpy/pandas:
+copy to numpy/pandas. This is the same no-JOIN "search + fetch full row" capability
+as `ailake-go`'s `Scan()` and the JNI `ailake_scan_json` used by the JVM plugins;
+`ailake.scan` is a naming-parity alias for `search_with_data` — both call the exact
+same function:
 
 ```python
 import io, pyarrow as pa
@@ -360,16 +436,33 @@ ipc_bytes = ailake.search_with_data(
     query_vec,
     top_k=10,
     partition_filter="agent-001",  # optional
+    hybrid_text=None,
+    text_column="chunk_text",
+    bm25_weight=0.5,
+    pruning_threshold=None,
+    ef_search=None,
+    rerank_factor=None,
 )
 table = pa.ipc.open_file(io.BytesIO(ipc_bytes)).read_all()
 df = table.to_pandas()  # all Parquet columns + _distance
+
+# Equivalent, naming-parity call:
+ipc_bytes = ailake.scan("s3://my-lake/docs/", query_vec, top_k=10)
 ```
+
+`search_with_data` (and therefore `scan`) has full parameter parity with `search()` —
+`hybrid_text`, `text_column`, `bm25_weight`, `ef_search`, `pruning_threshold`, and
+`rerank_factor` are all honored here too.
 
 ---
 
 ## 9. LLM context assembly
 
-`assemble_context` turns search results into structured XML for Claude / GPT-4:
+`assemble_context` turns search results into structured XML for Claude / GPT-4.
+
+**`assemble_context()` returns a `dict`, not a plain string** —
+`{"text": str, "chunk_count": int, "token_estimate": int}`. Unpack `["text"]` to get the
+XML block:
 
 ```python
 results = ailake.search(path, query_vec, top_k=20, fetch_data=True)
@@ -383,36 +476,53 @@ chunks = [
         "document_title": row.get("title", ""),
         "source_uri":    row.get("source_url", ""),
         "distance":      float(row["_distance"]),
+        # Optional: include the embedding to enable real near-duplicate dedup.
+        # Chunks without an "embedding" key are never deduplicated.
+        "embedding":     row["embedding"].tolist() if "embedding" in row else None,
     }
     for _, row in df.iterrows()
 ]
 
-context_xml = ailake.assemble_context(chunks, max_tokens=4096)
+ctx = ailake.assemble_context(
+    chunks,
+    max_tokens=4096,
+    dedup_threshold=0.05,          # cosine distance below which two chunks (both carrying
+                                    # an "embedding") are considered duplicates
+    group_by_document=True,        # group/sort chunks by document_id + chunk_index
+    max_chunks_per_document=10,    # cap chunks per document group
+)
+context_xml = ctx["text"]          # XML ready for the LLM prompt
+print(ctx["chunk_count"], ctx["token_estimate"])
+
 # Feed context_xml into your LLM prompt
 ```
+
+> Any code slicing the raw return value directly (e.g. `assemble_context(chunks)[:1200]`)
+> is wrong under the current API — that pattern only worked when `assemble_context`
+> returned a plain string.
 
 ---
 
 ## 10. Compaction
 
-Merges many small Parquet files into a larger file, rebuilding the index:
+Merges many small Parquet files into a larger file, rebuilding the index.
+
+`compact()` is a **native binding** — it calls `CompactionPlanner`/`CompactionExecutor`
+directly (same code path as `ailake-cli`'s `compact` subcommand). It does **not** shell
+out to an external `ailake` CLI binary and does not require one to be installed.
 
 ```python
 result = ailake.compact(
     "s3://my-lake/docs/",
-    min_files=4,                   # only compact when ≥4 small files exist
-    target_size_bytes=128*1024*1024, # 128 MiB target
-    max_files_per_pass=20,
-    deferred=False,                # True = Parquet now, index async
+    min_files=4,                        # only compact when ≥4 small files exist
+    target_size_bytes=536_870_912,      # 512 MiB target (default — matches the CLI default)
+    max_files_per_pass=20,              # bounds peak RAM and HNSW rebuild cost
+    deferred=False,                     # True = Parquet now, HNSW/IVF-PQ index built async
 )
 print(result)
 # {"ok": True, "files_compacted": 1, "output_path": "data/compacted-..."}
-# {"ok": True, "files_compacted": 0}  ← nothing to compact
-# {"ok": True, "files_compacted": 0, "warning": "ailake CLI not found; skipping"}
+# {"ok": True, "files_compacted": 0, "output_path": None}  ← nothing to compact
 ```
-
-`compact()` requires the `ailake` CLI. When the binary is not found, it returns
-gracefully with `warning` instead of raising.
 
 ---
 
@@ -439,6 +549,33 @@ ailake.add_column(
     doc="Quality score from reranker",
 )
 ailake.rename_column("s3://my-lake/docs/", "old_name", "new_name")
+```
+
+**Adding a new vector column** (metadata-only, then backfilled):
+
+```python
+# 1. Register the column in the schema — old files return null for it until backfilled.
+schema_id = ailake.add_vector_column(
+    "s3://my-lake/docs/",
+    column="image_embedding",
+    dim=512,
+    metric="cosine",
+    precision="f16",
+    pre_normalize=False,
+    hnsw_m=None,
+    hnsw_ef_construction=None,
+)
+
+# 2. Backfill existing files — re-embeds text_column via embed_fn and rewrites each
+#    file with both the original and new vector columns. Idempotent: files that
+#    already have the new column are skipped.
+ailake.backfill_vector_column(
+    "s3://my-lake/docs/",
+    column="image_embedding",
+    embed_fn=my_image_embed_fn,
+    text_column="chunk_text",
+    batch_size=512,
+)
 ```
 
 ---
@@ -496,6 +633,21 @@ ailake.migrate_embeddings(
 
 High-level helper for agent frameworks (LangChain, CrewAI, AutoGen).
 Hybrid scoring: `score = distance / (recency_weight × importance)`.
+
+`Agent` is a pure-Python class (defined in `ailake/__init__.py`, not part of the compiled
+`_ailake` extension) layered over `TableWriter` + `search_with_data` +
+`assemble_context`. `remember()`, `log_tool_call()`, and `recall()` read/write **real
+typed columns** matching `EpisodicMemorySchema`/`ToolCallSchema` field names —
+`agent_id`, `session_id`, `step_index`, `mem_type`, `record_id`, `importance`,
+`created_at`/`last_accessed_at` (as `TimestampNs`), `access_count`, `tool_name`,
+`tool_input_json`, `tool_output_json`, `outcome`, `latency_ms`. Tables written through
+`Agent` stay queryable by any AI-Lake client (Spark, Trino, Flink, DuckDB, the CLI) —
+not just this SDK — and `decay_memories()` (which requires a real `last_accessed_at`
+`Timestamp` column) works directly against them.
+
+`assemble_context()` on `Agent` still returns a plain `str` (its public contract is
+unchanged) — internally it now unpacks the module-level `assemble_context()`'s
+`["text"]` key.
 
 ```python
 import ailake, openai
@@ -584,6 +736,12 @@ updated = ailake.decay_memories(
 print(f"{updated} files updated")
 ```
 
+Requires a real `last_accessed_at` column of type `Timestamp(Nanosecond/Microsecond, UTC)`
+(write it via `ailake.TimestampNs(ailake.now_ns())` in `extra_columns` — see
+[§2](#2-writing-data--tablewriter)) or a legacy ISO-8601 date string. Any other Arrow
+type (including a plain `Int64` from an unwrapped `int`) raises `ValueError`. Tables
+written via `ailake.Agent` (§14) already use the correct column type.
+
 ---
 
 ## 17. Hardware detection
@@ -597,6 +755,25 @@ print(info)
 #   "has_avx512": "false",
 #   "cuda_device": "NVIDIA A100",
 # }
+```
+
+**Storage estimation — `estimate()`:**
+
+Pure math, no I/O — mirrors the `ailake-cli`'s `estimate` subcommand. Useful for
+capacity planning before writing a table:
+
+```python
+modes = ailake.estimate(
+    rows=100_000_000,
+    dim=1536,
+    hnsw_m=16,
+    pq_m=None,       # set to an int (e.g. 48) to also estimate a Product-Quantization mode
+)
+for m in modes:
+    print(m)
+# [{"mode": "f32_hnsw", "vectors_bytes": ..., "index_bytes": ..., "total_bytes": ...,
+#   "reduction_vs_f32_hnsw": 0.0, "recall": "...", "note": "..."},
+#  {"mode": "f16_hnsw", ...}, {"mode": "i8_hnsw", ...}, ...]
 ```
 
 ---
@@ -682,7 +859,7 @@ chunks = [
     }
     for i, (_, row) in enumerate(df.iterrows())
 ]
-context_xml = ailake.assemble_context(chunks, max_tokens=2048)
+context_xml = ailake.assemble_context(chunks, max_tokens=2048)["text"]
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
 resp = client.chat.completions.create(
@@ -704,31 +881,36 @@ print(resp.choices[0].message.content)
 | Function | Description |
 |---|---|
 | `open_table(path, **kwargs)` | Open/create table; returns `Table` |
-| `search(path, query, top_k, ...)` | Returns lazy `SearchQuery` |
+| `search(path, query, top_k, ...)` | Returns lazy `SearchQuery`; full param parity in both pointer and `fetch_data=True` modes |
 | `search_text(path, query_text, top_k, ...)` | BM25 FTS (O(N)) |
-| `search_multimodal(path, queries, top_k, ...)` | Cross-modal RRF |
-| `search_with_data(path, query, top_k, ...)` | Arrow IPC bytes (full row data) |
-| `assemble_context(chunks, max_tokens, ...)` | Format chunks as LLM XML context |
-| `compact(path, *, min_files, target_size_bytes, ...)` | Merge small files |
+| `search_multimodal(path, queries, top_k, ...)` | Cross-modal RRF; supports `rerank_factor` |
+| `search_with_data(path, query, top_k, ...)` | Arrow IPC bytes (full row data); full param parity with `search()` |
+| `scan(path, query, top_k, ...)` | Alias of `search_with_data` — naming parity with `ailake-go`'s `Scan()` |
+| `assemble_context(chunks, max_tokens, ...)` | Returns `{"text", "chunk_count", "token_estimate"}`; supports `embedding` (dedup), `group_by_document`, `max_chunks_per_document` |
+| `compact(path, *, min_files, target_size_bytes, ...)` | Native binding — merges small files, no external CLI required. `target_size_bytes` default `536_870_912` |
+| `estimate(rows, dim, hnsw_m, pq_m)` | Storage estimate per precision mode — pure math, no I/O |
 | `evolve_schema(path, *, add_columns, rename_columns)` | Add/rename columns |
 | `add_column(path, name, col_type, ...)` | Single column add |
 | `rename_column(path, old_name, new_name)` | Single column rename |
+| `add_vector_column(table_path, column, dim, ...)` | Register a new vector column (metadata-only) |
+| `backfill_vector_column(table_path, column, embed_fn, ...)` | Backfill a new vector column in existing files |
 | `delete_where(path, column, values)` | Equality delete |
 | `delete_rows(table_path, file_path, row_ids)` | Positional delete |
 | `migrate_embeddings(path, old_column, new_column, embed_fn, ...)` | Re-embed with new model |
-| `decay_memories(path, decay_lambda)` | Recompute recency weights |
+| `decay_memories(path, decay_lambda)` | Recompute recency weights (requires `Timestamp`/ISO-string `last_accessed_at`) |
 | `hardware_info()` | Returns `dict` with backend, SIMD, GPU info |
-| `now_ns()` | Nanosecond timestamp from Rust monotonic clock |
+| `now_ns()` | Current wall-clock Unix epoch nanoseconds (UTC) — wrap in `TimestampNs` for `extra_columns` |
 
 ### Classes
 
 | Class | Description |
 |---|---|
-| `TableWriter` | Low-level write interface; all write methods + `commit()` |
-| `Table` | Fluent handle: `insert()`, `commit()`, `search()`, async variants |
+| `TableWriter` | Low-level write interface; all write methods (incl. `write_batch_ivf_pq[_deferred]`, `write_batch_multi[_deferred]`) + `commit()` |
+| `Table` | Fluent handle: `insert()`, `commit()`, `search()`, `write_batch_idempotent()`, `write_batch_multi[_deferred]()`, async variants |
 | `SearchQuery` | Lazy search result; `.to_list/arrow/pandas/polars()` + async |
-| `VectorColSpec` | Column spec for multimodal write (`column`, `dim`, `metric`, `modality`) |
-| `Agent` | Phase 9: `remember()`, `log_tool_call()`, `recall()`, `assemble_context()`, async |
+| `VectorColSpec` | Column spec for multimodal write/search — `column`, `dim`, `metric`, `modality`, `precision`, `pre_normalize`, `hnsw_m`, `hnsw_ef_construction` |
+| `TimestampNs` | Wraps an `int` (Unix epoch ns) so `extra_columns` produces a real `Timestamp(Nanosecond, UTC)` column instead of `Int64` |
+| `Agent` | Phase 9: `remember()`, `log_tool_call()`, `recall()`, `assemble_context()` (returns `str`), async — writes real typed columns matching `EpisodicMemorySchema`/`ToolCallSchema` |
 | `WorkingMemoryBuffer` | Bounded FIFO: `push()`, `search()`, `drain_to_table()` |
 
 ### Key `SearchQuery` methods

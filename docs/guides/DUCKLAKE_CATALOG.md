@@ -128,8 +128,51 @@ gracefully, never incorrectly:
   still returns it as if active — a narrow, self-resolving inconsistency
   window, not data loss.
 
+## In-place rewrites are rejected (and why)
+
+DuckLake records each file's zone-map stats (per-column min/max) **and its exact
+footer size** at `ducklake_add_data_files` time, and trusts both afterwards.
+Verified against a live extension:
+
+- A **same-length** in-place rewrite silently returns wrong filtered rows — the
+  stale zone-map prunes the file (`WHERE w > 5` returned 0 with every row at
+  9.9).
+- A **changed-length** rewrite breaks every subsequent native read of the file
+  outright (`Parquet footer length stored in file is not equal to footer length
+  provided`) — including the row-`DELETE` needed to retire the path, so there
+  is no sanctioned SQL that can repair the registration afterwards.
+
+Consequences wired into the code:
+
+- `CatalogProvider::supports_in_place_rewrite()` returns `false` for this
+  backend. `MemoryDecayJob` (the one values-changing in-place rewriter) now
+  writes decayed files to a fresh `data/decayed-<ts>-<idx>.parquet` path and
+  retires the old one on every backend — uniform behavior, no DuckLake special
+  case at the writer level.
+- Deferred writes and deferred compaction (`--deferred`) are **refused up
+  front** with a clear error on this backend: their background index build
+  patches the data file in place at its committed path by design, and the
+  physical rewrite happens *before* any commit — too late for a commit-time
+  guard to prevent the file from becoming natively unreadable.
+- `commit_snapshot` backs all of this up with a hard error if a same-path
+  entry ever arrives with a different `file_size_bytes` than the registered
+  one (the entry's size always derives from the bytes the writer actually
+  produced, so a mismatch proves an in-place rewrite): failing loudly beats
+  registering a file whose native reads are already broken.
+
 ## Known v1 limitations
 
+- **Deferred writes/compaction not supported** — `ailake insert --deferred` and
+  `ailake compact --deferred` error out immediately (see "In-place rewrites are
+  rejected" above). Blocking writes and compaction are fully supported.
+- **Row-level deletes are invisible to DuckLake-native readers** —
+  `delete_where` (equality deletes) and `delete_rows` (V3 deletion vectors)
+  live in AI-Lake's sidecar and are applied by AI-Lake readers only; a plain
+  `SELECT ... FROM lake.<ns>.<table>` still sees the deleted rows. This is
+  asymmetric with file *retirement* (compaction, decay, backfill), which uses
+  a real row-`DELETE` that native readers do observe. Possible future fix:
+  translate equality deletes into `DELETE FROM lake.tbl WHERE col IN (...)`
+  when the predicate column is DuckLake-declared.
 - **No multi-writer support**: the metadata catalog is a local DuckDB file
   (SQLite-class single-writer constraint). Concurrent processes writing to
   the same table are not safe. A Postgres-backed DuckLake metadata catalog
@@ -142,7 +185,12 @@ gracefully, never incorrectly:
   passes `None` or `table_meta.current_snapshot_id`, never an arbitrary past
   id).
 - **Retired files are not physically reclaimed** by this module — see "The
-  retirement problem" above.
+  retirement problem" above. `CatalogProvider::retires_files_physically()`
+  returns `false` for this backend specifically so generic callers (currently
+  `CompactionExecutor` — `ailake-query/src/compaction.rs`) know not to
+  `store.delete()` a file's bytes right after `commit_snapshot` retires it;
+  doing so would leave the file's still-registered `ducklake_list_files()`
+  entry dangling and break any subsequent DuckLake-native SQL read of it.
 - **Network dependency on first use**: the `ducklake` extension is not
   bundled with the `duckdb` crate; `connect()` runs `INSTALL ducklake; LOAD
   ducklake;`, which fetches the extension from DuckDB's extension repository

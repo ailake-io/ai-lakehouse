@@ -226,6 +226,48 @@ ailake.embedding-model=text-embedding-3-small@v1
 
 Multiple AI-Lake tables → multiple catalog files with different names and `table-uri` values.
 
+> **`ailake.table-name`** — set this explicitly to `table` for any table written via
+> `ailake-py`/`ailake-cli` (they always use the fixed Iceberg ident `("default", "table")`).
+> Left unset, the connector defaults it to the *last path segment of `ailake.table-uri`*
+> (e.g. `docs` for `s3://my-lake/docs/`), which does not exist on disk under that name and
+> breaks every query — found live wiring this into `tests/docker/demo/` (see
+> `trino-catalog/ailake_native.properties` there for a worked, correct example).
+
+> **Known limitation (verified live against a real Trino 430 server)**:
+> - Pin the Trino server to **430**, matching `trino-plugin/build.gradle.kts`'s `trinoVersion`
+>   compileOnly target. Trino **460** breaks connector construction outright with
+>   `ConnectorMetadata getTableHandle() is not implemented` — a real Trino SPI signature
+>   change between the two versions, not yet accounted for in this plugin.
+>
+> `SELECT` execution against `search`/`search_full`/`search_multimodal` was previously
+> documented as broken here (`NullPointerException` reconstructing `VectorScanTableHandle`,
+> found 2026-07-13). **Fixed** — root-caused to two distinct Jackson serialization bugs in
+> Trino's internal `TaskUpdateRequest` codec (coordinator → worker HTTP call, exercised even
+> in single-node mode), both confirmed fixed with a real `SELECT * FROM search` /
+> `SELECT * FROM search_full` against a live Trino 430 server with data:
+> 1. Every `ConnectorTableHandle`/`ConnectorSplit`/`ColumnHandle` Kotlin data class used a
+>    bare `@JsonProperty` on its primary-constructor `val`s — that annotation use-site only
+>    reaches the constructor *parameter*, which Jackson needs for deserialization but not
+>    serialization. Trino's `ObjectMapperProvider` disables `MapperFeature.AUTO_DETECT_GETTERS`/
+>    `AUTO_DETECT_FIELDS` globally, so with no explicit getter Jackson silently serialized
+>    every field as absent — `tableUri` (and everything else) came back `null` on the worker
+>    side despite rendering correctly in `EXPLAIN` plan text (which never round-trips through
+>    this codec). Fixed by pairing every `@param:JsonProperty(...)` with an explicit
+>    `@get:JsonProperty(...)` in `VectorScanHandles.kt`, `AilakeIngestTableHandle.kt`, and the
+>    nested `PartitionFieldDef`/`VectorColSpec` classes in `AilakeNative.kt`.
+> 2. Once bug 1 was fixed, a second bug surfaced: `VectorScanTransactionHandle` is a Kotlin
+>    `object` (stateless singleton), which compiles to a private synthetic no-arg constructor —
+>    Trino's internal mapper has no `kotlin-module` registered and reflecting on that
+>    constructor threw `IllegalAccessException`. Fixed with a
+>    `@JsonCreator @JvmStatic fun jsonCreator(): VectorScanTransactionHandle = VectorScanTransactionHandle`
+>    factory, which sidesteps the constructor.
+>
+> Neither bug was reachable by `VectorScanSplitManagerTest`'s Mockito-based unit tests — no
+> test in this repo exercises a live server's JSON codec for this plugin
+> (`compat-jvm-plugins` in `.github/workflows/compat-heavy.yml` only runs mocked JUnit tests).
+> Both were found and fixed by standing up the real `tests/docker/demo/Dockerfile.trino` image
+> against a live table, not by code review. See `CHANGELOG.md` for the full writeup.
+
 ### Session properties
 
 | Property | Type | Default | Description |

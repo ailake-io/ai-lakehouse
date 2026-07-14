@@ -2,8 +2,8 @@
 
 The `ailake-go` package is a pure-Go client for AI-Lake tables. Vector search
 and catalog reads are implemented entirely in Go (no cgo, no CGO). Write
-operations, FTS search, and schema evolution delegate to the `ailake` CLI
-binary, so those require `ailake` on `PATH` or `AILAKE_BIN` set.
+operations, compaction, FTS search, and schema evolution delegate to the
+`ailake` CLI binary, so those require `ailake` on `PATH` or `AILAKE_BIN` set.
 
 ---
 
@@ -88,7 +88,55 @@ ailake.WriteBatchOptions{
     HnswEfConstruction: 200,              // HNSW ef_construction (0 = default)
     PreNormalize:       false,            // normalize vectors to unit L2 at write
     Deferred:           false,            // commit Parquet now, build index async
+    VectorCols:         nil,              // multi-column (multimodal) write — see below
 }
+```
+
+**Multi-column (Phase 8 multimodal) writes:**
+
+`WriteBatchOptions.VectorCols` writes several vector columns from the same
+Parquet file in one call, each getting its own HNSW section in the resulting
+AI-Lake file. When `VectorCols` is non-empty, `VecCol`/`Metric`/`Precision`
+are ignored — the CLI's `--vector-cols col:dim:metric[:modality],...` spec
+carries metric per column, and multi-column mode always writes F16.
+
+```go
+err := ailake.WriteBatch(
+    catalog,
+    "default", "media",
+    "/tmp/batch.parquet", // Parquet file with both embedding columns
+    ailake.WriteBatchOptions{
+        VectorCols: []ailake.VectorColSpec{
+            {Column: "embedding", Dim: 1536, Metric: "cosine"},
+            {Column: "image_embedding", Dim: 512, Metric: "cosine", Modality: "image"},
+        },
+    },
+)
+```
+
+Query it back with `SearchMultimodal` (§7).
+
+**Compaction:**
+
+`Compact` merges small files into a larger one by delegating to `ailake
+compact --format json`. Returns the number of files compacted (0 = nothing
+eligible, e.g. fewer than `MinFiles` small files present).
+
+```go
+filesCompacted, err := ailake.Compact(
+    catalog,
+    "default", "docs",
+    ailake.CompactOptions{
+        TargetSize:      0,     // 0 = CLI default, 512 MiB
+        MinFiles:        4,     // 0 = CLI default, 4
+        MaxFilesPerPass: 20,    // 0 = CLI default, 20 — bounds peak RAM / HNSW rebuild cost
+        Deferred:        false, // true = commit merged Parquet now, rebuild HNSW async
+    },
+)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("compacted %d files\n", filesCompacted)
 ```
 
 **Preparing a Parquet file in Go:**
@@ -388,7 +436,8 @@ func main() {
 | `ReadAilakeHeader(path)` | func | No | Introspect AILK section of any `.parquet` file |
 | `DecodeF16Vector(raw, dim)` | func | No | Decode F16 Parquet column to `[]float32` |
 | `DetectHardware()` | func | No | Reports CPU SIMD / CUDA / ROCm |
-| `WriteBatch(catalog, ns, name, parquet, opts)` | func | **Yes** | Ingest Parquet batch + build HNSW |
+| `WriteBatch(catalog, ns, name, parquet, opts)` | func | **Yes** | Ingest Parquet batch + build HNSW (single- or multi-column via `opts.VectorCols`) |
+| `Compact(catalog, ns, name, opts)` | func | **Yes** | Merge small files; returns files-compacted count |
 | `DeleteWhere(catalog, ns, name, col, vals)` | func | **Yes** | Iceberg equality delete |
 | `EvolveSchema(catalog, ns, name, add, rename)` | func | **Yes** | Add/rename columns (metadata-only) |
 | `SearchText(catalog, ns, name, query, cols, k)` | func | **Yes** | FTS (Tantivy or BM25 fallback) |
@@ -400,7 +449,9 @@ func main() {
 | Type | Description |
 |---|---|
 | `SearchOptions` | `TopK`, `EfSearch`, `PruningThreshold`, `PartitionFilter`, `Hardware` |
-| `WriteBatchOptions` | All write parameters (see §3) |
+| `WriteBatchOptions` | All write parameters incl. `VectorCols []VectorColSpec` for multi-column writes (see §3) |
+| `VectorColSpec` | `{Column, Dim, Metric, Modality}` — one column in a multi-column write |
+| `CompactOptions` | `{TargetSize, MinFiles, MaxFilesPerPass, Deferred}` (see §3) |
 | `ModalQuery` | `{Column, Query, Weight}` for multimodal search |
 | `FileSearchResult` | `{RowID, Distance, FilePath}` |
 | `ScanRow` | `{RowID, Distance, FilePath, Fields}` — `Fields` holds every Parquet column |

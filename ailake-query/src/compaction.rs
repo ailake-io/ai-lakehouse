@@ -748,7 +748,15 @@ impl CompactionExecutor {
             output_path
         );
 
-        delete_old_files(&self.store, &to_compact).await;
+        if catalog.retires_files_physically() {
+            delete_old_files(&self.store, &to_compact).await;
+        } else {
+            info!(
+                "ailake: compaction — leaving {} retired file(s) in place; catalog backend \
+                 manages physical reclamation itself (see docs/guides/DUCKLAKE_CATALOG.md)",
+                to_compact.len()
+            );
+        }
 
         Ok(Some(merged))
     }
@@ -769,6 +777,18 @@ impl CompactionExecutor {
         catalog: Arc<dyn CatalogProvider>,
         output_prefix: &str,
     ) -> AilakeResult<Option<DataFileEntry>> {
+        // The background index build patches the merged file in place at its
+        // committed path — refuse on backends where committed bytes are
+        // immutable (see TableWriter::ensure_deferred_supported for why a
+        // commit-time guard alone is too late: the physical put comes first).
+        if !catalog.supports_in_place_rewrite() {
+            return Err(ailake_core::AilakeError::Catalog(
+                "deferred compaction is not supported with this catalog backend: the \
+                 background index build patches the merged file in place at its committed \
+                 path, which this catalog cannot re-register — run a blocking compact"
+                    .into(),
+            ));
+        }
         let all_files = catalog.list_files(table, None).await?;
         let to_compact = planner.plan(&all_files);
         if to_compact.is_empty() {
@@ -813,7 +833,15 @@ impl CompactionExecutor {
             output_path
         );
 
-        delete_old_files(&self.store, &to_compact).await;
+        if catalog.retires_files_physically() {
+            delete_old_files(&self.store, &to_compact).await;
+        } else {
+            info!(
+                "ailake: compaction — leaving {} retired file(s) in place; catalog backend \
+                 manages physical reclamation itself (see docs/guides/DUCKLAKE_CATALOG.md)",
+                to_compact.len()
+            );
+        }
 
         Ok(Some(merged))
     }

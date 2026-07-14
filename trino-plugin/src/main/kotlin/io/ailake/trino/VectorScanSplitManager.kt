@@ -22,7 +22,13 @@ class VectorScanSplitManager : ConnectorSplitManager {
         dynamicFilter: DynamicFilter,
         constraint: Constraint,
     ): ConnectorSplitSource {
-        val topK = session.getProperty("top_k", Int::class.java) ?: 10
+        // Int::class.java resolves to the *primitive* int.class in Kotlin — mismatches
+        // PropertyMetadata.integerProperty's boxed java.lang.Integer.class registration
+        // and fails every query with "Property ... is type java.lang.Integer, but
+        // requested type was int" (confirmed live against a real Trino 430 server).
+        // javaObjectType gives the boxed Class needed here; same fix applies to
+        // hybrid_weight/Double below.
+        val topK = session.getProperty("top_k", Int::class.javaObjectType) ?: 10
         if (table is MultimodalScanTableHandle) {
             val queriesJson = session.getProperty("multimodal_queries", String::class.java) ?: ""
             return FixedSplitSource(
@@ -37,7 +43,7 @@ class VectorScanSplitManager : ConnectorSplitManager {
         }
         val queryVectorCsv = session.getProperty("query_vector", String::class.java) ?: ""
         val queryText = session.getProperty("query_text", String::class.java) ?: ""
-        val hybridWeight = session.getProperty("hybrid_weight", Double::class.java)?.toFloat() ?: 0.5f
+        val hybridWeight = session.getProperty("hybrid_weight", Double::class.javaObjectType)?.toFloat() ?: 0.5f
         // Parse CSV→bytes once at planning; split carries compact Base64 binary.
         val queryBytes = csvFloatsToBase64(queryVectorCsv)
         // ScanTableHandle (ailake.default.search_full, Fase 11) reuses VectorScanSplit as-is —

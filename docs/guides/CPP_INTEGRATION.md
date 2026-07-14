@@ -2,8 +2,8 @@
 
 `ailake-cpp` is a C++17 header-only SDK for AI-Lake tables. Vector search and
 catalog reads are implemented entirely in C++ (no cgo, no proprietary SDK
-required for CPU path). Write operations, FTS search, and schema evolution
-delegate to the `ailake` CLI binary via `popen`.
+required for CPU path). Write operations, FTS search, schema evolution, and
+compaction delegate to the `ailake` CLI binary via `popen`.
 
 GPU acceleration is opt-in at build time (`-DAILAKE_CUDA=ON` for NVIDIA);
 AMD ROCm is probed at runtime via `dlopen` without any build-time SDK.
@@ -18,7 +18,7 @@ AMD ROCm is probed at runtime via `dlopen` without any build-time SDK.
 | CMake | 3.20 |
 | Compiler | GCC 9+, Clang 10+, MSVC 2019+ |
 | CUDA (optional) | CUDA Toolkit 11.0+ (`-DAILAKE_CUDA=ON`) |
-| `ailake` CLI | Required only for write / delete / FTS / schema ops |
+| `ailake` CLI | Required only for write / delete / FTS / schema ops / compact |
 
 ---
 
@@ -110,6 +110,18 @@ std::cout << "table:   " << info.table         << "\n"
 if (info.snapshot_id)
     std::cout << "snapshot: " << *info.snapshot_id << "\n";
 ```
+
+**Catalog reading path — correctness note:** `HadoopCatalog` parses `metadata.json`
+and the Avro manifest list/manifest file with a hand-rolled reader (no
+`apache-avro` dependency). Path resolution (`table_dir`, `resolve_path`),
+zigzag-varint/EOF handling, Avro OCF data-block encoding, the V3 `first_row_id`
+union field, `centroid`/`radius`/`hnsw_offset` decoding from `key_metadata`,
+and `current-snapshot-id` lookup against multi-snapshot tables were all
+hardened against a real `ailake` binary and real DuckLake/Hadoop catalog
+output during Fase 14 (see `CHANGELOG.md`) — the behavior described in this
+guide and implemented in `catalog.hpp` reflects those fixes, not the earlier,
+narrower assumptions (single-snapshot tables, Hive-style `.db` directories,
+double-joined manifest paths) that predated them.
 
 ---
 
@@ -302,9 +314,9 @@ trailing `WriteBatchOptions` argument still applies for
 
 ---
 
-## 9. Deletes and schema evolution
+## 9. Deletes, schema evolution, and compaction
 
-Both delegate to the `ailake` CLI.
+All three delegate to the `ailake` CLI.
 
 **Logical delete (Iceberg equality delete — no data rewrite):**
 
@@ -335,6 +347,30 @@ int new_schema_id = ailake::evolve_schema(
 );
 std::cout << "new schema_id: " << new_schema_id << "\n";
 ```
+
+**Compaction — merge small files:**
+
+```cpp
+ailake::CompactOptions copts;
+copts.target_size        = 0;      // 0 → CLI default (512 MiB)
+copts.min_files          = 0;      // 0 → CLI default (4)
+copts.max_files_per_pass = 0;      // 0 → CLI default (20)
+copts.deferred            = false;  // true → build merged HNSW async
+
+int files_compacted = ailake::compact(
+    "/data/warehouse",
+    "default.docs",
+    copts
+);
+std::cout << "files compacted: " << files_compacted << "\n";
+```
+
+`compact()` always passes `--format json` to the CLI so the return value can
+be parsed reliably (`airflow-providers-ailake`'s `AilakeHook.compact()` once
+omitted this flag and always parsed `0` from the CLI's plain-text output —
+see the Fase 13 fix in `CHANGELOG.md` for that unrelated SDK's version of the
+same mistake). Returns `0` when no files were eligible for compaction (below
+`min_files`).
 
 ---
 
@@ -392,8 +428,8 @@ auto results = ailake::search(catalog, "default", "docs",
 
 ## 11. Binary resolution for CLI operations
 
-Write / delete / FTS / schema operations call `popen("ailake ...")`. Resolution
-order:
+Write / delete / FTS / schema / compact operations call `popen("ailake ...")`.
+Resolution order:
 
 1. `AILAKE_BIN` environment variable — exact path to binary.
 2. `ailake` found on `PATH`.
@@ -565,6 +601,19 @@ target_link_libraries(my_rag PRIVATE ailake ailake_catalog)
 | `VectorColSpec` | `{column, dim, metric, modality}` for `write_batch_multi` |
 | `CompactOptions` | `target_size`, `min_files`, `max_files_per_pass`, `deferred` |
 | `HardwareProfile` | `has_cuda`, `has_rocm`, `has_avx2`, `has_avx512` |
+
+**Deliberately out of scope — `scan` / full-row fetch:** unlike
+[`ailake-go`](GO_INTEGRATION.md), which embeds `parquet-go` and exposes
+`Scan(catalog, ns, name, query, opts)` (search + full-row Parquet fetch, no
+`JOIN` needed), `ailake-cpp` has no equivalent. This SDK's `search()` /
+`search_multimodal()` / `search_text()` only ever return `row_id` +
+`distance`/`score` + `file_path` — retrieving the actual row data
+(`chunk_text`, metadata columns, etc.) still requires a separate Parquet
+reader (e.g. Apache Arrow C++) reading `file_path` at `row_id`. Adding a
+native `scan()` would mean either pulling in a Parquet-reading dependency
+(against this SDK's deliberate header-only, dependency-light design) or a new
+`ailake scan` CLI subcommand to shell out to (doesn't exist yet). This is a
+documented scope boundary, not an oversight.
 
 ---
 

@@ -2,7 +2,8 @@
 #
 # Usage (from repo root):
 #
-#   Basic demo (notebooks 01-03 + 07-12, vector search + Iceberg compat + DuckDB + Spark + multimodal):
+#   Basic demo (notebooks 01-03 + 07-13, vector search + Iceberg compat + DuckDB + Spark + multimodal
+#   + DuckLake catalog):
 #     docker compose -f tests/docker/compose-demo.yml up -d
 #
 #   Full demo with engine plugins (notebooks 04-05, adds Trino + BigQuery emulator):
@@ -10,6 +11,9 @@
 #
 #   Airflow demo (notebook 12, Apache Airflow 2.9 + AI-Lake provider):
 #     docker compose -f tests/docker/compose-demo.yml --profile airflow up -d
+#
+#   Flink demo (notebook 14, ailake Flink connector — search/search_full/FTS/write):
+#     docker compose -f tests/docker/compose-demo.yml --profile flink up -d
 #
 # Then open: http://localhost:8888
 #
@@ -19,15 +23,24 @@
 #   jupyter  — JupyterLab with ailake + pyiceberg pre-loaded and demo data ready
 #
 # Services (--profile engines):
-#   trino           — Trino 446 with Iceberg/Nessie connector (http://localhost:8080)
+#   trino           — Trino 430 (pinned to match trino-plugin's compileOnly SPI version —
+#                     see Dockerfile.trino) with the stock Iceberg/Nessie connector
+#                     *and* the real ailake Trino plugin (ailake_native catalog).
+#                     http://localhost:8080
 #   bigquery-emulator — goccy BigQuery emulator (http://localhost:19050 on host)
 #
 # Services (--profile airflow):
 #   airflow — Apache Airflow 2.9 standalone (http://localhost:8090, admin/admin)
 #             Uses SequentialExecutor + SQLite — demo-only, not for production.
 #
-# First run builds the ailake-py wheel via maturin (~3-5 min).
-# Subsequent runs are instant (Docker layer cache).
+# Services (--profile flink):
+#   flink — Flink 1.18.1 standalone session cluster (single container, JobManager +
+#           TaskManager) with the real ailake connector pre-installed.
+#           Web UI: http://localhost:8082 (mapped from the container's 8081).
+#
+# First run builds the ailake-py wheel via maturin plus the ailake-cli binary
+# (with catalog-ducklake, for notebook 13 — pulls duckdb's bundled C++ build,
+# ~8-12 min cold). Subsequent runs are instant (Docker layer cache).
 
 services:
 
@@ -97,6 +110,9 @@ services:
       DEMO_MULTIMODAL_PATH: /data/ailake_multimodal
       DEMO_AGENT_PATH: /data/ailake_agent
       DEMO_FTS_PATH: /data/ailake_fts
+      DEMO_DUCKLAKE_STORE: /data/ailake_ducklake
+      AILAKE_HOOKS_DELETE_PATH: /data/ailake_hooks_delete_demo
+      AILAKE_HOOKS_EVOLVE_PATH: /data/ailake_hooks_evolve_demo
       DEMO_DIM: "32"
       # Engine endpoints — consumed by notebooks 04/05 when engines profile is active.
       # Values match container names so they also work without the profile
@@ -106,6 +122,9 @@ services:
       BQ_EMULATOR_HOST: bigquery-emulator
       BQ_EMULATOR_PORT: "9050"
       BQ_PROJECT: ailake-demo
+      # Flink endpoint — consumed by notebook 14 when --profile flink is active.
+      FLINK_HOST: flink
+      FLINK_PORT: "8081"
       # Airflow endpoint — consumed by notebook 12 when --profile airflow is active.
       # Ignored silently when Airflow is not running.
       AIRFLOW_URL: "http://ailake-demo-airflow:8080"
@@ -121,7 +140,13 @@ services:
 
   trino:
     profiles: ["engines"]
-    image: trinodb/trino:460
+    build:
+      # Custom image — bakes in the ailake Trino plugin (ailake_native catalog,
+      # notebook 04_trino.ipynb §Fase 11-12 sections) alongside the stock
+      # Iceberg/Nessie connector this service already used. Pinned to Trino 430
+      # (not 460) — see Dockerfile.trino header for why.
+      context: ../..
+      dockerfile: tests/docker/demo/Dockerfile.trino
     container_name: ailake-demo-trino
     ports:
       - "8080:8080"
@@ -185,6 +210,8 @@ services:
       AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "10"
       AILAKE_TABLE_PATH: /data/ailake_airflow
       AILAKE_RAG_TABLE_PATH: /data/ailake_rag_airflow
+      AILAKE_HOOKS_DELETE_PATH: /data/ailake_hooks_delete_demo
+      AILAKE_HOOKS_EVOLVE_PATH: /data/ailake_hooks_evolve_demo
       DEMO_DIM: "32"
     volumes:
       - ./demo/dags:/opt/airflow/dags:ro
@@ -198,6 +225,39 @@ services:
       interval: 15s
       timeout: 10s
       retries: 16
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+  # ── Flink service (--profile flink) ─────────────────────────────────────────
+  #
+  # Single-container standalone session cluster (JobManager + TaskManager in one
+  # process) with the ailake connector pre-installed. Not a real multi-node
+  # deployment — matches the scale of every other engine service in this demo.
+  #
+  # Query vectors/text are passed as Flink *job parameters*
+  # (`-Dpipeline.global-job-parameters.ailake.query.vector=...`), not SQL —
+  # there's no interactive session-property mechanism like Trino's `SET SESSION`.
+  # 14_flink.ipynb drives the bundled `sql-client.sh` via `docker exec` for
+  # exactly this reason (a Python driver would need its own gateway/job
+  # submission client, not just a DB-API connection).
+
+  flink:
+    profiles: ["flink"]
+    build:
+      context: ../..
+      dockerfile: tests/docker/demo/Dockerfile.flink
+    container_name: ailake-demo-flink
+    command: ["/bin/bash", "-c", "/opt/flink/bin/start-cluster.sh && tail -f /opt/flink/log/*.log"]
+    ports:
+      - "8082:8081"
+    volumes:
+      - demo-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
     depends_on:
       minio-init:
         condition: service_completed_successfully
@@ -237,6 +297,7 @@ services:
       DEMO_MULTIMODAL_PATH: /data/ailake_multimodal
       DEMO_AGENT_PATH: /data/ailake_agent
       DEMO_FTS_PATH: /data/ailake_fts
+      DEMO_DUCKLAKE_STORE: /data/ailake_ducklake
       DEMO_DIM: "32"
       TRINO_HOST: trino
       TRINO_PORT: "8080"

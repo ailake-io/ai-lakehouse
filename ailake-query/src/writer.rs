@@ -90,6 +90,16 @@ pub struct TableWriter {
     policy: VectorStoragePolicy,
     table: TableIdent,
     part_counter: Arc<AtomicU32>,
+    /// Unix-epoch milliseconds captured at writer construction; embedded in
+    /// every part path (`data/part-<session_ts>-NNNNN.parquet`) so file names
+    /// are unique across writer sessions. A plain per-session counter alone
+    /// reused names once compaction shrank the table's file count — and under
+    /// the DuckLake catalog the retired file the name collides with still
+    /// exists physically AND is still registered (retirement is a row-DELETE,
+    /// not a deregistration), so the colliding `store.put` rewrote a
+    /// registered file in place — the exact corruption
+    /// `supports_in_place_rewrite() == false` exists to prevent.
+    session_ts: u128,
     pending_files: Vec<DataFileEntry>,
     parent_snapshot_id: Option<SnapshotId>,
     /// Arrow schema captured from the first write_batch call; used to populate
@@ -127,6 +137,10 @@ impl TableWriter {
             policy,
             table,
             part_counter: Arc::new(AtomicU32::new(0)),
+            session_ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_else(|e| e.duration())
+                .as_millis(),
             pending_files: Vec::new(),
             parent_snapshot_id: None,
             captured_schema: None,
@@ -179,10 +193,10 @@ impl TableWriter {
         batch: &RecordBatch,
         embeddings: &[Vec<f32>],
     ) -> AilakeResult<()> {
+        self.ensure_deferred_supported()?;
         self.validate_embedding_dim(embeddings)?;
         self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
-        let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
-        let file_path = format!("data/part-{:05}.parquet", part_num);
+        let file_path = self.next_part_path();
 
         // Fast path: persist Parquet without HNSW.
         let file_writer = AilakeFileWriter::new(self.policy.clone());
@@ -253,9 +267,9 @@ impl TableWriter {
         embeddings: &[Vec<f32>],
         ivf_config: IvfPqConfig,
     ) -> AilakeResult<()> {
+        self.ensure_deferred_supported()?;
         self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
-        let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
-        let file_path = format!("data/part-{:05}.parquet", part_num);
+        let file_path = self.next_part_path();
 
         let file_writer = AilakeFileWriter::new(self.policy.clone());
         let parquet_bytes = file_writer.write_parquet_only(batch, embeddings)?;
@@ -317,6 +331,12 @@ impl TableWriter {
     /// so future retries can detect it.
     ///
     /// `commit()` is likewise a no-op when `pending_files` is empty.
+    ///
+    /// **Known window**: the tag lives on the `DataFileEntry`, and compaction's
+    /// merged file carries `batch_id: None` — a retry that fires *after* the
+    /// batch's file was compacted away will not find the tag and will re-insert
+    /// the batch. Keep retry horizons shorter than the compaction cadence, or
+    /// dedupe downstream on a business key.
     pub async fn write_batch_idempotent(
         &mut self,
         batch: &RecordBatch,
@@ -340,6 +360,35 @@ impl TableWriter {
     /// incompatible vectors (same error type used across write paths for consistency).
     fn validate_embedding_dim(&self, embeddings: &[Vec<f32>]) -> AilakeResult<()> {
         Self::validate_embedding_dim_for_policy(embeddings, &self.policy)
+    }
+
+    /// Next data-file path for this writer session:
+    /// `data/part-<session_ts>-NNNNN.parquet`. The session timestamp keeps
+    /// names unique across sessions (see the `session_ts` field doc for the
+    /// compaction-then-insert collision this prevents); the counter keeps them
+    /// unique within one.
+    fn next_part_path(&self) -> String {
+        let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
+        format!("data/part-{}-{:05}.parquet", self.session_ts, part_num)
+    }
+
+    /// Deferred writes persist a Parquet-only file first and later patch the
+    /// full AILK file **in place at the same path**. Refuse up front on catalog
+    /// backends where a committed path's bytes must never change (DuckLake:
+    /// stats and footer size are trusted from registration time — an in-place
+    /// grow breaks every subsequent native read of the file, verified live, and
+    /// the physical put happens *before* any commit-time guard could stop it).
+    fn ensure_deferred_supported(&self) -> AilakeResult<()> {
+        if self.catalog.supports_in_place_rewrite() {
+            Ok(())
+        } else {
+            Err(AilakeError::Catalog(
+                "deferred writes are not supported with this catalog backend: the \
+                 background index build patches the data file in place at its committed \
+                 path, which this catalog cannot re-register — use a blocking write"
+                    .into(),
+            ))
+        }
     }
 
     fn validate_embedding_dim_for_policy(
@@ -381,8 +430,7 @@ impl TableWriter {
     ) -> AilakeResult<()> {
         self.validate_embedding_dim(embeddings)?;
         self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
-        let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
-        let file_path = format!("data/part-{:05}.parquet", part_num);
+        let file_path = self.next_part_path();
 
         // Write AI-Lake file
         let mut file_writer = AilakeFileWriter::new(self.policy.clone());
@@ -501,8 +549,7 @@ impl TableWriter {
         ivf_config: IvfPqConfig,
     ) -> AilakeResult<()> {
         self.captured_schema = Some(merge_schema(self.captured_schema.take(), &batch.schema()));
-        let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
-        let file_path = format!("data/part-{:05}.parquet", part_num);
+        let file_path = self.next_part_path();
 
         // Train codebook once on the first shard; all subsequent shards reuse it.
         // This makes cross-shard ADC distances comparable, eliminating the need
@@ -593,8 +640,7 @@ impl TableWriter {
             Self::validate_embedding_dim_for_policy(col.embeddings, &col.policy)?;
         }
 
-        let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
-        let file_path = format!("data/part-{:05}.parquet", part_num);
+        let file_path = self.next_part_path();
 
         let col_batches: Vec<VectorColumnBatch<'_>> = columns
             .iter()
@@ -700,6 +746,7 @@ impl TableWriter {
         columns: &[MultiVectorBatch<'_>],
     ) -> AilakeResult<()> {
         use ailake_core::AilakeError;
+        self.ensure_deferred_supported()?;
         if columns.is_empty() {
             return Err(AilakeError::InvalidArgument(
                 "write_batch_multi_deferred requires at least one column".into(),
@@ -710,8 +757,7 @@ impl TableWriter {
             self.extra_vec_policies = columns[1..].iter().map(|c| c.policy.clone()).collect();
         }
 
-        let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
-        let file_path = format!("data/part-{:05}.parquet", part_num);
+        let file_path = self.next_part_path();
 
         // Immediate path: write Parquet with primary column only (no AILK sections yet).
         let primary_policy = &columns[0].policy;
@@ -940,10 +986,10 @@ impl TableWriter {
         table: TableIdent,
         format_version: u8,
     ) -> AilakeResult<Self> {
-        // Track existing file count so new writers start their part counter past
-        // any already-committed files, preventing name collisions on sequential writes.
-        let existing_file_count: u32;
-
+        // Part-path uniqueness across sessions comes from `session_ts` in the
+        // file name (see `next_part_path`), not from seeding the counter with
+        // the current file count — that seed was wrong anyway: compaction
+        // shrinks the count, making a later writer reuse a retired file's name.
         match catalog.load_table(&table).await {
             Ok(existing_meta) => {
                 // Hard error: dim stored in table metadata must match the policy dim.
@@ -984,11 +1030,6 @@ impl TableWriter {
                         }
                     }
                 }
-                existing_file_count = catalog
-                    .list_files(&table, None)
-                    .await
-                    .unwrap_or_default()
-                    .len() as u32;
             }
             Err(_) => {
                 catalog
@@ -1002,7 +1043,6 @@ impl TableWriter {
                         },
                     )
                     .await?;
-                existing_file_count = 0;
             }
         }
         let parent_snapshot_id = catalog
@@ -1011,7 +1051,6 @@ impl TableWriter {
             .ok()
             .and_then(|m| m.current_snapshot_id);
         let mut writer = Self::new(catalog, store, policy, table);
-        writer.part_counter = Arc::new(AtomicU32::new(existing_file_count));
         writer.parent_snapshot_id = parent_snapshot_id;
         Ok(writer)
     }
@@ -1958,5 +1997,119 @@ mod tests {
         assert_eq!(xi.hnsw_offset, 0); // not yet built
         assert_eq!(xi.hnsw_len, 0); // not yet built
         assert!(xi.centroid_b64.is_some());
+    }
+
+    /// Regression: part paths must be unique across writer sessions even after
+    /// the table's file count shrinks (compaction). The old counter seed
+    /// (`list_files().len()`) made a post-compaction writer reuse a retired
+    /// part's name — under DuckLake that file still exists physically and is
+    /// still registered, so the colliding put rewrote a registered file in
+    /// place. `session_ts` in the path prevents the reuse structurally.
+    #[tokio::test]
+    async fn part_paths_unique_across_sessions_after_compaction() {
+        use ailake_catalog::{
+            new_snapshot_id, HadoopCatalog, NewSnapshot, SnapshotOperation, TableIdent,
+        };
+        use ailake_store::LocalStore;
+        use arrow_schema::{DataType, Field, Schema};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: std::sync::Arc<dyn ailake_store::Store> =
+            std::sync::Arc::new(LocalStore::new(dir.path().to_str().unwrap()));
+        let catalog: std::sync::Arc<dyn CatalogProvider> =
+            std::sync::Arc::new(HadoopCatalog::new(std::sync::Arc::clone(&store), ""));
+        let ident = TableIdent::new("default", "t");
+
+        let schema =
+            std::sync::Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let batch = arrow_array::RecordBatch::try_new(
+            schema,
+            vec![std::sync::Arc::new(arrow_array::StringArray::from(vec![
+                "hello",
+            ]))],
+        )
+        .unwrap();
+        let embeddings = vec![vec![1.0f32, 0.0, 0.0, 0.0]];
+
+        // Session 1: two parts committed.
+        let mut w1 = TableWriter::create_or_open(
+            catalog.clone(),
+            store.clone(),
+            policy("embedding", 4),
+            ident.clone(),
+            2,
+        )
+        .await
+        .unwrap();
+        w1.write_batch(&batch, &embeddings).await.unwrap();
+        w1.write_batch(&batch, &embeddings).await.unwrap();
+        w1.commit().await.unwrap();
+        let session1_paths: Vec<String> = catalog
+            .list_files(&ident, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|f| f.path.clone())
+            .collect();
+        assert_eq!(session1_paths.len(), 2);
+
+        // Simulate compaction: Replace the two parts with one merged file,
+        // shrinking the table's file count from 2 to 1.
+        let mut merged = catalog.list_files(&ident, None).await.unwrap()[0].clone();
+        merged.path = "data/compacted-test.parquet".to_string();
+        store
+            .put(&merged.path, store.get(&session1_paths[0]).await.unwrap())
+            .await
+            .unwrap();
+        let parent = catalog
+            .load_table(&ident)
+            .await
+            .unwrap()
+            .current_snapshot_id;
+        catalog
+            .commit_snapshot(
+                &ident,
+                NewSnapshot {
+                    snapshot_id: new_snapshot_id(),
+                    parent_snapshot_id: parent,
+                    files: vec![merged],
+                    operation: SnapshotOperation::Replace,
+                    iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
+                    equality_delete_files: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        // Session 2: a fresh writer must not reuse any session-1 part name.
+        let mut w2 = TableWriter::create_or_open(
+            catalog.clone(),
+            store.clone(),
+            policy("embedding", 4),
+            ident.clone(),
+            2,
+        )
+        .await
+        .unwrap();
+        w2.write_batch(&batch, &embeddings).await.unwrap();
+        w2.commit().await.unwrap();
+
+        let final_paths: Vec<String> = catalog
+            .list_files(&ident, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|f| f.path.clone())
+            .collect();
+        let new_part = final_paths
+            .iter()
+            .find(|p| p.starts_with("data/part-"))
+            .expect("session 2 must have committed a part file");
+        assert!(
+            !session1_paths.contains(new_part),
+            "session 2 reused a retired part name: {new_part} (session 1 wrote {session1_paths:?})"
+        );
     }
 }
