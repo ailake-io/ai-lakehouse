@@ -488,6 +488,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             }],
             operation: SnapshotOperation::Append,
             iceberg_schema: None,
@@ -530,6 +531,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             }],
             operation: SnapshotOperation::Append,
             iceberg_schema: None,
@@ -574,6 +576,7 @@ mod tests {
             equality_ids: vec![1],
             record_count: 3,
             file_size_bytes: 128,
+            inline_values: None,
         };
         let snap3 = NewSnapshot {
             snapshot_id: new_snapshot_id(),
