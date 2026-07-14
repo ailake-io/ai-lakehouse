@@ -725,7 +725,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
 /// `List<Float32>` or `FixedSizeList<Float32>` array — the two on-wire shapes
 /// `ailake_write_batch_ipc` accepts for the vector column. `dim` is the
 /// declared table dimension; every row's element count must match it exactly.
-fn extract_embeddings_f32(arr: &dyn arrow_array::Array, dim: usize) -> Result<Vec<Vec<f32>>, String> {
+fn extract_embeddings_f32(
+    arr: &dyn arrow_array::Array,
+    dim: usize,
+) -> Result<Vec<Vec<f32>>, String> {
     use arrow_array::{Array, FixedSizeListArray, Float32Array, ListArray};
     use arrow_schema::DataType;
     match arr.data_type() {
@@ -790,7 +793,9 @@ fn project_dropping(
     batch: &arrow_array::RecordBatch,
     drop_idx: usize,
 ) -> Result<arrow_array::RecordBatch, arrow_schema::ArrowError> {
-    let keep: Vec<usize> = (0..batch.num_columns()).filter(|&i| i != drop_idx).collect();
+    let keep: Vec<usize> = (0..batch.num_columns())
+        .filter(|&i| i != drop_idx)
+        .collect();
     batch.project(&keep)
 }
 
@@ -927,13 +932,14 @@ pub unsafe extern "C" fn ailake_write_batch_ipc(
             return cstr_err_json("negative ipc_len");
         }
         let raw: &[u8] = unsafe { std::slice::from_raw_parts(ipc_bytes, ipc_len as usize) };
-        let mut reader = match arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(raw), None) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("ailake_write_batch_ipc: IPC stream header error: {}", e);
-                return cstr_err_json(e);
-            }
-        };
+        let mut reader =
+            match arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(raw), None) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("ailake_write_batch_ipc: IPC stream header error: {}", e);
+                    return cstr_err_json(e);
+                }
+            };
         let batch = match reader.next() {
             Some(Ok(b)) => b,
             Some(Err(e)) => {
@@ -952,10 +958,11 @@ pub unsafe extern "C" fn ailake_write_batch_ipc(
                 ))
             }
         };
-        let embeddings = match extract_embeddings_f32(batch.column(vec_idx).as_ref(), opts.dim as usize) {
-            Ok(v) => v,
-            Err(e) => return cstr_err_json(e),
-        };
+        let embeddings =
+            match extract_embeddings_f32(batch.column(vec_idx).as_ref(), opts.dim as usize) {
+                Ok(v) => v,
+                Err(e) => return cstr_err_json(e),
+            };
         let reduced = match project_dropping(&batch, vec_idx) {
             Ok(b) => b,
             Err(e) => return cstr_err_json(e),
@@ -2709,11 +2716,7 @@ mod tests {
     // `ailake_write_batch_ipc`, then confirm via `ailake_search_json` that the
     // rows actually landed and are searchable — not just "did not crash".
 
-    fn build_ipc_stream_list_f32(
-        ids: &[i64],
-        embeddings: &[Vec<f32>],
-        texts: &[&str],
-    ) -> Vec<u8> {
+    fn build_ipc_stream_list_f32(ids: &[i64], embeddings: &[Vec<f32>], texts: &[&str]) -> Vec<u8> {
         use arrow_array::builder::{Float32Builder, ListBuilder};
         use arrow_array::{Int64Array, StringArray};
         use arrow_schema::{DataType, Field, Schema};
@@ -2756,7 +2759,11 @@ mod tests {
         buf
     }
 
-    fn build_ipc_stream_fixed_size_list_f32(ids: &[i64], embeddings: &[Vec<f32>], dim: i32) -> Vec<u8> {
+    fn build_ipc_stream_fixed_size_list_f32(
+        ids: &[i64],
+        embeddings: &[Vec<f32>],
+        dim: i32,
+    ) -> Vec<u8> {
         use arrow_array::builder::{FixedSizeListBuilder, Float32Builder};
         use arrow_array::Int64Array;
         use arrow_schema::{DataType, Field, Schema};
@@ -2799,7 +2806,8 @@ mod tests {
 
     fn call_write_batch_ipc(buf: &[u8], opts_json: &str) -> String {
         let c_opts = std::ffi::CString::new(opts_json).unwrap();
-        let ptr = unsafe { ailake_write_batch_ipc(buf.as_ptr(), buf.len() as i64, c_opts.as_ptr()) };
+        let ptr =
+            unsafe { ailake_write_batch_ipc(buf.as_ptr(), buf.len() as i64, c_opts.as_ptr()) };
         assert!(!ptr.is_null());
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         unsafe { ailake_free_string(ptr) };
@@ -2858,7 +2866,11 @@ mod tests {
         );
         let parsed: serde_json::Value = serde_json::from_str(&search_json).unwrap();
         let results = parsed["results"].as_array().unwrap();
-        assert_eq!(results.len(), 3, "expected all 3 rows back, got: {search_json}");
+        assert_eq!(
+            results.len(),
+            3,
+            "expected all 3 rows back, got: {search_json}"
+        );
     }
 
     #[test]
@@ -2941,7 +2953,8 @@ mod tests {
         assert!(json.contains("null"), "got: {json}");
 
         let buf = vec![0u8; 4];
-        let ptr = unsafe { ailake_write_batch_ipc(buf.as_ptr(), buf.len() as i64, std::ptr::null()) };
+        let ptr =
+            unsafe { ailake_write_batch_ipc(buf.as_ptr(), buf.len() as i64, std::ptr::null()) };
         assert!(!ptr.is_null());
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         unsafe { ailake_free_string(ptr) };
