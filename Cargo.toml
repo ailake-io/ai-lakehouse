@@ -36,6 +36,7 @@ arrow-array  = "52"
 arrow-schema = "52"
 arrow-select = "52"
 arrow-buffer = "52"
+arrow-ipc    = "52"
 object_store = { version = "0.10" }  # cloud features added per-crate via ailake-store feature flags
 
 # Iceberg
