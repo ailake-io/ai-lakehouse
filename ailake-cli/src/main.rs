@@ -1014,6 +1014,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 score_fn: None,
                 partition_filter: None,
                 hybrid,
+                column_filter: None,
             };
 
             let results = ailake_query::search(

@@ -207,6 +207,7 @@ async fn hybrid_search_rrf_returns_top_k() {
                 .with_text_column("chunk_text")
                 .with_bm25_weight(0.4),
         ),
+        column_filter: None,
     };
 
     let results = ailake_query::search(

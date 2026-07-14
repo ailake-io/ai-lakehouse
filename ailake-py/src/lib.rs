@@ -711,6 +711,7 @@ fn search(
         score_fn: None,
         partition_filter,
         hybrid,
+        column_filter: None,
     };
 
     let results = rt
@@ -846,6 +847,7 @@ fn search_with_data(
         score_fn: None,
         partition_filter,
         hybrid,
+        column_filter: None,
     };
 
     let results = rt
@@ -1236,6 +1238,7 @@ fn search_multimodal(
         score_fn: None,
         partition_filter,
         hybrid: None,
+        column_filter: None,
     };
 
     let results = rt

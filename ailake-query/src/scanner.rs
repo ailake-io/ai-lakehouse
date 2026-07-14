@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::sync::Arc;
 
+use futures::future::try_join_all;
 use rayon::prelude::*;
 use tracing::{debug, error, warn};
 
-use ailake_catalog::{CatalogProvider, DataFileEntry, IndexStatus, SchemaField, TableIdent};
+use ailake_catalog::{
+    CatalogProvider, DataFileEntry, IndexStatus, SchemaField, TableIdent, TableMetadata,
+};
 use ailake_core::{AilakeError, AilakeResult, EmbeddingModelInfo, RowId, VectorMetric};
 use ailake_file::AilakeFileReader;
 use ailake_index::AnyIndex;
@@ -113,6 +116,15 @@ pub struct SearchConfig {
     /// matches this string. `None` searches all files (no partition pruning).
     /// Set to `agent_id` in Agent.recall() for per-agent isolated search.
     pub partition_filter: Option<String>,
+    /// Column-level predicate pushed down to the Parquet read of each surviving
+    /// file, via `AilakeFileReader::read_parquet_filtered` (row-group statistics
+    /// skip + exact Arrow `RowFilter` — see `ailake-parquet::ParquetVectorReader`).
+    /// Applies only where a Parquet read already happens (flat-scan fallback,
+    /// reranking, hybrid, `score_fn`, or equality-delete row checks) — it does
+    /// not gate which files survive centroid/partition pruning, and it isn't
+    /// applied against columns only materialized later by `SchemaFiller`
+    /// (schema-evolution defaults). `None` disables pushdown (default).
+    pub column_filter: Option<ailake_core::ColumnFilter>,
 }
 
 impl Default for SearchConfig {
@@ -125,11 +137,17 @@ impl Default for SearchConfig {
             score_fn: None,
             partition_filter: None,
             hybrid: None,
+            column_filter: None,
         }
     }
 }
 
 impl SearchConfig {
+    pub fn with_column_filter(mut self, filter: ailake_core::ColumnFilter) -> Self {
+        self.column_filter = Some(filter);
+        self
+    }
+
     pub fn with_pruning(mut self, threshold: f32) -> Self {
         self.pruning_threshold = threshold;
         self
@@ -339,195 +357,39 @@ pub async fn search(
     let mut flat_scan_deferred = 0usize;
     let mut flat_scan_unexpected = 0usize;
 
-    for file_entry in &surviving_files {
-        let file_bytes: Bytes = store.get(&file_entry.path).await?;
-        let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
+    // Fetch + search each surviving file concurrently instead of one at a time —
+    // the dominant cost per file is a network round-trip (`store.get`), so this
+    // overlaps their latencies instead of serializing them. `try_join_all` runs
+    // all of them concurrently on the current task (no OS-thread parallelism,
+    // no `tokio::spawn`); at the post-pruning scale this operates on (dozens of
+    // files, see `VectorPruner` — geometric pruning is designed to cut a
+    // 10k-file table down to ~50-100 survivors before this point), that's the
+    // right trade-off: no bound needed, and no per-task spawn overhead.
+    let outcomes: Vec<FileSearchOutcome> = try_join_all(surviving_files.iter().map(|file_entry| {
+        search_one_file(
+            file_entry,
+            query,
+            candidate_k,
+            metric,
+            &table_meta,
+            &config,
+            vector_column,
+            dim,
+            &store,
+            &eq_del_filter,
+            use_hybrid,
+        )
+    }))
+    .await?;
 
-        // V3 Deletion Vector: fetch bitmap once per file (range GET from Puffin .dvd).
-        // None for V2 tables or V3 files with no deletes. On fetch error: warn + continue
-        // without mask (surfacing deleted rows is safer than hard-failing the search).
-        let dv_bitmap: Option<roaring::RoaringBitmap> =
-            if let Some(ref dv) = file_entry.deletion_vector {
-                match crate::dv::load_deletion_vector(&store, dv).await {
-                    Ok(bm) => {
-                        debug!(
-                            "ailake: DV loaded ({} deletions) for {}",
-                            bm.len(),
-                            file_entry.path
-                        );
-                        Some(bm)
-                    }
-                    Err(e) => {
-                        warn!(
-                            "ailake: DV fetch failed for '{}': {e} — deleted rows may appear",
-                            file_entry.path
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-        // Parquet read required for: flat scan fallback, exact reranking, score_fn, hybrid,
-        // or when equality delete filter must check column values per-row.
-        let need_parquet = file_entry.index_status == IndexStatus::Indexing
-            || !reader.is_ailake_file()
-            || config.rerank_factor.is_some()
-            || config.score_fn.is_some()
-            || use_hybrid
-            || !eq_del_filter.is_empty();
-
-        if file_entry.index_status == IndexStatus::Indexing || !reader.is_ailake_file() {
-            match file_entry.index_status {
-                IndexStatus::Indexing => {
-                    flat_scan_deferred += 1;
-                    debug!(
-                        "ailake: flat scan fallback for {} — index build in progress \
-                         (deferred write, expected to resolve once background job completes)",
-                        file_entry.path
-                    );
-                }
-                IndexStatus::Failed => {
-                    // An internal indexing failure, not a foreign write — the file still
-                    // has a real (foreign-write-style) centroid_b64 from make_data_file_entry
-                    // *_indexing, since only index_status/index_error get patched on failure
-                    // (see writer.rs::patch_index_failed). Attributing this to an external
-                    // engine would send on-call looking for a Spark job that never ran.
-                    flat_scan_unexpected += 1;
-                    warn!(
-                        "ailake: flat scan fallback for {} — background index build failed \
-                         permanently ({}); serving via flat scan until the next compaction \
-                         rebuilds the index",
-                        file_entry.path,
-                        file_entry
-                            .index_error
-                            .as_deref()
-                            .unwrap_or("no error recorded")
-                    );
-                }
-                IndexStatus::Ready => {
-                    // Ready but no loadable index/footer: either a genuine foreign write
-                    // (no centroid_b64 — see CompactionPlanner::plan's detection) or a rare
-                    // internally-inconsistent state (Ready without ever getting an index).
-                    flat_scan_unexpected += 1;
-                    if file_entry.is_foreign() {
-                        warn!(
-                            "ailake: flat scan fallback for {} — file has no AI-Lake index \
-                             and no centroid; likely rewritten by a generic Iceberg engine \
-                             (OPTIMIZE / rewrite_data_files) with no knowledge of AI-Lake. \
-                             Results are still correct (exact O(N) scan), but degraded until \
-                             this file is recompacted by the AI-Lake SDK",
-                            file_entry.path
-                        );
-                    } else {
-                        warn!(
-                            "ailake: flat scan fallback for {} — marked Ready but has no \
-                             loadable AI-Lake index despite a recorded centroid; internal \
-                             inconsistency, not an external rewrite. Run compaction to rebuild",
-                            file_entry.path
-                        );
-                    }
-                }
-            }
-            let (raw_batch, raw_vectors) = reader.read_parquet()?;
-            // Phase G: inject columns added via schema evolution with initial_default values.
-            let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
-            for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
-                // Skip rows marked as deleted by a V3 Deletion Vector.
-                if dv_bitmap
-                    .as_ref()
-                    .is_some_and(|bm| bm.contains(row_id.as_u64() as u32))
-                {
-                    continue;
-                }
-                // Phase H: skip rows matched by an equality delete predicate.
-                if eq_del_filter.should_delete_row(&batch, row_id.as_u64() as usize) {
-                    continue;
-                }
-                if use_hybrid {
-                    let text = extract_text_for_row(
-                        &batch,
-                        row_id.as_u64() as usize,
-                        config.hybrid.as_ref().unwrap(),
-                    );
-                    raw_candidates.push((row_id, distance, file_entry.path.clone(), text));
-                } else {
-                    let final_score = apply_score_fn(&config.score_fn, distance, row_id, &batch);
-                    all_results.push(SearchResult {
-                        row_id,
-                        distance: final_score,
-                        file_path: file_entry.path.clone(),
-                    });
-                }
-            }
-            continue;
+    for outcome in outcomes {
+        match outcome.flat_scan {
+            Some(FlatScanKind::Deferred) => flat_scan_deferred += 1,
+            Some(FlatScanKind::Unexpected) => flat_scan_unexpected += 1,
+            None => {}
         }
-
-        let index = reader.load_any_index_for_column(vector_column)?;
-        let local_results = index.search(query, candidate_k, config.ef_search);
-
-        let parquet_data = if need_parquet {
-            let (raw_batch, raw_vecs) = reader.read_parquet()?;
-            // Phase G: fill missing columns for old files before score_fn / hybrid BM25.
-            let filled = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
-            Some((filled, raw_vecs))
-        } else {
-            None
-        };
-
-        for (row_id, approx_dist) in local_results {
-            // Skip rows marked as deleted by a V3 Deletion Vector.
-            if dv_bitmap
-                .as_ref()
-                .is_some_and(|bm| bm.contains(row_id.as_u64() as u32))
-            {
-                continue;
-            }
-            let idx = row_id.as_u64() as usize;
-            // Phase H: skip rows matched by an equality delete predicate.
-            // parquet_data is always loaded when eq_del_filter is non-empty (see need_parquet).
-            if let Some((ref batch, _)) = parquet_data {
-                if eq_del_filter.should_delete_row(batch, idx) {
-                    continue;
-                }
-            }
-
-            let distance = if config.rerank_factor.is_some() {
-                match parquet_data.as_ref().and_then(|(_, vecs)| vecs.get(idx)) {
-                    Some(v) => exact_distance(metric, query, v),
-                    None => {
-                        error!(
-                            "ailake: invariant violated — row_id {} out of bounds \
-                             (file={}); Parquet and HNSW node count out of sync; \
-                             run compaction to rebuild",
-                            idx, file_entry.path
-                        );
-                        f32::INFINITY
-                    }
-                }
-            } else {
-                approx_dist
-            };
-
-            if use_hybrid {
-                let text = parquet_data.as_ref().map_or(String::new(), |(batch, _)| {
-                    extract_text_for_row(batch, idx, config.hybrid.as_ref().unwrap())
-                });
-                raw_candidates.push((row_id, distance, file_entry.path.clone(), text));
-            } else {
-                let final_score = if let Some((ref batch, _)) = parquet_data {
-                    apply_score_fn(&config.score_fn, distance, row_id, batch)
-                } else {
-                    distance
-                };
-                all_results.push(SearchResult {
-                    row_id,
-                    distance: final_score,
-                    file_path: file_entry.path.clone(),
-                });
-            }
-        }
+        all_results.extend(outcome.results);
+        raw_candidates.extend(outcome.candidates);
     }
 
     if flat_scan_unexpected > 0 {
@@ -628,6 +490,281 @@ pub async fn search(
 
     all_results.truncate(config.top_k);
     Ok(all_results)
+}
+
+/// Why this file fell back to a flat (exact, O(N)) scan instead of HNSW —
+/// carried out of `search_one_file` so the caller can aggregate counts across
+/// all concurrently-searched files for the post-loop `warn!`/`debug!` summary.
+enum FlatScanKind {
+    /// Background index build still in progress (deferred write) — expected, transient.
+    Deferred,
+    /// No AI-Lake index and NOT in the deferred-indexing state — most likely an
+    /// external engine (Spark/Trino OPTIMIZE, DuckDB) rewrote the file, or an
+    /// internal inconsistency. Results are still correct, just degraded.
+    Unexpected,
+}
+
+/// Per-file result of `search_one_file`, folded into `search()`'s accumulators
+/// after all files have been searched concurrently.
+#[derive(Default)]
+struct FileSearchOutcome {
+    /// Populated when hybrid search is off.
+    results: Vec<SearchResult>,
+    /// Populated when hybrid search is on: (row_id, vector distance, file path, text).
+    candidates: Vec<(RowId, f32, String, String)>,
+    flat_scan: Option<FlatScanKind>,
+}
+
+/// Fetches, index-searches (or flat-scans), and filters a single file — the
+/// per-file body of `search()`'s main loop, extracted so it can be run
+/// concurrently across files via `try_join_all`. Pure with respect to the
+/// caller's accumulators: everything it would have mutated in place (result
+/// lists, flat-scan counters) comes back in the returned `FileSearchOutcome`
+/// instead, so concurrent invocations never share mutable state.
+#[allow(clippy::too_many_arguments)]
+async fn search_one_file(
+    file_entry: &DataFileEntry,
+    query: &[f32],
+    candidate_k: usize,
+    metric: VectorMetric,
+    table_meta: &TableMetadata,
+    config: &SearchConfig,
+    vector_column: &str,
+    dim: u32,
+    store: &Arc<dyn Store>,
+    eq_del_filter: &EqualityDeleteFilter,
+    use_hybrid: bool,
+) -> AilakeResult<FileSearchOutcome> {
+    let mut outcome = FileSearchOutcome::default();
+
+    let file_bytes: Bytes = store.get(&file_entry.path).await?;
+    let reader = AilakeFileReader::new(file_bytes, vector_column, dim);
+
+    // V3 Deletion Vector: fetch bitmap once per file (range GET from Puffin .dvd).
+    // None for V2 tables or V3 files with no deletes. On fetch error: warn + continue
+    // without mask (surfacing deleted rows is safer than hard-failing the search).
+    let dv_bitmap: Option<roaring::RoaringBitmap> = if let Some(ref dv) = file_entry.deletion_vector
+    {
+        match crate::dv::load_deletion_vector(store, dv).await {
+            Ok(bm) => {
+                debug!(
+                    "ailake: DV loaded ({} deletions) for {}",
+                    bm.len(),
+                    file_entry.path
+                );
+                Some(bm)
+            }
+            Err(e) => {
+                warn!(
+                    "ailake: DV fetch failed for '{}': {e} — deleted rows may appear",
+                    file_entry.path
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Predicate pushdown: resolve which original row positions in this file
+    // satisfy `config.column_filter`, without disturbing row identity (see
+    // `AilakeFileReader::matching_row_ids`). When the set comes back empty,
+    // no row in the file can pass — skip HNSW search and any Parquet
+    // decode for it entirely (the real perf win: files that don't contain
+    // the filtered value are never scanned at all, not just post-filtered).
+    let matching_row_ids: Option<std::collections::HashSet<u64>> =
+        match config.column_filter.as_ref() {
+            Some(filter) => {
+                let matching = reader.matching_row_ids(filter)?;
+                if matching.is_empty() {
+                    return Ok(outcome);
+                }
+                Some(matching)
+            }
+            None => None,
+        };
+
+    // Parquet read required for: flat scan fallback, exact reranking, score_fn, hybrid,
+    // or when equality delete filter must check column values per-row.
+    let need_parquet = file_entry.index_status == IndexStatus::Indexing
+        || !reader.is_ailake_file()
+        || config.rerank_factor.is_some()
+        || config.score_fn.is_some()
+        || use_hybrid
+        || !eq_del_filter.is_empty();
+
+    if file_entry.index_status == IndexStatus::Indexing || !reader.is_ailake_file() {
+        match file_entry.index_status {
+            IndexStatus::Indexing => {
+                outcome.flat_scan = Some(FlatScanKind::Deferred);
+                debug!(
+                    "ailake: flat scan fallback for {} — index build in progress \
+                     (deferred write, expected to resolve once background job completes)",
+                    file_entry.path
+                );
+            }
+            IndexStatus::Failed => {
+                // An internal indexing failure, not a foreign write — the file still
+                // has a real (foreign-write-style) centroid_b64 from make_data_file_entry
+                // *_indexing, since only index_status/index_error get patched on failure
+                // (see writer.rs::patch_index_failed). Attributing this to an external
+                // engine would send on-call looking for a Spark job that never ran.
+                outcome.flat_scan = Some(FlatScanKind::Unexpected);
+                warn!(
+                    "ailake: flat scan fallback for {} — background index build failed \
+                     permanently ({}); serving via flat scan until the next compaction \
+                     rebuilds the index",
+                    file_entry.path,
+                    file_entry
+                        .index_error
+                        .as_deref()
+                        .unwrap_or("no error recorded")
+                );
+            }
+            IndexStatus::Ready => {
+                // Ready but no loadable index/footer: either a genuine foreign write
+                // (no centroid_b64 — see CompactionPlanner::plan's detection) or a rare
+                // internally-inconsistent state (Ready without ever getting an index).
+                outcome.flat_scan = Some(FlatScanKind::Unexpected);
+                if file_entry.is_foreign() {
+                    warn!(
+                        "ailake: flat scan fallback for {} — file has no AI-Lake index \
+                         and no centroid; likely rewritten by a generic Iceberg engine \
+                         (OPTIMIZE / rewrite_data_files) with no knowledge of AI-Lake. \
+                         Results are still correct (exact O(N) scan), but degraded until \
+                         this file is recompacted by the AI-Lake SDK",
+                        file_entry.path
+                    );
+                } else {
+                    warn!(
+                        "ailake: flat scan fallback for {} — marked Ready but has no \
+                         loadable AI-Lake index despite a recorded centroid; internal \
+                         inconsistency, not an external rewrite. Run compaction to rebuild",
+                        file_entry.path
+                    );
+                }
+            }
+        }
+        let (raw_batch, raw_vectors) = reader.read_parquet()?;
+        // Phase G: inject columns added via schema evolution with initial_default values.
+        let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
+        for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
+            // Skip rows marked as deleted by a V3 Deletion Vector.
+            if dv_bitmap
+                .as_ref()
+                .is_some_and(|bm| bm.contains(row_id.as_u64() as u32))
+            {
+                continue;
+            }
+            // Phase H: skip rows matched by an equality delete predicate.
+            if eq_del_filter.should_delete_row(&batch, row_id.as_u64() as usize) {
+                continue;
+            }
+            // Predicate pushdown: row survived the file-level check above,
+            // but only rows in the matching set itself pass the filter.
+            if matching_row_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(&row_id.as_u64()))
+            {
+                continue;
+            }
+            if use_hybrid {
+                let text = extract_text_for_row(
+                    &batch,
+                    row_id.as_u64() as usize,
+                    config.hybrid.as_ref().unwrap(),
+                );
+                outcome
+                    .candidates
+                    .push((row_id, distance, file_entry.path.clone(), text));
+            } else {
+                let final_score = apply_score_fn(&config.score_fn, distance, row_id, &batch);
+                outcome.results.push(SearchResult {
+                    row_id,
+                    distance: final_score,
+                    file_path: file_entry.path.clone(),
+                });
+            }
+        }
+        return Ok(outcome);
+    }
+
+    let index = reader.load_any_index_for_column(vector_column)?;
+    let local_results = index.search(query, candidate_k, config.ef_search);
+
+    let parquet_data = if need_parquet {
+        let (raw_batch, raw_vecs) = reader.read_parquet()?;
+        // Phase G: fill missing columns for old files before score_fn / hybrid BM25.
+        let filled = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
+        Some((filled, raw_vecs))
+    } else {
+        None
+    };
+
+    for (row_id, approx_dist) in local_results {
+        // Skip rows marked as deleted by a V3 Deletion Vector.
+        if dv_bitmap
+            .as_ref()
+            .is_some_and(|bm| bm.contains(row_id.as_u64() as u32))
+        {
+            continue;
+        }
+        let idx = row_id.as_u64() as usize;
+        // Phase H: skip rows matched by an equality delete predicate.
+        // parquet_data is always loaded when eq_del_filter is non-empty (see need_parquet).
+        if let Some((ref batch, _)) = parquet_data {
+            if eq_del_filter.should_delete_row(batch, idx) {
+                continue;
+            }
+        }
+        // Predicate pushdown: row survived the file-level check above,
+        // but only rows in the matching set itself pass the filter.
+        if matching_row_ids
+            .as_ref()
+            .is_some_and(|ids| !ids.contains(&row_id.as_u64()))
+        {
+            continue;
+        }
+
+        let distance = if config.rerank_factor.is_some() {
+            match parquet_data.as_ref().and_then(|(_, vecs)| vecs.get(idx)) {
+                Some(v) => exact_distance(metric, query, v),
+                None => {
+                    error!(
+                        "ailake: invariant violated — row_id {} out of bounds \
+                         (file={}); Parquet and HNSW node count out of sync; \
+                         run compaction to rebuild",
+                        idx, file_entry.path
+                    );
+                    f32::INFINITY
+                }
+            }
+        } else {
+            approx_dist
+        };
+
+        if use_hybrid {
+            let text = parquet_data.as_ref().map_or(String::new(), |(batch, _)| {
+                extract_text_for_row(batch, idx, config.hybrid.as_ref().unwrap())
+            });
+            outcome
+                .candidates
+                .push((row_id, distance, file_entry.path.clone(), text));
+        } else {
+            let final_score = if let Some((ref batch, _)) = parquet_data {
+                apply_score_fn(&config.score_fn, distance, row_id, batch)
+            } else {
+                distance
+            };
+            outcome.results.push(SearchResult {
+                row_id,
+                distance: final_score,
+                file_path: file_entry.path.clone(),
+            });
+        }
+    }
+
+    Ok(outcome)
 }
 
 /// Extract concatenated text from specified columns for a single row.
@@ -743,6 +880,7 @@ pub async fn search_multimodal(
             score_fn: None,
             partition_filter: config.partition_filter.clone(),
             hybrid: None,
+            column_filter: config.column_filter.clone(),
         };
         let results = search(
             table,
@@ -1561,6 +1699,197 @@ mod tests {
         writer.commit().await.unwrap();
     }
 
+    /// Same shape as `write_demo_table`, plus a `category` column ("even"/"odd"
+    /// by row id) — lets predicate-pushdown tests assert against a real column
+    /// while still using the same unit-basis-vector embeddings (row `i`'s
+    /// nearest neighbor for query `i` is unambiguous).
+    async fn write_demo_table_with_category(dir: &TempDir, dim: usize, rows: usize) {
+        use arrow_array::StringArray;
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog = Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("category", DataType::Utf8, false),
+        ]));
+        let ids: Vec<i32> = (0..rows as i32).collect();
+        let categories: Vec<&str> = (0..rows)
+            .map(|i| if i % 2 == 0 { "even" } else { "odd" })
+            .collect();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(ids)),
+                Arc::new(StringArray::from(categories)),
+            ],
+        )
+        .unwrap();
+
+        let embeddings: Vec<Vec<f32>> = (0..rows)
+            .map(|i| {
+                let mut v = vec![0.0f32; dim];
+                v[i % dim] = 1.0;
+                v
+            })
+            .collect();
+
+        let mut writer =
+            crate::TableWriter::create_or_open(catalog, store, make_policy(dim as u32), table, 2)
+                .await
+                .unwrap();
+        writer.write_batch(&batch, &embeddings).await.unwrap();
+        writer.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn column_filter_preserves_row_identity_on_indexed_path() {
+        // The critical correctness property: row_ids returned under a
+        // column_filter must still be the TRUE file-relative row ids (usable
+        // to fetch the right row), not positions into some internally
+        // compacted/filtered batch. Every "even" row's embedding is a unit
+        // basis vector at its own dimension, so searching with that exact
+        // query and asserting the returned row_id matches would fail loudly
+        // if row identity got shifted by the pushdown.
+        let dir = TempDir::new().unwrap();
+        let dim = 8usize;
+        write_demo_table_with_category(&dir, dim, 8).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        // Query matches row 4 exactly ("even" — 4 % 2 == 0).
+        let mut query = vec![0.0f32; dim];
+        query[4] = 1.0;
+
+        let config = SearchConfig {
+            top_k: 1,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
+            hybrid: None,
+            column_filter: Some(ailake_core::ColumnFilter::eq(
+                "category",
+                ailake_core::FilterValue::Str("even".to_string()),
+            )),
+        };
+
+        let results = search(
+            &table,
+            &query,
+            config,
+            "embedding",
+            dim as u32,
+            catalog,
+            store,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].row_id.as_u64(),
+            4,
+            "row_id must be the true file-relative position, not a filtered-batch index"
+        );
+    }
+
+    #[tokio::test]
+    async fn column_filter_excludes_non_matching_rows() {
+        let dir = TempDir::new().unwrap();
+        let dim = 8usize;
+        write_demo_table_with_category(&dir, dim, 8).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        // Query matches row 3 exactly ("odd"); filtering for "even" must exclude it.
+        let mut query = vec![0.0f32; dim];
+        query[3] = 1.0;
+
+        let config = SearchConfig {
+            top_k: 8,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
+            hybrid: None,
+            column_filter: Some(ailake_core::ColumnFilter::eq(
+                "category",
+                ailake_core::FilterValue::Str("even".to_string()),
+            )),
+        };
+
+        let results = search(
+            &table,
+            &query,
+            config,
+            "embedding",
+            dim as u32,
+            catalog,
+            store,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 4, "only the 4 even rows should survive");
+        for r in &results {
+            assert_eq!(
+                r.row_id.as_u64() % 2,
+                0,
+                "row {} is not even",
+                r.row_id.as_u64()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn column_filter_no_match_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let dim = 8usize;
+        write_demo_table_with_category(&dir, dim, 8).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        let query = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let config = SearchConfig {
+            top_k: 8,
+            ef_search: 50,
+            pruning_threshold: f32::INFINITY,
+            rerank_factor: None,
+            score_fn: None,
+            partition_filter: None,
+            hybrid: None,
+            column_filter: Some(ailake_core::ColumnFilter::eq(
+                "category",
+                ailake_core::FilterValue::Str("nonexistent".to_string()),
+            )),
+        };
+
+        let results = search(
+            &table,
+            &query,
+            config,
+            "embedding",
+            dim as u32,
+            catalog,
+            store,
+        )
+        .await
+        .unwrap();
+        assert!(results.is_empty());
+    }
+
     #[tokio::test]
     async fn rerank_returns_correct_top_k_count() {
         let dir = TempDir::new().unwrap();
@@ -1581,6 +1910,7 @@ mod tests {
             score_fn: None,
             partition_filter: None,
             hybrid: None,
+            column_filter: None,
         };
 
         let results = search(
@@ -1619,6 +1949,7 @@ mod tests {
             score_fn: None,
             partition_filter: None,
             hybrid: None,
+            column_filter: None,
         };
 
         let results = search(
@@ -1666,6 +1997,7 @@ mod tests {
             score_fn: None,
             partition_filter: None,
             hybrid: None,
+            column_filter: None,
         };
         let cfg_rerank = SearchConfig {
             top_k: 2,
@@ -1675,6 +2007,7 @@ mod tests {
             score_fn: None,
             partition_filter: None,
             hybrid: None,
+            column_filter: None,
         };
 
         let plain = search(
@@ -1743,6 +2076,7 @@ mod tests {
             score_fn: None,
             partition_filter: None,
             hybrid: None,
+            column_filter: None,
         };
 
         let results =
@@ -1858,6 +2192,7 @@ mod tests {
             score_fn: None,
             partition_filter: None,
             hybrid: None,
+            column_filter: None,
         };
 
         let results =
@@ -1916,6 +2251,7 @@ mod tests {
             score_fn: None,
             partition_filter: None,
             hybrid: None,
+            column_filter: None,
         };
         let results = search(
             &table,
@@ -1982,6 +2318,7 @@ mod tests {
             score_fn: None,
             partition_filter: None,
             hybrid: None,
+            column_filter: None,
         };
         let results = search(
             &table,

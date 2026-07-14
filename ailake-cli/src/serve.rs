@@ -189,6 +189,7 @@ async fn handle_search(
         score_fn: None,
         partition_filter: None,
         hybrid: None,
+        column_filter: None,
     };
 
     let results = ailake_query::search(
