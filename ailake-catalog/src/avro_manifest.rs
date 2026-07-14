@@ -172,6 +172,69 @@ fn encode_partition_value(field: &PartitionField, value: Option<&str>, buf: &mut
 ///
 /// `partition_spec`: when `Some`, encodes partition values in the native Avro
 /// `data_file.partition` record field so Spark/Trino can do partition pruning.
+/// Encode one Iceberg `map<int, long>` manifest field (`column_sizes`/`value_counts`/
+/// `null_value_counts`) as `["null", array<record{key:int, value:long}>]` — Avro has
+/// no native non-string-keyed map type, so Iceberg's manifest schema (see
+/// `MANIFEST_ENTRY_SCHEMA_STR`) encodes `map<int,V>` as an array of 2-field records;
+/// this must match that shape exactly, mirroring `equality_ids`'s existing
+/// union+array+block-count+terminator pattern one level deeper (record instead of
+/// bare int per element). Emits `null` when `stats` is `None` or has no entries.
+fn encode_int_long_map(
+    stats: &Option<std::collections::BTreeMap<i32, crate::column_stats::FieldStats>>,
+    get_value: impl Fn(&crate::column_stats::FieldStats) -> Option<i64>,
+    rec: &mut Vec<u8>,
+) {
+    use crate::avro_raw::{encode_int, encode_long, encode_union_null};
+    let entries: Vec<(i32, i64)> = stats
+        .iter()
+        .flatten()
+        .filter_map(|(id, s)| get_value(s).map(|v| (*id, v)))
+        .collect();
+    if entries.is_empty() {
+        encode_union_null(rec);
+        return;
+    }
+    encode_long(1, rec); // union: non-null array
+    encode_long(entries.len() as i64, rec); // block count
+    for (id, v) in entries {
+        encode_int(id, rec); // key
+        encode_long(v, rec); // value
+    }
+    encode_long(0, rec); // array end marker
+}
+
+/// Same as `encode_int_long_map` but for `lower_bounds`/`upper_bounds` (`map<int,
+/// bytes>`) — `get_bound` returns a base64 string (as stored in `FieldStats`), decoded
+/// here; malformed base64 is skipped rather than failing the whole manifest write.
+fn encode_int_bytes_map(
+    stats: &Option<std::collections::BTreeMap<i32, crate::column_stats::FieldStats>>,
+    get_bound: impl Fn(&crate::column_stats::FieldStats) -> Option<&str>,
+    rec: &mut Vec<u8>,
+) {
+    use crate::avro_raw::{encode_bytes_field, encode_int, encode_long, encode_union_null};
+    use base64::Engine;
+    let entries: Vec<(i32, Vec<u8>)> = stats
+        .iter()
+        .flatten()
+        .filter_map(|(id, s)| {
+            let b64 = get_bound(s)?;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+            Some((*id, bytes))
+        })
+        .collect();
+    if entries.is_empty() {
+        encode_union_null(rec);
+        return;
+    }
+    encode_long(1, rec); // union: non-null array
+    encode_long(entries.len() as i64, rec); // block count
+    for (id, bytes) in entries {
+        encode_int(id, rec); // key
+        encode_bytes_field(&bytes, rec); // value
+    }
+    encode_long(0, rec); // array end marker
+}
+
 pub fn write_manifest_file(
     files: &[DataFileEntry],
     snapshot_id: SnapshotId,
@@ -188,6 +251,12 @@ pub fn write_manifest_file(
 
     let mut records: Vec<Vec<u8>> = Vec::with_capacity(files.len());
     for f in files {
+        // Decoded once per file; feeds the 5 stats fields below (`nan_value_counts`
+        // stays null — Parquet doesn't track NaN counts natively, see column_stats.rs).
+        let stats: Option<std::collections::BTreeMap<i32, crate::column_stats::FieldStats>> = f
+            .column_stats
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
         let mut rec = Vec::new();
         encode_int(1, &mut rec); // status=ADDED
         encode_union_long(1, snapshot_id, &mut rec); // snapshot_id
@@ -213,12 +282,12 @@ pub fn write_manifest_file(
         }
         encode_long(f.record_count as i64, &mut rec); // record_count
         encode_long(f.file_size_bytes as i64, &mut rec); // file_size_in_bytes
-        encode_union_null(&mut rec); // column_sizes
-        encode_union_null(&mut rec); // value_counts
-        encode_union_null(&mut rec); // null_value_counts
-        encode_union_null(&mut rec); // nan_value_counts
-        encode_union_null(&mut rec); // lower_bounds
-        encode_union_null(&mut rec); // upper_bounds
+        encode_int_long_map(&stats, |s| Some(s.column_size), &mut rec); // column_sizes
+        encode_int_long_map(&stats, |s| Some(s.value_count), &mut rec); // value_counts
+        encode_int_long_map(&stats, |s| Some(s.null_count), &mut rec); // null_value_counts
+        encode_union_null(&mut rec); // nan_value_counts — Parquet stats don't track NaN counts
+        encode_int_bytes_map(&stats, |s| s.lower_bound_b64.as_deref(), &mut rec); // lower_bounds
+        encode_int_bytes_map(&stats, |s| s.upper_bound_b64.as_deref(), &mut rec); // upper_bounds
         let ext = AilakeEntryExt {
             centroid_b64: f.centroid_b64.clone(),
             radius: f.radius,
@@ -476,6 +545,10 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                             .or(native_dv),
                         first_row_id: native_first_row_id
                             .or_else(|| ext.as_ref().and_then(|e| e.first_row_id)),
+                        // Write-only field (see `DataFileEntry::column_stats` doc):
+                        // encoded as real native Avro fields by `write_manifest_file`,
+                        // not read back — nothing downstream consumes it post-read.
+                        column_stats: None,
                     });
                 }
             }
@@ -1098,6 +1171,7 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -1129,6 +1203,7 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -1160,6 +1235,7 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: Some(5000),
+            column_stats: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -1188,12 +1264,141 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
         let bytes = write_manifest_file(&[file], 88, 1, schema_json, partition_spec, 2, None);
         let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
         assert_eq!(entries[0].first_row_id, None);
+    }
+
+    /// Verifies the hand-written `encode_int_long_map`/`encode_int_bytes_map` binary
+    /// matches `MANIFEST_ENTRY_SCHEMA_STR`'s declared `array<record{key,value}>` shape
+    /// for `map<int,V>` exactly — bypasses `read_manifest_file` (which never decodes
+    /// these fields back into `DataFileEntry`, see its `column_stats` doc) and instead
+    /// uses `apache_avro::Reader`'s real schema-driven decoder directly, the same
+    /// library Spark/Trino/PyIceberg use to read this file.
+    #[test]
+    fn column_stats_roundtrip_via_real_avro_reader() {
+        use crate::column_stats::FieldStats;
+        use base64::Engine;
+        use std::collections::BTreeMap;
+
+        let mut stats: BTreeMap<i32, FieldStats> = BTreeMap::new();
+        stats.insert(
+            1,
+            FieldStats {
+                value_count: 10,
+                null_count: 2,
+                column_size: 512,
+                lower_bound_b64: Some(
+                    base64::engine::general_purpose::STANDARD.encode(5i32.to_le_bytes()),
+                ),
+                upper_bound_b64: Some(
+                    base64::engine::general_purpose::STANDARD.encode(50i32.to_le_bytes()),
+                ),
+            },
+        );
+
+        let file = DataFileEntry {
+            path: "data/part-9.parquet".to_string(),
+            record_count: 10,
+            file_size_bytes: 4096,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: None,
+            vector_dim: None,
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            index_error: None,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+            column_stats: Some(serde_json::to_string(&stats).unwrap()),
+        };
+        let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
+        let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
+        let bytes = write_manifest_file(&[file], 99, 1, schema_json, partition_spec, 2, None);
+
+        let reader = apache_avro::Reader::new(bytes.as_ref()).expect("valid avro container");
+        let value = reader
+            .into_iter()
+            .next()
+            .unwrap()
+            .expect("decodable record");
+        let Value::Record(fields) = value else {
+            panic!("expected top-level record")
+        };
+        let data_file = fields
+            .iter()
+            .find(|(k, _)| k == "data_file")
+            .map(|(_, v)| v)
+            .expect("data_file field");
+        let Value::Record(df_fields) = data_file else {
+            panic!("expected data_file record")
+        };
+        let get = |name: &str| {
+            df_fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v)
+                .unwrap_or_else(|| panic!("field {name} missing"))
+        };
+
+        // Every populated map field decodes as union(non-null) -> array -> one
+        // {key,value} record whose key matches the Iceberg field id (1, from the JSON
+        // map's key) and whose value round-trips exactly.
+        let assert_long_map_entry = |field: &str, expected: i64| match get(field) {
+            Value::Union(_, inner) => match inner.as_ref() {
+                Value::Array(items) => {
+                    assert_eq!(items.len(), 1, "{field}: expected exactly one entry");
+                    let Value::Record(kv) = &items[0] else {
+                        panic!("{field}: expected record item")
+                    };
+                    assert_eq!(kv[0], ("key".to_string(), Value::Int(1)));
+                    assert_eq!(kv[1], ("value".to_string(), Value::Long(expected)));
+                }
+                other => panic!("{field}: expected array union payload, got {other:?}"),
+            },
+            other => panic!("{field}: expected non-null union, got {other:?}"),
+        };
+        assert_long_map_entry("value_counts", 10);
+        assert_long_map_entry("null_value_counts", 2);
+        assert_long_map_entry("column_sizes", 512);
+
+        let assert_bytes_map_entry = |field: &str, expected_i32: i32| match get(field) {
+            Value::Union(_, inner) => match inner.as_ref() {
+                Value::Array(items) => {
+                    assert_eq!(items.len(), 1, "{field}: expected exactly one entry");
+                    let Value::Record(kv) = &items[0] else {
+                        panic!("{field}: expected record item")
+                    };
+                    assert_eq!(kv[0], ("key".to_string(), Value::Int(1)));
+                    let Value::Bytes(b) = &kv[1].1 else {
+                        panic!("{field}: expected bytes value")
+                    };
+                    assert_eq!(
+                        i32::from_le_bytes(b.as_slice().try_into().unwrap()),
+                        expected_i32
+                    );
+                }
+                other => panic!("{field}: expected array union payload, got {other:?}"),
+            },
+            other => panic!("{field}: expected non-null union, got {other:?}"),
+        };
+        assert_bytes_map_entry("lower_bounds", 5);
+        assert_bytes_map_entry("upper_bounds", 50);
+
+        // nan_value_counts is deliberately always null (see column_stats.rs doc).
+        match get("nan_value_counts") {
+            Value::Union(_, inner) => assert_eq!(inner.as_ref(), &Value::Null),
+            other => panic!("expected union, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1261,6 +1466,7 @@ mod tests {
             partition_value: Some("agent-abc-123".to_string()),
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[{"id":1,"name":"agent_id","required":false,"type":"string"}]}"#;
         let partition_spec_json = r#"[{"spec-id":0,"fields":[]},{"spec-id":1,"fields":[{"name":"agent_id","transform":"identity","source-id":1,"field-id":1000}]}]"#;
@@ -1310,6 +1516,7 @@ mod tests {
             partition_value: Some("7".to_string()),
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[{"id":1,"name":"shard_id","required":false,"type":"int"}]}"#;
         let partition_spec_json = r#"[{"spec-id":1,"fields":[{"name":"shard_id","transform":"identity","source-id":1,"field-id":1000}]}]"#;
@@ -1368,6 +1575,7 @@ mod tests {
             partition_value: Some(compound.to_string()),
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[{"id":1,"name":"agent_id","required":false,"type":"string"},{"id":2,"name":"ts","required":false,"type":"string"}]}"#;
         let partition_spec_json = r#"[{"spec-id":0,"fields":[]},{"spec-id":1,"fields":[{"name":"agent_id","transform":"identity","source-id":1,"field-id":1000},{"name":"ts","transform":"truncate[4]","source-id":2,"field-id":1001}]}]"#;
@@ -1434,6 +1642,7 @@ mod tests {
             partition_value: partition_value.map(String::from),
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         }
     }
 
@@ -1552,6 +1761,7 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;

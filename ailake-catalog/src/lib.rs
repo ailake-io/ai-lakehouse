@@ -8,6 +8,7 @@
 
 pub mod avro_manifest;
 pub mod avro_raw;
+pub mod column_stats;
 #[cfg(feature = "rest-catalog")]
 pub mod databricks;
 pub mod hadoop;
@@ -36,6 +37,7 @@ pub use avro_manifest::{
     build_manifest_entry_schema, read_equality_delete_values, write_equality_delete_avro,
     write_equality_delete_manifest, write_manifest_list_multi_typed, write_partition_stats_parquet,
 };
+pub use column_stats::{extract_column_stats, FieldStats};
 #[cfg(feature = "rest-catalog")]
 pub use databricks::{databricks_aws, databricks_azure, databricks_gcp, DatabricksAuth};
 pub use hadoop::HadoopCatalog;

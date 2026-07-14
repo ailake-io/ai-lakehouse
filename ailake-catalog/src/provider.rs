@@ -112,6 +112,16 @@ pub struct DataFileEntry {
     /// None for V2 tables (row lineage requires format-version=3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_row_id: Option<i64>,
+    /// JSON-encoded `BTreeMap<i32, FieldStats>` (`column_stats::extract_column_stats`),
+    /// computed once from this file's own Parquet footer at write/compaction time.
+    /// `write_manifest_file` decodes this to emit real `value_counts`/
+    /// `null_value_counts`/`column_sizes`/`lower_bounds`/`upper_bounds` Avro fields
+    /// instead of `null`, enabling row-group pruning for Spark/Trino/DuckDB reading
+    /// the table as plain Iceberg. `None` for files predating this feature, or where
+    /// extraction failed — always spec-safe since these fields are optional at every
+    /// format version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_stats: Option<String>,
 }
 
 impl DataFileEntry {
@@ -537,6 +547,7 @@ pub fn make_multi_column_data_file_entry(
         partition_value: None,
         deletion_vector: None,
         first_row_id: None,
+        column_stats: None,
     }
 }
 
@@ -577,6 +588,7 @@ pub fn make_data_file_entry_indexing(
         partition_value: None,
         deletion_vector: None,
         first_row_id: None,
+        column_stats: None,
     }
 }
 
@@ -647,6 +659,7 @@ mod batch_id_tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         }
     }
 

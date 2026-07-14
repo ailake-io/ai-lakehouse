@@ -321,6 +321,7 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         }
     }
 

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use ailake_catalog::{
-    encode_centroid_b64, make_data_file_entry, make_data_file_entry_indexing,
+    encode_centroid_b64, extract_column_stats, make_data_file_entry, make_data_file_entry_indexing,
     make_multi_column_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,
     ExtraVectorIndex, IcebergSchemaUpdate, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation,
     TableIdent, TableProperties, VectorIndexInfo,
@@ -76,6 +76,15 @@ fn apply_partition_transforms(policy: &VectorStoragePolicy, raw: Option<&str>) -
         })
         .collect();
     Some(transformed.join("\x1f"))
+}
+
+/// Extract per-column Iceberg stats from `file_bytes`' own Parquet footer, excluding
+/// `skip_columns` (the vector column(s) — see `ailake_catalog::column_stats` doc),
+/// and JSON-encode for `DataFileEntry::column_stats`. `None` on extraction failure —
+/// always safe, since `write_manifest_file` falls back to the pre-existing null
+/// encoding for these fields (optional at every Iceberg format version).
+fn column_stats_json(file_bytes: &Bytes, skip_columns: &[&str]) -> Option<String> {
+    extract_column_stats(file_bytes, skip_columns).and_then(|m| serde_json::to_string(&m).ok())
 }
 
 /// One vector column for a multi-column write batch.
@@ -202,6 +211,7 @@ impl TableWriter {
         let file_writer = AilakeFileWriter::new(self.policy.clone());
         let parquet_bytes = file_writer.write_parquet_only(batch, embeddings)?;
         let file_size = parquet_bytes.len() as u64;
+        let column_stats = column_stats_json(&parquet_bytes, &[self.policy.column_name.as_str()]);
         self.store.put(&file_path, parquet_bytes).await?;
 
         // Centroid needed immediately for geometric pruning during the build window.
@@ -221,6 +231,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
 
         // Spawn background HNSW build (fire-and-forget; errors are logged).
@@ -274,6 +285,7 @@ impl TableWriter {
         let file_writer = AilakeFileWriter::new(self.policy.clone());
         let parquet_bytes = file_writer.write_parquet_only(batch, embeddings)?;
         let file_size = parquet_bytes.len() as u64;
+        let column_stats = column_stats_json(&parquet_bytes, &[self.policy.column_name.as_str()]);
         self.store.put(&file_path, parquet_bytes).await?;
 
         let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
@@ -292,6 +304,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
 
         let store = self.store.clone();
@@ -442,6 +455,7 @@ impl TableWriter {
         }
         let file_bytes: Bytes = file_writer.write(batch, embeddings)?;
         let file_size = file_bytes.len() as u64;
+        let column_stats = column_stats_json(&file_bytes, &[self.policy.column_name.as_str()]);
 
         // Store the file
         self.store.put(&file_path, file_bytes.clone()).await?;
@@ -480,6 +494,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
 
         // Update BM25 IDF stats + build Bloom filter (Phase F).
@@ -580,6 +595,7 @@ impl TableWriter {
             .with_shared_ivf_codebook(codebook);
         let file_bytes: Bytes = file_writer.write(batch, embeddings)?;
         let file_size = file_bytes.len() as u64;
+        let column_stats = column_stats_json(&file_bytes, &[self.policy.column_name.as_str()]);
 
         self.store.put(&file_path, file_bytes.clone()).await?;
 
@@ -614,6 +630,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
         Ok(())
     }
@@ -660,6 +677,11 @@ impl TableWriter {
         }
         let file_bytes: Bytes = file_writer.write_multi(batch, &col_batches)?;
         let file_size = file_bytes.len() as u64;
+        let vector_col_names: Vec<&str> = columns
+            .iter()
+            .map(|c| c.policy.column_name.as_str())
+            .collect();
+        let column_stats = column_stats_json(&file_bytes, &vector_col_names);
 
         self.store.put(&file_path, file_bytes.clone()).await?;
 
@@ -727,6 +749,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
         Ok(())
     }
@@ -767,6 +790,13 @@ impl TableWriter {
         let file_writer = AilakeFileWriter::new(primary_policy.clone());
         let parquet_bytes = file_writer.write_parquet_only(batch, columns[0].embeddings)?;
         let file_size = parquet_bytes.len() as u64;
+        // Only the primary vector column is physically present yet — extra columns'
+        // row groups don't exist until the background patch below rewrites the file
+        // via write_multi. Non-vector-column field ids are stable across that rewrite
+        // (extra columns are only ever appended after them), so these stats stay valid
+        // and don't need recomputing once the extra columns land.
+        let column_stats =
+            column_stats_json(&parquet_bytes, &[primary_policy.column_name.as_str()]);
         self.store.put(&file_path, parquet_bytes).await?;
 
         // Primary centroid enables geometric pruning during the build window.
@@ -803,6 +833,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
 
         // Clone all column data for the background task.

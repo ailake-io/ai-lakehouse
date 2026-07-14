@@ -446,6 +446,7 @@ fn query_active_files(
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             });
         }
     }
@@ -497,6 +498,9 @@ fn row_to_entry(row: &duckdb::Row) -> duckdb::Result<DataFileEntry> {
         partition_value,
         deletion_vector,
         first_row_id,
+        // Write-only field (see `DataFileEntry::column_stats` doc) — not persisted
+        // to the sidecar table, so nothing to read back here.
+        column_stats: None,
     })
 }
 
@@ -1086,6 +1090,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             }
         }
 

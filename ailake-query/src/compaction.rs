@@ -315,6 +315,9 @@ impl CompactionExecutor {
         };
         let file_bytes = writer.write(&merged_batch, &all_embeddings)?;
         let file_size = file_bytes.len() as u64;
+        let column_stats =
+            ailake_catalog::extract_column_stats(&file_bytes, &[self.policy.column_name.as_str()])
+                .and_then(|m| serde_json::to_string(&m).ok());
         self.store.put(output_path, file_bytes.clone()).await?;
 
         // Compute centroid and HNSW offsets for catalog entry
@@ -350,6 +353,7 @@ impl CompactionExecutor {
         // as already-committed after this merge (see `DataFileEntry::merge_batch_ids`
         // and `write_batch_idempotent`).
         entry.batch_id = DataFileEntry::merge_batch_ids(files);
+        entry.column_stats = column_stats;
         Ok(entry)
     }
 
@@ -578,6 +582,9 @@ impl CompactionExecutor {
         };
         let file_bytes = writer.write_with_prebuilt_hnsw(&merged_batch, &all_embeddings, &hnsw)?;
         let file_size = file_bytes.len() as u64;
+        let column_stats =
+            ailake_catalog::extract_column_stats(&file_bytes, &[self.policy.column_name.as_str()])
+                .and_then(|m| serde_json::to_string(&m).ok());
         self.store.put(output_path, file_bytes.clone()).await?;
 
         let centroid = compute_centroid_and_radius(&all_embeddings, self.policy.metric);
@@ -608,6 +615,7 @@ impl CompactionExecutor {
         );
         entry.first_row_id = source_first_row_id;
         entry.batch_id = DataFileEntry::merge_batch_ids(files);
+        entry.column_stats = column_stats;
 
         info!(
             "ailake: compact_incremental — merged {} files into {} \
@@ -658,6 +666,11 @@ impl CompactionExecutor {
         let file_writer = AilakeFileWriter::new(self.policy.clone());
         let parquet_bytes = file_writer.write_parquet_only(&merged_batch, &all_embeddings)?;
         let file_size = parquet_bytes.len() as u64;
+        let column_stats = ailake_catalog::extract_column_stats(
+            &parquet_bytes,
+            &[self.policy.column_name.as_str()],
+        )
+        .and_then(|m| serde_json::to_string(&m).ok());
         self.store.put(output_path, parquet_bytes).await?;
 
         // Centroid available for geometric pruning during the build window.
@@ -673,6 +686,7 @@ impl CompactionExecutor {
         );
         entry.first_row_id = source_first_row_id;
         entry.batch_id = DataFileEntry::merge_batch_ids(files);
+        entry.column_stats = column_stats;
 
         // Spawn background index build; errors are logged, not propagated.
         let store = self.store.clone();
@@ -929,6 +943,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             })
             .collect();
         assert!(planner.plan(&files).is_empty());
@@ -960,6 +975,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
             DataFileEntry {
                 path: "large.parquet".into(),
@@ -979,6 +995,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
             DataFileEntry {
                 path: "also-small.parquet".into(),
@@ -998,6 +1015,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
         ];
         let selected = planner.plan(&files);
@@ -1033,6 +1051,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             })
             .collect();
         let selected = planner.plan(&files);
@@ -1069,6 +1088,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
             DataFileEntry {
                 path: "a.parquet".into(),
@@ -1088,6 +1108,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
             DataFileEntry {
                 path: "b.parquet".into(),
@@ -1107,6 +1128,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
         ];
         let selected = planner.plan(&files);
@@ -1134,6 +1156,7 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         }
     }
 
@@ -1280,6 +1303,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -1299,6 +1323,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
         ];
 
@@ -1408,6 +1433,7 @@ mod tests {
                 cardinality: 1,
             }),
             first_row_id: None,
+            column_stats: None,
         };
         let entry_b = DataFileEntry {
             path: "data/b.parquet".into(),
@@ -1427,6 +1453,7 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         };
 
         let executor = CompactionExecutor::new(store.clone(), policy.clone());
@@ -1536,6 +1563,7 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         };
         let entries = vec![
             make_entry(&path_a, bytes_a.len() as u64),
@@ -1649,6 +1677,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
             DataFileEntry {
                 path: "data/small.parquet".into(),
@@ -1668,6 +1697,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
         ];
 
@@ -1797,6 +1827,7 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         };
         let entries = vec![
             make_entry(&path_dom, n_dom, bytes_dom.len() as u64),
@@ -1891,6 +1922,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -1910,6 +1942,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
         ];
 
@@ -2022,6 +2055,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -2041,6 +2075,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
         ];
 
@@ -2146,6 +2181,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             }
         }
         let entries = vec![
@@ -2287,6 +2323,7 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         };
 
         let initial_snap_id = ailake_catalog::new_snapshot_id();
@@ -2461,6 +2498,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
             DataFileEntry {
                 path: "data/foreign.parquet".into(),
@@ -2480,6 +2518,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             },
         ];
 
