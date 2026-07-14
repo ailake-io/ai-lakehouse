@@ -19,7 +19,6 @@ pub fn precision_str(p: VectorPrecision) -> &'static str {
         VectorPrecision::F32 => "f32",
         VectorPrecision::F16 => "f16",
         VectorPrecision::I8 => "i8",
-        VectorPrecision::Binary => "binary",
     }
 }
 
