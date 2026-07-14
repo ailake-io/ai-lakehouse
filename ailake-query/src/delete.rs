@@ -247,6 +247,10 @@ pub async fn delete_where(
         equality_ids: vec![field_id],
         record_count: values.len() as u64,
         file_size_bytes: file_size,
+        inline_values: Some((
+            column_name.to_string(),
+            values.iter().map(|v| v.to_string()).collect(),
+        )),
     };
 
     // Commit Delete snapshot — inherits previous data manifests, appends delete manifest.

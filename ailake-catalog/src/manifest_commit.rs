@@ -229,6 +229,7 @@ pub(crate) async fn build_commit(
             equality_ids: d.equality_ids.clone(),
             record_count: d.record_count,
             file_size_bytes: d.file_size_bytes,
+            inline_values: None,
         })
         .collect();
     if !abs_eq_deletes.is_empty() {

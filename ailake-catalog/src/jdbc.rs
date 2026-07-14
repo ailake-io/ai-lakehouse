@@ -576,6 +576,7 @@ mod tests {
             equality_ids: vec![1],
             record_count: 3,
             file_size_bytes: 128,
+            inline_values: None,
         };
         let snap3 = NewSnapshot {
             snapshot_id: new_snapshot_id(),

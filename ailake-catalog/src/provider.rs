@@ -259,6 +259,14 @@ pub struct EqualityDeleteFile {
     /// Number of predicates (rows) in the delete file.
     pub record_count: u64,
     pub file_size_bytes: u64,
+    /// Write-path-only hint: `(column_name, values)` as passed to `delete_where`,
+    /// before Avro encoding. Never persisted to the Iceberg delete manifest —
+    /// `manifest_commit.rs` rebuilds `EqualityDeleteFile` field-by-field for the
+    /// Avro writer, so this drops out naturally on every backend except
+    /// `DuckLakeCatalog`, which uses it to additionally issue a native
+    /// `DELETE FROM lake.tbl WHERE col IN (...)` when the column is declared.
+    #[serde(default, skip_serializing)]
+    pub inline_values: Option<(String, Vec<String>)>,
 }
 
 /// Snapshot commit request.

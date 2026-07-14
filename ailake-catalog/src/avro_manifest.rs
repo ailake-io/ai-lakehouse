@@ -928,6 +928,7 @@ pub fn read_equality_delete_manifest(
                         equality_ids,
                         record_count,
                         file_size_bytes,
+                        inline_values: None,
                     });
                 }
             }
@@ -1409,6 +1410,7 @@ mod tests {
             equality_ids: vec![5, 9],
             record_count: 3,
             file_size_bytes: 512,
+            inline_values: None,
         };
         let bytes = write_equality_delete_manifest(&[del], 42, 1);
         let entries =
