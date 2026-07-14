@@ -2952,7 +2952,7 @@ mod tests {
         unsafe { ailake_free_string(ptr) };
         assert!(json.contains("null"), "got: {json}");
 
-        let buf = vec![0u8; 4];
+        let buf = [0u8; 4];
         let ptr =
             unsafe { ailake_write_batch_ipc(buf.as_ptr(), buf.len() as i64, std::ptr::null()) };
         assert!(!ptr.is_null());
@@ -2964,7 +2964,7 @@ mod tests {
     #[test]
     fn write_batch_ipc_negative_len_guard() {
         let opts = std::ffi::CString::new(r#"{"warehouse":"/x","table":"t","dim":4}"#).unwrap();
-        let buf = vec![0u8; 4];
+        let buf = [0u8; 4];
         let ptr = unsafe { ailake_write_batch_ipc(buf.as_ptr(), -1, opts.as_ptr()) };
         assert!(!ptr.is_null());
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
