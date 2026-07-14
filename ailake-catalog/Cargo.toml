@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-catalog"
-version = "0.1.3"
+version = "0.1.4"
 edition     = "2021"
 description = "Iceberg Spec v2 catalog backends (Hadoop, REST, Glue, Nessie, JDBC) for AI-Lake"
 license     = "MIT OR Apache-2.0"
@@ -16,8 +16,8 @@ catalog-jdbc     = ["dep:sqlx"]
 catalog-ducklake = ["dep:duckdb"]
 
 [dependencies]
-ailake-core  = { path = "../ailake-core", version = "0.1.3" }
-ailake-store = { path = "../ailake-store", version = "0.1.3" }
+ailake-core  = { path = "../ailake-core", version = "0.1.4" }
+ailake-store = { path = "../ailake-store", version = "0.1.4" }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 tokio        = { workspace = true }
