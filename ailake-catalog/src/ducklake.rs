@@ -446,6 +446,7 @@ fn query_active_files(
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             });
         }
     }
@@ -497,6 +498,9 @@ fn row_to_entry(row: &duckdb::Row) -> duckdb::Result<DataFileEntry> {
         partition_value,
         deletion_vector,
         first_row_id,
+        // Write-only field (see `DataFileEntry::column_stats` doc) — not persisted
+        // to the sidecar table, so nothing to read back here.
+        column_stats: None,
     })
 }
 
@@ -767,6 +771,53 @@ impl CatalogProvider for DuckLakeCatalog {
                 conn.execute_batch(&call_sql)
                     .map_err(|e| cat_err("add_data_files", e))?;
             }
+            // Equality deletes (Delete op): the sidecar (phase 2 below) is always
+            // the enforcement path AI-Lake readers use, but when `delete_where`
+            // handed us the raw (column, values) pair — see
+            // `EqualityDeleteFile::inline_values` — and that column is already
+            // declared on the `lake` table, also issue a real row-DELETE so
+            // DuckLake-native readers (bare `duckdb`, Spark/Trino once a DuckLake
+            // connector exists) observe the same rows as gone, not just AI-Lake's
+            // own scanner. Undeclared columns fall back to sidecar-only masking —
+            // the documented v1 limitation, now the exception rather than the rule.
+            for eq in &snapshot.equality_delete_files {
+                let Some((col, vals)) = &eq.inline_values else {
+                    continue;
+                };
+                if vals.is_empty() {
+                    continue;
+                }
+                let declared: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM duckdb_columns() WHERE database_name = ? \
+                         AND schema_name = ? AND table_name = ? AND column_name = ? LIMIT 1",
+                        duckdb::params![alias, table.namespace, table.name, col],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                if !declared {
+                    tracing::warn!(
+                        column = %col,
+                        table = %key,
+                        "DuckLake: equality-delete column not yet declared on the `lake` table — \
+                         skipping native DELETE, AI-Lake sidecar remains sole enforcement path"
+                    );
+                    continue;
+                }
+                // Cast both sides to VARCHAR: `values` arrives as raw strings from
+                // the CLI/binding boundary, and the AI-Lake scanner's own
+                // `EqualityDeleteFilter` (ailake-query/src/equality_delete.rs)
+                // already string-normalizes every column type before comparing —
+                // matching that model here keeps native and AI-Lake masking in
+                // agreement regardless of the column's real DuckLake type.
+                let placeholders = vals.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+                let del_sql = format!(
+                    "DELETE FROM {full_table} WHERE CAST({} AS VARCHAR) IN ({placeholders})",
+                    quote_ident(col)
+                );
+                conn.execute(&del_sql, duckdb::params_from_iter(vals.iter()))
+                    .map_err(|e| cat_err("native equality delete", e))?;
+            }
             Ok(())
         })();
         match lake_result {
@@ -992,6 +1043,7 @@ impl CatalogProvider for DuckLakeCatalog {
                     equality_ids: serde_json::from_str(&ids_json).unwrap_or_default(),
                     record_count: record_count as u64,
                     file_size_bytes: file_size_bytes as u64,
+                    inline_values: None,
                 },
             )
             .collect();
@@ -1086,6 +1138,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             }
         }
 
@@ -1358,6 +1411,95 @@ mod tests {
             assert_eq!(
                 total, 10,
                 "old path must be fully retired — no duplicate rows"
+            );
+        }
+
+        /// `delete_where` hands `commit_snapshot` the raw `(column, values)` pair
+        /// via `EqualityDeleteFile::inline_values`. When that column is already
+        /// DuckLake-declared (`w`, via `setup_rewrite_fixture`'s `evolve_schema`),
+        /// the Delete commit must also issue a native `DELETE`, so a bare
+        /// `SELECT` against `lake.default.docs` agrees with AI-Lake's own masking
+        /// immediately — no more "row-level deletes invisible to native readers".
+        #[tokio::test]
+        async fn equality_delete_declared_column_native_delete() {
+            let dir = TempDir::new().unwrap();
+            let (catalog, table, _file1, snap_id) = setup_rewrite_fixture(&dir, 0).await;
+
+            let (_, total_before) = count_where_w_gt_5(&catalog).await;
+            assert_eq!(total_before, 10, "fixture precondition: 10 rows, w=0.5");
+
+            let eq_del = EqualityDeleteFile {
+                path: "metadata/eq-del-test.avro".to_string(),
+                equality_ids: vec![0],
+                record_count: 1,
+                file_size_bytes: 0,
+                inline_values: Some(("w".to_string(), vec!["0.5".to_string()])),
+            };
+            let snap2 = NewSnapshot {
+                snapshot_id: new_snapshot_id(),
+                parent_snapshot_id: Some(snap_id),
+                files: vec![],
+                operation: SnapshotOperation::Delete,
+                iceberg_schema: None,
+                extra_properties: HashMap::new(),
+                bloom_filters: vec![],
+                equality_delete_files: vec![eq_del],
+            };
+            catalog.commit_snapshot(&table, snap2).await.unwrap();
+
+            let (_, total_after) = count_where_w_gt_5(&catalog).await;
+            assert_eq!(
+                total_after, 0,
+                "declared column: native DuckLake reader must observe the delete immediately"
+            );
+
+            let sidecar = catalog.list_equality_deletes(&table, None).await.unwrap();
+            assert_eq!(
+                sidecar.len(),
+                1,
+                "sidecar stays the source of truth for AI-Lake readers regardless"
+            );
+        }
+
+        /// Mirror of the above with an undeclared column: the documented v1
+        /// fallback — sidecar records the delete for AI-Lake readers, but a
+        /// bare native `SELECT` still returns the "deleted" rows since there's
+        /// no DuckLake column to DELETE against. Must not error or corrupt state.
+        #[tokio::test]
+        async fn equality_delete_undeclared_column_falls_back_to_sidecar() {
+            let dir = TempDir::new().unwrap();
+            let (catalog, table, _file1, snap_id) = setup_rewrite_fixture(&dir, 0).await;
+
+            let eq_del = EqualityDeleteFile {
+                path: "metadata/eq-del-test.avro".to_string(),
+                equality_ids: vec![0],
+                record_count: 1,
+                file_size_bytes: 0,
+                inline_values: Some(("ghost_col".to_string(), vec!["x".to_string()])),
+            };
+            let snap2 = NewSnapshot {
+                snapshot_id: new_snapshot_id(),
+                parent_snapshot_id: Some(snap_id),
+                files: vec![],
+                operation: SnapshotOperation::Delete,
+                iceberg_schema: None,
+                extra_properties: HashMap::new(),
+                bloom_filters: vec![],
+                equality_delete_files: vec![eq_del],
+            };
+            catalog.commit_snapshot(&table, snap2).await.unwrap();
+
+            let (_, total_after) = count_where_w_gt_5(&catalog).await;
+            assert_eq!(
+                total_after, 10,
+                "undeclared column: native rows are untouched, not an error"
+            );
+
+            let sidecar = catalog.list_equality_deletes(&table, None).await.unwrap();
+            assert_eq!(
+                sidecar.len(),
+                1,
+                "sidecar must still record the delete for AI-Lake readers"
             );
         }
     }

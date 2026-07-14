@@ -347,6 +347,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
@@ -380,6 +381,7 @@ mod tests {
             partition_value: None,
             deletion_vector: None,
             first_row_id: None,
+            column_stats: None,
         }
     }
 
@@ -486,6 +488,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None, // assigned by catalog at commit time
+                column_stats: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
@@ -518,6 +521,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
@@ -577,6 +581,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
@@ -628,6 +633,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
@@ -658,6 +664,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None,
+                column_stats: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,
@@ -690,6 +697,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: Some(0), // pre-set by compaction — must be respected
+                column_stats: None,
             }],
             operation: crate::provider::SnapshotOperation::Replace,
             iceberg_schema: None,
@@ -730,6 +738,7 @@ mod tests {
                 partition_value: None,
                 deletion_vector: None,
                 first_row_id: None, // fresh write
+                column_stats: None,
             }],
             operation: crate::provider::SnapshotOperation::Append,
             iceberg_schema: None,

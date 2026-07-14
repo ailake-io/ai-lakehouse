@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use ailake_catalog::{
-    encode_centroid_b64, make_data_file_entry, make_data_file_entry_indexing,
+    encode_centroid_b64, extract_column_stats, make_data_file_entry, make_data_file_entry_indexing,
     make_multi_column_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,
     ExtraVectorIndex, IcebergSchemaUpdate, IndexStatus, NewSnapshot, SnapshotId, SnapshotOperation,
     TableIdent, TableProperties, VectorIndexInfo,
@@ -76,6 +76,15 @@ fn apply_partition_transforms(policy: &VectorStoragePolicy, raw: Option<&str>) -
         })
         .collect();
     Some(transformed.join("\x1f"))
+}
+
+/// Extract per-column Iceberg stats from `file_bytes`' own Parquet footer, excluding
+/// `skip_columns` (the vector column(s) — see `ailake_catalog::column_stats` doc),
+/// and JSON-encode for `DataFileEntry::column_stats`. `None` on extraction failure —
+/// always safe, since `write_manifest_file` falls back to the pre-existing null
+/// encoding for these fields (optional at every Iceberg format version).
+fn column_stats_json(file_bytes: &Bytes, skip_columns: &[&str]) -> Option<String> {
+    extract_column_stats(file_bytes, skip_columns).and_then(|m| serde_json::to_string(&m).ok())
 }
 
 /// One vector column for a multi-column write batch.
@@ -202,6 +211,7 @@ impl TableWriter {
         let file_writer = AilakeFileWriter::new(self.policy.clone());
         let parquet_bytes = file_writer.write_parquet_only(batch, embeddings)?;
         let file_size = parquet_bytes.len() as u64;
+        let column_stats = column_stats_json(&parquet_bytes, &[self.policy.column_name.as_str()]);
         self.store.put(&file_path, parquet_bytes).await?;
 
         // Centroid needed immediately for geometric pruning during the build window.
@@ -221,6 +231,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
 
         // Spawn background HNSW build (fire-and-forget; errors are logged).
@@ -274,6 +285,7 @@ impl TableWriter {
         let file_writer = AilakeFileWriter::new(self.policy.clone());
         let parquet_bytes = file_writer.write_parquet_only(batch, embeddings)?;
         let file_size = parquet_bytes.len() as u64;
+        let column_stats = column_stats_json(&parquet_bytes, &[self.policy.column_name.as_str()]);
         self.store.put(&file_path, parquet_bytes).await?;
 
         let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
@@ -292,6 +304,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
 
         let store = self.store.clone();
@@ -343,10 +356,13 @@ impl TableWriter {
         embeddings: &[Vec<f32>],
         batch_id: &str,
     ) -> AilakeResult<()> {
+        // `batch_ids()` decodes both a plain single key and a compaction-merged
+        // JSON array (see `DataFileEntry::merge_batch_ids`) — a retry must still
+        // no-op after the original file it wrote to has since been compacted away.
         let existing = self.catalog.list_files(&self.table, None).await?;
         if existing
             .iter()
-            .any(|f| f.batch_id.as_deref() == Some(batch_id))
+            .any(|f| f.batch_ids().iter().any(|id| id == batch_id))
         {
             return Ok(());
         }
@@ -439,6 +455,7 @@ impl TableWriter {
         }
         let file_bytes: Bytes = file_writer.write(batch, embeddings)?;
         let file_size = file_bytes.len() as u64;
+        let column_stats = column_stats_json(&file_bytes, &[self.policy.column_name.as_str()]);
 
         // Store the file
         self.store.put(&file_path, file_bytes.clone()).await?;
@@ -477,6 +494,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
 
         // Update BM25 IDF stats + build Bloom filter (Phase F).
@@ -577,6 +595,7 @@ impl TableWriter {
             .with_shared_ivf_codebook(codebook);
         let file_bytes: Bytes = file_writer.write(batch, embeddings)?;
         let file_size = file_bytes.len() as u64;
+        let column_stats = column_stats_json(&file_bytes, &[self.policy.column_name.as_str()]);
 
         self.store.put(&file_path, file_bytes.clone()).await?;
 
@@ -611,6 +630,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
         Ok(())
     }
@@ -657,6 +677,11 @@ impl TableWriter {
         }
         let file_bytes: Bytes = file_writer.write_multi(batch, &col_batches)?;
         let file_size = file_bytes.len() as u64;
+        let vector_col_names: Vec<&str> = columns
+            .iter()
+            .map(|c| c.policy.column_name.as_str())
+            .collect();
+        let column_stats = column_stats_json(&file_bytes, &vector_col_names);
 
         self.store.put(&file_path, file_bytes.clone()).await?;
 
@@ -724,6 +749,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
         Ok(())
     }
@@ -764,6 +790,13 @@ impl TableWriter {
         let file_writer = AilakeFileWriter::new(primary_policy.clone());
         let parquet_bytes = file_writer.write_parquet_only(batch, columns[0].embeddings)?;
         let file_size = parquet_bytes.len() as u64;
+        // Only the primary vector column is physically present yet — extra columns'
+        // row groups don't exist until the background patch below rewrites the file
+        // via write_multi. Non-vector-column field ids are stable across that rewrite
+        // (extra columns are only ever appended after them), so these stats stay valid
+        // and don't need recomputing once the extra columns land.
+        let column_stats =
+            column_stats_json(&parquet_bytes, &[primary_policy.column_name.as_str()]);
         self.store.put(&file_path, parquet_bytes).await?;
 
         // Primary centroid enables geometric pruning during the build window.
@@ -800,6 +833,7 @@ impl TableWriter {
             .map(|m| m.to_property_value());
         entry.partition_value =
             apply_partition_transforms(&self.policy, self.policy.partition_value.as_deref());
+        entry.column_stats = column_stats;
         self.pending_files.push(entry);
 
         // Clone all column data for the background task.
@@ -2110,6 +2144,132 @@ mod tests {
         assert!(
             !session1_paths.contains(new_part),
             "session 2 reused a retired part name: {new_part} (session 1 wrote {session1_paths:?})"
+        );
+    }
+
+    /// Regression test (ADR-018 / CLAUDE.md Fase 5 "Idempotência batch_id sobrevivendo
+    /// a compaction"): a retry of an idempotent write must still no-op after the
+    /// original file it wrote to has been compacted into a merged file. Before
+    /// `DataFileEntry::merge_batch_ids` + this method's `batch_ids()`-based
+    /// membership check, `write_batch_idempotent` compared `batch_id` for exact
+    /// equality against a merged file's `None` and silently re-inserted the row.
+    #[tokio::test]
+    async fn write_batch_idempotent_no_ops_after_source_file_compacted() {
+        use ailake_catalog::{
+            new_snapshot_id, DataFileEntry, HadoopCatalog, NewSnapshot, SnapshotOperation,
+            TableIdent,
+        };
+        use ailake_store::LocalStore;
+        use arrow_schema::{DataType, Field, Schema};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: std::sync::Arc<dyn ailake_store::Store> =
+            std::sync::Arc::new(LocalStore::new(dir.path().to_str().unwrap()));
+        let catalog: std::sync::Arc<dyn CatalogProvider> =
+            std::sync::Arc::new(HadoopCatalog::new(std::sync::Arc::clone(&store), ""));
+        let ident = TableIdent::new("default", "t");
+
+        let schema =
+            std::sync::Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let batch = arrow_array::RecordBatch::try_new(
+            schema,
+            vec![std::sync::Arc::new(arrow_array::StringArray::from(vec![
+                "hello",
+            ]))],
+        )
+        .unwrap();
+        let embeddings = vec![vec![1.0f32, 0.0, 0.0, 0.0]];
+
+        // Two idempotent writes, two distinct keys, two files.
+        let mut w1 = TableWriter::create_or_open(
+            catalog.clone(),
+            store.clone(),
+            policy("embedding", 4),
+            ident.clone(),
+            2,
+        )
+        .await
+        .unwrap();
+        w1.write_batch_idempotent(&batch, &embeddings, "k-a")
+            .await
+            .unwrap();
+        w1.commit().await.unwrap();
+
+        let mut w2 = TableWriter::create_or_open(
+            catalog.clone(),
+            store.clone(),
+            policy("embedding", 4),
+            ident.clone(),
+            2,
+        )
+        .await
+        .unwrap();
+        w2.write_batch_idempotent(&batch, &embeddings, "k-b")
+            .await
+            .unwrap();
+        w2.commit().await.unwrap();
+
+        let sources = catalog.list_files(&ident, None).await.unwrap();
+        assert_eq!(sources.len(), 2);
+
+        // Simulate compaction: merge both into one file, aggregating batch_ids via
+        // the real production helper — same call `compaction.rs` makes.
+        let mut merged = sources[0].clone();
+        merged.path = "data/compacted-test.parquet".to_string();
+        merged.record_count = sources.iter().map(|f| f.record_count).sum();
+        merged.batch_id = DataFileEntry::merge_batch_ids(&sources);
+        store
+            .put(&merged.path, store.get(&sources[0].path).await.unwrap())
+            .await
+            .unwrap();
+        let parent = catalog
+            .load_table(&ident)
+            .await
+            .unwrap()
+            .current_snapshot_id;
+        catalog
+            .commit_snapshot(
+                &ident,
+                NewSnapshot {
+                    snapshot_id: new_snapshot_id(),
+                    parent_snapshot_id: parent,
+                    files: vec![merged],
+                    operation: SnapshotOperation::Replace,
+                    iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
+                    equality_delete_files: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(catalog.list_files(&ident, None).await.unwrap().len(), 1);
+
+        // Retry of either original write, on a fresh writer session, must no-op —
+        // not add a second file back.
+        let mut w3 = TableWriter::create_or_open(
+            catalog.clone(),
+            store.clone(),
+            policy("embedding", 4),
+            ident.clone(),
+            2,
+        )
+        .await
+        .unwrap();
+        w3.write_batch_idempotent(&batch, &embeddings, "k-a")
+            .await
+            .unwrap();
+        assert!(
+            w3.pending_files.is_empty(),
+            "retry of an already-compacted batch_id must not stage a new file"
+        );
+        w3.commit().await.unwrap();
+
+        let final_files = catalog.list_files(&ident, None).await.unwrap();
+        assert_eq!(
+            final_files.len(),
+            1,
+            "retry after compaction must not re-insert — table must still have exactly 1 file"
         );
     }
 }

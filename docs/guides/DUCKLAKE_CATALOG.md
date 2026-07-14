@@ -165,14 +165,24 @@ Consequences wired into the code:
 - **Deferred writes/compaction not supported** — `ailake insert --deferred` and
   `ailake compact --deferred` error out immediately (see "In-place rewrites are
   rejected" above). Blocking writes and compaction are fully supported.
-- **Row-level deletes are invisible to DuckLake-native readers** —
-  `delete_where` (equality deletes) and `delete_rows` (V3 deletion vectors)
-  live in AI-Lake's sidecar and are applied by AI-Lake readers only; a plain
-  `SELECT ... FROM lake.<ns>.<table>` still sees the deleted rows. This is
-  asymmetric with file *retirement* (compaction, decay, backfill), which uses
-  a real row-`DELETE` that native readers do observe. Possible future fix:
-  translate equality deletes into `DELETE FROM lake.tbl WHERE col IN (...)`
-  when the predicate column is DuckLake-declared.
+- **`delete_rows` (V3 deletion vectors) is invisible to DuckLake-native
+  readers** — DVs live entirely in AI-Lake's own Puffin sidecar mechanism
+  (shared with every other catalog backend, not DuckLake-specific) and are
+  applied by AI-Lake readers only; a plain `SELECT ... FROM lake.<ns>.<table>`
+  still sees the deleted rows.
+- **`delete_where` (equality deletes) is native-visible only when the
+  predicate column is already DuckLake-declared** — `commit_snapshot` now
+  additionally issues a real `DELETE FROM lake.tbl WHERE CAST(col AS VARCHAR)
+  IN (...)` (cast-to-string matches the same string-normalized comparison
+  `EqualityDeleteFilter` already uses in the scanner) whenever
+  `delete_where`'s raw `(column, values)` pair is available and
+  `duckdb_columns()` confirms the column exists on the `lake` table. If the
+  column hasn't been declared yet (no row ever written with it, or
+  `evolve_schema` hasn't run), the native `DELETE` is skipped with a
+  `tracing::warn!` and the AI-Lake sidecar remains the sole enforcement path —
+  same asymmetry as before, now the fallback case instead of the default.
+  Either way, the sidecar is always written too, so AI-Lake readers are
+  unaffected by whether the native path fired.
 - **No multi-writer support**: the metadata catalog is a local DuckDB file
   (SQLite-class single-writer constraint). Concurrent processes writing to
   the same table are not safe. A Postgres-backed DuckLake metadata catalog

@@ -25,7 +25,8 @@ pub enum Precision {
     F32 = 0,
     F16 = 1,
     I8 = 2,
-    Binary = 3,
+    // 3 ("Binary") reserved, not reassigned — see ailake_core::VectorPrecision's
+    // doc comment for why it was removed rather than kept as a real variant.
 }
 
 #[repr(u8)]
@@ -43,7 +44,6 @@ impl From<VectorPrecision> for Precision {
             VectorPrecision::F32 => Precision::F32,
             VectorPrecision::F16 => Precision::F16,
             VectorPrecision::I8 => Precision::I8,
-            VectorPrecision::Binary => Precision::Binary,
         }
     }
 }
@@ -66,9 +66,8 @@ impl TryFrom<u8> for Precision {
             0 => Ok(Precision::F32),
             1 => Ok(Precision::F16),
             2 => Ok(Precision::I8),
-            3 => Ok(Precision::Binary),
             _ => Err(AilakeError::InvalidArgument(format!(
-                "invalid precision byte: {v} (valid: 0=F32, 1=F16, 2=I8, 3=Binary)"
+                "invalid precision byte: {v} (valid: 0=F32, 1=F16, 2=I8; 3 reserved)"
             ))),
         }
     }
