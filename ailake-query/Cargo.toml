@@ -33,9 +33,10 @@ tracing        = { workspace = true }
 roaring        = { workspace = true }
 
 [dev-dependencies]
-tempfile    = { workspace = true }
-rand        = { workspace = true }
-serde_json  = { workspace = true }
+tempfile     = { workspace = true }
+rand         = { workspace = true }
+serde_json   = { workspace = true }
+async-trait  = { workspace = true }
 
 [[example]]
 name = "demo"

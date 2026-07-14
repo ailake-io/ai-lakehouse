@@ -368,7 +368,12 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 5. Para arquivos sobreviventes, buscados concorrentemente (`try_join_all` — sem
    `tokio::spawn`/thread pool, concorrência cooperativa sobre I/O na mesma task;
    `ailake-query/src/scanner.rs::search_one_file` + `search()`):
-     a. GET do arquivo inteiro (`store.get`, não range-GET — ver nota abaixo)
+     a. GET — range-GET incremental (footer → header AILK → blob HNSW, via
+        `ailake-query/src/index_loader.rs::load_primary_index`) quando a query
+        só precisa do índice da coluna primária (sem `column_filter`/rerank/
+        hybrid/score_fn/equality-delete, `IndexStatus::Ready`, não-foreign);
+        senão, GET do arquivo inteiro (`store.get`) — ver nota abaixo pro que
+        ainda falta (coluna secundária/multimodal)
      b. Se `SearchConfig::column_filter` setado: resolve o conjunto de row-ids
         que satisfazem o predicado via `AilakeFileReader::matching_row_ids`
         (skip de row-group inteiro por estatísticas min/max do Parquet + leitura
@@ -383,16 +388,18 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 8. Retorna RecordBatch (todas as colunas + _distance)
 ```
 
-> **Nota — GET é sempre do arquivo inteiro, não range-GET**: o passo 5a busca
-> `store.get(&file_entry.path)` (todo o arquivo) — não os range-GETs
-> incrementais (footer → header AILK → blob HNSW) descritos na §4 como
-> pseudocódigo de carga via mmap. O trecho da §4 é o design pretendido pro
-> caminho `AilakeFileReader`/mmap de baixo nível; a busca real (`ailake-query`)
-> nunca foi conectada a ele — todo processamento pós-GET é CPU-bound sobre um
-> buffer já 100% em memória, não I/O incremental. Skip de row-group por
-> predicado (5b) economiza decode de CPU, não bytes de rede. Gap real, não
-> corrigido nesta revisão — rastreado como item de roadmap na Fase 16.
-```
+> **Nota — range-GET real, mas só pra coluna primária**: o passo 5a evita o
+> `store.get()` integral (fazendo range-GETs incrementais — footer → header
+> AILK → blob HNSW, reaproveitando bytes já buscados quando cabem na mesma
+> janela) apenas quando a query atinge a coluna primária de vetor e não
+> precisa de mais nada do arquivo além do índice. Fora dessas condições
+> (coluna secundária/multimodal, `column_filter`, rerank, hybrid, score_fn,
+> equality-delete, ou índice ainda não pronto) cai no `store.get()` integral
+> — o design de §4 pra carga incremental via mmap, antes nunca conectado ao
+> `scanner.rs` real, agora está parcialmente ligado (Fase 16). Pushdown de
+> coluna secundária via range-GET fica pra depois (precisaria de um
+> `AsyncFileReader` customizado sobre `Store::get_range`, mais superfície de
+> risco, sem demanda medida ainda).
 
 ---
 
@@ -607,7 +614,10 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
 - [x] **`SearchConfig::column_filter`** — plumbing em `ailake-query/src/scanner.rs::search()`/`search_multimodal()`: antes de decidir HNSW vs. flat-scan, resolve `matching_row_ids` uma vez por arquivo; conjunto vazio pula o arquivo inteiro (sem HNSW, sem decode Parquet — o ganho real de perf, arquivos que não têm a coluna filtrada nunca são escaneados, só pós-filtrados); conjunto não-vazio aplica como checagem de pertencimento adicional nos dois loops por linha existentes (mesmo padrão do `dv_bitmap`/`eq_del_filter` já usados ali), preservando 100% a identidade de `row_id`. Todos os 9 outros pontos de construção de `SearchConfig` no workspace (CLI, JNI, Python×3, testes×8) atualizados com `column_filter: None` — superfície pública (CLI/Python/JNI) não expõe o campo ainda, é plumbing interno por enquanto. 3 testes de integração no scanner comprovando: linha correta retornada sob filtro no path indexado (`row_id` seguro), linhas não-correspondentes excluídas, arquivo sem match nenhum retorna vazio sem erro.
 - [x] **Busca concorrente por arquivo** — `search()`'s `for file_entry in &surviving_files` sequencial extraído pra `search_one_file()` (mesmo corpo, sem mudança de lógica) e despachado via `futures::future::try_join_all` — concorrência cooperativa sobre I/O na mesma task (sem `tokio::spawn`, sem thread pool novo), correta pro volume que esse ponto do pipeline já opera (dezenas de arquivos pós-poda geométrica, não milhares — ver §3). Estado mutável do loop original (`all_results`/`raw_candidates`/contadores de flat-scan) virou retorno por valor (`FileSearchOutcome`), sem necessidade de `Mutex`/`Arc` — cada arquivo processado é independente, resultado é dobrado (fold) depois que todas as buscas terminam.
 - [x] **§8 (Fluxo Fim-a-Fim) corrigido** — texto agora bate com o código: concorrência via `try_join_all` (não "Tokio" genérico), pushdown de predicado descrito onde ele realmente acontece (passo 5, seleção de linha por arquivo — não no passo 7, fetch das linhas vencedoras). Nota nova documentando que o GET de arquivo é sempre integral (`store.get`, não range-GET incremental como a §4 descreve em pseudocódigo pro caminho mmap de baixo nível) — gap real, não fechado nesta revisão.
-- [ ] **Range-GET real no caminho de busca** — `search_one_file` faz `store.get()` do arquivo inteiro; a estratégia de range-GET incremental (footer → header AILK → blob HNSW) que a §4 documenta como pseudocódigo nunca foi conectada ao `scanner.rs` real — só existe como design pretendido pro `AilakeFileReader`/mmap de baixo nível. Corrigir exigiria mudar `AilakeFileReader` de "recebe `Bytes` já 100% em memória" pra um modo que aceita `Store + path` e faz GETs incrementais sob demanda — mudança estrutural maior, fora do escopo desta fase (que só entregou pushdown de predicado + concorrência entre arquivos, ambos operando sobre bytes já residentes).
+- [x] **Range-GET real no caminho de busca — fast path para coluna primária (Fase 1 do plano; pushdown por range-GET de coluna secundária adiado — ver nota abaixo)** — `search_one_file` fazia `store.get()` do arquivo inteiro incondicionalmente; a estratégia de range-GET incremental (footer → header AILK → blob HNSW) que a §4 documentava como pseudocódigo nunca tinha sido conectada ao `scanner.rs` real. Novo módulo `ailake-query/src/index_loader.rs::load_primary_index`: quando a query não precisa de mais nada do arquivo além do índice (sem `column_filter`/`rerank_factor`/`score_fn`/hybrid/equality-delete, coluna primária, `IndexStatus::Ready`, arquivo não-foreign — todo conhecível a partir do manifesto/config, sem tocar bytes do arquivo), `search_one_file` pula o `store.get()` do arquivo inteiro e busca só: (1) uma janela especulativa da cauda (64 KiB) pra descobrir `ailake.footer_offset` via `ParquetVectorReader::kv_metadata` (parquet's próprio parser de metadata só lê de trás pra frente — funciona com uma janela parcial, não precisa do arquivo inteiro), com um fetch exato de fallback no raro caso da janela ser pequena demais; (2) header AILK (64B) e (3) o blob HNSW/IVF-PQ — reaproveitando bytes já buscados da janela especulativa quando o header/blob cabem nela (evita re-fetch quando a seção AILK inteira é pequena o bastante). Qualquer falha nesse caminho (parse, offset fora dos limites) cai de volta pro `store.get()` integral — nunca transforma uma busca que funcionaria em uma que falha, só desperdiça um `get_range` pequeno extra na pior hipótese.
+  - **Bug real achado e corrigido durante a implementação**: a primeira versão usava o bootstrap via `AilakeTrailer` (24 bytes no fim do arquivo, mesma técnica que `AilakeFileReader::ailk_offset_from_trailer` já usa) em vez do KV do Parquet — mais barato (não precisa do footer thrift inteiro). Quebrou o teste real `multimodal_rrf_cross_modal_different_dims` (dimension mismatch) porque `AilakeFileWriter::write_multi` escreve **um trailer auto-referente por seção de coluna** — pra um arquivo multi-coluna, o trailer fisicamente mais próximo do EOF pertence à **última** coluna escrita, não necessariamente à primária. O gate `vector_column == primary_col` filtrava corretamente a *query*, mas o bootstrap por trailer resolvia pro offset errado de qualquer forma (carregando o índice HNSW de uma coluna secundária com dimensão diferente, silenciosamente). Corrigido trocando pra leitura do KV `ailake.footer_offset` (que `write_multi` sempre marca certo na coluna `0`, custe o que custar o número de colunas seguintes) — mesmo mecanismo que `AilakeFileReader::ailk_offset()` já usa como caminho preferencial. Achado só porque a suíte de testes completa (341 testes) rodou antes do merge — nenhum teste dedicado ao range-GET pegaria isso sozinho, foi um teste de *outra* feature (multimodal RRF) que quebrou primeiro.
+  - Verificado com testes reais (sem mocks): `range_get_fast_path_never_touches_tabular_data_section` prova a garantia precisa e independente de proporção HNSW/dados — o offset mínimo buscado no arquivo nunca fica antes do início da seção AILK (ground truth via leitura completa + `AilakeFileReader::ailk_offset()` independente); `range_get_fast_path_matches_full_file_path_results` prova paridade de resultado exata (`row_id` e `distance`) contra o caminho completo forçado via um `column_filter` que casa com todas as linhas (mesma semântica de busca, desqualifica o fast path). Full workspace build/test/clippy/fmt limpos (343 passed, 0 regressões).
+  - **Adiado (Fase 2 do plano, não implementado)**: pushdown de coluna secundária via range-GET — exigiria um `AsyncFileReader` customizado plugando `parquet::arrow::async_reader` em `Store::get_range` pra buscar só os column chunks necessários dos row groups sobreviventes, em vez do arquivo inteiro. Maior superfície de risco (internals async do parquet), sem demanda medida ainda — mesmo padrão de "adiar até ter volume real" já usado pra Trino/Flink na Fase 10.
 - Verificado com build real (`cargo build --workspace`), suite completa (`cargo test --workspace`, 314 passed / 7 ignored, 0 regressões), `cargo clippy --workspace --all-targets -D warnings` (0 warnings), `cargo fmt --all --check` limpo.
 
 ---
