@@ -91,6 +91,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Documentation
 
+- **Stale `VectorPrecision`/`VectorMetric` enum listings in `CLAUDE.md` §6B and `docs/architecture/WORKSPACE.md`** — both still listed the `Binary` precision variant (removed in v0.0.14, see above) and a `VectorPrecision::I8Symmetric` name that never existed in `ailake-core::types` (the real variant is `I8`); `VectorMetric` was missing `NormalizedCosine` (added in Fase 6/`pre_normalize`). Found auditing the project after the REST Catalog wiring (Fase 17) landed; both docs now match `ailake-core/src/types.rs` exactly.
 - **DuckLake — row-level deletes invisible to native readers** documented as a v1 limitation in `DUCKLAKE_CATALOG.md` (`delete_where`/`delete_rows` live in the sidecar; a plain `SELECT` through the DuckLake attachment still sees deleted rows — asymmetric with file retirement, which native readers do observe), with the possible translate-to-native-`DELETE` fix recorded as a roadmap item in CLAUDE.md.
 - **`write_batch_idempotent` retry window after compaction** documented (the `batch_id` tag lives on the `DataFileEntry`; compaction's merged file carries `batch_id: None`, so a retry firing after the batch was compacted away re-inserts it), with the aggregate-batch-ids fix recorded as a roadmap item.
 - **`SearchSession` does not filter deleted rows** — docstring now warns that deletion vectors and equality deletes are not applied (unlike `search`/`search_text`); it trades delete visibility for throughput on static snapshots.
