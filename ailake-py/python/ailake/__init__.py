@@ -132,6 +132,7 @@ class SearchQuery:
         pruning_threshold: "float | None" = None,
         ef_search: "int | None" = None,
         rerank_factor: "int | None" = None,
+        catalog_opts: "dict[str, str] | None" = None,
     ) -> None:
         self._path = path
         self._query = query
@@ -145,6 +146,7 @@ class SearchQuery:
         self._pruning_threshold = pruning_threshold
         self._ef_search = ef_search
         self._rerank_factor = rerank_factor
+        self._catalog_opts = catalog_opts
         self._results: list[dict] | None = None      # lazy — pointer-only
         self._arrow_batch: Any | None = None          # lazy — full RecordBatch
 
@@ -165,6 +167,7 @@ class SearchQuery:
                 self._path, self._query, self._top_k, self._partition_filter,
                 self._hybrid_text, self._text_column, self._bm25_weight,
                 self._pruning_threshold, self._ef_search, self._rerank_factor,
+                self._catalog_opts,
             )
         return self._results
 
@@ -176,6 +179,7 @@ class SearchQuery:
                 self._path, self._query, self._top_k, self._partition_filter,
                 self._hybrid_text, self._text_column, self._bm25_weight,
                 self._pruning_threshold, self._ef_search, self._rerank_factor,
+                self._catalog_opts,
             )
             table = pa.ipc.open_file(io.BytesIO(ipc_bytes)).read_all()
             if self._score_fn is not None:
@@ -367,8 +371,10 @@ class Table:
         partition_fields: list[tuple[str, str, str]] | None = None,
         partition_values: dict[str, str] | None = None,
         format_version: int = 2,
+        catalog_opts: dict[str, str] | None = None,
     ) -> None:
         self._path = path
+        self._catalog_opts = catalog_opts
         self._vector_column = vector_column
         self._dim = dim
         self._metric = metric
@@ -404,6 +410,7 @@ class Table:
             partition_fields=partition_fields,
             partition_values=partition_values,
             format_version=format_version,
+            catalog_opts=catalog_opts,
         )
 
     # ── write ─────────────────────────────────────────────────────────────────
@@ -632,6 +639,7 @@ class Table:
             pruning_threshold=pruning_threshold,
             ef_search=ef_search,
             rerank_factor=rerank_factor,
+            catalog_opts=self._catalog_opts,
         )
 
     # ── context manager ───────────────────────────────────────────────────────
@@ -728,11 +736,15 @@ def open_table(
     partition_fields: list[tuple[str, str, str]] | None = None,
     partition_values: dict[str, str] | None = None,
     format_version: int = 2,
+    catalog_opts: dict[str, str] | None = None,
 ) -> Table:
     """Open or create an AI-Lake table at *path*.
 
     Args:
-        path: Local filesystem path or object-storage URI (``s3://``, ``gs://``, ``az://``).
+        path: Local filesystem path. Data/manifest I/O always goes through a
+              local `Store` today — `ailake-py` has no `store_from_url`
+              equivalent yet, so S3/GCS/Azure URIs aren't reachable from any
+              binding (a pre-existing gap, not closed here).
         vector_column: Name of the embedding column (default ``"embedding"``).
         dim: Embedding dimension (default 1536).
         metric: Distance metric — ``"cosine"``, ``"euclidean"``, ``"dot_product"``,
@@ -765,6 +777,17 @@ def open_table(
                           *partition_value* is also set.
         format_version: Iceberg format version — ``2`` (default) or ``3`` (deletion
                         vectors, row lineage).
+        catalog_opts: Catalog backend selection/config. Omit for the default
+                      (Hadoop-style, file-based catalog — unchanged behavior).
+                      Set ``{"catalog": "rest", "rest_uri": "...", ...}`` to talk
+                      to an Iceberg REST Catalog spec server instead (Polaris,
+                      Unity Catalog, BigLake, S3 Tables, Nessie, Gravitino) —
+                      keys mirror ``ailake-cli``'s ``--rest-*`` flags
+                      (``rest_prefix``, ``rest_warehouse``, ``rest_auth``:
+                      ``"none"``/``"bearer"``/``"oauth2"``, ``rest_token``,
+                      ``rest_oauth_token_endpoint``, ``rest_oauth_client_id``,
+                      ``rest_oauth_client_secret``, ``rest_oauth_scope``). See
+                      docs/guides/REST_CATALOG.md.
     """
     return Table(
         path,
@@ -789,6 +812,7 @@ def open_table(
         partition_fields=partition_fields,
         partition_values=partition_values,
         format_version=format_version,
+        catalog_opts=catalog_opts,
     )
 
 

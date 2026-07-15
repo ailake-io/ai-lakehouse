@@ -7,6 +7,8 @@ use ailake_catalog::{
     hadoop::HadoopCatalog,
     provider::{CatalogProvider, TableIdent, TableProperties},
 };
+#[cfg(feature = "catalog-rest")]
+use ailake_catalog::{RestCatalog, RestCatalogAuth, RestCatalogConfig};
 use ailake_core::{
     AilakeError, EmbeddingModelInfo, VectorMetric, VectorModality, VectorPrecision,
     VectorStoragePolicy,
@@ -16,7 +18,7 @@ use ailake_query::{
     EmbedFn, HybridConfig, MemoryDecayJob, MigrationJob, MigrationProgress, MigrationStrategy,
     MultiVectorBatch, ProgressFn, SearchConfig, TableWriter,
 };
-use ailake_store::store_from_url;
+use ailake_store::{store_from_url, Store};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -33,9 +35,55 @@ struct Cli {
 
     /// Catalog backend. `ducklake` requires a local filesystem `--store` (no
     /// s3://gs://az:// scheme) and the `catalog-ducklake` build feature — see
-    /// docs/guides/DUCKLAKE_CATALOG.md.
+    /// docs/guides/DUCKLAKE_CATALOG.md. `rest` talks to any Iceberg REST
+    /// Catalog spec server (Polaris, Unity Catalog, BigLake, S3 Tables,
+    /// Nessie, Gravitino) — see docs/guides/REST_CATALOG.md.
     #[arg(long, global = true, value_enum, default_value = "hadoop")]
     catalog: CatalogBackendArg,
+
+    /// REST catalog base URI (required for `--catalog rest`), e.g.
+    /// "http://localhost:8181" or "https://<account>.snowflakecomputing.com/polaris/api/catalog".
+    #[arg(long, global = true, env = "AILAKE_REST_URI")]
+    rest_uri: Option<String>,
+
+    /// REST catalog path prefix inserted between `/v1` and `/namespaces`
+    /// (Polaris: catalog name; Nessie: branch, e.g. "main"). Leave unset for
+    /// servers that don't use a prefix (Unity Catalog, BigLake).
+    #[arg(long, global = true, env = "AILAKE_REST_PREFIX")]
+    rest_prefix: Option<String>,
+
+    /// Base storage location the REST catalog server should use for new
+    /// tables (e.g. "s3://my-bucket/warehouse"). Required for `create` if the
+    /// server doesn't auto-assign locations.
+    #[arg(long, global = true, env = "AILAKE_REST_WAREHOUSE")]
+    rest_warehouse: Option<String>,
+
+    /// REST catalog auth strategy. `bearer` needs `--rest-token`; `oauth2`
+    /// needs `--rest-oauth-token-endpoint`/`--rest-oauth-client-id`/
+    /// `--rest-oauth-client-secret`.
+    #[arg(long, global = true, value_enum, default_value = "none")]
+    rest_auth: RestAuthArg,
+
+    /// Pre-obtained Bearer token — Workload Identity, CI tokens, etc. Used
+    /// when `--rest-auth bearer`.
+    #[arg(long, global = true, env = "AILAKE_REST_TOKEN")]
+    rest_token: Option<String>,
+
+    /// OAuth2 token endpoint URL. Used when `--rest-auth oauth2`.
+    #[arg(long, global = true, env = "AILAKE_REST_OAUTH_TOKEN_ENDPOINT")]
+    rest_oauth_token_endpoint: Option<String>,
+
+    /// OAuth2 client id. Used when `--rest-auth oauth2`.
+    #[arg(long, global = true, env = "AILAKE_REST_OAUTH_CLIENT_ID")]
+    rest_oauth_client_id: Option<String>,
+
+    /// OAuth2 client secret. Used when `--rest-auth oauth2`.
+    #[arg(long, global = true, env = "AILAKE_REST_OAUTH_CLIENT_SECRET")]
+    rest_oauth_client_secret: Option<String>,
+
+    /// Optional OAuth2 scope (e.g. "https://management.azure.com/.default").
+    #[arg(long, global = true, env = "AILAKE_REST_OAUTH_SCOPE")]
+    rest_oauth_scope: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -45,6 +93,14 @@ struct Cli {
 enum CatalogBackendArg {
     Hadoop,
     Ducklake,
+    Rest,
+}
+
+#[derive(ValueEnum, Clone)]
+enum RestAuthArg {
+    None,
+    Bearer,
+    Oauth2,
 }
 
 #[derive(Subcommand)]
@@ -530,6 +586,72 @@ async fn build_ducklake_catalog(store_arg: &str) -> Result<Arc<dyn CatalogProvid
     Ok(Arc::new(catalog) as Arc<dyn CatalogProvider>)
 }
 
+/// Build a `RestCatalog` from the `--rest-*` flags. `store` still handles
+/// data-file and manifest I/O directly (unchanged from Hadoop/DuckLake) — the
+/// REST server only manages `metadata.json`/table registration, per
+/// `ailake_catalog::rest`'s own module doc.
+#[cfg(feature = "catalog-rest")]
+fn build_rest_catalog(
+    cli: &Cli,
+    store: Arc<dyn Store>,
+) -> Result<Arc<dyn CatalogProvider>, String> {
+    let uri = cli
+        .rest_uri
+        .clone()
+        .ok_or("--catalog rest requires --rest-uri (or AILAKE_REST_URI)")?;
+
+    let auth = match cli.rest_auth {
+        RestAuthArg::None => RestCatalogAuth::None,
+        RestAuthArg::Bearer => {
+            let token = cli
+                .rest_token
+                .clone()
+                .ok_or("--rest-auth bearer requires --rest-token (or AILAKE_REST_TOKEN)")?;
+            RestCatalogAuth::Bearer(token)
+        }
+        RestAuthArg::Oauth2 => {
+            let token_endpoint = cli.rest_oauth_token_endpoint.clone().ok_or(
+                "--rest-auth oauth2 requires --rest-oauth-token-endpoint \
+                 (or AILAKE_REST_OAUTH_TOKEN_ENDPOINT)",
+            )?;
+            let client_id = cli.rest_oauth_client_id.clone().ok_or(
+                "--rest-auth oauth2 requires --rest-oauth-client-id \
+                 (or AILAKE_REST_OAUTH_CLIENT_ID)",
+            )?;
+            let client_secret = cli.rest_oauth_client_secret.clone().ok_or(
+                "--rest-auth oauth2 requires --rest-oauth-client-secret \
+                 (or AILAKE_REST_OAUTH_CLIENT_SECRET)",
+            )?;
+            RestCatalogAuth::OAuth2 {
+                token_endpoint,
+                client_id,
+                client_secret,
+                scope: cli.rest_oauth_scope.clone(),
+            }
+        }
+    };
+
+    let config = RestCatalogConfig {
+        uri,
+        prefix: cli.rest_prefix.clone(),
+        warehouse: cli.rest_warehouse.clone(),
+        auth,
+    };
+    Ok(Arc::new(RestCatalog::new(config, store)) as Arc<dyn CatalogProvider>)
+}
+
+#[cfg(not(feature = "catalog-rest"))]
+fn build_rest_catalog(
+    _cli: &Cli,
+    _store: Arc<dyn Store>,
+) -> Result<Arc<dyn CatalogProvider>, String> {
+    Err(
+        "this `ailake` binary was built without the catalog-rest feature — rebuild with \
+         `cargo build --features catalog-rest` (or the equivalent release asset)"
+            .to_string(),
+    )
+}
+
 #[cfg(not(feature = "catalog-ducklake"))]
 async fn build_ducklake_catalog(_store_arg: &str) -> Result<Arc<dyn CatalogProvider>, String> {
     Err(
@@ -573,6 +695,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     let catalog: Arc<dyn CatalogProvider> = match cli.catalog {
         CatalogBackendArg::Hadoop => Arc::new(HadoopCatalog::new(Arc::clone(&store), "")),
         CatalogBackendArg::Ducklake => build_ducklake_catalog(&cli.store).await?,
+        CatalogBackendArg::Rest => build_rest_catalog(&cli, Arc::clone(&store))?,
     };
 
     match cli.command {

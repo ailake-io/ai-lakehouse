@@ -33,8 +33,8 @@ The shared type system. No I/O, no async, no external deps beyond `serde`, `uuid
 
 Public API surface:
 - `VectorColumn` — name, dim, metric, precision
-- `VectorMetric` — `Cosine | Euclidean | DotProduct`
-- `VectorPrecision` — `F32 | F16 | I8Symmetric | Binary`
+- `VectorMetric` — `Cosine | Euclidean | DotProduct | NormalizedCosine`
+- `VectorPrecision` — `F32 | F16 | I8`
 - `VectorStoragePolicy` — precision, PQ config, reranking flag
 - `LlmContextSchema` — canonical field names and types for RAG tables
 - `Centroid` — centroid + radius for pruning
