@@ -94,21 +94,6 @@ body) stays Hadoop-only — there's nowhere to carry the config.
   but a later `search`/read fails with a plain `No such file or directory` — the
   catalog and the store silently disagree about where the file actually is. No
   validation currently catches this mismatch at write time.
-- **`commit_snapshot`'s schema-patch path (Phase I) has an unresolved, apparently
-  fixture-specific issue** against `apache/iceberg-rest-fixture:latest` — the
-  reference/test implementation, not a production catalog. This path fires on
-  *every* normal write commit (not just explicit schema evolution — see
-  `ailake-query/src/writer.rs::TableWriter::commit`'s `captured_schema`), so it
-  blocks the full write round trip against that specific fixture image. Two
-  different, spec-compliant request shapes were tried for the `SetCurrentSchema`
-  update (the `-1` "last added" sentinel the spec documents, and the explicit
-  predicted schema-id) — the fixture rejected each with a *different* error
-  (`ValidationException: Cannot set last added schema` for `-1`;
-  `IllegalArgumentException: Cannot set current schema to unknown schema: N` for the
-  explicit id), which reads as an inconsistency in the fixture's own schema-id
-  bookkeeping rather than a client-side bug — but this has **not** been confirmed
-  against a production-grade REST catalog server (Polaris, Unity Catalog, Gravitino).
-  Needs follow-up verification before this path can be called fully closed.
 - **`AddPartitionSpec`/`SetDefaultSpec` for tables with real partitioning is
   untested** — the live verification session used only unpartitioned tables (the
   `unchanged` check added to skip a redundant `AddPartitionSpec` — see "Real bugs
@@ -120,7 +105,9 @@ body) stays Hadoop-only — there's nowhere to carry the config.
 ## Real bugs found wiring this into the CLI/Python/JNI bindings
 
 Verified live (2026-07) against a real `apache/iceberg-rest-fixture:latest` container
-— not mocks. Two real, confirmed, fixed bugs; one open item documented above.
+— not mocks, including a full create → insert → commit → search round trip. Four
+real, confirmed, fixed bugs — the write-commit path is closed, not just the
+read/create side.
 
 1. **`create_table` never created the namespace first.** Spec-compliant REST
    catalogs (unlike `HadoopCatalog`, which just uses a directory implicitly) reject
@@ -153,8 +140,32 @@ Verified live (2026-07) against a real `apache/iceberg-rest-fixture:latest` cont
    add-partition-spec`, HTTP 500). Fixed by comparing the remapped spec against
    what's already registered and only emitting the update when it actually changed.
 
+4. **`commit_snapshot` unconditionally sent `AddSchema` + `SetCurrentSchema` on
+   every write commit, even when the schema hadn't actually changed** — the
+   schema-patch path (`TableWriter::commit`'s `captured_schema`) fires on *every*
+   normal write, not just real schema evolution. Real Iceberg core
+   (`TableMetadata.Builder.addSchema`, which every spec-compliant REST server
+   delegates to) *reuses an existing schema-id* — silently ignoring whatever id
+   the request suggests — whenever the submitted schema is structurally
+   identical to one already registered, and is a true no-op when it's identical
+   to the table's *current* schema specifically. Both cases made the
+   client-predicted `current_schema_id + 1` (or the `-1` "last added" sentinel)
+   wrong to reference in the immediately-following `SetCurrentSchema` — this is
+   what produced the two *different* errors from the *same* request shape in
+   different runs (`IllegalArgumentException: Cannot set current schema to
+   unknown schema: N` when dedup reused a *different* existing id;
+   `ValidationException: Cannot set last added schema: no schema has been added`
+   when it was a true no-op) — a real client-side bug, not a fixture
+   inconsistency as first suspected. Fixed by comparing the patch's new fields
+   against the table's *current* schema fields (from `meta.schemas`, matched by
+   `current_schema_id`) and skipping the whole `AddSchema`/`SetCurrentSchema`/
+   name-mapping trio entirely when nothing actually changed — the same
+   "skip when unchanged" principle already applied to `AddPartitionSpec` (bug 3).
+
 Verified with 2 real (non-mocked) integration tests in `ailake-catalog/src/rest.rs`
 (`live_create_table_auto_creates_namespace`, `live_ensure_namespace_is_idempotent`),
 `#[ignore]`d by default (need a running server — see the doc comment above them for
-the exact `docker run` command). Full workspace build/test/clippy/fmt clean with and
-without the `rest-catalog`/`catalog-rest` features.
+the exact `docker run` command), plus a full `ailake-py` create → insert → commit →
+search round trip run 3× against a live server after bug 4's fix, all 3 succeeding.
+Full workspace build/test/clippy/fmt clean with and without the
+`rest-catalog`/`catalog-rest` features.

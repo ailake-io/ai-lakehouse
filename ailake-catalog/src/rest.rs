@@ -445,39 +445,55 @@ impl CatalogProvider for RestCatalog {
             // Phase I: schema/partition-spec patch (only present when the caller
             // supplied `NewSnapshot::iceberg_schema` — same trigger as Hadoop/Glue/Jdbc).
             if let Some(patch) = artifacts.schema_patch {
-                let new_schema_id = current_schema_id + 1;
-                updates.push(TableUpdate::AddSchema {
-                    schema: serde_json::json!({
-                        "schema-id": new_schema_id,
-                        "type": "struct",
-                        "fields": patch.new_schema_fields,
-                    }),
-                });
-                // `-1` is the REST spec's documented "the schema just added in
-                // this same request" sentinel for `SetCurrentSchema` — used here
-                // deliberately instead of predicting `new_schema_id` client-side,
-                // since live testing against `apache/iceberg-rest-fixture`
-                // (2026-07) found the server's own schema-id assignment doesn't
-                // reliably agree with `current_schema_id + 1`: sending the
-                // predicted id explicitly got rejected with `IllegalArgumentException:
-                // Cannot set current schema to unknown schema: N` (server assigned
-                // a different id than predicted), while `-1` intermittently got
-                // rejected with `ValidationException: Cannot set last added schema:
-                // no schema has been added` on the exact same request shape. Both
-                // are spec-compliant requests per the OpenAPI schema; this reads as
-                // a real inconsistency in this specific fixture image, not
-                // something a client-side workaround can reliably satisfy either
-                // way. Kept as `-1` (matches the spec's stated intent) — flagged
-                // as an open item pending verification against a more mature REST
-                // catalog server (Polaris, Unity Catalog, Gravitino) — see
-                // docs/guides/REST_CATALOG.md.
-                updates.push(TableUpdate::SetCurrentSchema { schema_id: -1 });
-                updates.push(TableUpdate::SetProperties {
-                    updates: HashMap::from([(
-                        "schema.name-mapping.default".to_string(),
-                        patch.name_mapping_json,
-                    )]),
-                });
+                // Real Iceberg core (`TableMetadata.Builder.addSchema`, which every
+                // spec-compliant REST server delegates to) reuses an existing
+                // schema-id — silently ignoring whatever id the request suggests —
+                // whenever the submitted schema is structurally identical to one
+                // already registered, and is a straight no-op when it's identical
+                // to the *current* schema specifically. Both cases make the
+                // client-predicted `current_schema_id + 1` wrong to reference in
+                // the following `SetCurrentSchema`, which is exactly what live
+                // testing against `apache/iceberg-rest-fixture` (2026-07) hit:
+                // `IllegalArgumentException: Cannot set current schema to unknown
+                // schema: N` (dedup reused a *different* existing id) and
+                // `ValidationException: Cannot set last added schema: no schema
+                // has been added` (no-op — identical to the already-current
+                // schema) from the exact same request shape in different runs.
+                // Comparing against the current schema's own fields first and
+                // skipping the whole schema-update trio when nothing actually
+                // changed avoids ever sending a no-op/dedup-prone `AddSchema` —
+                // same "skip when unchanged" principle already applied to
+                // `AddPartitionSpec` below.
+                let current_schema_fields = meta
+                    .schemas
+                    .iter()
+                    .find(|s| s["schema-id"].as_i64() == Some(current_schema_id as i64))
+                    .and_then(|s| s["fields"].as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let schema_unchanged = current_schema_fields == patch.new_schema_fields;
+
+                if !schema_unchanged {
+                    let new_schema_id = current_schema_id + 1;
+                    updates.push(TableUpdate::AddSchema {
+                        schema: serde_json::json!({
+                            "schema-id": new_schema_id,
+                            "type": "struct",
+                            "fields": patch.new_schema_fields,
+                        }),
+                    });
+                    // `-1` ("the schema just added in this request") rather than
+                    // the predicted id — correct even in the dedup-reuse case,
+                    // since it always resolves to whatever id `AddSchema` above
+                    // actually produced or reused.
+                    updates.push(TableUpdate::SetCurrentSchema { schema_id: -1 });
+                    updates.push(TableUpdate::SetProperties {
+                        updates: HashMap::from([(
+                            "schema.name-mapping.default".to_string(),
+                            patch.name_mapping_json,
+                        )]),
+                    });
+                }
                 // The REST protocol has no "modify an existing spec's source-id in
                 // place" update — the closest spec-correct equivalent is adding the
                 // corrected spec as new and making it the default. Only the *last*
