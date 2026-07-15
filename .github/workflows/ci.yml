@@ -16,6 +16,7 @@ jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -27,6 +28,7 @@ jobs:
   clippy:
     name: clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -38,6 +40,7 @@ jobs:
   deny:
     name: deny (licenses + advisories)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -47,17 +50,31 @@ jobs:
           command: check licenses advisories sources
 
   unit:
-    name: unit
-    runs-on: ubuntu-latest
+    name: unit (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
-      - run: cargo test --workspace --lib --bins
+      - name: Test all crates (Linux) or subset (macOS)
+        run: |
+          if [ "${{ matrix.os }}" = macos-latest ]; then
+            EXCLUDE="--exclude ailake-py --exclude ailake-jni --exclude ailake-bench"
+          else
+            EXCLUDE=""
+          fi
+          # shellcheck disable=SC2086
+          cargo test --workspace --lib --bins $EXCLUDE
 
   integration:
     name: integration
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -78,6 +95,7 @@ jobs:
   miri:
     name: miri (UB detection)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
@@ -96,6 +114,39 @@ jobs:
         env:
           MIRI_TEST_NUMERICS: "100"
 
+  # Sanitizers: AddressSanitizer + LeakSanitizer + UndefinedBehaviorSanitizer.
+  # All use nightly + -Zbuild-std to instrument std. Tests only core crates
+  # without SIMD intrinsics, FFI, or GPU libloading — these would produce
+  # false positives (asan on SIMD vector lanes, ubsan on FFI boundary, etc).
+  # --test-threads=1 prevents interleaved sanitizer error output.
+  sanitizers:
+    name: sanitizers (ASan + LSan + UBSan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: ASan + LSan (address)
+        run: >
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
+          -p ailake-core -p ailake-vec -p ailake-parquet -p ailake-file
+          -p ailake-store -p ailake-catalog -p ailake-query
+          --lib -- --test-threads=1
+        env:
+          RUSTFLAGS: "-Z sanitizer=address"
+          ASAN_OPTIONS: "detect_leaks=1 detect_stack_use_after_return=1"
+      - name: UBSan (undefined)
+        run: >
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
+          -p ailake-core -p ailake-vec -p ailake-parquet -p ailake-file
+          -p ailake-store -p ailake-catalog -p ailake-query
+          --lib -- --test-threads=1
+        env:
+          RUSTFLAGS: "-Z sanitizer=undefined"
+          UBSAN_OPTIONS: "halt_on_error=1"
+
   # Runs ailake-index unit tests on a CPU-only Linux runner.
   # Verifies that hardware::detect_backend() falls back to CpuSimd when no
   # CUDA/ROCm libraries are present and that all index tests pass on that path.
@@ -103,6 +154,7 @@ jobs:
   index-cpu-fallback:
     name: index — cpu fallback (no GPU)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -120,6 +172,7 @@ jobs:
   compat-parquet:
     name: compat-parquet
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -137,6 +190,7 @@ jobs:
   compat-pyarrow:
     name: compat-pyarrow
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -156,6 +210,7 @@ jobs:
   compat-duckdb:
     name: compat-duckdb
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -175,6 +230,7 @@ jobs:
   compat-pyiceberg:
     name: compat-pyiceberg
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -194,6 +250,7 @@ jobs:
   test-airflow-provider:
     name: test-airflow-provider
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
@@ -210,6 +267,7 @@ jobs:
   test-airbyte:
     name: test-airbyte
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
@@ -226,6 +284,7 @@ jobs:
   compat-ailake-py:
     name: compat-ailake-py
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -249,6 +308,7 @@ jobs:
   fts-e2e:
     name: fts-e2e (Phase T Tantivy)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -269,6 +329,7 @@ jobs:
   test-jvm:
     name: test-jvm (trino + spark plugins)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
