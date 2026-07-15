@@ -4,7 +4,17 @@ package io.ailake.spark
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.sun.jna.{Library, Native, Pointer}
+import org.apache.arrow.memory.RootAllocator
+import org.apache.arrow.vector.{BigIntVector, FieldVector, VarCharVector, VectorSchemaRoot}
+import org.apache.arrow.vector.complex.ListVector
+import org.apache.arrow.vector.ipc.ArrowStreamWriter
+import org.apache.arrow.vector.types.FloatingPointPrecision
+import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType}
 import org.slf4j.LoggerFactory
+import java.io.ByteArrayOutputStream
+import java.nio.channels.Channels
+import java.nio.charset.StandardCharsets
+import java.util.{ArrayList => JArrayList, Collections => JCollections}
 import scala.util.Try
 
 /**
@@ -63,6 +73,20 @@ object AilakeNative {
     /** JSON-envelope write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
     def ailake_write_batch_json(requestJson: String): Pointer
 
+    /**
+     * Arrow-IPC write (Fase 10, ADR-017) — same result shape as
+     * [[ailake_write_batch_json]], but `id`/embedding/extra-text-columns arrive
+     * as a single Arrow IPC stream RecordBatch (`ipcBytes`) instead of JSON,
+     * replacing `Float.toString`/`mkString` formatting (~150ms/1k×1536-dim
+     * batch, measured) with a binary buffer write (~30ms). `ipcLen` is declared
+     * `Long` — JNA marshals Scala/Java `Long` to native C `long`, which is
+     * 8 bytes on the 64-bit Linux targets this plugin runs on, matching the
+     * Rust side's `i64` exactly (see the safety doc on `ailake_write_batch_ipc`
+     * in `ailake-jni/src/lib.rs` for why the width is pinned rather than left
+     * to `usize`/native `long` inference).
+     */
+    def ailake_write_batch_ipc(ipcBytes: Array[Byte], ipcLen: Long, optsJson: String): Pointer
+
     /** Multi-column (Phase 8 multimodal) write. Returns `{"ok":true,"snapshot_id":N}`. Caller must free. */
     def ailake_write_batch_multi_json(requestJson: String): Pointer
 
@@ -111,6 +135,91 @@ object AilakeNative {
   private val mapper = new ObjectMapper()
 
   /**
+   * Builds the single-RecordBatch Arrow IPC **stream** payload `ailake_write_batch_ipc`
+   * expects: `id` (Int64, non-null), `vectorColumn` (`List<Float32>`, non-null),
+   * and any `columns` (Utf8, nullable) — the same logical shape
+   * `ailake_write_batch_json` builds internally from `ids`/`embeddings`/`columns`,
+   * just constructed here with primitive Arrow buffer writes instead of
+   * `Float.toString`/`mkString` JSON formatting (Fase 10, ADR-017; see the doc
+   * comment on `Lib.ailake_write_batch_ipc` above for the measured ~150ms → ~30ms
+   * per 1k×1536-dim batch).
+   *
+   * Uses only public `org.apache.arrow.vector` API (`ListVector` + its
+   * `UnionListWriter`, not any Spark-internal Arrow helper) — this dependency
+   * is `compileOnly` against whatever Arrow version Spark itself bundles
+   * (pinned to `12.0.1` in `build.gradle.kts` to match Spark 3.5.0 exactly),
+   * so staying off Spark-private classes avoids a second coupling surface on
+   * top of that version pin.
+   */
+  private def buildIpcBatch(
+    ids:          Seq[Long],
+    vectorColumn: String,
+    embeddings:   Seq[Seq[Float]],
+    columns:      Map[String, Seq[String]],
+  ): Array[Byte] = {
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val idVector = new BigIntVector("id", allocator)
+      idVector.allocateNew(ids.size)
+      ids.zipWithIndex.foreach { case (v, i) => idVector.setSafe(i, v) }
+      idVector.setValueCount(ids.size)
+
+      val itemField = new Field(
+        "item",
+        FieldType.nullable(new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE)),
+        null,
+      )
+      val embField = new Field(
+        vectorColumn,
+        FieldType.notNullable(new ArrowType.List()),
+        JCollections.singletonList(itemField),
+      )
+      val embVector = embField.createVector(allocator).asInstanceOf[ListVector]
+      embVector.allocateNew()
+      val embWriter = embVector.getWriter
+      for (i <- ids.indices) {
+        embWriter.setPosition(i)
+        embWriter.startList()
+        embeddings(i).foreach(v => embWriter.float4().writeFloat4(v))
+        embWriter.endList()
+      }
+      embVector.setValueCount(ids.size)
+
+      val extraVectors: Seq[FieldVector] = columns.toSeq.sortBy(_._1).map { case (name, vals) =>
+        val v = new VarCharVector(name, allocator)
+        v.allocateNew()
+        vals.zipWithIndex.foreach { case (s, i) => v.setSafe(i, s.getBytes(StandardCharsets.UTF_8)) }
+        v.setValueCount(vals.size)
+        v
+      }
+
+      val fieldVectors = new JArrayList[FieldVector]()
+      fieldVectors.add(idVector)
+      fieldVectors.add(embVector)
+      extraVectors.foreach(fieldVectors.add(_))
+
+      val root = new VectorSchemaRoot(fieldVectors)
+      root.setRowCount(ids.size)
+      try {
+        val out = new ByteArrayOutputStream()
+        val ipcWriter = new ArrowStreamWriter(root, null, Channels.newChannel(out))
+        try {
+          ipcWriter.start()
+          ipcWriter.writeBatch()
+          ipcWriter.end()
+        } finally {
+          ipcWriter.close()
+        }
+        out.toByteArray
+      } finally {
+        root.close() // also closes idVector/embVector/extraVectors, which it now owns
+      }
+    } finally {
+      allocator.close()
+    }
+  }
+
+  /**
    * Write a batch of rows to an AI-Lake table via the native library.
    * Returns the snapshot_id on success, None on failure.
    *
@@ -152,8 +261,8 @@ object AilakeNative {
     lib match {
       case None => None
       case Some(native) =>
-        val idsJson  = ids.mkString("[", ",", "]")
-        val embJson  = embeddings.map(_.mkString("[", ",", "]")).mkString("[", ",", "]")
+        val ipcBytes = buildIpcBatch(ids, vectorColumn, embeddings, columns)
+
         val modelJson   = embeddingModel.map(m => s""","embedding_model":${jsonStr(m)}""").getOrElse("")
         val partByJson  = partitionBy.map(v => s""","partition_by":${jsonStr(v)}""").getOrElse("")
         val partValJson = partitionValue.map(v => s""","partition_value":${jsonStr(v)}""").getOrElse("")
@@ -172,21 +281,16 @@ object AilakeNative {
         val hnswEfJson             = hnswEfConstruction.map(v => s""","hnsw_ef_construction":$v""").getOrElse("")
         val preNormalizeJson       = if (preNormalize) ""","pre_normalize":true""" else ""
         val deferredJson           = if (deferred) ""","deferred":true""" else ""
-        val colsJson = if (columns.nonEmpty) {
-          val inner = columns.map { case (col, vals) =>
-            val arr = vals.map(v => jsonStr(v)).mkString("[", ",", "]")
-            s"""${jsonStr(col)}:$arr"""
-          }.mkString("{", ",", "}")
-          s""","columns":$inner"""
-        } else ""
-        val requestJson =
+        // No `ids`/`embeddings`/`columns` here — those three now live in
+        // `ipcBytes` instead of being JSON-encoded (Fase 10, ADR-017).
+        val optsJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
           s""""table":${jsonStr(tableName)},"vec_col":${jsonStr(vectorColumn)},""" +
-          s""""dim":$dim,"metric":${jsonStr(metric)},"precision":${jsonStr(precision)},""" +
-          s""""ids":$idsJson,"embeddings":$embJson$modelJson$partByJson$partValJson$pfJson$fvJson$ftsJson$hnswMJson$hnswEfJson$preNormalizeJson$deferredJson$colsJson}"""
-        val ptr = native.ailake_write_batch_json(requestJson)
+          s""""dim":$dim,"metric":${jsonStr(metric)},"precision":${jsonStr(precision)}""" +
+          s"""$modelJson$partByJson$partValJson$pfJson$fvJson$ftsJson$hnswMJson$hnswEfJson$preNormalizeJson$deferredJson}"""
+        val ptr = native.ailake_write_batch_ipc(ipcBytes, ipcBytes.length.toLong, optsJson)
         if (ptr == null) {
-          log.warn(s"[ailake] ailake_write_batch_json returned null for table=$tableName")
+          log.warn(s"[ailake] ailake_write_batch_ipc returned null for table=$tableName")
           return None
         }
         val json = try { ptr.getString(0) } catch {

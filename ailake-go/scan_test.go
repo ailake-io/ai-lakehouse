@@ -12,34 +12,38 @@ import (
 
 // ── Helper tests ───────────────────────────────────────────────────────────────
 
-func TestIsAbsPath(t *testing.T) {
+func TestResolveWarehousePath(t *testing.T) {
 	cases := []struct {
-		path string
-		want bool
+		name      string
+		warehouse string
+		path      string
+		want      string
 	}{
-		{"/data/table", true},
-		{"relative/path", false},
-		{"", false},
-		{"C:/Windows", true},
-		{"./local", false},
+		{"relative joins onto warehouse", "/data", "file.parquet", "/data/file.parquet"},
+		{"warehouse with trailing slash", "/data/", "file.parquet", "/data/file.parquet"},
+		{"empty warehouse", "", "file.parquet", "file.parquet"},
+		{"already OS-absolute, used as-is", "/data", "/other/file.parquet", "/other/file.parquet"},
+		// The regression case: ailake-py's local_catalog_store always writes
+		// warehouse_uri as file://<absolute path> (Trino Iceberg-connector
+		// compatibility), so metadata.json's manifest-list can be an absolute
+		// file:// URI. Before this fix, resolveWarehousePath's predecessors
+		// (filepath.IsAbs / isAbsPath) didn't recognize "file://" as absolute,
+		// so this got joined onto warehouse — filepath.Join then normalized
+		// "/data" + "file:///abs/path/snap-1.avro" into the corrupted
+		// "/data/file:/abs/path/snap-1.avro", not "/abs/path/snap-1.avro".
+		{
+			"absolute file:// URI, scheme stripped and used as-is",
+			"/data/go_client_test",
+			"file:///home/thiago/data/go_client_test/default/table/metadata/snap-1.avro",
+			"/home/thiago/data/go_client_test/default/table/metadata/snap-1.avro",
+		},
 	}
 	for _, c := range cases {
-		if got := isAbsPath(c.path); got != c.want {
-			t.Errorf("isAbsPath(%q) = %v, want %v", c.path, got, c.want)
-		}
-	}
-}
-
-func TestJoinPath(t *testing.T) {
-	cases := []struct{ base, rel, want string }{
-		{"/data", "file.parquet", "/data/file.parquet"},
-		{"/data/", "file.parquet", "/data/file.parquet"},
-		{"", "file.parquet", "file.parquet"},
-	}
-	for _, c := range cases {
-		if got := joinPath(c.base, c.rel); got != c.want {
-			t.Errorf("joinPath(%q, %q) = %q, want %q", c.base, c.rel, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolveWarehousePath(c.warehouse, c.path); got != c.want {
+				t.Errorf("resolveWarehousePath(%q, %q) = %q, want %q", c.warehouse, c.path, got, c.want)
+			}
+		})
 	}
 }
 

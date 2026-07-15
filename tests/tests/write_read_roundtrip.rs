@@ -70,6 +70,7 @@ async fn write_10k_rows_search_top10() {
             score_fn: None,
             partition_filter: None,
             hybrid: None,
+            column_filter: None,
         },
         "embedding",
         dim,

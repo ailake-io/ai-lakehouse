@@ -11,7 +11,9 @@ use std::{
     sync::Arc,
 };
 
-use ailake_catalog::{HadoopCatalog, TableIdent};
+use ailake_catalog::{
+    CatalogProvider, HadoopCatalog, RestCatalog, RestCatalogAuth, RestCatalogConfig, TableIdent,
+};
 use ailake_core::{EmbeddingModelInfo, VectorMetric};
 use ailake_query::{
     fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
@@ -87,6 +89,100 @@ fn parse_metric(s: &str) -> VectorMetric {
     }
 }
 
+/// Catalog-selection fields shared by every JSON `Req`/`Opts` struct via
+/// `#[serde(flatten)]`. `catalog` defaults to `"hadoop"` (unchanged behavior
+/// for every existing caller — Spark/Trino/Flink plugins that never set this
+/// field keep working exactly as before). `"rest"` talks to any Iceberg REST
+/// Catalog spec server — see `docs/guides/REST_CATALOG.md`.
+///
+/// Deliberately NOT threaded into `do_search`/`ailake_vector_search_json`
+/// (the raw-pointer legacy entry point with no JSON body to carry this
+/// config) — that path stays Hadoop-only, matching its existing behavior.
+#[derive(serde::Deserialize, Default)]
+struct CatalogOpts {
+    #[serde(default)]
+    catalog: Option<String>,
+    #[serde(default)]
+    rest_uri: Option<String>,
+    #[serde(default)]
+    rest_prefix: Option<String>,
+    #[serde(default)]
+    rest_warehouse: Option<String>,
+    #[serde(default)]
+    rest_auth: Option<String>,
+    #[serde(default)]
+    rest_token: Option<String>,
+    #[serde(default)]
+    rest_oauth_token_endpoint: Option<String>,
+    #[serde(default)]
+    rest_oauth_client_id: Option<String>,
+    #[serde(default)]
+    rest_oauth_client_secret: Option<String>,
+    #[serde(default)]
+    rest_oauth_scope: Option<String>,
+}
+
+/// Builds the `CatalogProvider` a JSON request asked for. `warehouse` is
+/// always used for `Store` resolution and as the Hadoop catalog root (see
+/// `LocalStore::new(&warehouse)` at each call site) — unrelated to `opts`,
+/// which only selects/configures the catalog *metadata* backend.
+fn resolve_catalog(
+    warehouse: &str,
+    store: Arc<dyn ailake_store::Store>,
+    opts: &CatalogOpts,
+) -> Result<Arc<dyn CatalogProvider>, String> {
+    match opts.catalog.as_deref().unwrap_or("hadoop") {
+        "hadoop" => Ok(Arc::new(HadoopCatalog::new(store, warehouse))),
+        "rest" => {
+            let uri = opts
+                .rest_uri
+                .clone()
+                .ok_or("catalog=\"rest\" requires \"rest_uri\"")?;
+            let auth = match opts.rest_auth.as_deref().unwrap_or("none") {
+                "none" => RestCatalogAuth::None,
+                "bearer" => {
+                    let token = opts
+                        .rest_token
+                        .clone()
+                        .ok_or("rest_auth=\"bearer\" requires \"rest_token\"")?;
+                    RestCatalogAuth::Bearer(token)
+                }
+                "oauth2" => {
+                    let token_endpoint = opts
+                        .rest_oauth_token_endpoint
+                        .clone()
+                        .ok_or("rest_auth=\"oauth2\" requires \"rest_oauth_token_endpoint\"")?;
+                    let client_id = opts
+                        .rest_oauth_client_id
+                        .clone()
+                        .ok_or("rest_auth=\"oauth2\" requires \"rest_oauth_client_id\"")?;
+                    let client_secret = opts
+                        .rest_oauth_client_secret
+                        .clone()
+                        .ok_or("rest_auth=\"oauth2\" requires \"rest_oauth_client_secret\"")?;
+                    RestCatalogAuth::OAuth2 {
+                        token_endpoint,
+                        client_id,
+                        client_secret,
+                        scope: opts.rest_oauth_scope.clone(),
+                    }
+                }
+                other => return Err(format!("unknown rest_auth: {other}")),
+            };
+            let config = RestCatalogConfig {
+                uri,
+                prefix: opts.rest_prefix.clone(),
+                warehouse: opts.rest_warehouse.clone(),
+                auth,
+            };
+            Ok(Arc::new(RestCatalog::new(config, store)))
+        }
+        other => Err(format!(
+            "unknown catalog backend: {other} (supported: \"hadoop\", \"rest\")"
+        )),
+    }
+}
+
 /// Returns a per-table `Mutex` shared across all JNI calls in this process.
 ///
 /// `HadoopCatalog` serializes commits via a per-instance mutex, but each JNI call
@@ -121,9 +217,11 @@ fn do_search(
     text_column: &str,
     bm25_weight: f32,
     pruning_threshold: f32,
+    catalog_opts: &CatalogOpts,
 ) -> ailake_core::AilakeResult<Vec<SearchResult>> {
     let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&warehouse));
-    let catalog = Arc::new(HadoopCatalog::new(store.clone(), &warehouse));
+    let catalog = resolve_catalog(&warehouse, store.clone(), catalog_opts)
+        .map_err(ailake_core::AilakeError::InvalidArgument)?;
     let table = TableIdent::new(namespace, table_name);
     let hybrid = hybrid_text.map(|qt| {
         ailake_query::HybridConfig::new(qt)
@@ -138,6 +236,7 @@ fn do_search(
         score_fn: None,
         partition_filter,
         hybrid,
+        column_filter: None,
     };
     rt().block_on(rs_search(
         &table, &query, config, vec_col, dim, catalog, store,
@@ -298,6 +397,7 @@ pub unsafe extern "C" fn ailake_vector_search_json(
             "chunk_text",
             0.5,
             f32::INFINITY,
+            &CatalogOpts::default(),
         ) {
             Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
             Err(e) => {
@@ -340,6 +440,8 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "default_ns")]
             namespace: String,
             table: String,
@@ -421,6 +523,7 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
             &text_column,
             bm25_weight,
             pruning_threshold,
+            &req.catalog_opts,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -495,6 +598,8 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "default_ns")]
             namespace: String,
             table: String,
@@ -646,7 +751,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
         let store: std::sync::Arc<dyn ailake_store::Store> =
             std::sync::Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = std::sync::Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
 
         use arrow_array::StringArray;
         let mut fields = vec![Field::new("id", DataType::Int64, false)];
@@ -721,6 +829,368 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
     })
 }
 
+/// Extracts one row per top-level list element as `Vec<f32>` from an Arrow
+/// `List<Float32>` or `FixedSizeList<Float32>` array — the two on-wire shapes
+/// `ailake_write_batch_ipc` accepts for the vector column. `dim` is the
+/// declared table dimension; every row's element count must match it exactly.
+fn extract_embeddings_f32(
+    arr: &dyn arrow_array::Array,
+    dim: usize,
+) -> Result<Vec<Vec<f32>>, String> {
+    use arrow_array::{Array, FixedSizeListArray, Float32Array, ListArray};
+    use arrow_schema::DataType;
+    match arr.data_type() {
+        DataType::List(_) => {
+            let list = arr
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| "vector column: expected ListArray".to_string())?;
+            let values = list
+                .values()
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| "vector column: List child must be Float32".to_string())?;
+            let offsets = list.value_offsets();
+            let mut out = Vec::with_capacity(list.len());
+            for i in 0..list.len() {
+                let start = offsets[i] as usize;
+                let end = offsets[i + 1] as usize;
+                if end - start != dim {
+                    return Err(format!(
+                        "vector column: row {i} has {} dims, expected {dim}",
+                        end - start
+                    ));
+                }
+                out.push(values.values()[start..end].to_vec());
+            }
+            Ok(out)
+        }
+        DataType::FixedSizeList(_, list_dim) => {
+            if *list_dim as usize != dim {
+                return Err(format!(
+                    "vector column: FixedSizeList dim {list_dim} != declared dim {dim}"
+                ));
+            }
+            let list = arr
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .ok_or_else(|| "vector column: expected FixedSizeListArray".to_string())?;
+            let values = list
+                .values()
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| "vector column: FixedSizeList child must be Float32".to_string())?;
+            let mut out = Vec::with_capacity(list.len());
+            for i in 0..list.len() {
+                let start = i * dim;
+                out.push(values.values()[start..start + dim].to_vec());
+            }
+            Ok(out)
+        }
+        other => Err(format!(
+            "vector column: unsupported Arrow type {other:?}, expected List<Float32> or FixedSizeList<Float32>"
+        )),
+    }
+}
+
+/// Projects `batch` onto every column except `drop_idx` — used to strip the
+/// vector column back out of the decoded IPC batch before handing the
+/// remaining (id + extra text columns) batch to `TableWriter`, which expects
+/// the vector column supplied separately as `&[Vec<f32>]`.
+fn project_dropping(
+    batch: &arrow_array::RecordBatch,
+    drop_idx: usize,
+) -> Result<arrow_array::RecordBatch, arrow_schema::ArrowError> {
+    let keep: Vec<usize> = (0..batch.num_columns())
+        .filter(|&i| i != drop_idx)
+        .collect();
+    batch.project(&keep)
+}
+
+/// Write a batch of records to an AI-Lake table — Arrow IPC variant of
+/// `ailake_write_batch_json` (Fase 10, ADR-017).
+///
+/// Replaces the JSON `"embeddings": [[...], ...]` payload (measured ~150ms of
+/// JVM-side `Float.toString` formatting + UTF-8 encode per 1k×1536-dim batch)
+/// with a single Arrow IPC **stream** RecordBatch carrying `id` (Int64), the
+/// vector column (`List<Float32>` or `FixedSizeList<Float32>`, named to match
+/// `vec_col` in `opts_json`), and any extra text columns (Utf8) — the same
+/// shape `ailake_write_batch_json` builds internally from `ids`/`embeddings`/
+/// `columns`, just arriving pre-built instead of hand-assembled from JSON.
+///
+/// `opts_json` carries every field `ailake_write_batch_json`'s `Req` has
+/// *except* `ids`/`embeddings`/`columns` (those three live in the IPC batch
+/// instead):
+/// ```json
+/// {
+///   "warehouse": "/path/to/warehouse", "namespace": "default", "table": "docs",
+///   "vec_col": "embedding", "dim": 1536, "metric": "cosine", "precision": "f16"
+/// }
+/// ```
+///
+/// Returns JSON: `{"ok":true,"snapshot_id":N}` or `{"ok":false,"error":"..."}`.
+///
+/// # Safety
+/// `ipc_bytes` must point to `ipc_len` valid bytes (an Arrow IPC stream with
+/// exactly one RecordBatch). `ipc_len` is `i64` rather than `usize` deliberately —
+/// a fixed 8-byte width avoids any ambiguity against JNA's `long` marshalling
+/// (Java `long` → native `long`, 8 bytes on the 64-bit Linux targets this
+/// project runs on; `usize` would carry the same width here today, but pinning
+/// the FFI-facing type to a fixed-width integer keeps that an implementation
+/// detail rather than a load-bearing assumption of the C-ABI contract).
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_write_batch_ipc(
+    ipc_bytes: *const u8,
+    ipc_len: i64,
+    opts_json: *const c_char,
+) -> *mut c_char {
+    catch_ffi_panic("ailake_write_batch_ipc", move || {
+        use ailake_core::{PartitionDef, VectorPrecision, VectorStoragePolicy};
+        use ailake_query::TableWriter;
+
+        #[derive(serde::Deserialize)]
+        struct PartitionFieldReq {
+            column: String,
+            #[serde(default = "default_transform")]
+            transform: String,
+            #[serde(default = "default_col_type")]
+            column_type: String,
+        }
+        fn default_transform() -> String {
+            "identity".into()
+        }
+        fn default_col_type() -> String {
+            "string".into()
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Opts {
+            warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
+            #[serde(default = "default_ns")]
+            namespace: String,
+            table: String,
+            #[serde(default = "default_col")]
+            vec_col: String,
+            dim: u32,
+            #[serde(default)]
+            metric: Option<String>,
+            #[serde(default)]
+            precision: Option<String>,
+            #[serde(default)]
+            ivf_residual: bool,
+            #[serde(default)]
+            embedding_model: Option<String>,
+            #[serde(default)]
+            partition_by: Option<String>,
+            #[serde(default)]
+            partition_value: Option<String>,
+            #[serde(default)]
+            partition_fields: Vec<PartitionFieldReq>,
+            #[serde(default = "default_format_version")]
+            format_version: u8,
+            #[serde(default)]
+            fts_columns: Vec<String>,
+            #[serde(default = "default_fts_tokenizer")]
+            fts_tokenizer: String,
+            #[serde(default)]
+            hnsw_m: Option<u32>,
+            #[serde(default)]
+            hnsw_ef_construction: Option<u32>,
+            #[serde(default)]
+            pre_normalize: bool,
+            #[serde(default)]
+            deferred: bool,
+        }
+        fn default_ns() -> String {
+            "default".into()
+        }
+        fn default_col() -> String {
+            "embedding".into()
+        }
+        fn default_format_version() -> u8 {
+            2
+        }
+        fn default_fts_tokenizer() -> String {
+            "default".into()
+        }
+
+        if opts_json.is_null() {
+            return cstr_err_json("null opts_json");
+        }
+        let json_str = match unsafe { CStr::from_ptr(opts_json) }.to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("ailake_write_batch_ipc: invalid UTF-8 in opts_json: {}", e);
+                return cstr_err_json(e);
+            }
+        };
+        let opts: Opts = match serde_json::from_str(json_str) {
+            Ok(o) => o,
+            Err(e) => {
+                warn!("ailake_write_batch_ipc: opts_json parse error: {}", e);
+                return cstr_err_json(e);
+            }
+        };
+
+        if ipc_bytes.is_null() {
+            return cstr_err_json("null ipc_bytes");
+        }
+        if ipc_len < 0 {
+            return cstr_err_json("negative ipc_len");
+        }
+        let raw: &[u8] = unsafe { std::slice::from_raw_parts(ipc_bytes, ipc_len as usize) };
+        let mut reader =
+            match arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(raw), None) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("ailake_write_batch_ipc: IPC stream header error: {}", e);
+                    return cstr_err_json(e);
+                }
+            };
+        let batch = match reader.next() {
+            Some(Ok(b)) => b,
+            Some(Err(e)) => {
+                warn!("ailake_write_batch_ipc: IPC batch decode error: {}", e);
+                return cstr_err_json(e);
+            }
+            None => return cstr_err_json("empty IPC stream: no RecordBatch"),
+        };
+
+        let vec_idx = match batch.schema().index_of(&opts.vec_col) {
+            Ok(i) => i,
+            Err(_) => {
+                return cstr_err_json(format!(
+                    "vector column '{}' not found in IPC batch schema",
+                    opts.vec_col
+                ))
+            }
+        };
+        let embeddings =
+            match extract_embeddings_f32(batch.column(vec_idx).as_ref(), opts.dim as usize) {
+                Ok(v) => v,
+                Err(e) => return cstr_err_json(e),
+            };
+        let reduced = match project_dropping(&batch, vec_idx) {
+            Ok(b) => b,
+            Err(e) => return cstr_err_json(e),
+        };
+
+        debug!(
+            "ailake_write_batch_ipc: warehouse={} table={}.{} rows={}",
+            opts.warehouse,
+            opts.namespace,
+            opts.table,
+            embeddings.len()
+        );
+
+        let metric = parse_metric(opts.metric.as_deref().unwrap_or("euclidean"));
+        let precision = match opts.precision.as_deref().unwrap_or("f16") {
+            "f32" => VectorPrecision::F32,
+            "i8" => VectorPrecision::I8,
+            _ => VectorPrecision::F16,
+        };
+        let embedding_model = opts
+            .embedding_model
+            .as_deref()
+            .map(EmbeddingModelInfo::from_property_value);
+        let partition_fields: Vec<PartitionDef> = opts
+            .partition_fields
+            .into_iter()
+            .map(|pf| PartitionDef {
+                column: pf.column,
+                transform: pf.transform,
+                column_type: pf.column_type,
+            })
+            .collect();
+
+        let policy = VectorStoragePolicy {
+            column_name: opts.vec_col.clone(),
+            dim: opts.dim,
+            metric,
+            precision,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: opts.pre_normalize,
+            hnsw_m: opts.hnsw_m,
+            hnsw_ef_construction: opts.hnsw_ef_construction,
+            ivf_residual: opts.ivf_residual,
+            embedding_model,
+            modality: None,
+            partition_by: opts.partition_by,
+            partition_value: opts.partition_value,
+            partition_column_type: None,
+            partition_fields,
+        };
+
+        let format_version = opts.format_version;
+        let table = ailake_catalog::TableIdent::new(&opts.namespace, &opts.table);
+        let store: std::sync::Arc<dyn ailake_store::Store> =
+            std::sync::Arc::new(LocalStore::new(&opts.warehouse));
+        let catalog = match resolve_catalog(&opts.warehouse, store.clone(), &opts.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
+
+        let fts_cfg: Option<ailake_fts::FtsConfig> = if opts.fts_columns.is_empty() {
+            None
+        } else {
+            Some(ailake_fts::FtsConfig {
+                text_columns: opts.fts_columns,
+                tokenizer: opts.fts_tokenizer,
+                writer_heap_bytes: 50 * 1024 * 1024,
+            })
+        };
+
+        let deferred = opts.deferred;
+        let _table_lock = jni_table_lock(&opts.warehouse, &opts.namespace, &opts.table);
+        let _commit_guard = _table_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let result = rt().block_on(async {
+            let base =
+                TableWriter::create_or_open(catalog, store, policy, table, format_version).await?;
+            let mut writer = if let Some(cfg) = fts_cfg {
+                base.with_fts_config(cfg)
+            } else {
+                base
+            };
+            if deferred {
+                writer
+                    .write_batch_auto_deferred(&reduced, &embeddings)
+                    .await?;
+            } else {
+                writer.write_batch_auto(&reduced, &embeddings).await?;
+            }
+            writer.commit().await
+        });
+
+        #[derive(serde::Serialize)]
+        struct Resp {
+            ok: bool,
+            snapshot_id: i64,
+        }
+        match result {
+            Ok(snap) => {
+                info!(
+                    "ailake_write_batch_ipc: committed snapshot_id={} table={}.{}",
+                    snap, opts.namespace, opts.table
+                );
+                serde_json::to_string(&Resp {
+                    ok: true,
+                    snapshot_id: snap,
+                })
+                .map(cstr_json)
+                .unwrap_or_else(cstr_err_json)
+            }
+            Err(e) => {
+                warn!("ailake_write_batch_ipc: write failed: {}", e);
+                cstr_err_json(e)
+            }
+        }
+    })
+}
+
 /// Write a batch with N independent vector columns into a single AI-Lake file.
 ///
 /// Each column gets its own HNSW section in the file footer (Phase 8 multimodal
@@ -775,6 +1245,8 @@ pub unsafe extern "C" fn ailake_write_batch_multi_json(request_json: *const c_ch
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "default_ns")]
             namespace: String,
             table: String,
@@ -900,7 +1372,10 @@ pub unsafe extern "C" fn ailake_write_batch_multi_json(request_json: *const c_ch
         let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
         let store: std::sync::Arc<dyn ailake_store::Store> =
             std::sync::Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = std::sync::Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
 
         use arrow_array::StringArray;
         let mut fields = vec![Field::new("id", DataType::Int64, false)];
@@ -1019,6 +1494,8 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "default_ns_st")]
             namespace: String,
             table: String,
@@ -1069,7 +1546,10 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
         );
 
         let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
         let table = TableIdent::new(&req.namespace, &req.table);
         let pf = req.partition_filter.as_deref();
         // Prefer multi-column spec; fall back to legacy single-column field.
@@ -1152,6 +1632,8 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "default_ns_multi")]
             namespace: String,
             table: String,
@@ -1200,7 +1682,10 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
 
         let table = TableIdent::new(&req.namespace, &req.table);
         let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
 
         // Hold owned query vecs alive for the lifetime of ModalQuery borrows
         let modal_queries_owned: Vec<(String, Vec<f32>, f32, u32)> = req
@@ -1523,11 +2008,11 @@ fn record_batch_to_scan_json(batch: &arrow_array::RecordBatch) -> Result<String,
 #[no_mangle]
 pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c_char {
     catch_ffi_panic("ailake_scan_json", move || {
-        use ailake_catalog::provider::CatalogProvider;
-
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "scan_default_ns")]
             namespace: String,
             table: String,
@@ -1589,6 +2074,7 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
             "",
             0.0,
             f32::INFINITY,
+            &req.catalog_opts,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -1603,7 +2089,10 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         // Current Iceberg schema — so a file written before a metadata-only
         // evolve_schema/add_column still gets the new column projected in as null
         // instead of silently omitted (see fetch_rows's doc comment).
-        let scan_catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let scan_catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
         let scan_table = TableIdent::new(&req.namespace, &req.table);
         let schema_fields = match rt().block_on(scan_catalog.load_table(&scan_table)) {
             Ok(meta) => meta.schema_fields,
@@ -1671,6 +2160,8 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "dw_default_ns")]
             namespace: String,
             table: String,
@@ -1706,7 +2197,10 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
         );
 
         let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
         let table = TableIdent::new(&req.namespace, &req.table);
         let values_ref: Vec<&str> = req.values.iter().map(String::as_str).collect();
 
@@ -1775,7 +2269,6 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
 #[no_mangle]
 pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) -> *mut c_char {
     catch_ffi_panic("ailake_evolve_schema_json", move || {
-        use ailake_catalog::provider::CatalogProvider;
         use ailake_catalog::{AddColumnRequest, SchemaEvolution};
 
         #[derive(serde::Deserialize)]
@@ -1798,6 +2291,8 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "es_default_ns")]
             namespace: String,
             table: String,
@@ -1850,7 +2345,10 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
         }
 
         let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
         let table = TableIdent::new(&req.namespace, &req.table);
 
         let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
@@ -1909,6 +2407,8 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "compact_default_ns")]
             namespace: String,
             table: String,
@@ -1946,8 +2446,10 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
         );
 
         let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
-        let catalog: Arc<dyn ailake_catalog::provider::CatalogProvider> =
-            Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
         let table = TableIdent::new(&req.namespace, &req.table);
 
         let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
@@ -2350,5 +2852,268 @@ mod tests {
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         assert!(json.contains("error"), "expected error, got: {}", json);
         unsafe { ailake_free_string(ptr) };
+    }
+
+    // ── write_batch_ipc (Fase 10, ADR-017) ──────────────────────────────────────
+    //
+    // Real (non-mocked) round-trips against a tempdir warehouse: build an Arrow
+    // IPC stream the same shape a JVM caller would send, hand it to
+    // `ailake_write_batch_ipc`, then confirm via `ailake_search_json` that the
+    // rows actually landed and are searchable — not just "did not crash".
+
+    fn build_ipc_stream_list_f32(ids: &[i64], embeddings: &[Vec<f32>], texts: &[&str]) -> Vec<u8> {
+        use arrow_array::builder::{Float32Builder, ListBuilder};
+        use arrow_array::{Int64Array, StringArray};
+        use arrow_schema::{DataType, Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new(
+                "embedding",
+                DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
+                false,
+            ),
+            Field::new("chunk_text", DataType::Utf8, true),
+        ]));
+
+        let mut list_builder = ListBuilder::new(Float32Builder::new());
+        for row in embeddings {
+            for v in row {
+                list_builder.values().append_value(*v);
+            }
+            list_builder.append(true);
+        }
+        let embedding_array = list_builder.finish();
+
+        let batch = arrow_array::RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(ids.to_vec())),
+                Arc::new(embedding_array),
+                Arc::new(StringArray::from(texts.to_vec())),
+            ],
+        )
+        .unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut buf, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        buf
+    }
+
+    fn build_ipc_stream_fixed_size_list_f32(
+        ids: &[i64],
+        embeddings: &[Vec<f32>],
+        dim: i32,
+    ) -> Vec<u8> {
+        use arrow_array::builder::{FixedSizeListBuilder, Float32Builder};
+        use arrow_array::Int64Array;
+        use arrow_schema::{DataType, Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dim),
+                false,
+            ),
+        ]));
+
+        let mut list_builder = FixedSizeListBuilder::new(Float32Builder::new(), dim);
+        for row in embeddings {
+            for v in row {
+                list_builder.values().append_value(*v);
+            }
+            list_builder.append(true);
+        }
+        let embedding_array = list_builder.finish();
+
+        let batch = arrow_array::RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(ids.to_vec())),
+                Arc::new(embedding_array),
+            ],
+        )
+        .unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut buf, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        buf
+    }
+
+    fn call_write_batch_ipc(buf: &[u8], opts_json: &str) -> String {
+        let c_opts = std::ffi::CString::new(opts_json).unwrap();
+        let ptr =
+            unsafe { ailake_write_batch_ipc(buf.as_ptr(), buf.len() as i64, c_opts.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        unsafe { ailake_free_string(ptr) };
+        json
+    }
+
+    #[test]
+    fn write_batch_ipc_real_round_trip_list_f32() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let warehouse = dir.path().to_str().unwrap();
+
+        let ids = vec![1i64, 2, 3];
+        let embeddings = vec![
+            vec![1.0f32, 0.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+        ];
+        let texts = vec!["row one", "row two", "row three"];
+        let buf = build_ipc_stream_list_f32(&ids, &embeddings, &texts);
+
+        let opts = serde_json::json!({
+            "warehouse": warehouse,
+            "namespace": "default",
+            "table": "docs",
+            "vec_col": "embedding",
+            "dim": 4,
+            "metric": "euclidean",
+        })
+        .to_string();
+        let write_json = call_write_batch_ipc(&buf, &opts);
+        assert!(
+            write_json.contains("\"ok\":true"),
+            "expected success, got: {write_json}"
+        );
+        assert!(write_json.contains("snapshot_id"), "got: {write_json}");
+
+        // Confirm the rows really landed and are searchable — full parity with
+        // what ailake_write_batch_json would have produced.
+        let search_req = serde_json::json!({
+            "warehouse": warehouse,
+            "namespace": "default",
+            "table": "docs",
+            "vec_col": "embedding",
+            "dim": 4,
+            "query": [1.0, 0.0, 0.0, 0.0],
+            "top_k": 3,
+        })
+        .to_string();
+        let c_search = std::ffi::CString::new(search_req).unwrap();
+        let ptr = unsafe { ailake_search_json(c_search.as_ptr()) };
+        let search_json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        unsafe { ailake_free_string(ptr) };
+        assert!(
+            search_json.contains("\"ok\":true"),
+            "search failed: {search_json}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&search_json).unwrap();
+        let results = parsed["results"].as_array().unwrap();
+        assert_eq!(
+            results.len(),
+            3,
+            "expected all 3 rows back, got: {search_json}"
+        );
+    }
+
+    #[test]
+    fn write_batch_ipc_real_round_trip_fixed_size_list_f32() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let warehouse = dir.path().to_str().unwrap();
+
+        let ids = vec![10i64, 20];
+        let embeddings = vec![vec![0.5f32, 0.5, 0.5, 0.5], vec![0.1, 0.2, 0.3, 0.4]];
+        let buf = build_ipc_stream_fixed_size_list_f32(&ids, &embeddings, 4);
+
+        let opts = serde_json::json!({
+            "warehouse": warehouse,
+            "namespace": "default",
+            "table": "docs_fixed",
+            "vec_col": "embedding",
+            "dim": 4,
+        })
+        .to_string();
+        let write_json = call_write_batch_ipc(&buf, &opts);
+        assert!(
+            write_json.contains("\"ok\":true"),
+            "expected success, got: {write_json}"
+        );
+    }
+
+    #[test]
+    fn write_batch_ipc_dim_mismatch_returns_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let warehouse = dir.path().to_str().unwrap();
+
+        let ids = vec![1i64];
+        let embeddings = vec![vec![1.0f32, 2.0, 3.0]]; // 3 dims
+        let texts = vec!["x"];
+        let buf = build_ipc_stream_list_f32(&ids, &embeddings, &texts);
+
+        let opts = serde_json::json!({
+            "warehouse": warehouse,
+            "namespace": "default",
+            "table": "docs",
+            "vec_col": "embedding",
+            "dim": 4, // declared dim mismatches actual row width
+        })
+        .to_string();
+        let write_json = call_write_batch_ipc(&buf, &opts);
+        assert!(write_json.contains("\"ok\":false"), "got: {write_json}");
+        assert!(write_json.contains("dims"), "got: {write_json}");
+    }
+
+    #[test]
+    fn write_batch_ipc_missing_vec_col_returns_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let warehouse = dir.path().to_str().unwrap();
+
+        let ids = vec![1i64];
+        let embeddings = vec![vec![1.0f32, 2.0, 3.0, 4.0]];
+        let texts = vec!["x"];
+        let buf = build_ipc_stream_list_f32(&ids, &embeddings, &texts);
+
+        let opts = serde_json::json!({
+            "warehouse": warehouse,
+            "namespace": "default",
+            "table": "docs",
+            "vec_col": "does_not_exist",
+            "dim": 4,
+        })
+        .to_string();
+        let write_json = call_write_batch_ipc(&buf, &opts);
+        assert!(write_json.contains("\"ok\":false"), "got: {write_json}");
+        assert!(write_json.contains("not found"), "got: {write_json}");
+    }
+
+    #[test]
+    fn write_batch_ipc_null_guards() {
+        let opts = std::ffi::CString::new(r#"{"warehouse":"/x","table":"t","dim":4}"#).unwrap();
+        let ptr = unsafe { ailake_write_batch_ipc(std::ptr::null(), 0, opts.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        unsafe { ailake_free_string(ptr) };
+        assert!(json.contains("null"), "got: {json}");
+
+        let buf = [0u8; 4];
+        let ptr =
+            unsafe { ailake_write_batch_ipc(buf.as_ptr(), buf.len() as i64, std::ptr::null()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        unsafe { ailake_free_string(ptr) };
+        assert!(json.contains("null"), "got: {json}");
+    }
+
+    #[test]
+    fn write_batch_ipc_negative_len_guard() {
+        let opts = std::ffi::CString::new(r#"{"warehouse":"/x","table":"t","dim":4}"#).unwrap();
+        let buf = [0u8; 4];
+        let ptr = unsafe { ailake_write_batch_ipc(buf.as_ptr(), -1, opts.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        unsafe { ailake_free_string(ptr) };
+        assert!(json.contains("negative"), "got: {json}");
     }
 }

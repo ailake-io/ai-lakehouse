@@ -37,7 +37,12 @@ pub enum VectorPrecision {
     F32 = 0,
     F16 = 1,
     I8 = 2,
-    Binary = 3,
+    // 3 was `Binary` (1-bit packed quantization for the now-removed Binary Hamming
+    // index, v0.0.14) — removed: no encoder ever implemented real bit-packing (the
+    // write path silently fell back to F16 while the field metadata still
+    // labeled the column "binary", a size mismatch), and no public API
+    // (CLI/Python/JNI) ever exposed it. Reserved, not reassigned — see
+    // `ailake-file::footer::Precision` and `docs/specs/FILE_FORMAT.md` §3.1.
 }
 
 impl VectorPrecision {
@@ -47,7 +52,6 @@ impl VectorPrecision {
             Self::F32 => 4,
             Self::F16 => 2,
             Self::I8 => 1,
-            Self::Binary => 1, // ceil(dim/8) handled at call site
         }
     }
 }

@@ -92,6 +92,7 @@ class TableWriter:
         format_version: int = 2,
         fts_text_columns: Optional[list[str]] = None,
         fts_tokenizer: str = "default",
+        catalog_opts: Optional[dict[str, str]] = None,
     ) -> None:
         """Open or create an AI-Lake table at *path*.
 
@@ -299,6 +300,7 @@ def search(
     pruning_threshold: Optional[float] = None,
     ef_search: Optional[int] = None,
     rerank_factor: Optional[int] = None,
+    catalog_opts: Optional[dict[str, str]] = None,
 ) -> list[dict[str, object]]:
     """Search a table for the top-*k* nearest vectors to *query*.
 
@@ -336,6 +338,7 @@ def search_text(
     top_k: int = 10,
     text_column: str = "chunk_text",
     partition_filter: Optional[str] = None,
+    catalog_opts: Optional[dict[str, str]] = None,
 ) -> list[dict[str, object]]:
     """Pure BM25 full-text search — no vector query required.
 
@@ -435,6 +438,7 @@ class WorkingMemoryBuffer:
 def decay_memories(
     path: str,
     decay_lambda: float = 0.1,
+    catalog_opts: Optional[dict[str, str]] = None,
 ) -> int:
     """Recompute ``recency_weight`` for all rows in an episodic memory table.
 
@@ -472,6 +476,7 @@ def search_with_data(
     pruning_threshold: Optional[float] = None,
     ef_search: Optional[int] = None,
     rerank_factor: Optional[int] = None,
+    catalog_opts: Optional[dict[str, str]] = None,
 ) -> bytes:
     """Search and return full row data serialized as Arrow IPC bytes.
 
@@ -550,6 +555,7 @@ def migrate_embeddings(
     new_model: Optional[str] = None,
     new_model_version: Optional[str] = None,
     on_progress: Optional[Callable[..., None]] = None,
+    catalog_opts: Optional[dict[str, str]] = None,
 ) -> None:
     """Migrate an embedding column to a new model.
 
@@ -594,6 +600,7 @@ def search_multimodal(
     ef_search: Optional[int] = None,
     pruning_threshold: Optional[float] = None,
     rerank_factor: Optional[int] = None,
+    catalog_opts: Optional[dict[str, str]] = None,
 ) -> list[dict[str, object]]:
     """Cross-modal search: fuse results from N vector columns via Reciprocal Rank Fusion.
 
@@ -633,8 +640,15 @@ def search_multimodal(
 # file previously declared nonexistent `Agent.agent_id`/`session_id`
 # properties and a stale `str`-returning `assemble_context` — removed).
 
-def delete_where(path: str, column: str, values: list[str]) -> None: ...
-def delete_rows(table_path: str, file_path: str, row_ids: list[int]) -> None: ...
+def delete_where(
+    path: str, column: str, values: list[str], catalog_opts: Optional[dict[str, str]] = None
+) -> None: ...
+def delete_rows(
+    table_path: str,
+    file_path: str,
+    row_ids: list[int],
+    catalog_opts: Optional[dict[str, str]] = None,
+) -> None: ...
 def now_ns() -> int: ...
 def add_column(
     path: str,
@@ -644,8 +658,11 @@ def add_column(
     initial_default: Optional[object] = None,
     write_default: Optional[object] = None,
     doc: Optional[str] = None,
+    catalog_opts: Optional[dict[str, str]] = None,
 ) -> int: ...
-def rename_column(path: str, old_name: str, new_name: str) -> int: ...
+def rename_column(
+    path: str, old_name: str, new_name: str, catalog_opts: Optional[dict[str, str]] = None
+) -> int: ...
 def hardware_info() -> dict[str, str]: ...
 
 def add_vector_column(
@@ -657,6 +674,7 @@ def add_vector_column(
     pre_normalize: bool = False,
     hnsw_m: Optional[int] = None,
     hnsw_ef_construction: Optional[int] = None,
+    catalog_opts: Optional[dict[str, str]] = None,
 ) -> int:
     """Add a new vector column to an existing table schema without rewriting
     data files. Old files return ``null`` for this column until
@@ -670,6 +688,7 @@ def backfill_vector_column(
     embed_fn: Callable[[list[str]], list[list[float]]],
     text_column: str = "chunk_text",
     batch_size: int = 512,
+    catalog_opts: Optional[dict[str, str]] = None,
 ) -> None:
     """Backfill a new vector column (added via :func:`add_vector_column`) in
     all existing files. Reads each file, calls *embed_fn* on *text_column*,
@@ -684,6 +703,7 @@ def compact(
     target_size_bytes: int = 536_870_912,
     max_files_per_pass: int = 20,
     deferred: bool = False,
+    catalog_opts: Optional[dict[str, str]] = None,
 ) -> dict[str, object]:
     """Compact small files in a table into a larger merged file. Native
     binding — no external ``ailake`` CLI binary required.

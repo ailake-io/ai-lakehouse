@@ -108,9 +108,9 @@ Starts at byte 0 of every AILK section. All integer fields little-endian.
 | `0`   | F32      | 4 |
 | `1`   | F16      | 2 (default) |
 | `2`   | I8       | 1 |
-| `3`   | Binary   | ceil(dim/8) |
+| `3`   | *reserved* | — |
 
-The **RaBitQ / Binary Hamming index type** (Fase 7) was removed in v0.0.14 — recall ≈ 0 on standard float embeddings without specific binary training alignment. This is unrelated to `precision=3` above: the `Binary` column-encoding value itself is still defined (`ailake-core::VectorPrecision::Binary`, `ailake-file::footer::Precision::Binary`) and readers/writers still accept it as a storage precision.
+The **RaBitQ / Binary Hamming index type** (Fase 7) was removed in v0.0.14 — recall ≈ 0 on standard float embeddings without specific binary training alignment. The `Binary` column-encoding value (`precision=3`) has since been removed too: no encoder ever implemented real bit-packing (write path silently fell back to F16 while field metadata still labeled the column "binary"), and no public API (CLI/Python/JNI) ever exposed it. `ailake-core::VectorPrecision` and `ailake-file::footer::Precision` keep discriminant `3` reserved (not reassigned) for on-disk compatibility, but no variant maps to it — readers reject byte value `3` as invalid.
 
 The `precision` field describes the encoding stored in the **Parquet column**.
 The centroid blob in the AILK section is always F32 (4 bytes per element)

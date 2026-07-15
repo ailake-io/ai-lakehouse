@@ -189,6 +189,7 @@ async fn main() {
             score_fn: None,
             partition_filter: None,
             hybrid: None,
+            column_filter: None,
         },
         "embedding",
         dim,

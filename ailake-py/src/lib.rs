@@ -21,6 +21,7 @@ use tracing::{debug, warn};
 use ailake_catalog::{
     hadoop::HadoopCatalog,
     provider::{CatalogProvider, TableIdent},
+    RestCatalog, RestCatalogAuth, RestCatalogConfig,
 };
 use ailake_core::{EmbeddingModelInfo, VectorMetric, VectorModality, VectorStoragePolicy};
 use ailake_query::{
@@ -165,7 +166,21 @@ fn build_batch_with_extra(
     RecordBatch::try_new(schema, arrays).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>) {
+/// `catalog_opts` selects/configures the catalog *metadata* backend; `path`
+/// still always resolves to a local `Store` (ailake-py has no `store_from_url`
+/// equivalent yet — S3/GCS/Azure aren't reachable from any binding today, a
+/// separate, pre-existing gap not closed here). `catalog_opts["catalog"]`:
+/// `"hadoop"` (default, unchanged behavior for every caller that omits it) or
+/// `"rest"` — talks to any Iceberg REST Catalog spec server, keys mirror
+/// `ailake-cli`'s `--rest-*` flags (`rest_uri`, `rest_prefix`,
+/// `rest_warehouse`, `rest_auth`: `"none"`/`"bearer"`/`"oauth2"`, `rest_token`,
+/// `rest_oauth_token_endpoint`, `rest_oauth_client_id`,
+/// `rest_oauth_client_secret`, `rest_oauth_scope`). See
+/// docs/guides/REST_CATALOG.md.
+fn local_catalog_store(
+    path: &str,
+    catalog_opts: Option<&std::collections::HashMap<String, String>>,
+) -> PyResult<(Arc<dyn CatalogProvider>, Arc<dyn Store>)> {
     let store: Arc<dyn Store> = Arc::new(LocalStore::new(path));
     // Use a file:// URI as warehouse so that Iceberg metadata.json and manifest
     // files contain absolute file:// paths. Required for Trino's Iceberg
@@ -176,9 +191,74 @@ fn local_catalog_store(path: &str) -> (Arc<dyn CatalogProvider>, Arc<dyn Store>)
     // to exist (unlike canonicalize, which fails on new table paths).
     let absolute = std::path::absolute(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
     let warehouse_uri = format!("file://{}", absolute.display());
-    let catalog: Arc<dyn CatalogProvider> =
-        Arc::new(HadoopCatalog::new(Arc::clone(&store), &warehouse_uri));
-    (catalog, store)
+
+    let backend = catalog_opts
+        .and_then(|o| o.get("catalog"))
+        .map(String::as_str)
+        .unwrap_or("hadoop");
+    let catalog: Arc<dyn CatalogProvider> = match backend {
+        "hadoop" => Arc::new(HadoopCatalog::new(Arc::clone(&store), &warehouse_uri)),
+        "rest" => {
+            // Only reachable when `backend == "rest"`, which only comes from
+            // `catalog_opts["catalog"]`, so `catalog_opts` itself is `Some` here.
+            let opts = catalog_opts.expect("catalog=\"rest\" implies catalog_opts is Some");
+            let uri = opts.get("rest_uri").cloned().ok_or_else(|| {
+                PyValueError::new_err("catalog_opts['catalog']=\"rest\" requires \"rest_uri\"")
+            })?;
+            let auth = match opts.get("rest_auth").map(String::as_str).unwrap_or("none") {
+                "none" => RestCatalogAuth::None,
+                "bearer" => {
+                    let token = opts.get("rest_token").cloned().ok_or_else(|| {
+                        PyValueError::new_err("rest_auth=\"bearer\" requires \"rest_token\"")
+                    })?;
+                    RestCatalogAuth::Bearer(token)
+                }
+                "oauth2" => {
+                    let token_endpoint = opts
+                        .get("rest_oauth_token_endpoint")
+                        .cloned()
+                        .ok_or_else(|| {
+                            PyValueError::new_err(
+                                "rest_auth=\"oauth2\" requires \"rest_oauth_token_endpoint\"",
+                            )
+                        })?;
+                    let client_id = opts.get("rest_oauth_client_id").cloned().ok_or_else(|| {
+                        PyValueError::new_err(
+                            "rest_auth=\"oauth2\" requires \"rest_oauth_client_id\"",
+                        )
+                    })?;
+                    let client_secret =
+                        opts.get("rest_oauth_client_secret")
+                            .cloned()
+                            .ok_or_else(|| {
+                                PyValueError::new_err(
+                                    "rest_auth=\"oauth2\" requires \"rest_oauth_client_secret\"",
+                                )
+                            })?;
+                    RestCatalogAuth::OAuth2 {
+                        token_endpoint,
+                        client_id,
+                        client_secret,
+                        scope: opts.get("rest_oauth_scope").cloned(),
+                    }
+                }
+                other => return Err(PyValueError::new_err(format!("unknown rest_auth: {other}"))),
+            };
+            let config = RestCatalogConfig {
+                uri,
+                prefix: opts.get("rest_prefix").cloned(),
+                warehouse: opts.get("rest_warehouse").cloned(),
+                auth,
+            };
+            Arc::new(RestCatalog::new(config, Arc::clone(&store)))
+        }
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown catalog backend: {other} (supported: \"hadoop\", \"rest\")"
+            )))
+        }
+    };
+    Ok((catalog, store))
 }
 
 /// Python-facing table writer. Wraps ailake_query::TableWriter.
@@ -200,7 +280,7 @@ impl TableWriter {
     /// Open (or create) an AI-Lake table at `path` on the local filesystem.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", precision="f16", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, partition_column_type=None, partition_fields=None, partition_values=None, bm25_text_column=None, format_version=2, fts_text_columns=None, fts_tokenizer="default"))]
+    #[pyo3(signature = (path, vector_column="embedding", dim=1536, metric="cosine", precision="f16", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, pq_only=false, ivf_residual=false, embedding_model=None, embedding_model_version=None, embed_fn=None, partition_by=None, partition_value=None, partition_column_type=None, partition_fields=None, partition_values=None, bm25_text_column=None, format_version=2, fts_text_columns=None, fts_tokenizer="default", catalog_opts=None))]
     fn new(
         py: Python<'_>,
         path: &str,
@@ -231,6 +311,7 @@ impl TableWriter {
         format_version: u8,
         fts_text_columns: Option<Vec<String>>,
         fts_tokenizer: &str,
+        catalog_opts: Option<std::collections::HashMap<String, String>>,
     ) -> PyResult<Self> {
         let rt = rt()?;
         debug!(
@@ -284,7 +365,7 @@ impl TableWriter {
             }
             policy.embedding_model = Some(model_info);
         }
-        let (catalog, store) = local_catalog_store(path);
+        let (catalog, store) = local_catalog_store(path, catalog_opts.as_ref())?;
         let table = TableIdent::new("default", "table");
 
         let stored_embed_fn = embed_fn.map(|f| f.clone_ref(py));
@@ -657,7 +738,7 @@ impl TableWriter {
 /// Returns a list of dicts: [{"row_id": int, "distance": float, "file": str}, ...]
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None))]
+#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None, catalog_opts=None))]
 fn search(
     py: Python<'_>,
     path: &str,
@@ -670,6 +751,7 @@ fn search(
     pruning_threshold: Option<f32>,
     ef_search: Option<usize>,
     rerank_factor: Option<usize>,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
@@ -680,7 +762,7 @@ fn search(
         partition_filter,
         hybrid_text.as_deref().map(|t| &t[..t.len().min(50)])
     );
-    let (catalog, store) = local_catalog_store(path);
+    let (catalog, store) = local_catalog_store(path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
 
     let meta = rt
@@ -711,6 +793,7 @@ fn search(
         score_fn: None,
         partition_filter,
         hybrid,
+        column_filter: None,
     };
 
     let results = rt
@@ -746,7 +829,7 @@ fn search(
 /// where `distance` is the negated BM25 score (lower = more relevant, for consistency
 /// with the vector search convention).
 #[pyfunction]
-#[pyo3(signature = (path, query_text, top_k=10, text_column="chunk_text", partition_filter=None))]
+#[pyo3(signature = (path, query_text, top_k=10, text_column="chunk_text", partition_filter=None, catalog_opts=None))]
 fn search_text(
     py: Python<'_>,
     path: &str,
@@ -754,10 +837,11 @@ fn search_text(
     top_k: usize,
     text_column: &str,
     partition_filter: Option<String>,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
 ) -> PyResult<Py<PyAny>> {
     use ailake_query::search_text as rs_search_text;
     let rt = rt()?;
-    let (catalog, store) = local_catalog_store(path);
+    let (catalog, store) = local_catalog_store(path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
     let pf = partition_filter.as_deref();
     let results = rt
@@ -791,7 +875,7 @@ fn search_text(
 /// Python side deserializes with: `pyarrow.ipc.open_file(io.BytesIO(bytes)).read_all()`
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None))]
+#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None, catalog_opts=None))]
 fn search_with_data(
     py: Python<'_>,
     path: &str,
@@ -804,6 +888,7 @@ fn search_with_data(
     pruning_threshold: Option<f32>,
     ef_search: Option<usize>,
     rerank_factor: Option<usize>,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
@@ -815,7 +900,7 @@ fn search_with_data(
         hybrid_text.as_deref().map(|t| &t[..t.len().min(50)])
     );
 
-    let (catalog, store) = local_catalog_store(path);
+    let (catalog, store) = local_catalog_store(path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
 
     let meta = rt
@@ -846,6 +931,7 @@ fn search_with_data(
         score_fn: None,
         partition_filter,
         hybrid,
+        column_filter: None,
     };
 
     let results = rt
@@ -989,7 +1075,7 @@ fn assemble_context(
 ///   new_model_version: optional version tag for the new model
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, old_column, new_column, embed_fn, text_column="chunk_text", strategy="dual_write_then_cutover", batch_size=512, new_model=None, new_model_version=None, on_progress=None))]
+#[pyo3(signature = (path, old_column, new_column, embed_fn, text_column="chunk_text", strategy="dual_write_then_cutover", batch_size=512, new_model=None, new_model_version=None, on_progress=None, catalog_opts=None))]
 fn migrate_embeddings(
     py: Python<'_>,
     path: &str,
@@ -1002,6 +1088,7 @@ fn migrate_embeddings(
     new_model: Option<&str>,
     new_model_version: Option<&str>,
     on_progress: Option<Py<PyAny>>,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
 ) -> PyResult<()> {
     let migration_strategy = match strategy {
         "atomic_replace" => MigrationStrategy::AtomicReplace,
@@ -1059,7 +1146,7 @@ fn migrate_embeddings(
         arc
     });
 
-    let (catalog, store) = local_catalog_store(path);
+    let (catalog, store) = local_catalog_store(path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
 
     let job = MigrationJob {
@@ -1172,7 +1259,7 @@ fn parse_precision(s: &str) -> ailake_core::VectorPrecision {
 /// rrf_score is higher for better results.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, queries, top_k=10, dim=None, partition_filter=None, ef_search=None, pruning_threshold=None, rerank_factor=None))]
+#[pyo3(signature = (path, queries, top_k=10, dim=None, partition_filter=None, ef_search=None, pruning_threshold=None, rerank_factor=None, catalog_opts=None))]
 fn search_multimodal(
     py: Python<'_>,
     path: &str,
@@ -1183,9 +1270,10 @@ fn search_multimodal(
     ef_search: Option<usize>,
     pruning_threshold: Option<f32>,
     rerank_factor: Option<usize>,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
-    let (catalog, store) = local_catalog_store(path);
+    let (catalog, store) = local_catalog_store(path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
 
     // Load metadata once to resolve per-column dims.
@@ -1236,6 +1324,7 @@ fn search_multimodal(
         score_fn: None,
         partition_filter,
         hybrid: None,
+        column_filter: None,
     };
 
     let results = rt
@@ -1343,13 +1432,17 @@ impl PyWorkingMemoryBuffer {
 ///
 /// Returns the number of files updated.
 #[pyfunction]
-#[pyo3(signature = (path, decay_lambda=0.1))]
-fn decay_memories(path: &str, decay_lambda: f32) -> PyResult<usize> {
+#[pyo3(signature = (path, decay_lambda=0.1, catalog_opts=None))]
+fn decay_memories(
+    path: &str,
+    decay_lambda: f32,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
+) -> PyResult<usize> {
     use ailake_core::VectorMetric;
     use ailake_query::MemoryDecayJob;
 
     let rt = rt()?;
-    let (catalog, store) = local_catalog_store(path);
+    let (catalog, store) = local_catalog_store(path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
 
     // Load stored policy from table metadata
@@ -1402,7 +1495,7 @@ fn decay_memories(path: &str, decay_lambda: f32) -> PyResult<usize> {
 ///
 /// Returns a dict: {"ok": True, "files_compacted": int, "output_path": str | None}.
 #[pyfunction]
-#[pyo3(signature = (path, min_files=4, target_size_bytes=536_870_912, max_files_per_pass=20, deferred=false))]
+#[pyo3(signature = (path, min_files=4, target_size_bytes=536_870_912, max_files_per_pass=20, deferred=false, catalog_opts=None))]
 fn compact(
     py: Python<'_>,
     path: &str,
@@ -1410,12 +1503,13 @@ fn compact(
     target_size_bytes: u64,
     max_files_per_pass: usize,
     deferred: bool,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
 ) -> PyResult<Py<PyAny>> {
     use ailake_core::VectorPrecision;
     use ailake_query::compaction::{CompactionConfig, CompactionExecutor, CompactionPlanner};
 
     let rt = rt()?;
-    let (catalog, store) = local_catalog_store(path);
+    let (catalog, store) = local_catalog_store(path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
 
     let meta = rt
@@ -1612,10 +1706,15 @@ fn estimate(
 ///         [5, 10, 42],
 ///     )
 #[pyfunction]
-#[pyo3(signature = (table_path, file_path, row_ids))]
-fn delete_rows(table_path: &str, file_path: &str, row_ids: Vec<u32>) -> PyResult<()> {
+#[pyo3(signature = (table_path, file_path, row_ids, catalog_opts=None))]
+fn delete_rows(
+    table_path: &str,
+    file_path: &str,
+    row_ids: Vec<u32>,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
+) -> PyResult<()> {
     let rt = rt()?;
-    let (catalog, store) = local_catalog_store(table_path);
+    let (catalog, store) = local_catalog_store(table_path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
 
     rt.block_on(rs_delete_rows(catalog, store, &table, file_path, &row_ids))
@@ -1651,7 +1750,8 @@ fn now_ns() -> i64 {
 /// Returns:
 ///     new schema-id (int)
 #[pyfunction]
-#[pyo3(signature = (table_path, name, iceberg_type, required=false, initial_default=None, write_default=None, doc=None))]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (table_path, name, iceberg_type, required=false, initial_default=None, write_default=None, doc=None, catalog_opts=None))]
 fn add_column(
     table_path: &str,
     name: &str,
@@ -1660,9 +1760,10 @@ fn add_column(
     initial_default: Option<pyo3::Bound<'_, PyAny>>,
     write_default: Option<pyo3::Bound<'_, PyAny>>,
     doc: Option<&str>,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
 ) -> PyResult<i32> {
     let rt = rt()?;
-    let (catalog, _store) = local_catalog_store(table_path);
+    let (catalog, _store) = local_catalog_store(table_path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
 
     let py_to_json = |v: Option<pyo3::Bound<'_, PyAny>>| -> Option<serde_json::Value> {
@@ -1705,10 +1806,15 @@ fn add_column(
 /// Returns:
 ///     new schema-id (int)
 #[pyfunction]
-#[pyo3(signature = (table_path, old_name, new_name))]
-fn rename_column(table_path: &str, old_name: &str, new_name: &str) -> PyResult<i32> {
+#[pyo3(signature = (table_path, old_name, new_name, catalog_opts=None))]
+fn rename_column(
+    table_path: &str,
+    old_name: &str,
+    new_name: &str,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
+) -> PyResult<i32> {
     let rt = rt()?;
-    let (catalog, _store) = local_catalog_store(table_path);
+    let (catalog, _store) = local_catalog_store(table_path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
 
     use ailake_catalog::SchemaEvolution;
@@ -1736,10 +1842,15 @@ fn rename_column(table_path: &str, old_name: &str, new_name: &str) -> PyResult<i
 ///         ["doc-abc", "doc-def"],
 ///     )
 #[pyfunction]
-#[pyo3(signature = (table_path, column, values))]
-fn delete_where(table_path: &str, column: &str, values: Vec<String>) -> PyResult<()> {
+#[pyo3(signature = (table_path, column, values, catalog_opts=None))]
+fn delete_where(
+    table_path: &str,
+    column: &str,
+    values: Vec<String>,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
+) -> PyResult<()> {
     let rt = rt()?;
-    let (catalog, store) = local_catalog_store(table_path);
+    let (catalog, store) = local_catalog_store(table_path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
     let value_refs: Vec<&str> = values.iter().map(String::as_str).collect();
     rt.block_on(ailake_query::delete_where(
@@ -1771,7 +1882,7 @@ fn delete_where(table_path: &str, column: &str, values: Vec<String>) -> PyResult
 ///     new schema-id (int)
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (table_path, column, dim, metric="cosine", precision="f16", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None))]
+#[pyo3(signature = (table_path, column, dim, metric="cosine", precision="f16", pre_normalize=false, hnsw_m=None, hnsw_ef_construction=None, catalog_opts=None))]
 fn add_vector_column(
     table_path: &str,
     column: &str,
@@ -1781,11 +1892,12 @@ fn add_vector_column(
     pre_normalize: bool,
     hnsw_m: Option<u32>,
     hnsw_ef_construction: Option<u32>,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
 ) -> PyResult<i32> {
     use ailake_core::{VectorColSpec as RsVectorColSpec, VectorMetric, VectorPrecision};
 
     let rt = rt()?;
-    let (catalog, _store) = local_catalog_store(table_path);
+    let (catalog, _store) = local_catalog_store(table_path, catalog_opts.as_ref())?;
     let table = TableIdent::new("default", "table");
 
     let metric_val = match metric {
@@ -1843,7 +1955,7 @@ fn add_vector_column(
 ///         embed_fn=embed,
 ///     )
 #[pyfunction]
-#[pyo3(signature = (table_path, column, embed_fn, text_column="chunk_text", batch_size=512))]
+#[pyo3(signature = (table_path, column, embed_fn, text_column="chunk_text", batch_size=512, catalog_opts=None))]
 fn backfill_vector_column(
     py: Python<'_>,
     table_path: &str,
@@ -1851,12 +1963,13 @@ fn backfill_vector_column(
     embed_fn: Py<PyAny>,
     text_column: &str,
     batch_size: usize,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
 ) -> PyResult<()> {
     use ailake_core::{VectorColSpec as RsVectorColSpec, VectorMetric, VectorPrecision};
     use ailake_query::BackfillJob;
 
     let rt = rt()?;
-    let (catalog, store) = local_catalog_store(table_path);
+    let (catalog, store) = local_catalog_store(table_path, catalog_opts.as_ref())?;
     let table_ident = TableIdent::new("default", "table");
 
     // Load new column properties from the catalog to build VectorColSpec.

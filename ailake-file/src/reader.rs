@@ -249,6 +249,30 @@ impl AilakeFileReader {
         reader.read_all()
     }
 
+    /// Same as `read_parquet`, but pushes `filter` down to the Parquet read —
+    /// see `ParquetVectorReader::read_all_filtered` for the row-group skip +
+    /// exact `RowFilter` mechanics.
+    pub fn read_parquet_filtered(
+        &self,
+        filter: &ailake_core::ColumnFilter,
+    ) -> AilakeResult<(RecordBatch, Vec<Vec<f32>>)> {
+        let reader = ParquetVectorReader::new(self.bytes.clone(), &self.vector_column);
+        reader.read_all_filtered(filter)
+    }
+
+    /// Returns the set of original (file-relative) row indices matching
+    /// `filter`, without disturbing row identity — see
+    /// `ParquetVectorReader::matching_row_ids`. Use this (not
+    /// `read_parquet_filtered`) wherever the caller also indexes rows by an
+    /// externally-computed position (HNSW `row_id`, deletion vector bitmap).
+    pub fn matching_row_ids(
+        &self,
+        filter: &ailake_core::ColumnFilter,
+    ) -> AilakeResult<std::collections::HashSet<u64>> {
+        let reader = ParquetVectorReader::new(self.bytes.clone(), &self.vector_column);
+        reader.matching_row_ids(filter)
+    }
+
     /// Load the raw FTS blob from the AILK_FTS section, if present.
     ///
     /// Returns `Ok(None)` when the file has no FTS section (opt-in feature).
