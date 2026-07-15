@@ -27,6 +27,7 @@
 //! }, "warehouse/my_table/")?;
 //! ```
 
+pub mod fail_store;
 pub mod from_url;
 pub mod local;
 pub mod object_store_backend;
