@@ -368,6 +368,18 @@ jobs:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
           CARGO_TARGET_DIR: /tmp/ailake-target-${{ matrix.target }}
           RUNNER_ALLOW_RUNASROOT: "1"
+          # ailake-py depends on ailake-catalog's rest-catalog feature (reqwest,
+          # rustls-tls -> ring backend), which needs a real C compiler pass for
+          # ring's pregenerated ARMv8 assembly (chacha/aes/sha/... .S files).
+          # The aarch64 cross-compile toolchain in maturin-action's manylinux
+          # Docker image doesn't predefine __ARM_ARCH in its default invocation,
+          # and ring's asm_base.h hard-errors without it ("ARM assembler must
+          # define __ARM_ARCH") — a known ring/cross-gcc issue, unrelated to any
+          # code in this repo. Only matters for aarch64 (native x86_64 gcc
+          # predefines its own arch macros correctly); harmless no-op for the
+          # x86_64 matrix leg since cc-rs only reads the target-suffixed var
+          # matching the crate's actual build target.
+          CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8"
         with:
           target: ${{ matrix.target }}
           manylinux: auto
