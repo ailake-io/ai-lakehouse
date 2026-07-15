@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-07-14
+
+### Fixed
+
+- **fix(ci): set CFLAGS for ring's aarch64 cross-compile in release workflow** — cross-compilation fix for ARM64 Linux builds in the GitHub release workflow (commit `0e8eb1d`).
+
+## [0.1.5] — 2026-07-14
+
 ### Fixed
 
 - **`ailake-go`/`ailake-cpp` — absolute `file://` manifest-list URI double-prefixed, breaking `Search`/`search` on every locally-written table** — found building a real polyglot-read demo (`ailake-langchain-demo`'s Go/C++ clients) against a table written by `ailake-py`: `LoadTable`/`load_table()` (reads only `metadata.json`) worked, but `Search`/`search()` (needs the manifest list) failed with a corrupted path like `<warehouse>/file:/<warehouse>/.../snap-*.avro`. Root cause: `ailake-py/src/lib.rs`'s `local_catalog_store` always writes `warehouse_uri` as `file://<absolute path>` (required for Trino's Iceberg connector), so `metadata.json`'s `manifest-list` is a valid, spec-compliant absolute `file://` URI when written by the Python SDK — but neither SDK's path-join logic checked for a URI scheme, only a leading `/` (POSIX-absolute) or drive letter (Windows), so the URI was treated as relative and joined onto the warehouse root a second time. Fixed in both:
@@ -110,6 +118,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Demo — `13_ducklake.ipynb`** — new notebook covering the `DuckLakeCatalog` backend (shipped in 0.1.3 but previously absent from the demo entirely: CLI-only feature, no `ailake-py` binding, so no notebook had touched it). Drives the `ailake` CLI via `subprocess` (create → insert → search → evolve → insert-after-evolve → compact → info), then opens both halves of the catalog directly with `duckdb` — the AI-Lake sidecar (`ailake_vector_index`) and the real DuckLake attachment (`ATTACH 'ducklake:...'`) — to make the two-tier design concrete. `tests/docker/demo/Dockerfile` now builds `ailake-cli --features catalog-ducklake` (needs `cmake` for `duckdb`'s bundled C++ build) into the demo image; `tests/docker/compose-demo.yml` gained `DEMO_DUCKLAKE_STORE`. Build time for the demo image increases from ~3-5 min to ~8-12 min cold as a result — documented in `docs/guides/DEMO_NOTEBOOKS.md`.
 - **Demo — closed three Fase 15 (`ailake-py`) coverage gaps in existing notebooks**, found auditing the demo against the current SDK surface: `01_ailake_demo.ipynb` §17 now calls the native `ailake.estimate()` binding instead of a hand-rolled reimplementation of the same math; §12 gained a `rerank_factor` demo (exact-distance reranking after IVF-PQ, compared against brute-force ground truth); `10_gpu_demo.ipynb` §3 switched from the heuristic-driven `write_batch_auto_deferred` to the actually-forced `write_batch_ivf_pq`/`write_batch_ivf_pq_deferred` (the section's own markdown already claimed to "force each engine explicitly," but the code silently depended on hardware heuristics that could pick HNSW on <8-core machines); `08_agents.ipynb` gained a §4b demonstrating `ailake.TimestampNs` + native `decay_memories()` and fixed a stale "MemoryDecayJob (Phase 9, pending)" claim (it shipped in 0.1.2).
+
+## [0.1.4] — 2026-07-14
+
+### Added
+
+- **`docs/guides/CLI_INTEGRATION.md`** — new dedicated guide for the `ailake-cli` binary, covering every subcommand with real captured output. All 6 existing integration guides audited and updated against current source.
+
+- **Demo — `13_ducklake.ipynb`** — new notebook covering the `DuckLakeCatalog` backend. Drives the `ailake` CLI via `subprocess` (create → insert → search → evolve → compact → info), then opens both halves of the catalog directly with `duckdb`.
+
+- **Demo — closed three Fase 15 (`ailake-py`) coverage gaps** in existing notebooks: native `ailake.estimate()`, `rerank_factor` after IVF-PQ, forced `write_batch_ivf_pq*` calls, `TimestampNs` + `decay_memories()` demo.
+
+### Fixed
+
+- **In-place data-file rewrites incompatible with DuckLake catalog** — `MemoryDecayJob` now writes fresh `data/decayed-<ts>-<idx>.parquet` paths; deferred writes/compaction refused on `DuckLakeCatalog`.
+
+- **`CompactionExecutor` physically deleted retired files even on backends that don't want that** — added `CatalogProvider::retires_files_physically() -> bool`; `DuckLakeCatalog` returns `false`.
+
+- **`MemoryDecayJob` committed snapshots with `parent_snapshot_id: None`** — breaking the snapshot lineage chain. Now loads current snapshot ID before committing.
+
+- **Session-unique data-file paths** — part paths, `BackfillJob`, and `MigrationJob` output now include a timestamp component (`part-<ts>-NNNNN.parquet`), preventing name collision across sessions.
+
+- **Trino plugin `SELECT` execution — two bugs** (`NullPointerException` reconstructing `VectorScanTableHandle`, `IllegalAccessException` on `VectorScanTransactionHandle`). Both confirmed fixed against live Trino 430 server.
+
+- **`ailake delete-where` silently did nothing** — `EqualityDeleteFile.path` was double-prefixed with `table_root`, resulting in a 404 on read. Fixed by passing a `table_root`-relative path instead.
+
+- **Demo notebook fixes** — `assemble_context()` return value handling, IVF-PQ `rerank_factor` cell, `os.environ.get("QUERY_PATH")` bug, orphaned duplicate table fragment, stale version strings.
 
 ## [0.1.3] — 2026-07-10
 
