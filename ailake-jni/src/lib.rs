@@ -3116,4 +3116,211 @@ mod tests {
         unsafe { ailake_free_string(ptr) };
         assert!(json.contains("negative"), "got: {json}");
     }
+
+    // ── Proptest: FFI fuzzing ─────────────────────────────────────
+    //
+    // 1. Garbage strings — every single-param JSON export must survive
+    //    arbitrary non-null byte sequences and return valid JSON.
+    // 2. Extreme numeric values at the legacy binary C-ABI boundary.
+    // 3. Random IPC buffers — must not crash.
+    // 4. Round-trip: write random valid data, search it back.
+
+    use proptest::prelude::*;
+    use proptest::proptest;
+
+    // ── 1. FFI string layer fuzzing ────────────────────────────────
+    //
+    // Generate byte sequences without interior nulls (valid UTF-8 or not).
+    // Every export must return `{...}` or `[...]` JSON, never crash.
+
+    proptest! {
+        #[test]
+        fn ffi_search_json_arbitrary_string(
+            bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_input = CString::new(bytes).unwrap();
+            let ptr = unsafe { ailake_search_json(c_input.as_ptr()) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+
+        #[test]
+        fn ffi_write_batch_json_arbitrary_string(
+            bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_input = CString::new(bytes).unwrap();
+            let ptr = unsafe { ailake_write_batch_json(c_input.as_ptr()) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+
+        #[test]
+        fn ffi_search_text_json_arbitrary_string(
+            bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_input = CString::new(bytes).unwrap();
+            let ptr = unsafe { ailake_search_text_json(c_input.as_ptr()) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+
+        #[test]
+        fn ffi_scan_json_arbitrary_string(
+            bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_input = CString::new(bytes).unwrap();
+            let ptr = unsafe { ailake_scan_json(c_input.as_ptr()) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+
+        #[test]
+        fn ffi_compact_json_arbitrary_string(
+            bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_input = CString::new(bytes).unwrap();
+            let ptr = unsafe { ailake_compact_json(c_input.as_ptr()) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+    }
+
+    // ── 2. Legacy binary API: boundary values ────────────────────
+    //
+    // ailake_vector_search_json takes raw f32 pointer + length + top_k.
+    // Must not crash for boundary dims (0, 1, max allocatable), zero top_k,
+    // or large top_k. query_len always matches the actual allocation.
+
+    proptest! {
+        #[test]
+        fn ffi_legacy_api_boundary_values(
+            table_uri_bytes in proptest::collection::vec(1u8..=255u8, 0..100),
+            dim in 0u32..4097,  // covers 0..4096 inclusive
+            top_k in prop::num::u32::ANY,
+        ) {
+            let c_uri = CString::new(table_uri_bytes).unwrap();
+            // Cap allocation at 4096 f32s = 16 KB, keeps test fast
+            let safe_dim = dim.min(4096);
+            let query = vec![0.0f32; safe_dim as usize];
+            let ptr = unsafe { ailake_vector_search_json(
+                c_uri.as_ptr(),
+                query.as_ptr(),
+                safe_dim, // always matches allocated buffer
+                top_k,
+            )};
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+    }
+
+    // ── 3. IPC API: random byte buffers ───────────────────────────
+    //
+    // ailake_write_batch_ipc takes raw bytes + i64 length + opts JSON.
+    // Random byte buffers + random opts must return error JSON.
+
+    proptest! {
+        #[test]
+        fn ffi_ipc_random_buffers(
+            buf_bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..100),
+            opts_bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_opts = CString::new(opts_bytes).unwrap();
+            let ptr = unsafe { ailake_write_batch_ipc(
+                buf_bytes.as_ptr(),
+                buf_bytes.len() as i64,
+                c_opts.as_ptr(),
+            )};
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+    }
+
+    // ── 4. Round-trip: write random valid data → search it back ──
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 20, .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn ffi_write_search_roundtrip(
+            dim in 1u32..8,
+            num_rows in 1usize..6,
+        ) {
+            let dir = tempfile::TempDir::new().unwrap();
+            let warehouse = dir.path().to_str().unwrap().to_string();
+
+            // Build deterministic embeddings from dim/num_rows
+            let ids: Vec<i64> = (0..num_rows as i64).collect();
+            let embeddings: Vec<Vec<f32>> = (0..num_rows)
+                .map(|i| {
+                    (0..dim as usize)
+                        .map(|j| ((i * dim as usize + j) as f32) / 100.0)
+                        .collect()
+                })
+                .collect();
+            let texts: Vec<String> = (0..num_rows)
+                .map(|i| format!("row {i}"))
+                .collect();
+            let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+
+            let buf = build_ipc_stream_list_f32(&ids, &embeddings, &text_refs);
+
+            let opts = serde_json::json!({
+                "warehouse": warehouse,
+                "namespace": "default",
+                "table": "proptest_t",
+                "vec_col": "embedding",
+                "dim": dim,
+                "metric": "euclidean",
+            }).to_string();
+
+            let write_json = call_write_batch_ipc(&buf, &opts);
+            assert!(
+                write_json.contains("\"ok\":true"),
+                "write failed: {write_json}"
+            );
+
+            // Search with the first embedding as query
+            let query_vec: Vec<f32> = embeddings[0].clone();
+            let search_req = serde_json::json!({
+                "warehouse": warehouse,
+                "namespace": "default",
+                "table": "proptest_t",
+                "vec_col": "embedding",
+                "dim": dim,
+                "query": query_vec,
+                "top_k": num_rows as u32,
+            }).to_string();
+            let c_search = CString::new(search_req).unwrap();
+            let ptr = unsafe { ailake_search_json(c_search.as_ptr()) };
+            assert!(!ptr.is_null());
+            let search_json = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            let parsed: serde_json::Value = serde_json::from_str(&search_json).unwrap();
+            assert!(
+                parsed["ok"] == serde_json::Value::Bool(true),
+                "search failed: {search_json}"
+            );
+            let results = parsed["results"].as_array();
+            assert!(
+                results.is_some() && results.unwrap().len() == num_rows,
+                "expected {num_rows} results, got: {search_json}"
+            );
+        }
+    }
 }
