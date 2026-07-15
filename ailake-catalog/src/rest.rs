@@ -117,6 +117,10 @@ impl RestCatalog {
         format!("{}/namespaces/{}/tables", self.base_url(), ns)
     }
 
+    fn namespaces_url(&self) -> String {
+        format!("{}/namespaces", self.base_url())
+    }
+
     fn table_url(&self, table: &TableIdent) -> String {
         format!(
             "{}/namespaces/{}/tables/{}",
@@ -243,6 +247,32 @@ impl RestCatalog {
         )))
     }
 
+    /// Registers `ns` with the REST server if it doesn't already exist.
+    ///
+    /// Spec-compliant REST catalogs (unlike `HadoopCatalog`, which just uses a
+    /// directory implicitly) reject `create_table` with
+    /// `NoSuchNamespaceException` for a namespace nobody has explicitly
+    /// created — verified live against `apache/iceberg-rest-fixture`. A 409
+    /// Conflict (already exists) is treated as success, not an error — this
+    /// makes `create_table` idempotent with respect to namespace existence,
+    /// matching `HadoopCatalog`'s implicit-namespace behavior from the
+    /// caller's point of view.
+    async fn ensure_namespace(&self, ns: &str) -> AilakeResult<()> {
+        let req = CreateNamespaceRequest {
+            namespace: vec![ns.to_string()],
+            properties: HashMap::new(),
+        };
+        let resp = self.post(&self.namespaces_url(), &req).await?;
+        if resp.status().is_success() || resp.status() == reqwest::StatusCode::CONFLICT {
+            return Ok(());
+        }
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(AilakeError::Catalog(format!(
+            "ensure_namespace('{ns}'): HTTP {status}: {body}"
+        )))
+    }
+
     /// Fetch current table metadata from the REST server.
     async fn load_metadata(&self, table: &TableIdent) -> AilakeResult<IcebergMetadata> {
         let resp = self.get(&self.table_url(table)).await?;
@@ -306,6 +336,8 @@ impl CatalogProvider for RestCatalog {
             properties,
         };
 
+        self.ensure_namespace(&name.namespace).await?;
+
         let url = self.namespace_tables_url(&name.namespace);
         let resp = self.post(&url, &req).await?;
         Self::require_ok(resp, "create_table").await?;
@@ -362,7 +394,18 @@ impl CatalogProvider for RestCatalog {
                 .await
                 .map_err(|e| AilakeError::Catalog(format!("commit_snapshot parse: {e}")))?;
             let meta = result.metadata;
-            let current_snapshot_id = meta.current_snapshot_id;
+            // Iceberg's on-disk sentinel for "no current snapshot" is the literal
+            // integer -1 (`current-snapshot-id: -1` in metadata.json for a
+            // freshly created table with zero snapshots) — `IcebergMetadata`'s
+            // plain `#[serde(default)]` deserialization has no reason to know
+            // that and reads it straight into `Some(-1)`. The REST spec's own
+            // "assert ref does not exist yet" semantics need a real `null` in
+            // the request JSON, not `-1` — sending `-1` verbatim, verified live
+            // against `apache/iceberg-rest-fixture`, gets every commit to a
+            // brand-new table rejected with `CommitFailedException: branch or
+            // tag main is missing, expected -1` (all 5 OCC retries, since the
+            // same wrong value keeps getting resent). Treat -1 as None here.
+            let current_snapshot_id = meta.current_snapshot_id.filter(|&id| id != -1);
             let current_schema_id = meta.current_schema_id;
 
             let artifacts = crate::manifest_commit::build_commit(
@@ -410,6 +453,24 @@ impl CatalogProvider for RestCatalog {
                         "fields": patch.new_schema_fields,
                     }),
                 });
+                // `-1` is the REST spec's documented "the schema just added in
+                // this same request" sentinel for `SetCurrentSchema` — used here
+                // deliberately instead of predicting `new_schema_id` client-side,
+                // since live testing against `apache/iceberg-rest-fixture`
+                // (2026-07) found the server's own schema-id assignment doesn't
+                // reliably agree with `current_schema_id + 1`: sending the
+                // predicted id explicitly got rejected with `IllegalArgumentException:
+                // Cannot set current schema to unknown schema: N` (server assigned
+                // a different id than predicted), while `-1` intermittently got
+                // rejected with `ValidationException: Cannot set last added schema:
+                // no schema has been added` on the exact same request shape. Both
+                // are spec-compliant requests per the OpenAPI schema; this reads as
+                // a real inconsistency in this specific fixture image, not
+                // something a client-side workaround can reliably satisfy either
+                // way. Kept as `-1` (matches the spec's stated intent) — flagged
+                // as an open item pending verification against a more mature REST
+                // catalog server (Polaris, Unity Catalog, Gravitino) — see
+                // docs/guides/REST_CATALOG.md.
                 updates.push(TableUpdate::SetCurrentSchema { schema_id: -1 });
                 updates.push(TableUpdate::SetProperties {
                     updates: HashMap::from([(
@@ -422,11 +483,37 @@ impl CatalogProvider for RestCatalog {
                 // corrected spec as new and making it the default. Only the *last*
                 // (highest spec-id) entry in `remapped_partition_specs` is genuinely
                 // new — the earlier ones are the same specs already registered.
+                //
+                // `remapped_partition_specs` is built by cloning every existing spec
+                // and patching `source-id` in place where a column's field-id moved
+                // (see `manifest_commit::build_commit`) — for an unpartitioned table
+                // (the common case) that's a no-op clone of the empty default spec,
+                // and re-sending it as a "new" `AddPartitionSpec` is both redundant
+                // and, verified live against `apache/iceberg-rest-fixture`, rejected
+                // with a 500 ("Cannot convert metadata update action to json:
+                // add-partition-spec") — that fixture's `AddPartitionSpec` response
+                // serialization doesn't round-trip cleanly. Only emit the update when
+                // the spec actually changed from what's already registered.
                 if let Some(new_spec) = patch.remapped_partition_specs.last() {
-                    updates.push(TableUpdate::AddPartitionSpec {
-                        spec: new_spec.clone(),
-                    });
-                    updates.push(TableUpdate::SetDefaultSpec { spec_id: -1 });
+                    let unchanged = meta
+                        .partition_specs
+                        .get(patch.remapped_partition_specs.len() - 1)
+                        .is_some_and(|old_spec| old_spec == new_spec);
+                    if !unchanged {
+                        updates.push(TableUpdate::AddPartitionSpec {
+                            spec: new_spec.clone(),
+                        });
+                        // NOTE: same `-1` ("last added") sentinel that proved
+                        // unreliable for `SetCurrentSchema` above against
+                        // `apache/iceberg-rest-fixture`. Unlike that case, this
+                        // path is untested — real partitioning was out of scope
+                        // for the live verification this session did (see
+                        // CHANGELOG/CLAUDE.md) — so it's flagged, not changed to
+                        // an explicit spec-id, to avoid a speculative, unverified
+                        // fix. If this hits the same class of failure, the fix
+                        // is the same shape: use `new_spec["spec-id"]` explicitly.
+                        updates.push(TableUpdate::SetDefaultSpec { spec_id: -1 });
+                    }
                 }
                 requirements.push(TableRequirement::AssertCurrentSchemaId { current_schema_id });
             }
@@ -469,8 +556,9 @@ impl CatalogProvider for RestCatalog {
                     tokio::time::sleep(std::time::Duration::from_millis(50 << attempt)).await;
                     continue;
                 }
+                let body = resp.text().await.unwrap_or_default();
                 return Err(AilakeError::Catalog(format!(
-                    "commit_snapshot: {MAX_RETRIES} retries exhausted (concurrent modification)"
+                    "commit_snapshot: {MAX_RETRIES} retries exhausted (concurrent modification): {body}"
                 )));
             }
             Self::require_ok(resp, "commit_snapshot").await?;
@@ -607,6 +695,12 @@ impl CatalogProvider for RestCatalog {
 struct OAuthTokenResponse {
     access_token: String,
     expires_in: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct CreateNamespaceRequest {
+    namespace: Vec<String>,
+    properties: HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -885,5 +979,102 @@ mod tests {
         assert!(json.contains("\"type\":\"assert-ref-snapshot-id\""));
         assert!(json.contains("\"ref\":\"main\""));
         assert!(json.contains("\"snapshot-id\":42"));
+    }
+
+    // ── Live tests against a real Iceberg REST Catalog server ──────────────────
+    //
+    // `#[ignore]`d by default — these need a running server, not available in
+    // the default CI environment. Run locally with:
+    //
+    //   docker run -d --name ailake-rest-test -p 18181:8181 \
+    //     -e CATALOG_WAREHOUSE=/tmp/warehouse \
+    //     -e CATALOG_IO__IMPL=org.apache.iceberg.hadoop.HadoopFileIO \
+    //     apache/iceberg-rest-fixture:latest
+    //   cargo test -p ailake-catalog --features rest-catalog -- --ignored rest::tests::live_
+    //
+    // Verified live (2026-07) against `apache/iceberg-rest-fixture:latest`:
+    // catalog config (auth=None), namespace auto-creation (`ensure_namespace`,
+    // including idempotent re-creation), and `create_table` all work correctly.
+    // `commit_snapshot`'s schema-patch path (fires on every normal write, not
+    // just schema evolution — see Phase I) hit an unresolved, seemingly
+    // fixture-specific inconsistency in server-side schema-id assignment
+    // during `AddSchema`+`SetCurrentSchema` — documented in that code's own
+    // comment and in docs/guides/REST_CATALOG.md; not covered by a test here
+    // because it doesn't yet reliably pass against this fixture image. Needs
+    // follow-up verification against a more mature REST catalog server
+    // (Polaris, Unity Catalog, Gravitino) before closing.
+    fn live_catalog() -> RestCatalog {
+        let store = Arc::new(LocalStore::new("/tmp"));
+        RestCatalog::new(
+            RestCatalogConfig {
+                uri: "http://localhost:18181".into(),
+                prefix: None,
+                warehouse: Some("/tmp/ailake_rest_live_test_warehouse".into()),
+                auth: RestCatalogAuth::None,
+            },
+            store,
+        )
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live Iceberg REST catalog server on localhost:18181"]
+    async fn live_create_table_auto_creates_namespace() {
+        let catalog = live_catalog();
+        let ns = format!("live_test_ns_{}", ailake_core::now_ns());
+        let table = TableIdent::new(&ns, "t1");
+        let policy = ailake_core::VectorStoragePolicy {
+            column_name: "embedding".to_string(),
+            dim: 4,
+            metric: ailake_core::VectorMetric::Cosine,
+            precision: ailake_core::VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
+        let props = TableProperties {
+            policy,
+            format_version: 2,
+            partition_column_type: None,
+            extra: HashMap::new(),
+        };
+
+        catalog
+            .create_table(&table, &props)
+            .await
+            .expect("create_table should auto-create the namespace and succeed");
+
+        let meta = catalog
+            .load_table(&table)
+            .await
+            .expect("load_table should find the just-created table");
+        assert_eq!(
+            meta.properties.get("ailake.vector-dim").map(String::as_str),
+            Some("4")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live Iceberg REST catalog server on localhost:18181"]
+    async fn live_ensure_namespace_is_idempotent() {
+        let catalog = live_catalog();
+        let ns = format!("live_test_ns_{}", ailake_core::now_ns());
+
+        catalog
+            .ensure_namespace(&ns)
+            .await
+            .expect("first ensure_namespace call should create it");
+        catalog
+            .ensure_namespace(&ns)
+            .await
+            .expect("second ensure_namespace call (already exists) should be a no-op success");
     }
 }

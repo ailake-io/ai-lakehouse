@@ -11,7 +11,9 @@ use std::{
     sync::Arc,
 };
 
-use ailake_catalog::{HadoopCatalog, TableIdent};
+use ailake_catalog::{
+    CatalogProvider, HadoopCatalog, RestCatalog, RestCatalogAuth, RestCatalogConfig, TableIdent,
+};
 use ailake_core::{EmbeddingModelInfo, VectorMetric};
 use ailake_query::{
     fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
@@ -87,6 +89,100 @@ fn parse_metric(s: &str) -> VectorMetric {
     }
 }
 
+/// Catalog-selection fields shared by every JSON `Req`/`Opts` struct via
+/// `#[serde(flatten)]`. `catalog` defaults to `"hadoop"` (unchanged behavior
+/// for every existing caller — Spark/Trino/Flink plugins that never set this
+/// field keep working exactly as before). `"rest"` talks to any Iceberg REST
+/// Catalog spec server — see `docs/guides/REST_CATALOG.md`.
+///
+/// Deliberately NOT threaded into `do_search`/`ailake_vector_search_json`
+/// (the raw-pointer legacy entry point with no JSON body to carry this
+/// config) — that path stays Hadoop-only, matching its existing behavior.
+#[derive(serde::Deserialize, Default)]
+struct CatalogOpts {
+    #[serde(default)]
+    catalog: Option<String>,
+    #[serde(default)]
+    rest_uri: Option<String>,
+    #[serde(default)]
+    rest_prefix: Option<String>,
+    #[serde(default)]
+    rest_warehouse: Option<String>,
+    #[serde(default)]
+    rest_auth: Option<String>,
+    #[serde(default)]
+    rest_token: Option<String>,
+    #[serde(default)]
+    rest_oauth_token_endpoint: Option<String>,
+    #[serde(default)]
+    rest_oauth_client_id: Option<String>,
+    #[serde(default)]
+    rest_oauth_client_secret: Option<String>,
+    #[serde(default)]
+    rest_oauth_scope: Option<String>,
+}
+
+/// Builds the `CatalogProvider` a JSON request asked for. `warehouse` is
+/// always used for `Store` resolution and as the Hadoop catalog root (see
+/// `LocalStore::new(&warehouse)` at each call site) — unrelated to `opts`,
+/// which only selects/configures the catalog *metadata* backend.
+fn resolve_catalog(
+    warehouse: &str,
+    store: Arc<dyn ailake_store::Store>,
+    opts: &CatalogOpts,
+) -> Result<Arc<dyn CatalogProvider>, String> {
+    match opts.catalog.as_deref().unwrap_or("hadoop") {
+        "hadoop" => Ok(Arc::new(HadoopCatalog::new(store, warehouse))),
+        "rest" => {
+            let uri = opts
+                .rest_uri
+                .clone()
+                .ok_or("catalog=\"rest\" requires \"rest_uri\"")?;
+            let auth = match opts.rest_auth.as_deref().unwrap_or("none") {
+                "none" => RestCatalogAuth::None,
+                "bearer" => {
+                    let token = opts
+                        .rest_token
+                        .clone()
+                        .ok_or("rest_auth=\"bearer\" requires \"rest_token\"")?;
+                    RestCatalogAuth::Bearer(token)
+                }
+                "oauth2" => {
+                    let token_endpoint = opts
+                        .rest_oauth_token_endpoint
+                        .clone()
+                        .ok_or("rest_auth=\"oauth2\" requires \"rest_oauth_token_endpoint\"")?;
+                    let client_id = opts
+                        .rest_oauth_client_id
+                        .clone()
+                        .ok_or("rest_auth=\"oauth2\" requires \"rest_oauth_client_id\"")?;
+                    let client_secret = opts
+                        .rest_oauth_client_secret
+                        .clone()
+                        .ok_or("rest_auth=\"oauth2\" requires \"rest_oauth_client_secret\"")?;
+                    RestCatalogAuth::OAuth2 {
+                        token_endpoint,
+                        client_id,
+                        client_secret,
+                        scope: opts.rest_oauth_scope.clone(),
+                    }
+                }
+                other => return Err(format!("unknown rest_auth: {other}")),
+            };
+            let config = RestCatalogConfig {
+                uri,
+                prefix: opts.rest_prefix.clone(),
+                warehouse: opts.rest_warehouse.clone(),
+                auth,
+            };
+            Ok(Arc::new(RestCatalog::new(config, store)))
+        }
+        other => Err(format!(
+            "unknown catalog backend: {other} (supported: \"hadoop\", \"rest\")"
+        )),
+    }
+}
+
 /// Returns a per-table `Mutex` shared across all JNI calls in this process.
 ///
 /// `HadoopCatalog` serializes commits via a per-instance mutex, but each JNI call
@@ -121,9 +217,11 @@ fn do_search(
     text_column: &str,
     bm25_weight: f32,
     pruning_threshold: f32,
+    catalog_opts: &CatalogOpts,
 ) -> ailake_core::AilakeResult<Vec<SearchResult>> {
     let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&warehouse));
-    let catalog = Arc::new(HadoopCatalog::new(store.clone(), &warehouse));
+    let catalog = resolve_catalog(&warehouse, store.clone(), catalog_opts)
+        .map_err(ailake_core::AilakeError::InvalidArgument)?;
     let table = TableIdent::new(namespace, table_name);
     let hybrid = hybrid_text.map(|qt| {
         ailake_query::HybridConfig::new(qt)
@@ -299,6 +397,7 @@ pub unsafe extern "C" fn ailake_vector_search_json(
             "chunk_text",
             0.5,
             f32::INFINITY,
+            &CatalogOpts::default(),
         ) {
             Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
             Err(e) => {
@@ -341,6 +440,8 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "default_ns")]
             namespace: String,
             table: String,
@@ -422,6 +523,7 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
             &text_column,
             bm25_weight,
             pruning_threshold,
+            &req.catalog_opts,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -496,6 +598,8 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "default_ns")]
             namespace: String,
             table: String,
@@ -647,7 +751,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
         let store: std::sync::Arc<dyn ailake_store::Store> =
             std::sync::Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = std::sync::Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
 
         use arrow_array::StringArray;
         let mut fields = vec![Field::new("id", DataType::Int64, false)];
@@ -860,6 +967,8 @@ pub unsafe extern "C" fn ailake_write_batch_ipc(
         #[derive(serde::Deserialize)]
         struct Opts {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "default_ns")]
             namespace: String,
             table: String,
@@ -1020,7 +1129,10 @@ pub unsafe extern "C" fn ailake_write_batch_ipc(
         let table = ailake_catalog::TableIdent::new(&opts.namespace, &opts.table);
         let store: std::sync::Arc<dyn ailake_store::Store> =
             std::sync::Arc::new(LocalStore::new(&opts.warehouse));
-        let catalog = std::sync::Arc::new(HadoopCatalog::new(store.clone(), &opts.warehouse));
+        let catalog = match resolve_catalog(&opts.warehouse, store.clone(), &opts.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
 
         let fts_cfg: Option<ailake_fts::FtsConfig> = if opts.fts_columns.is_empty() {
             None
@@ -1133,6 +1245,8 @@ pub unsafe extern "C" fn ailake_write_batch_multi_json(request_json: *const c_ch
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "default_ns")]
             namespace: String,
             table: String,
@@ -1258,7 +1372,10 @@ pub unsafe extern "C" fn ailake_write_batch_multi_json(request_json: *const c_ch
         let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
         let store: std::sync::Arc<dyn ailake_store::Store> =
             std::sync::Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = std::sync::Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
 
         use arrow_array::StringArray;
         let mut fields = vec![Field::new("id", DataType::Int64, false)];
@@ -1377,6 +1494,8 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "default_ns_st")]
             namespace: String,
             table: String,
@@ -1427,7 +1546,10 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
         );
 
         let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
         let table = TableIdent::new(&req.namespace, &req.table);
         let pf = req.partition_filter.as_deref();
         // Prefer multi-column spec; fall back to legacy single-column field.
@@ -1510,6 +1632,8 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "default_ns_multi")]
             namespace: String,
             table: String,
@@ -1558,7 +1682,10 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
 
         let table = TableIdent::new(&req.namespace, &req.table);
         let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
 
         // Hold owned query vecs alive for the lifetime of ModalQuery borrows
         let modal_queries_owned: Vec<(String, Vec<f32>, f32, u32)> = req
@@ -1881,11 +2008,11 @@ fn record_batch_to_scan_json(batch: &arrow_array::RecordBatch) -> Result<String,
 #[no_mangle]
 pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c_char {
     catch_ffi_panic("ailake_scan_json", move || {
-        use ailake_catalog::provider::CatalogProvider;
-
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "scan_default_ns")]
             namespace: String,
             table: String,
@@ -1947,6 +2074,7 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
             "",
             0.0,
             f32::INFINITY,
+            &req.catalog_opts,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -1961,7 +2089,10 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         // Current Iceberg schema — so a file written before a metadata-only
         // evolve_schema/add_column still gets the new column projected in as null
         // instead of silently omitted (see fetch_rows's doc comment).
-        let scan_catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let scan_catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
         let scan_table = TableIdent::new(&req.namespace, &req.table);
         let schema_fields = match rt().block_on(scan_catalog.load_table(&scan_table)) {
             Ok(meta) => meta.schema_fields,
@@ -2029,6 +2160,8 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "dw_default_ns")]
             namespace: String,
             table: String,
@@ -2064,7 +2197,10 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
         );
 
         let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
         let table = TableIdent::new(&req.namespace, &req.table);
         let values_ref: Vec<&str> = req.values.iter().map(String::as_str).collect();
 
@@ -2133,7 +2269,6 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
 #[no_mangle]
 pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) -> *mut c_char {
     catch_ffi_panic("ailake_evolve_schema_json", move || {
-        use ailake_catalog::provider::CatalogProvider;
         use ailake_catalog::{AddColumnRequest, SchemaEvolution};
 
         #[derive(serde::Deserialize)]
@@ -2156,6 +2291,8 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "es_default_ns")]
             namespace: String,
             table: String,
@@ -2208,7 +2345,10 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
         }
 
         let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
-        let catalog = Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
         let table = TableIdent::new(&req.namespace, &req.table);
 
         let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
@@ -2267,6 +2407,8 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
         #[derive(serde::Deserialize)]
         struct Req {
             warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
             #[serde(default = "compact_default_ns")]
             namespace: String,
             table: String,
@@ -2304,8 +2446,10 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
         );
 
         let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
-        let catalog: Arc<dyn ailake_catalog::provider::CatalogProvider> =
-            Arc::new(HadoopCatalog::new(store.clone(), &req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
         let table = TableIdent::new(&req.namespace, &req.table);
 
         let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
