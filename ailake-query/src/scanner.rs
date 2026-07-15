@@ -2738,11 +2738,7 @@ mod tests {
             matches!(e, ailake_core::AilakeError::Store(_))
         }
 
-        async fn write_search_rt(
-            profile: &FailProfile,
-            rows: usize,
-            dim: u32,
-        ) -> FuzzOutcome {
+        async fn write_search_rt(profile: &FailProfile, rows: usize, dim: u32) -> FuzzOutcome {
             let dir = TempDir::new().unwrap();
             let inner = LocalStore::new(dir.path());
             let fail = FailStore::new(inner)
@@ -2775,7 +2771,8 @@ mod tests {
 
             let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
             let ids: Vec<i32> = (0..rows as i32).collect();
-            let batch = RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(ids))]).unwrap();
+            let batch =
+                RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(ids))]).unwrap();
             let embeddings: Vec<Vec<f32>> = (0..rows)
                 .map(|i| {
                     let mut v = vec![0.0f32; dim as usize];
@@ -2794,15 +2791,29 @@ mod tests {
             .await
             {
                 Ok(w) => w,
-                Err(e) => return if is_store_err(&e) { FuzzOutcome::StoreError } else { FuzzOutcome::OtherError },
+                Err(e) => {
+                    return if is_store_err(&e) {
+                        FuzzOutcome::StoreError
+                    } else {
+                        FuzzOutcome::OtherError
+                    }
+                }
             };
 
             if let Err(e) = writer.write_batch(&batch, &embeddings).await {
-                return if is_store_err(&e) { FuzzOutcome::StoreError } else { FuzzOutcome::OtherError };
+                return if is_store_err(&e) {
+                    FuzzOutcome::StoreError
+                } else {
+                    FuzzOutcome::OtherError
+                };
             }
 
             if let Err(e) = writer.commit().await {
-                return if is_store_err(&e) { FuzzOutcome::StoreError } else { FuzzOutcome::OtherError };
+                return if is_store_err(&e) {
+                    FuzzOutcome::StoreError
+                } else {
+                    FuzzOutcome::OtherError
+                };
             }
 
             let query: Vec<f32> = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
@@ -2874,8 +2885,7 @@ mod tests {
             }
 
             for i in 0..2 {
-                let schema =
-                    Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+                let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
                 let ids: Vec<i32> = (0..rows as i32).collect();
                 let batch =
                     RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(ids))]).unwrap();
@@ -2921,10 +2931,8 @@ mod tests {
                 ..Default::default()
             };
             let planner = crate::compaction::CompactionPlanner::new(config);
-            let executor = crate::compaction::CompactionExecutor::new(
-                Arc::clone(&store),
-                policy.clone(),
-            );
+            let executor =
+                crate::compaction::CompactionExecutor::new(Arc::clone(&store), policy.clone());
 
             match executor
                 .run(&planner, &table, Arc::clone(&catalog), "data/merged")

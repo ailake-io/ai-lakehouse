@@ -553,12 +553,8 @@ mod tests {
         // Start at 64 bytes into header section where centroid ends, find where
         // HNSW blob starts by reading hnsw_offset and hnsw_len from header
         let header_bytes = &corrupted[ailk_start..];
-        let hnsw_offset = u64::from_le_bytes(
-            header_bytes[48..56].try_into().unwrap(),
-        ) as usize;
-        let hnsw_len = u64::from_le_bytes(
-            header_bytes[40..48].try_into().unwrap(),
-        ) as usize;
+        let hnsw_offset = u64::from_le_bytes(header_bytes[48..56].try_into().unwrap()) as usize;
+        let hnsw_len = u64::from_le_bytes(header_bytes[40..48].try_into().unwrap()) as usize;
         // Corrupt HNSW blob
         let blob_start = ailk_start + hnsw_offset;
         let garbage = vec![0xABu8; hnsw_len];
@@ -567,7 +563,10 @@ mod tests {
 
         let reader = AilakeFileReader::new(corrupted, "embedding", 4);
         let result = reader.load_index_for_column("embedding");
-        assert!(result.is_err(), "corrupted HNSW bincode must return Err, got Ok");
+        assert!(
+            result.is_err(),
+            "corrupted HNSW bincode must return Err, got Ok"
+        );
     }
 
     #[test]
@@ -596,7 +595,10 @@ mod tests {
         let file = write_file(3, 4);
         let parquet_footer = "PAR1";
         // Find the last "PAR1" footer marker and truncate before it
-        if let Some(pos) = file.windows(4).rposition(|w| w == parquet_footer.as_bytes()) {
+        if let Some(pos) = file
+            .windows(4)
+            .rposition(|w| w == parquet_footer.as_bytes())
+        {
             let truncated = file.slice(..pos);
             let reader = AilakeFileReader::new(truncated, "embedding", 4);
             assert!(!reader.is_ailake_file());

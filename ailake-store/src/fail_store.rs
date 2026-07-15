@@ -138,7 +138,7 @@ impl FailStore {
             Some(1) => {
                 // This call is the one that should fail
                 *nth = None; // consume the nth counter
-                // If fail_get remains true, subsequent calls will also fail
+                             // If fail_get remains true, subsequent calls will also fail
                 true
             }
             Some(n) => {
@@ -262,7 +262,10 @@ mod tests {
         // Actually after nth consumes, fail_get is still true and nth is None,
         // so every subsequent call fails too. That's fine — the user can
         // toggle fail_get off after the expected failure.
-        assert!(third.is_err(), "third get should fail (fail_get still true)");
+        assert!(
+            third.is_err(),
+            "third get should fail (fail_get still true)"
+        );
     }
 
     #[tokio::test]

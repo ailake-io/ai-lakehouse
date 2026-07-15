@@ -8,13 +8,13 @@
 
 mod fixtures;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ailake_catalog::{CatalogProvider, HadoopCatalog, TableIdent, TableProperties};
 use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
-use ailake_query::compaction::{CompactionConfig, CompactionPlanner, CompactionExecutor};
+use ailake_query::compaction::{CompactionConfig, CompactionExecutor, CompactionPlanner};
 use ailake_query::scanner::{search, SearchConfig};
 use ailake_store::{LocalStore, Store};
 use tempfile::TempDir;
@@ -73,9 +73,11 @@ async fn concurrent_search_and_compact() {
 
     // Seed 4 small data files (each with distinct unit-basis embeddings)
     for i in 0..4 {
-        let schema = Arc::new(arrow_schema::Schema::new(vec![
-            arrow_schema::Field::new("id", arrow_schema::DataType::Int32, false),
-        ]));
+        let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "id",
+            arrow_schema::DataType::Int32,
+            false,
+        )]));
         let ids: Vec<i32> = (0..5).map(|j| (i * 5 + j) as i32).collect();
         let batch = arrow_array::RecordBatch::try_new(
             schema,
@@ -261,16 +263,11 @@ async fn concurrent_search_and_compact() {
                                 r.distance.is_finite(),
                                 "non-finite distance returned by search"
                             );
-                            assert!(
-                                r.distance >= 0.0,
-                                "negative distance returned by search"
-                            );
+                            assert!(r.distance >= 0.0, "negative distance returned by search");
                         }
                     }
                     Err(e) => {
-                        eprintln!(
-                            "search error (seeker {seeker_id}, iter {_iter}): {e:?}"
-                        );
+                        eprintln!("search error (seeker {seeker_id}, iter {_iter}): {e:?}");
                         s_errors.fetch_add(1, Ordering::Release);
                     }
                 }
@@ -331,7 +328,10 @@ async fn concurrent_search_and_compact() {
         store,
     )
     .await;
-    assert!(final_results.is_ok(), "final search after stress test failed");
+    assert!(
+        final_results.is_ok(),
+        "final search after stress test failed"
+    );
     let final_results = final_results.unwrap();
     assert!(
         !final_results.is_empty(),

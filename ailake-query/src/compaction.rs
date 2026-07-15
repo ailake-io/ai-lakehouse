@@ -2552,6 +2552,7 @@ mod tests {
     /// This tests the actual recall — not just verify_integrity().
     #[tokio::test]
     async fn compact_preserves_search_results() {
+        use crate::scanner::SearchConfig;
         use ailake_catalog::HadoopCatalog;
         use ailake_core::{VectorMetric, VectorPrecision};
         use ailake_store::LocalStore;
@@ -2559,7 +2560,6 @@ mod tests {
         use arrow_schema::{DataType, Field, Schema};
         use std::sync::Arc;
         use tempfile::TempDir;
-        use crate::scanner::SearchConfig;
         let dir = TempDir::new().unwrap();
         let store = Arc::new(LocalStore::new(dir.path()));
         let policy = VectorStoragePolicy {
@@ -2596,10 +2596,7 @@ mod tests {
         .unwrap();
 
         // File B: 2 rows — unit basis vectors along dimensions 3 and mixed
-        let embs_b: Vec<Vec<f32>> = vec![
-            vec![0.0, 0.0, 0.0, 1.0],
-            vec![0.7, 0.7, 0.0, 0.0],
-        ];
+        let embs_b: Vec<Vec<f32>> = vec![vec![0.0, 0.0, 0.0, 1.0], vec![0.7, 0.7, 0.0, 0.0]];
         let batch_b = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int32Array::from(vec![3i32, 4]))],
@@ -2625,12 +2622,18 @@ mod tests {
         let table = TableIdent::new("default", "compact_search_test");
 
         // Bootstrap the table via create_table, then commit the two files
-        catalog.create_table(&table, &ailake_catalog::TableProperties {
-            policy: policy.clone(),
-            extra: std::collections::HashMap::new(),
-            format_version: 2,
-            partition_column_type: None,
-        }).await.unwrap();
+        catalog
+            .create_table(
+                &table,
+                &ailake_catalog::TableProperties {
+                    policy: policy.clone(),
+                    extra: std::collections::HashMap::new(),
+                    format_version: 2,
+                    partition_column_type: None,
+                },
+            )
+            .await
+            .unwrap();
 
         // Load current iceberg schema so commit_snapshot can point at it
         let meta = catalog.load_table(&table).await.unwrap();
@@ -2703,12 +2706,20 @@ mod tests {
             ..Default::default()
         };
         let before = crate::scanner::search(
-            &table, &query_before, config.clone(), "embedding", 4,
-            catalog.clone(), store.clone(),
+            &table,
+            &query_before,
+            config.clone(),
+            "embedding",
+            4,
+            catalog.clone(),
+            store.clone(),
         )
         .await
         .unwrap();
-        assert!(!before.is_empty(), "search before compaction must return results");
+        assert!(
+            !before.is_empty(),
+            "search before compaction must return results"
+        );
         let before_dists: Vec<f32> = before.iter().map(|r| r.distance).collect();
 
         // ── Compact the two files ──
@@ -2760,19 +2771,29 @@ mod tests {
 
         // ── Search after compaction ──
         let after = crate::scanner::search(
-            &table, &query_before, config.clone(), "embedding", 4,
-            catalog, store,
+            &table,
+            &query_before,
+            config.clone(),
+            "embedding",
+            4,
+            catalog,
+            store,
         )
         .await
         .unwrap();
-        assert!(!after.is_empty(), "search after compaction must return results");
+        assert!(
+            !after.is_empty(),
+            "search after compaction must return results"
+        );
         let after_dists: Vec<f32> = after.iter().map(|r| r.distance).collect();
 
         // ── Assert recall parity ──
         assert_eq!(
-            before.len(), after.len(),
+            before.len(),
+            after.len(),
             "number of results should match before ({}) and after ({}) compaction",
-            before.len(), after.len(),
+            before.len(),
+            after.len(),
         );
         // Row-ids are NOT expected to match — compaction reassigns row positions.
         // What matters: distances should be approximately the same for each rank,

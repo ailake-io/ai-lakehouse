@@ -825,9 +825,7 @@ mod tests {
     }
 
     fn arb_f16_vecs() -> impl Strategy<Value = (Vec<f32>, Vec<f16>)> {
-        (1usize..2048).prop_flat_map(|dim| {
-            (arb_vec(dim), arb_f16_vec(dim))
-        })
+        (1usize..2048).prop_flat_map(|dim| (arb_vec(dim), arb_f16_vec(dim)))
     }
 
     proptest! {
@@ -1041,7 +1039,10 @@ mod tests {
         let a = vec![f32::NAN, 1.0];
         let b = vec![1.0, 2.0];
         let result = dot_product(&a, &b);
-        assert!(result.is_nan(), "dot with NaN should produce NaN, got {result}");
+        assert!(
+            result.is_nan(),
+            "dot with NaN should produce NaN, got {result}"
+        );
     }
 
     #[test]
@@ -1049,7 +1050,10 @@ mod tests {
         let a = vec![f32::INFINITY, 1.0];
         let b = vec![1.0, 2.0];
         let result = dot_product(&a, &b);
-        assert!(result.is_infinite(), "dot with Inf should produce Inf, got {result}");
+        assert!(
+            result.is_infinite(),
+            "dot with Inf should produce Inf, got {result}"
+        );
     }
 
     #[test]
@@ -1057,7 +1061,10 @@ mod tests {
         let a = vec![0.0f32; 4];
         let b = vec![1.0, 2.0, 3.0, 4.0];
         let result = dot_product(&a, &b);
-        assert_eq!(result, 0.0, "dot with zero vector should be 0, got {result}");
+        assert_eq!(
+            result, 0.0,
+            "dot with zero vector should be 0, got {result}"
+        );
     }
 
     #[test]
@@ -1065,7 +1072,10 @@ mod tests {
         let a = vec![f32::NAN, 1.0];
         let b = vec![1.0, 2.0];
         let result = euclidean_distance(&a, &b);
-        assert!(result.is_nan(), "euclidean with NaN should produce NaN, got {result}");
+        assert!(
+            result.is_nan(),
+            "euclidean with NaN should produce NaN, got {result}"
+        );
     }
 
     #[test]
@@ -1147,6 +1157,9 @@ mod tests {
         let a = normalize_l2(&[1.0f32, 0.0]);
         let b = normalize_l2(&[0.0f32, 1.0]);
         let d = normalized_cosine_distance(&a, &b);
-        assert!((d - 1.0).abs() < 1e-5, "orthogonal distance should be 1, got {d}");
+        assert!(
+            (d - 1.0).abs() < 1e-5,
+            "orthogonal distance should be 1, got {d}"
+        );
     }
 }
