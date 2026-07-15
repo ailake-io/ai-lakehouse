@@ -1768,7 +1768,7 @@ gradle wrapper
 ./gradlew shadowJar
 
 # Output:
-ls build/libs/trino-plugin-0.1.5-plugin.jar
+ls build/libs/trino-plugin-0.1.6-plugin.jar
 ```
 
 ### 15D. Step 3 — Install in Trino
@@ -1779,7 +1779,7 @@ TRINO_HOME=/opt/trino
 
 # Create plugin directory and copy jar
 mkdir -p $TRINO_HOME/plugin/ailake
-cp build/libs/trino-plugin-0.1.5-plugin.jar $TRINO_HOME/plugin/ailake/
+cp build/libs/trino-plugin-0.1.6-plugin.jar $TRINO_HOME/plugin/ailake/
 
 # Place native library in Trino's library path
 # Option A: copy to Trino's lib/
@@ -1920,7 +1920,7 @@ cd spark-plugin
 gradle wrapper   # first time only
 ./gradlew shadowJar
 
-ls build/libs/spark-plugin-0.1.5-plugin.jar
+ls build/libs/spark-plugin-0.1.6-plugin.jar
 ```
 
 ### 16D. Step 3 — Generate demo table
@@ -1939,7 +1939,7 @@ export AILAKE_TABLE=/tmp/ailakeXXXXXX/warehouse/default/demo_table
 
 ```bash
 $SPARK_HOME/bin/spark-shell \
-  --jars $(pwd)/spark-plugin/build/libs/spark-plugin-0.1.5-plugin.jar \
+  --jars $(pwd)/spark-plugin/build/libs/spark-plugin-0.1.6-plugin.jar \
   --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions \
   --conf "spark.driver.extraJavaOptions=-Djava.library.path=$(pwd)/target/release" \
   --conf spark.ui.enabled=false
@@ -1987,7 +1987,7 @@ results.printSchema()
 
 ```bash
 $SPARK_HOME/bin/pyspark \
-  --jars $(pwd)/spark-plugin/build/libs/spark-plugin-0.1.5-plugin.jar \
+  --jars $(pwd)/spark-plugin/build/libs/spark-plugin-0.1.6-plugin.jar \
   --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions \
   --conf "spark.driver.extraJavaOptions=-Djava.library.path=$(pwd)/target/release"
 ```
@@ -2050,7 +2050,7 @@ object MyVectorSearchJob {
 
 ```bash
 spark-submit \
-  --jars spark-plugin-0.1.5-plugin.jar \
+  --jars spark-plugin-0.1.6-plugin.jar \
   --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions \
   --conf "spark.driver.extraJavaOptions=-Djava.library.path=/opt/ailake/lib" \
   --conf "spark.executor.extraJavaOptions=-Djava.library.path=/opt/ailake/lib" \
@@ -2106,7 +2106,7 @@ cd ailake-flink
 gradle wrapper   # first time only
 ./gradlew shadowJar
 
-ls build/libs/ailake-flink-0.1.5-plugin.jar
+ls build/libs/ailake-flink-0.1.6-plugin.jar
 ```
 
 The shadow jar (`-plugin`) includes JNA and Jackson. Flink dependencies are outside (`compileOnly`).
@@ -2115,7 +2115,7 @@ The shadow jar (`-plugin`) includes JNA and Jackson. Flink dependencies are outs
 
 ```sql
 -- Flink SQL Client
-ADD JAR '/path/to/ailake-flink-0.1.5-plugin.jar';
+ADD JAR '/path/to/ailake-flink-0.1.6-plugin.jar';
 
 -- Source + sink table
 CREATE TABLE docs (
@@ -2351,7 +2351,7 @@ SET SESSION ailake.query_vector = '0.1,0.2,0.3,...';
 The plugin jar was not passed to Spark.
 ```bash
 # Verify --jars includes the plugin
-spark-shell --jars /path/to/spark-plugin-0.1.5-plugin.jar \
+spark-shell --jars /path/to/spark-plugin-0.1.6-plugin.jar \
   --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions
 ```
 
@@ -2435,7 +2435,7 @@ ldconfig -p | grep -E "libamdhip|libcuda"
 The plugin jar was not added to Flink.
 ```bash
 # SQL Client — add before CREATE TABLE
-ADD JAR '/path/to/ailake-flink-0.1.5-plugin.jar';
+ADD JAR '/path/to/ailake-flink-0.1.6-plugin.jar';
 
 # or via flink-conf.yaml
 classloader.parent-first-patterns.additional: io.ailake
