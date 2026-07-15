@@ -26,6 +26,7 @@ s3:/
 data/
 compat-fixture/
 actions-runner/
+LAB_PLAN.md
 
 # graphify (local knowledge-graph tooling, machine-specific)
 graphify-out/
