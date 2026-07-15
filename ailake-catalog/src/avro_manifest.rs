@@ -1775,4 +1775,287 @@ mod tests {
             Some("k-means did not converge")
         );
     }
+
+    // ── Proptest: Avro manifest round-trip fuzzing ───────────────────
+
+    // The proptest! macro must be at the top level of the cfg(test) module
+    // due to macro hygiene. Tests are defined outside fuzz_tests but share
+    // the same strategies.
+    mod fuzz_utils {
+        use crate::provider::DataFileEntry;
+
+        pub const AVRO_SCHEMA: &str = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
+        pub const AVRO_PARTITION: &str = r#"[{"spec-id":0,"fields":[]}]"#;
+
+        pub fn assert_entry_eq(a: &DataFileEntry, b: &DataFileEntry) {
+            assert_eq!(a.path, b.path);
+            assert_eq!(a.record_count, b.record_count);
+            assert_eq!(a.file_size_bytes, b.file_size_bytes);
+            assert_eq!(a.centroid_b64, b.centroid_b64);
+            assert_eq!(a.radius, b.radius);
+            assert_eq!(a.hnsw_offset, b.hnsw_offset);
+            assert_eq!(a.hnsw_len, b.hnsw_len);
+            assert_eq!(a.vector_column, b.vector_column);
+            assert_eq!(a.vector_dim, b.vector_dim);
+            assert_eq!(a.extra_vector_indexes.len(), b.extra_vector_indexes.len());
+            for (i, (ea, eb)) in a
+                .extra_vector_indexes
+                .iter()
+                .zip(b.extra_vector_indexes.iter())
+                .enumerate()
+            {
+                assert_eq!(ea.column, eb.column, "extra_index[{i}].column");
+                assert_eq!(ea.dim, eb.dim, "extra_index[{i}].dim");
+                assert_eq!(
+                    ea.hnsw_offset, eb.hnsw_offset,
+                    "extra_index[{i}].hnsw_offset"
+                );
+                assert_eq!(ea.hnsw_len, eb.hnsw_len, "extra_index[{i}].hnsw_len");
+            }
+            assert_eq!(a.index_status, b.index_status);
+            assert_eq!(a.index_error, b.index_error);
+            assert_eq!(a.batch_id, b.batch_id);
+            assert_eq!(a.embedding_model, b.embedding_model);
+            assert_eq!(a.partition_value, b.partition_value);
+            assert_eq!(
+                a.deletion_vector.as_ref().map(|d| &d.path),
+                b.deletion_vector.as_ref().map(|d| &d.path),
+            );
+            assert_eq!(
+                a.deletion_vector.as_ref().map(|d| d.offset),
+                b.deletion_vector.as_ref().map(|d| d.offset),
+            );
+            assert_eq!(a.first_row_id, b.first_row_id);
+            assert!(
+                b.column_stats.is_none(),
+                "column_stats must be None after Avro round-trip"
+            );
+        }
+    }
+
+    mod fuzz_strategies {
+        use crate::provider::{
+            DataFileEntry, DeletionVector, EqualityDeleteFile, ExtraVectorIndex, IndexStatus,
+        };
+        use proptest::prelude::*;
+
+        pub fn arb_dv() -> impl Strategy<Value = Option<DeletionVector>> {
+            proptest::option::of(
+                ("[a-z]{4,20}/dv.bin", 0u64..10_000, 1u64..4096, 1i64..1000).prop_map(
+                    |(path, offset, length, cardinality)| DeletionVector {
+                        path,
+                        offset,
+                        length,
+                        cardinality,
+                    },
+                ),
+            )
+        }
+
+        pub fn arb_extra() -> impl Strategy<Value = Vec<ExtraVectorIndex>> {
+            proptest::collection::vec(
+                ("[a-z_]{3,12}", 2u32..8, 0u64..1000, 0u64..500).prop_map(
+                    |(column, dim, hnsw_offset, hnsw_len)| ExtraVectorIndex {
+                        column,
+                        dim,
+                        hnsw_offset,
+                        hnsw_len,
+                        centroid_b64: None,
+                        radius: None,
+                    },
+                ),
+                0..3,
+            )
+        }
+
+        pub fn arb_entry() -> impl Strategy<Value = DataFileEntry> {
+            let group1 = (
+                "[a-zA-Z0-9_/.-]{5,40}\\.parquet",
+                0u64..10_000,
+                0u64..1_000_000,
+                proptest::option::of("[A-Za-z0-9+/=]{10,100}"),
+                proptest::option::of(
+                    proptest::num::f32::ANY
+                        .prop_filter("NaN not allowed in radius", |v| v.is_finite()),
+                ),
+                proptest::option::of(0u64..10_000_000),
+                proptest::option::of(0u64..5_000_000),
+                proptest::option::of("[a-zA-Z_][a-zA-Z0-9_]{2,15}"),
+            );
+            let group2 = (
+                proptest::option::of(2u32..4096),
+                arb_extra(),
+                proptest::option::of("[a-zA-Z0-9_-]{1,30}"),
+                proptest::option::of("[a-zA-Z0-9_.-]{2,30}"),
+                proptest::option::of("\\w{1,20}"),
+                proptest::option::of(proptest::num::i64::ANY),
+                arb_dv(),
+            );
+            (group1, group2).prop_map(
+                |(
+                    (
+                        path,
+                        record_count,
+                        file_size_bytes,
+                        centroid_b64,
+                        radius,
+                        hnsw_offset,
+                        hnsw_len,
+                        vector_column,
+                    ),
+                    (
+                        vector_dim,
+                        extra_vector_indexes,
+                        batch_id,
+                        embedding_model,
+                        partition_value,
+                        first_row_id,
+                        deletion_vector,
+                    ),
+                )| {
+                    DataFileEntry {
+                        path,
+                        record_count,
+                        file_size_bytes,
+                        centroid_b64,
+                        radius,
+                        hnsw_offset,
+                        hnsw_len,
+                        vector_column,
+                        vector_dim,
+                        extra_vector_indexes,
+                        index_status: IndexStatus::Ready,
+                        index_error: None,
+                        batch_id,
+                        embedding_model,
+                        partition_value,
+                        deletion_vector,
+                        first_row_id,
+                        column_stats: None,
+                    }
+                },
+            )
+        }
+
+        pub fn arb_eq_del() -> impl Strategy<Value = EqualityDeleteFile> {
+            (
+                "[a-zA-Z0-9_/.-]{5,40}\\.avro",
+                0u64..10_000,
+                0u64..1_000_000,
+                proptest::collection::vec(proptest::num::i32::ANY, 0..5),
+            )
+                .prop_map(|(path, record_count, file_size_bytes, equality_ids)| {
+                    EqualityDeleteFile {
+                        path,
+                        equality_ids,
+                        record_count,
+                        file_size_bytes,
+                        inline_values: None,
+                    }
+                })
+        }
+    }
+
+    use fuzz_strategies::*;
+    use fuzz_utils::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_manifest_file_roundtrip(
+            entry in arb_entry(),
+        ) {
+            let bytes = crate::avro_manifest::write_manifest_file(
+                std::slice::from_ref(&entry), 99, 1,
+                AVRO_SCHEMA, AVRO_PARTITION, 2, None,
+            );
+            let entries = crate::avro_manifest::read_manifest_file(&bytes)
+                .expect("read_manifest_file should succeed");
+            assert_eq!(entries.len(), 1, "should read back 1 entry");
+            assert_entry_eq(&entry, &entries[0]);
+        }
+
+        #[test]
+        fn prop_manifest_file_multi_entry_roundtrip(
+            entries in proptest::collection::vec(arb_entry(), 0..5),
+        ) {
+            let count = entries.len();
+            let bytes = crate::avro_manifest::write_manifest_file(
+                &entries, 99, 1,
+                AVRO_SCHEMA, AVRO_PARTITION, 2, None,
+            );
+            let decoded = crate::avro_manifest::read_manifest_file(&bytes)
+                .expect("read_manifest_file should succeed");
+            assert_eq!(
+                decoded.len(), count,
+                "entry count mismatch: {count} written, {} read", decoded.len()
+            );
+            for (orig, dec) in entries.iter().zip(decoded.iter()) {
+                assert_entry_eq(orig, dec);
+            }
+        }
+
+        #[test]
+        fn prop_manifest_list_roundtrip(
+            path in "[a-zA-Z0-9_/.-]{5,60}\\.avro",
+            manifest_len in 100u64..1_000_000,
+            snapshot_id in proptest::num::i64::ANY,
+        ) {
+            let bytes = crate::avro_manifest::write_manifest_list(&path, manifest_len as usize, snapshot_id, 1, 10);
+            let paths = crate::avro_manifest::read_manifest_list(&bytes)
+                .expect("read_manifest_list should succeed");
+            assert_eq!(paths.len(), 1, "manifest list should have 1 entry");
+            assert!(
+                paths[0].contains(".avro"),
+                "manifest list path should be .avro, got: {}", paths[0]
+            );
+        }
+
+        #[test]
+        fn prop_manifest_list_multi_typed_roundtrip(
+            manifests in proptest::collection::vec(
+                ("[a-zA-Z0-9_/.-]{5,40}\\.avro", 0i64..1_000_000, 0i32..2),
+                0..4,
+            ),
+            snapshot_id in proptest::num::i64::ANY,
+        ) {
+            let bytes = crate::avro_manifest::write_manifest_list_multi_typed(&manifests, snapshot_id, 1, 10);
+            let decoded = crate::avro_manifest::read_manifest_list_typed(&bytes)
+                .expect("read_manifest_list_typed should succeed");
+            assert_eq!(
+                decoded.len(), manifests.len(),
+                "multi-typed manifest list entry count mismatch"
+            );
+        }
+
+        #[test]
+        fn prop_equality_delete_manifest_roundtrip(
+            del in arb_eq_del(),
+            snapshot_id in proptest::num::i64::ANY,
+        ) {
+            let bytes = crate::avro_manifest::write_equality_delete_manifest(std::slice::from_ref(&del), snapshot_id, 1);
+            let decoded = crate::avro_manifest::read_equality_delete_manifest(&bytes)
+                .expect("read_equality_delete_manifest should succeed");
+            assert_eq!(decoded.len(), 1, "equality delete manifest should have 1 entry");
+            assert_eq!(decoded[0].path, del.path, "equality delete path mismatch");
+            assert_eq!(decoded[0].record_count, del.record_count, "equality delete record_count mismatch");
+            assert_eq!(decoded[0].file_size_bytes, del.file_size_bytes, "equality delete file_size_bytes mismatch");
+        }
+    }
+
+    #[test]
+    fn prop_empty_manifest_roundtrip() {
+        let entries =
+            crate::avro_manifest::read_manifest_file(&crate::avro_manifest::write_manifest_file(
+                &[],
+                99,
+                1,
+                AVRO_SCHEMA,
+                AVRO_PARTITION,
+                2,
+                None,
+            ))
+            .expect("empty manifest should decode successfully");
+        assert!(entries.is_empty(), "empty manifest should yield 0 entries");
+    }
 }
