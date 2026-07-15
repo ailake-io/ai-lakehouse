@@ -297,10 +297,35 @@ func (c *HadoopCatalog) readMetadata(tableDir string) (map[string]any, error) {
 // directory — joining against the table directory would double-prefix
 // namespace/table (see hadoop.rs's table_root()/manifest_list_path).
 func (c *HadoopCatalog) resolveAvroPath(path string) string {
+	return resolveWarehousePath(c.Warehouse, path)
+}
+
+// resolveWarehousePath resolves a path emitted by the Rust catalog writer
+// (manifest-list, manifest-file, or a DataFileEntry.Path) against the
+// warehouse root. Paths come in three shapes:
+//
+//   - an absolute file:// URI — ailake-py's local_catalog_store always
+//     writes warehouse_uri as file://<absolute path> (required for Trino's
+//     Iceberg connector, see ailake-py/src/lib.rs), so metadata.json written
+//     by the Python SDK stores manifest-list this way. Must be detected and
+//     returned (scheme stripped) as-is, NOT passed through filepath.Join:
+//     unlike Rust's Path::join or Python's os.path.join, Go's filepath.Join
+//     does not special-case an absolute second argument — it normalizes
+//     both parts together, silently producing a corrupted concatenated
+//     path (confirmed: warehouse "/a/b" + "file:///a/b/x.avro" via
+//     filepath.Join yields "/a/b/file:/a/b/x.avro", not "/a/b/x.avro").
+//   - a plain OS-absolute path (filepath.IsAbs) — used as-is.
+//   - relative to the warehouse root (the common case for the Rust
+//     CLI/JNI writer, which never emits paths relative to anything else) —
+//     joined onto warehouse.
+func resolveWarehousePath(warehouse, path string) string {
+	if rest, ok := strings.CutPrefix(path, "file://"); ok {
+		return rest
+	}
 	if filepath.IsAbs(path) {
 		return path
 	}
-	return filepath.Join(c.Warehouse, path)
+	return filepath.Join(warehouse, path)
 }
 
 // readManifestList reads an Iceberg manifest list (Avro OCF) and returns manifest file paths.

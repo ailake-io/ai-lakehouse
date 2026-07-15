@@ -20,7 +20,6 @@ import (
 	"log/slog"
 	"math"
 	"os"
-	"path/filepath"
 	"sort"
 )
 
@@ -180,11 +179,10 @@ func searchFile(
 	// Resolve absolute path. entry.Path is already relative to the warehouse
 	// root (e.g. "default/docs/data/part-00000.parquet" — the Rust catalog
 	// writer includes namespace/table in it), so join against warehouse only;
-	// joining namespace/table again here would double-prefix the path.
-	filePath := entry.Path
-	if !filepath.IsAbs(filePath) {
-		filePath = filepath.Join(warehouse, filePath)
-	}
+	// joining namespace/table again here would double-prefix the path. Also
+	// handles an absolute file:// URI (ailake-py writer) — see
+	// resolveWarehousePath's doc comment in catalog.go.
+	filePath := resolveWarehousePath(warehouse, entry.Path)
 
 	if entry.HnswOffset == nil || entry.HnswLen == nil {
 		slog.Debug("ailake: skipping file — index not ready (HnswOffset/HnswLen nil)", "file", entry.Path)

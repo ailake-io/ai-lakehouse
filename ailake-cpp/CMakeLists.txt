@@ -63,6 +63,16 @@ target_include_directories(ailake_catalog PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
+# Namespaced aliases — README.md's documented FetchContent usage
+# (target_link_libraries(... ailake::ailake ailake::ailake_catalog)) needs
+# these: the `install(EXPORT ... NAMESPACE ailake::)` block below only
+# namespaces targets for the installed/find_package consumption path, not
+# FetchContent/add_subdirectory, which only ever see the raw target names.
+# Without these aliases the README's own example fails with "target
+# ailake::ailake not found" — confirmed building against this file as-is.
+add_library(ailake::ailake ALIAS ailake)
+add_library(ailake::ailake_catalog ALIAS ailake_catalog)
+
 if(AILAKE_CUDA)
   add_library(ailake_cuda STATIC src/cuda_search.cu)
   target_link_libraries(ailake_cuda PUBLIC ailake CUDA::cudart)
@@ -84,7 +94,7 @@ endif()
 if(AILAKE_TESTS)
   enable_testing()
 
-  foreach(_test footer hnsw ivfpq write fts)
+  foreach(_test footer hnsw ivfpq write fts catalog_paths)
     add_executable(ailake_test_${_test} tests/test_${_test}.cpp)
     target_link_libraries(ailake_test_${_test} PRIVATE ailake)
     add_test(NAME test_${_test} COMMAND ailake_test_${_test})
