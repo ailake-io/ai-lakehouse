@@ -252,12 +252,13 @@ Para 100M de registros com `text-embedding-3-small` em `float16`, os vetores ocu
 
 ```rust
 pub enum VectorPrecision {
-    F32,          // 4 bytes/dim — precisão máxima
-    F16,          // 2 bytes/dim — perda <0.1% em recall@10 (PADRÃO)
-    I8Symmetric,  // 1 byte/dim  — perda ~1-3%
-    Binary,       // 1 bit/dim   — apenas para modelos binários
+    F32,  // 4 bytes/dim — precisão máxima
+    F16,  // 2 bytes/dim — perda <0.1% em recall@10 (PADRÃO)
+    I8,   // 1 byte/dim  — perda ~1-3%
 }
 ```
+
+> `Binary` (precision=3) removido em v0.0.14 — nenhum encoder real de bit-packing chegou a existir; ver §5A/Fase 7 e `docs/specs/FILE_FORMAT.md` §3.1.
 
 Configurado no `metadata.json`:
 ```json
