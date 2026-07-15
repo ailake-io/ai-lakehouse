@@ -86,10 +86,7 @@ func FetchRows(
 	// Group by file path — minimize file opens.
 	byFile := make(map[string][]fileHit)
 	for i, r := range results {
-		filePath := r.FilePath
-		if !isAbsPath(filePath) {
-			filePath = joinPath(warehouse, filePath)
-		}
+		filePath := resolveWarehousePath(warehouse, r.FilePath)
 		byFile[filePath] = append(byFile[filePath], fileHit{r.RowID, r.Distance, i})
 	}
 
@@ -258,18 +255,3 @@ func parquetRowToFields(
 	return fields
 }
 
-// isAbsPath reports whether path is absolute (POSIX or Windows).
-func isAbsPath(path string) bool {
-	return len(path) > 0 && (path[0] == '/' || (len(path) >= 3 && path[1] == ':'))
-}
-
-// joinPath joins two path segments.
-func joinPath(base, rel string) string {
-	if base == "" {
-		return rel
-	}
-	if base[len(base)-1] == '/' {
-		return base + rel
-	}
-	return base + "/" + rel
-}

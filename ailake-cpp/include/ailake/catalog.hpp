@@ -209,8 +209,7 @@ public:
                               const std::string& rel) const {
         (void)ns;
         (void)tbl;
-        if (!rel.empty() && rel[0] == '/') return rel; // already absolute
-        return warehouse_ + "/" + rel;
+        return resolve_warehouse_path(rel);
     }
 
     TableInfo load_table(const std::string& ns, const std::string& tbl) const {
@@ -446,13 +445,14 @@ public:
         // manifest-file paths are stored relative to the warehouse ROOT
         // (e.g. "default/docs/metadata/snap-....avro", already including
         // namespace/table) — join against warehouse_, not the table dir,
-        // or namespace/table gets double-prefixed.
-        if (manifest_list[0] != '/') manifest_list = warehouse_ + "/" + manifest_list;
+        // or namespace/table gets double-prefixed. Also handles an absolute
+        // file:// URI (ailake-py writer) — see resolve_warehouse_path().
+        manifest_list = resolve_warehouse_path(manifest_list);
 
         auto manifest_paths = read_manifest_list(manifest_list);
         std::vector<DataFileEntry> all;
         for (auto& mp : manifest_paths) {
-            if (mp[0] != '/') mp = warehouse_ + "/" + mp;
+            mp = resolve_warehouse_path(mp);
             auto es = read_manifest_file(mp);
             all.insert(all.end(), es.begin(), es.end());
         }
@@ -461,6 +461,31 @@ public:
 
 private:
     std::string warehouse_;
+
+    // Resolves a path emitted by the Rust catalog writer against the
+    // warehouse root. See ailake-go's resolveWarehousePath (catalog.go) for
+    // the identical fix on the Go side — same root cause, same three cases:
+    //   - an absolute file:// URI — ailake-py's local_catalog_store always
+    //     writes warehouse_uri as file://<absolute path> (required for
+    //     Trino's Iceberg connector, see ailake-py/src/lib.rs), so
+    //     metadata.json written by the Python SDK stores manifest-list this
+    //     way. The old `rel[0] == '/'` check didn't recognize this as
+    //     absolute (a file:// URI starts with 'f'), so it got string-joined
+    //     onto warehouse_, producing a corrupted double-prefixed path
+    //     (confirmed: warehouse "/a/b" + "file:///a/b/x.avro" via
+    //     `warehouse_ + "/" + path` yields "/a/b/file:///a/b/x.avro", not
+    //     "/a/b/x.avro"). Scheme is stripped, remainder used as-is.
+    //   - a plain OS-absolute path (leading '/') — used as-is.
+    //   - relative to the warehouse root (the common case for the Rust
+    //     CLI/JNI writer) — joined onto warehouse_.
+    std::string resolve_warehouse_path(const std::string& path) const {
+        static const std::string scheme = "file://";
+        if (path.compare(0, scheme.size(), scheme) == 0) {
+            return path.substr(scheme.size());
+        }
+        if (!path.empty() && path[0] == '/') return path;
+        return warehouse_ + "/" + path;
+    }
 
     // Matches ailake-catalog's HadoopCatalog::table_root() exactly: flat
     // "<warehouse>/<namespace>/<table>", no Hive-style ".db" suffix.

@@ -6,7 +6,6 @@ package ailake
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 )
 
@@ -153,10 +152,9 @@ func searchFileCol(
 	// entry.Path is already relative to the warehouse root (includes
 	// namespace/table) — see searchFile's comment in ailake.go for why
 	// joining namespace/table again here would double-prefix the path.
-	filePath := entry.Path
-	if !filepath.IsAbs(filePath) {
-		filePath = filepath.Join(warehouse, filePath)
-	}
+	// resolveWarehousePath also handles an absolute file:// URI (ailake-py
+	// writer) — see its doc comment in catalog.go.
+	filePath := resolveWarehousePath(warehouse, entry.Path)
 
 	var hnswOffset, hnswLen uint64
 	var dim uint32
