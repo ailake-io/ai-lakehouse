@@ -1033,4 +1033,120 @@ mod tests {
         assert!((c.values[0] - 1.0).abs() < 1e-6);
         assert!(c.radius > 0.0);
     }
+
+    // ── Edge cases: NaN, Inf, zero vectors ───────────────────────────────
+
+    #[test]
+    fn dot_product_nan_inputs() {
+        let a = vec![f32::NAN, 1.0];
+        let b = vec![1.0, 2.0];
+        let result = dot_product(&a, &b);
+        assert!(result.is_nan(), "dot with NaN should produce NaN, got {result}");
+    }
+
+    #[test]
+    fn dot_product_inf_inputs() {
+        let a = vec![f32::INFINITY, 1.0];
+        let b = vec![1.0, 2.0];
+        let result = dot_product(&a, &b);
+        assert!(result.is_infinite(), "dot with Inf should produce Inf, got {result}");
+    }
+
+    #[test]
+    fn dot_product_zero_vector() {
+        let a = vec![0.0f32; 4];
+        let b = vec![1.0, 2.0, 3.0, 4.0];
+        let result = dot_product(&a, &b);
+        assert_eq!(result, 0.0, "dot with zero vector should be 0, got {result}");
+    }
+
+    #[test]
+    fn euclidean_nan_input() {
+        let a = vec![f32::NAN, 1.0];
+        let b = vec![1.0, 2.0];
+        let result = euclidean_distance(&a, &b);
+        assert!(result.is_nan(), "euclidean with NaN should produce NaN, got {result}");
+    }
+
+    #[test]
+    fn euclidean_zero_vector() {
+        let a = vec![0.0f32; 3];
+        let b = vec![3.0, 4.0, 0.0];
+        let result = euclidean_distance(&a, &b);
+        assert!((result - 5.0).abs() < 1e-5, "expected 5.0, got {result}");
+    }
+
+    #[test]
+    fn cosine_zero_vector_handles_gracefully() {
+        let zero = vec![0.0f32; 4];
+        let other = vec![1.0, 0.0, 0.0, 0.0];
+        // Cosine with a zero vector: ||zero|| = 0 → division by zero
+        // Should return a finite value (1.0 = max distance) rather than panicking
+        let result = cosine_distance(&zero, &other);
+        assert!(
+            result.is_finite(),
+            "cosine with zero vector should return finite value, got {result}"
+        );
+    }
+
+    #[test]
+    fn cosine_both_zero_vectors() {
+        let zero = vec![0.0f32; 4];
+        let result = cosine_distance(&zero, &zero);
+        assert!(
+            result.is_finite(),
+            "cosine with both zero should return finite value, got {result}"
+        );
+    }
+
+    #[test]
+    fn normalize_l2_zero_vector() {
+        let v = vec![0.0f32; 4];
+        let n = normalize_l2(&v);
+        // Should return zero vector (not NaN)
+        for x in &n {
+            assert!(x.is_finite(), "normalized zero vector has non-finite {x}");
+        }
+        let norm: f32 = n.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(norm.abs() < 1e-6, "norm should be 0, got {norm}");
+    }
+
+    // ── Dimension mismatch ───────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "dimension mismatch")]
+    fn dot_dimension_mismatch_panics() {
+        let a = vec![1.0f32; 3];
+        let b = vec![2.0f32; 5];
+        dot_product(&a, &b);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension mismatch")]
+    fn euclidean_dimension_mismatch_panics() {
+        euclidean_distance(&[1.0f32; 3], &[2.0f32; 5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension mismatch")]
+    fn cosine_dimension_mismatch_panics() {
+        cosine_distance(&[1.0f32; 3], &[2.0f32; 5]);
+    }
+
+    // ── NormalizedCosine edge cases ──────────────────────────────────────
+
+    #[test]
+    fn normalized_cosine_identity() {
+        let v = vec![0.5f32, 0.5, 0.5, 0.5];
+        let d = normalized_cosine_distance(&v, &v);
+        assert!(d.abs() < 1e-6, "identity distance should be 0, got {d}");
+    }
+
+    #[test]
+    fn normalized_cosine_orthogonal() {
+        let a = normalize_l2(&[1.0f32, 0.0]);
+        let b = normalize_l2(&[0.0f32, 1.0]);
+        let d = normalized_cosine_distance(&a, &b);
+        assert!((d - 1.0).abs() < 1e-5, "orthogonal distance should be 1, got {d}");
+    }
 }

@@ -2633,4 +2633,35 @@ mod tests {
             embedding_fields[0].data_type()
         );
     }
+
+    // ── Edge cases: dimension mismatch ───────────────────────────────────
+
+    #[tokio::test]
+    async fn search_dimension_mismatch_rejected() {
+        let dir = TempDir::new().unwrap();
+        write_demo_table(&dir, 8, 5).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        // Query with wrong dimension (4 instead of 8)
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let config = SearchConfig::default();
+        let result = search(
+            &table,
+            &query,
+            config,
+            "embedding",
+            8,
+            Arc::clone(&catalog),
+            Arc::clone(&store),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "search with wrong dim should error, got Ok"
+        );
+    }
 }
