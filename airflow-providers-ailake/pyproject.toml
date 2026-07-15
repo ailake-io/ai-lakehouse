@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "apache-airflow-providers-ailake"
-version = "0.1.4"
+version = "0.1.5"
 description = "Apache Airflow provider for AI-Lake Format — hook, operators, and snapshot sensor"
 readme = "README.md"
 license = { text = "MIT OR Apache-2.0" }
