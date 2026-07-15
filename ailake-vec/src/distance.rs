@@ -807,6 +807,116 @@ mod neon_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    // ── Proptest: SIMD kernels match scalar fallback ──────────────────────
+
+    fn arb_vec(dim: usize) -> impl Strategy<Value = Vec<f32>> {
+        proptest::collection::vec(proptest::num::f32::ANY, dim)
+    }
+
+    fn arb_vecs() -> impl Strategy<Value = (Vec<f32>, Vec<f32>)> {
+        (1usize..2048).prop_flat_map(|dim| (arb_vec(dim), arb_vec(dim)))
+    }
+
+    fn arb_f16_vec(dim: usize) -> impl Strategy<Value = Vec<f16>> {
+        proptest::collection::vec(proptest::num::f32::ANY, dim)
+            .prop_map(|v| v.into_iter().map(f16::from_f32).collect())
+    }
+
+    fn arb_f16_vecs() -> impl Strategy<Value = (Vec<f32>, Vec<f16>)> {
+        (1usize..2048).prop_flat_map(|dim| {
+            (arb_vec(dim), arb_f16_vec(dim))
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn prop_dot_matches_scalar((a, b) in arb_vecs()) {
+            let expected = dot_scalar(&a, &b);
+            let actual = dot_product(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-4;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "dot simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+
+        #[test]
+        fn prop_euclidean_matches_scalar((a, b) in arb_vecs()) {
+            let expected = euclidean_scalar(&a, &b);
+            let actual = euclidean_distance(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-4;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "euclidean simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+
+        #[test]
+        fn prop_cosine_matches_scalar((a, b) in arb_vecs()) {
+            let expected = cosine_scalar(&a, &b);
+            let actual = cosine_distance(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-4;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "cosine simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+
+        #[test]
+        fn prop_dot_f16_matches_scalar((a, b) in arb_f16_vecs()) {
+            let expected = dot_f16_scalar(&a, &b);
+            let actual = dot_product_f16(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-3;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "f16 dot simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+
+        #[test]
+        fn prop_euclidean_f16_matches_scalar((a, b) in arb_f16_vecs()) {
+            let expected = euclidean_f16_scalar(&a, &b);
+            let actual = euclidean_distance_f16(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-3;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "f16 euclidean simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+
+        #[test]
+        fn prop_cosine_f16_matches_scalar((a, b) in arb_f16_vecs()) {
+            let expected = cosine_f16_scalar(&a, &b);
+            let actual = cosine_distance_f16(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-3;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "f16 cosine simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+    }
+
+    // ── Deterministic edge cases ──────────────────────────────────────────
 
     #[test]
     fn cosine_identical() {

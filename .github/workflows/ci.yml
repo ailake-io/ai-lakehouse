@@ -71,6 +71,31 @@ jobs:
       - run: pip install pyarrow
       - run: cargo test -p ailake-tests -- --test-threads=1
 
+  # Miri: undefined-behaviour detection on core + vec + index (no SIMD/FFI).
+  # Uses nightly, tests only crate subsets safe for Miri (no SIMD intrinsics,
+  # no FFI, no GPU libloading). Runs with reduced iterations — Miri is ~50×
+  # slower than native execution.
+  miri:
+    name: miri (UB detection)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Run Miri on ailake-core
+        run: cargo miri test -p ailake-core --lib
+        env:
+          MIRI_TEST_NUMERICS: "100"  # reduce iteration count for Miri's slowness
+      - name: Run Miri on ailake-vec (scalar fallback only, no SIMD)
+        run: cargo miri test -p ailake-vec --lib
+        env:
+          MIRI_TEST_NUMERICS: "100"
+      - name: Run Miri on ailake-index (mmap + HNSW only, no GPU)
+        run: cargo miri test -p ailake-index --lib
+        env:
+          MIRI_TEST_NUMERICS: "100"
+
   # Runs ailake-index unit tests on a CPU-only Linux runner.
   # Verifies that hardware::detect_backend() falls back to CpuSimd when no
   # CUDA/ROCm libraries are present and that all index tests pass on that path.
