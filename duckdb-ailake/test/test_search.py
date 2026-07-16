@@ -243,8 +243,14 @@ def test_search_text_schema():
     require("file_path" in col_names, f"ailake_search_text missing file_path, got {col_names}")
     print(f"PASS: ailake_search_text schema correct {col_names}")
 
-def test_search_text_no_lib_returns_empty():
-    """When native lib not loaded, ailake_search_text returns 0 rows gracefully."""
+def test_search_text_nonexistent_table_raises():
+    """A table path that doesn't exist raises a clear SQL error, not silent 0 rows.
+
+    Same root cause as test_search_nonexistent_table_raises above: this is a
+    genuine ok:false backend response (I/O error), not "native lib not loaded" —
+    AilakeLib is a process-wide singleton already loaded by earlier tests in
+    this script by the time this one runs.
+    """
     conn = duckdb.connect(config={
         "allow_unsigned_extensions": True,
         "allow_extensions_metadata_mismatch": True,
@@ -255,15 +261,18 @@ def test_search_text_no_lib_returns_empty():
         print("SKIP: extension not built yet")
         return
 
-    rows = conn.execute(f"""
-        SELECT count(*) FROM ailake_search_text(
-            '/nonexistent/path',
-            'rust programming',
-            10
-        )
-    """).fetchone()
-    require(rows[0] == 0, f"expected 0 rows without native lib, got {rows[0]}")
-    print("PASS: ailake_search_text graceful degradation without native lib")
+    try:
+        conn.execute(f"""
+            SELECT count(*) FROM ailake_search_text(
+                '/nonexistent/path',
+                'rust programming',
+                10
+            )
+        """).fetchone()
+        require(False, "expected an exception for a nonexistent table path, got a result")
+    except duckdb.Error as e:
+        require("ailake_search_text failed" in str(e), f"unexpected error message: {e}")
+        print("PASS: ailake_search_text nonexistent table path raises a clear error")
 
 
 def test_search_text_text_columns_named_param():
@@ -374,7 +383,7 @@ if __name__ == "__main__":
     test_search_partition_filter_named_param()
     test_search_hybrid_named_params()
     test_search_text_schema()
-    test_search_text_no_lib_returns_empty()
+    test_search_text_nonexistent_table_raises()
     test_search_text_text_columns_named_param()
     test_search_text_legacy_text_column_param()
     test_search_namespace_named_param_isolation()

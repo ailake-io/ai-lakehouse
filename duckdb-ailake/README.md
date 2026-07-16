@@ -4,6 +4,14 @@ DuckDB community extension that exposes AI-Lake vector search and write via SQL 
 
 Bridges DuckDB to [`libailake_jni.so`](../ailake-jni) using the same C-ABI as the Spark and Trino plugins — zero additional Rust code required.
 
+> **Error handling**: a genuine backend rejection (`ok:false` in the JSON response — e.g. a
+> nonexistent table path, `NaN`/`Infinity` embeddings, mismatched `ids`/`embeddings` lengths,
+> `top_k` above `ailake_core::MAX_TOP_K` (100,000)) is now raised as a `duckdb::InvalidInputException`
+> with the real error message, for every function below except `ailake_delete_where` (which still
+> returns `FALSE`, unchanged). This used to be silently folded into an empty result / `-1` / `FALSE`,
+> indistinguishable from a genuine zero-match search or no-op. `libailake_jni.so` not being loaded
+> (or not exporting a given symbol) is a separate, still-silent case — see "Design" below.
+
 ## Functions
 
 ### `ailake_search` — vector similarity search
@@ -129,7 +137,7 @@ SELECT * FROM ailake_search_multimodal(
 ) ORDER BY rrf_score DESC;
 ```
 
-Returns 0 rows (no error) if `libailake_jni.so` is not loaded or does not export `ailake_search_multimodal_json`.
+Returns 0 rows (no error) if `libailake_jni.so` is not loaded or does not export `ailake_search_multimodal_json`. A backend rejection (e.g. nonexistent table path) raises `InvalidInputException` instead — see "Error handling" above.
 
 ---
 
@@ -166,7 +174,7 @@ SELECT * FROM ailake_search_text(
 ) ORDER BY distance;
 ```
 
-Returns 0 rows (graceful degradation) when `libailake_jni.so` is not loaded. Backed by `ailake_search_text_json` C-ABI.
+Returns 0 rows (graceful degradation) when `libailake_jni.so` is not loaded. A backend rejection raises `InvalidInputException` instead — see "Error handling" above. Backed by `ailake_search_text_json` C-ABI.
 
 ---
 
@@ -178,7 +186,9 @@ SELECT ailake_write_batch(
     table_path      VARCHAR,         -- table root path/URI
     ids             BIGINT[],        -- row identifiers
     embeddings      FLOAT[][]        -- one embedding per id
-) → BIGINT  -- snapshot_id, or -1 on error
+) → BIGINT  -- snapshot_id; a backend rejection (e.g. NaN/Infinity embeddings) raises
+            -- InvalidInputException, not a silent -1 — see "Error handling" above.
+            -- -1 is still returned if libailake_jni.so isn't loaded.
 
 -- 6-arg form (explicit options)
 SELECT ailake_write_batch(
@@ -267,7 +277,8 @@ SELECT ailake_write_batch_multi(
     deferred        BOOLEAN                  -- default false — persist Parquet
                                               --   immediately, build all HNSW
                                               --   indexes in the background
-) → BIGINT  -- snapshot_id, or -1 on error
+) → BIGINT  -- snapshot_id; a backend rejection raises InvalidInputException, not a silent
+            -- -1 — see "Error handling" above. -1 is still returned if the lib isn't loaded.
 ```
 
 Writes a batch of rows with **N independent vector columns** (e.g. text + image embeddings on the same row), each getting its own HNSW section in the same AI-Lake file — searchable via `ailake_search_multimodal`'s RRF fusion. The **first entry in `vector_columns` is primary** (used for geometric pruning in the manifest). Backed by `ailake_write_batch_multi_json` C-ABI.
@@ -314,7 +325,9 @@ SELECT ailake_evolve_schema(
     table_path          VARCHAR,  -- path/URI to AI-Lake table root
     add_columns_json    VARCHAR,  -- JSON array: [{"name":"col","type":"string","initial_default":null}]
     rename_columns_json VARCHAR   -- JSON array: [{"from":"old_name","to":"new_name"}]
-) → INTEGER               -- new schema_id on success, -1 on any error
+) → INTEGER  -- new schema_id; a backend rejection raises InvalidInputException, not a
+             -- silent -1 — see "Error handling" above. -1 is still returned if the lib
+             -- isn't loaded.
 ```
 
 Either argument may be `'[]'` or `''` to skip. No data files are rewritten. Backed by `ailake_evolve_schema_json` C-ABI.
@@ -342,7 +355,9 @@ SELECT ailake_compact(
                                    --   build the HNSW index in the background
     namespace             VARCHAR, -- default 'default'
     table_name            VARCHAR  -- default 'table'
-) → BIGINT  -- number of files compacted (0 = nothing eligible), -1 on error
+) → BIGINT  -- number of files compacted (0 = nothing eligible); a backend rejection
+            -- (e.g. missing table) raises InvalidInputException, not a silent -1 —
+            -- see "Error handling" above. -1 is still returned if the lib isn't loaded.
 ```
 
 Compacts small files in an AI-Lake table into a larger merged file. Backed by `ailake_compact_json` C-ABI.
