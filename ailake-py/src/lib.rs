@@ -2157,7 +2157,11 @@ fn create_table(
     } else {
         match modality.parse::<VectorModality>() {
             Ok(m) => Some(m),
-            Err(_) => return Err(PyValueError::new_err(format!("unknown modality: {modality}"))),
+            Err(_) => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown modality: {modality}"
+                )))
+            }
         }
     };
 
@@ -2171,9 +2175,15 @@ fn create_table(
     let mut extra = std::collections::HashMap::new();
     if !fts_columns.is_empty() {
         extra.insert("ailake.fts.enabled".to_string(), "true".to_string());
-        extra.insert("ailake.fts.text-columns".to_string(), fts_columns.to_string());
+        extra.insert(
+            "ailake.fts.text-columns".to_string(),
+            fts_columns.to_string(),
+        );
         if !fts_tokenizer.is_empty() {
-            extra.insert("ailake.fts.tokenizer".to_string(), fts_tokenizer.to_string());
+            extra.insert(
+                "ailake.fts.tokenizer".to_string(),
+                fts_tokenizer.to_string(),
+            );
         }
     }
 
@@ -2188,11 +2198,27 @@ fn create_table(
         hnsw_m,
         hnsw_ef_construction,
         ivf_residual: false,
-        embedding_model: if embedding_model.is_empty() { None } else { Some(EmbeddingModelInfo::new(embedding_model.to_string())) },
+        embedding_model: if embedding_model.is_empty() {
+            None
+        } else {
+            Some(EmbeddingModelInfo::new(embedding_model.to_string()))
+        },
         modality,
-        partition_by: if partition_by.is_empty() { None } else { Some(partition_by.to_string()) },
-        partition_value: if partition_value.is_empty() { None } else { Some(partition_value.to_string()) },
-        partition_column_type: if partition_column_type.is_empty() { None } else { Some(partition_column_type.to_string()) },
+        partition_by: if partition_by.is_empty() {
+            None
+        } else {
+            Some(partition_by.to_string())
+        },
+        partition_value: if partition_value.is_empty() {
+            None
+        } else {
+            Some(partition_value.to_string())
+        },
+        partition_column_type: if partition_column_type.is_empty() {
+            None
+        } else {
+            Some(partition_column_type.to_string())
+        },
         partition_fields,
     };
 

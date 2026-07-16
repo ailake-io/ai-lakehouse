@@ -805,20 +805,16 @@ object AilakeNative {
             return None
         }
         native.ailake_free_string(ptr)
-        try {
-          val root = mapper.readTree(json)
-          if (!root.path("ok").asBoolean(false)) {
-            log.warn(s"[ailake] create_table ok=false for table=$namespace.$table: ${root.path("error").asText()}")
-            None
-          } else {
-            log.info(s"[ailake] create_table OK table=$namespace.$table")
-            Some(())
-          }
-        } catch {
-          case e: Exception =>
-            log.error(s"[ailake] Failed to parse create_table response for table=$namespace.$table: ${e.getMessage}", e)
-            None
+        val root = mapper.readTree(json)
+        // Same as writeBatch/writeBatchMulti: a real backend rejection (e.g. the
+        // table already exists) must fail visibly, not be swallowed into a None
+        // a caller could mistake for "nothing to do".
+        if (!root.path("ok").asBoolean(false)) {
+          val errMsg = root.path("error").asText("unknown error")
+          throw new RuntimeException(s"ailake create_table failed for table=$namespace.$table: $errMsg")
         }
+        log.info(s"[ailake] create_table OK table=$namespace.$table")
+        Some(())
     }
   }
 

@@ -776,21 +776,22 @@ object AilakeNative {
             log.warn("[ailake] ailake_create_table_json returned null for table={}.{}", namespace, table)
             return false
         }
-        return try {
+        val resp: Map<String, Any>? = try {
             val json = ptr.getString(0)
-            val resp = mapper.readValue<Map<String, Any>>(json)
-            if (resp["ok"] != true) {
-                log.warn("[ailake] createTable ok=false for table={}.{}: {}", namespace, table, resp["error"])
-                false
-            } else {
-                log.info("[ailake] createTable OK table={}.{}", namespace, table)
-                true
-            }
+            mapper.readValue<Map<String, Any>>(json)
         } catch (e: Exception) {
             log.error("[ailake] Failed to parse createTable response for table={}.{}: {}", namespace, table, e.message, e)
-            false
+            null
         } finally {
             runCatching { native.ailake_free_string(ptr) }
         }
+        if (resp == null) return false
+        // Same as writeBatch/writeBatchMulti: a real backend rejection (e.g. the
+        // table already exists) must fail visibly.
+        if (resp["ok"] != true) {
+            throw RuntimeException("ailake create_table failed for table=$namespace.$table: ${resp["error"]}")
+        }
+        log.info("[ailake] createTable OK table={}.{}", namespace, table)
+        return true
     }
 }

@@ -2631,7 +2631,7 @@ pub unsafe extern "C" fn ailake_create_table_json(request_json: *const c_char) -
             metric: String,
             #[serde(default = "ct_default_precision")]
             precision: String,
-            #[serde(default)]
+            #[serde(default = "ct_default_format_version")]
             format_version: u8,
             #[serde(default)]
             hnsw_m: Option<u32>,
@@ -2656,10 +2656,21 @@ pub unsafe extern "C" fn ailake_create_table_json(request_json: *const c_char) -
             #[serde(default)]
             embedding_model: Option<String>,
         }
-        fn ct_default_ns() -> String { "default".into() }
-        fn ct_default_vec_col() -> String { "embedding".into() }
-        fn ct_default_metric() -> String { "cosine".into() }
-        fn ct_default_precision() -> String { "f16".into() }
+        fn ct_default_ns() -> String {
+            "default".into()
+        }
+        fn ct_default_vec_col() -> String {
+            "embedding".into()
+        }
+        fn ct_default_metric() -> String {
+            "cosine".into()
+        }
+        fn ct_default_precision() -> String {
+            "f16".into()
+        }
+        fn ct_default_format_version() -> u8 {
+            2
+        }
 
         #[derive(serde::Deserialize)]
         struct PartitionDefReq {
