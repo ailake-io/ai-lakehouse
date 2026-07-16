@@ -114,13 +114,20 @@ jobs:
         env:
           MIRI_TEST_NUMERICS: "100"
 
-  # Sanitizers: AddressSanitizer + LeakSanitizer + UndefinedBehaviorSanitizer.
-  # All use nightly + -Zbuild-std to instrument std. Tests only core crates
+  # Sanitizers: AddressSanitizer + LeakSanitizer.
+  # Uses nightly + -Zbuild-std to instrument std. Tests only core crates
   # without SIMD intrinsics, FFI, or GPU libloading — these would produce
-  # false positives (asan on SIMD vector lanes, ubsan on FFI boundary, etc).
+  # false positives (asan on SIMD vector lanes, etc).
   # --test-threads=1 prevents interleaved sanitizer error output.
+  #
+  # No UBSan step: rustc's `-Z sanitizer=` never accepted `undefined` as a value
+  # (confirmed against the value list in rustc's own error message — `address`,
+  # `cfi`, `dataflow`, `hwaddress`, `kcfi`, `kernel-address`, `kernel-hwaddress`,
+  # `leak`, `memory`, `memtag`, `safestack`, `shadow-call-stack`, `thread`,
+  # `realtime`). Rust doesn't expose a standalone UBSan instrumentation pass the
+  # way Clang does; a step requesting it always failed to compile.
   sanitizers:
-    name: sanitizers (ASan + LSan + UBSan)
+    name: sanitizers (ASan + LSan)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -137,15 +144,6 @@ jobs:
         env:
           RUSTFLAGS: "-Z sanitizer=address"
           ASAN_OPTIONS: "detect_leaks=1 detect_stack_use_after_return=1"
-      - name: UBSan (undefined)
-        run: >
-          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
-          -p ailake-core -p ailake-vec -p ailake-parquet -p ailake-file
-          -p ailake-store -p ailake-catalog -p ailake-query
-          --lib -- --test-threads=1
-        env:
-          RUSTFLAGS: "-Z sanitizer=undefined"
-          UBSAN_OPTIONS: "halt_on_error=1"
 
   # Runs ailake-index unit tests on a CPU-only Linux runner.
   # Verifies that hardware::detect_backend() falls back to CpuSimd when no

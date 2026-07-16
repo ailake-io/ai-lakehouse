@@ -62,7 +62,7 @@ Out of scope:
 | Check | Scope | Detail |
 |-------|-------|--------|
 | **Miri** | `ailake-core`, `ailake-vec`, `ailake-index` | Nightly Rust; detects undefined behavior (UB) in unsafe code. 30 min timeout. No SIMD/FFI coverage |
-| **ASan + LSan + UBSan** | 7 core crates | Nightly + `-Zbuild-std`. Address, leak, and undefined behavior sanitizers |
+| **ASan + LSan** | 7 core crates | Nightly + `-Zbuild-std`. Address and leak sanitizers. No UBSan: rustc's `-Z sanitizer=` never accepted `undefined` as a value — Rust doesn't expose a standalone UBSan pass the way Clang does |
 | **cargo-deny** | All crates | License compliance, security advisories, source checks |
 | **TruffleHog** | Entire repo | Secret scanning on push to `main`/`develop` and all PRs. `--only-verified` |
 | **RUST_BACKTRACE=1** | CI env | Full backtrace on panic for bug repro |
