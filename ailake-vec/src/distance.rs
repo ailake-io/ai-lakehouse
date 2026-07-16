@@ -213,11 +213,25 @@ pub fn compute_centroid_and_radius(vectors: &[Vec<f32>], metric: VectorMetric) -
 
 #[inline(always)]
 fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(
+        a.len(),
+        b.len(),
+        "dot_scalar: dimension mismatch {} vs {}",
+        a.len(),
+        b.len()
+    );
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 #[inline(always)]
 fn euclidean_scalar(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(
+        a.len(),
+        b.len(),
+        "euclidean_scalar: dimension mismatch {} vs {}",
+        a.len(),
+        b.len()
+    );
     a.iter()
         .zip(b.iter())
         .map(|(x, y)| (x - y) * (x - y))
@@ -227,6 +241,13 @@ fn euclidean_scalar(a: &[f32], b: &[f32]) -> f32 {
 
 #[inline(always)]
 fn cosine_scalar(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(
+        a.len(),
+        b.len(),
+        "cosine_scalar: dimension mismatch {} vs {}",
+        a.len(),
+        b.len()
+    );
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
