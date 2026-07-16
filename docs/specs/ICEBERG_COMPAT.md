@@ -266,7 +266,7 @@ The Iceberg `format-version` (`2` by default, `3` opt-in) is NOT the AI-Lake for
 
 ## Verifying compatibility in CI
 
-### Always-on (every PR and push — `ci.yml`)
+### Always-on (every PR and push — `ci.yml` + `ci-safety.yml`)
 
 1. **PyArrow read test** (`compat-pyarrow`): build fixture via `write_fixture`, read all Parquet files with `pyarrow.parquet`. Verify row count, schema columns, vector column as binary.
 2. **DuckDB read test** (`compat-duckdb`): same fixture, read via `duckdb.read_parquet`. Verify row count and id range.
@@ -280,4 +280,4 @@ The Iceberg `format-version` (`2` by default, `3` opt-in) is NOT the AI-Lake for
 7. **JVM plugins** (`compat-jvm-plugins`): builds `libailake_jni.so`, runs Flink, Spark, and Trino Gradle integration tests.
 8. **BigQuery compat** (`compat-bigquery`): `fsouza/fake-gcs-server:1.47.2` + `goccy/bigquery-emulator:0.6.6`; pyarrow validates AILK Parquet files, BQ streaming inserts validate row count, schema, `MIN`/`MAX(id)`.
 
-Failure of tests 1–4 is a PR blocker. Failure of 5–8 is a release blocker.
+Failure of tests 1–4 is a PR blocker. Failure of 5–8 is a release blocker. Additionally, `ci-safety.yml` (Miri UB detection + Loom concurrency model checking) runs in parallel and failures also block PRs.

@@ -16,6 +16,7 @@ jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -27,6 +28,7 @@ jobs:
   clippy:
     name: clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -38,6 +40,7 @@ jobs:
   deny:
     name: deny (licenses + advisories)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -47,17 +50,31 @@ jobs:
           command: check licenses advisories sources
 
   unit:
-    name: unit
-    runs-on: ubuntu-latest
+    name: unit (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       # - uses: Swatinem/rust-cache@v2  # GitHub-hosted cache
-      - run: cargo test --workspace --lib --bins
+      - name: Test all crates (Linux) or subset (macOS)
+        run: |
+          if [ "${{ matrix.os }}" = macos-latest ]; then
+            EXCLUDE="--exclude ailake-py --exclude ailake-jni"
+          else
+            EXCLUDE=""
+          fi
+          # shellcheck disable=SC2086
+          cargo test --workspace --lib --bins $EXCLUDE
 
   integration:
     name: integration
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -71,6 +88,69 @@ jobs:
       - run: pip install pyarrow
       - run: cargo test -p ailake-tests -- --test-threads=1
 
+  # Miri: undefined-behaviour detection on core + vec + index (no SIMD/FFI).
+  # Uses nightly, tests only crate subsets safe for Miri (no SIMD intrinsics,
+  # no FFI, no GPU libloading). Runs with reduced iterations — Miri is ~50×
+  # slower than native execution.
+  miri:
+    name: miri (UB detection)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Run Miri on ailake-core
+        run: cargo miri test -p ailake-core --lib
+        env:
+          MIRI_TEST_NUMERICS: "100"  # reduce iteration count for Miri's slowness
+      # Filtered to `miri_`-prefixed tests: ailake-vec's full suite includes a zstd
+      # compression test (extern "C" FFI) and ailake-index's includes a GPU driver
+      # probe via libloading::Library::new (dlopen) — both fundamentally
+      # uninterpretable by Miri, so an unfiltered `--lib` run always fails here
+      # regardless of the code under test. `miri_`-prefixed tests are the ones
+      # written to only exercise Miri-interpretable (scalar/safe-Rust) code paths.
+      - name: Run Miri on ailake-vec (scalar fallback only, no SIMD)
+        run: cargo miri test -p ailake-vec --lib -- miri_
+        env:
+          MIRI_TEST_NUMERICS: "100"
+      - name: Run Miri on ailake-index (mmap + HNSW only, no GPU)
+        run: cargo miri test -p ailake-index --lib -- miri_
+        env:
+          MIRI_TEST_NUMERICS: "100"
+
+  # Sanitizers: AddressSanitizer + LeakSanitizer.
+  # Uses nightly + -Zbuild-std to instrument std. Tests only core crates
+  # without SIMD intrinsics, FFI, or GPU libloading — these would produce
+  # false positives (asan on SIMD vector lanes, etc).
+  # --test-threads=1 prevents interleaved sanitizer error output.
+  #
+  # No UBSan step: rustc's `-Z sanitizer=` never accepted `undefined` as a value
+  # (confirmed against the value list in rustc's own error message — `address`,
+  # `cfi`, `dataflow`, `hwaddress`, `kcfi`, `kernel-address`, `kernel-hwaddress`,
+  # `leak`, `memory`, `memtag`, `safestack`, `shadow-call-stack`, `thread`,
+  # `realtime`). Rust doesn't expose a standalone UBSan instrumentation pass the
+  # way Clang does; a step requesting it always failed to compile.
+  sanitizers:
+    name: sanitizers (ASan + LSan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: ASan + LSan (address)
+        run: >
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
+          -p ailake-core -p ailake-vec -p ailake-parquet -p ailake-file
+          -p ailake-store -p ailake-catalog -p ailake-query
+          --lib -- --test-threads=1
+        env:
+          RUSTFLAGS: "-Z sanitizer=address"
+          ASAN_OPTIONS: "detect_leaks=1 detect_stack_use_after_return=1"
+
   # Runs ailake-index unit tests on a CPU-only Linux runner.
   # Verifies that hardware::detect_backend() falls back to CpuSimd when no
   # CUDA/ROCm libraries are present and that all index tests pass on that path.
@@ -78,6 +158,7 @@ jobs:
   index-cpu-fallback:
     name: index — cpu fallback (no GPU)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -95,6 +176,7 @@ jobs:
   compat-parquet:
     name: compat-parquet
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -112,6 +194,7 @@ jobs:
   compat-pyarrow:
     name: compat-pyarrow
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -131,6 +214,7 @@ jobs:
   compat-duckdb:
     name: compat-duckdb
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -150,6 +234,7 @@ jobs:
   compat-pyiceberg:
     name: compat-pyiceberg
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -169,6 +254,7 @@ jobs:
   test-airflow-provider:
     name: test-airflow-provider
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
@@ -185,6 +271,7 @@ jobs:
   test-airbyte:
     name: test-airbyte
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
@@ -201,6 +288,7 @@ jobs:
   compat-ailake-py:
     name: compat-ailake-py
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -224,6 +312,7 @@ jobs:
   fts-e2e:
     name: fts-e2e (Phase T Tantivy)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -244,6 +333,7 @@ jobs:
   test-jvm:
     name: test-jvm (trino + spark plugins)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

@@ -23,6 +23,8 @@ store-local = []
 store-s3    = ["object_store/aws"]
 store-gcs   = ["object_store/gcp"]
 store-azure = ["object_store/azure"]
+# Gates FailStore (fault-injection Store wrapper) — test-only, not for release binaries.
+test-utils  = []
 
 [dev-dependencies]
 tempfile    = { workspace = true }

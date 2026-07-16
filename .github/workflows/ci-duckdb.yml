@@ -19,6 +19,7 @@ jobs:
   build-and-test:
     name: build + test (Linux x86_64)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v6

@@ -21,6 +21,9 @@ pub mod scanner;
 pub mod schema_filler;
 pub mod writer;
 
+#[cfg(all(feature = "loom", test))]
+pub mod loom_tests;
+
 pub use ailake_index::IvfPqConfig;
 pub use backfill::{BackfillJob, BackfillProgress, BackfillProgressFn};
 pub use bloom::BloomFilter;

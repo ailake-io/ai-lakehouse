@@ -2547,4 +2547,271 @@ mod tests {
             "compact_incremental() must include all 4 rows — 2 native + 2 from the footerless file"
         );
     }
+
+    /// End-to-end: search returns the same top-K results before and after compaction.
+    /// This tests the actual recall — not just verify_integrity().
+    #[tokio::test]
+    async fn compact_preserves_search_results() {
+        use crate::scanner::SearchConfig;
+        use ailake_catalog::HadoopCatalog;
+        use ailake_core::{VectorMetric, VectorPrecision};
+        use ailake_store::LocalStore;
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let policy = VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim: 4,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+
+        // File A: 3 rows — unit basis vectors along dimensions 0, 1, 2
+        let embs_a: Vec<Vec<f32>> = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+        ];
+        let batch_a = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![0i32, 1, 2]))],
+        )
+        .unwrap();
+
+        // File B: 2 rows — unit basis vectors along dimensions 3 and mixed
+        let embs_b: Vec<Vec<f32>> = vec![vec![0.0, 0.0, 0.0, 1.0], vec![0.7, 0.7, 0.0, 0.0]];
+        let batch_b = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![3i32, 4]))],
+        )
+        .unwrap();
+
+        let bytes_a = AilakeFileWriter::new(policy.clone())
+            .write(&batch_a, &embs_a)
+            .unwrap();
+        let bytes_b = AilakeFileWriter::new(policy.clone())
+            .write(&batch_b, &embs_b)
+            .unwrap();
+
+        store.put("data/a.parquet", bytes_a).await.unwrap();
+        store.put("data/b.parquet", bytes_b).await.unwrap();
+        let file_size_a = store.file_size("data/a.parquet").await.unwrap();
+        let file_size_b = store.file_size("data/b.parquet").await.unwrap();
+
+        // We need a CatalogProvider to create/snapshot the table.
+        // Use the catalog_provider helper from ailake-query.
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "compact_search_test");
+
+        // Bootstrap the table via create_table, then commit the two files
+        catalog
+            .create_table(
+                &table,
+                &ailake_catalog::TableProperties {
+                    policy: policy.clone(),
+                    extra: std::collections::HashMap::new(),
+                    format_version: 2,
+                    partition_column_type: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Load current iceberg schema so commit_snapshot can point at it
+        let meta = catalog.load_table(&table).await.unwrap();
+        let parent_snapshot_id = meta.current_snapshot_id;
+
+        let entry_a = DataFileEntry {
+            path: "data/a.parquet".into(),
+            record_count: 3,
+            file_size_bytes: file_size_a,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: Some("embedding".into()),
+            vector_dim: Some(4),
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            index_error: None,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+            column_stats: None,
+        };
+        let entry_b = DataFileEntry {
+            path: "data/b.parquet".into(),
+            record_count: 2,
+            file_size_bytes: file_size_b,
+            centroid_b64: None,
+            radius: None,
+            hnsw_offset: None,
+            hnsw_len: None,
+            vector_column: Some("embedding".into()),
+            vector_dim: Some(4),
+            extra_vector_indexes: vec![],
+            index_status: IndexStatus::Ready,
+            index_error: None,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+            column_stats: None,
+        };
+
+        catalog
+            .commit_snapshot(
+                &table,
+                NewSnapshot {
+                    snapshot_id: 200,
+                    parent_snapshot_id,
+                    files: vec![entry_a, entry_b],
+                    operation: SnapshotOperation::Append,
+                    iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
+                    equality_delete_files: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        // ── Search before compaction ──
+        let query_before = vec![1.0f32, 0.0, 0.0, 0.0];
+        let config = SearchConfig {
+            top_k: 5,
+            ef_search: 100,
+            pruning_threshold: f32::INFINITY,
+            ..Default::default()
+        };
+        let before = crate::scanner::search(
+            &table,
+            &query_before,
+            config.clone(),
+            "embedding",
+            4,
+            catalog.clone(),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !before.is_empty(),
+            "search before compaction must return results"
+        );
+        let before_dists: Vec<f32> = before.iter().map(|r| r.distance).collect();
+
+        // ── Compact the two files ──
+        let executor = CompactionExecutor::new(store.clone(), policy.clone());
+        let files_to_compact = catalog.list_files(&table, None).await.unwrap();
+        let merged = executor
+            .compact(&files_to_compact, "data/merged.parquet")
+            .await
+            .unwrap();
+
+        // Commit the merge: Replace old entries with the merged one
+        let meta2 = catalog.load_table(&table).await.unwrap();
+        let merged_entry = DataFileEntry {
+            path: merged.path.clone(),
+            record_count: merged.record_count,
+            file_size_bytes: merged.file_size_bytes,
+            centroid_b64: merged.centroid_b64,
+            radius: merged.radius,
+            hnsw_offset: merged.hnsw_offset,
+            hnsw_len: merged.hnsw_len,
+            vector_column: merged.vector_column,
+            vector_dim: merged.vector_dim,
+            extra_vector_indexes: merged.extra_vector_indexes,
+            index_status: merged.index_status,
+            index_error: merged.index_error,
+            batch_id: merged.batch_id,
+            embedding_model: merged.embedding_model,
+            partition_value: merged.partition_value,
+            deletion_vector: merged.deletion_vector,
+            first_row_id: None,
+            column_stats: None,
+        };
+        catalog
+            .commit_snapshot(
+                &table,
+                NewSnapshot {
+                    snapshot_id: 201,
+                    parent_snapshot_id: meta2.current_snapshot_id,
+                    files: vec![merged_entry],
+                    operation: SnapshotOperation::Replace,
+                    iceberg_schema: None,
+                    extra_properties: std::collections::HashMap::new(),
+                    bloom_filters: vec![],
+                    equality_delete_files: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        // ── Search after compaction ──
+        let after = crate::scanner::search(
+            &table,
+            &query_before,
+            config.clone(),
+            "embedding",
+            4,
+            catalog,
+            store,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !after.is_empty(),
+            "search after compaction must return results"
+        );
+        let after_dists: Vec<f32> = after.iter().map(|r| r.distance).collect();
+
+        // ── Assert recall parity ──
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "number of results should match before ({}) and after ({}) compaction",
+            before.len(),
+            after.len(),
+        );
+        // Row-ids are NOT expected to match — compaction reassigns row positions.
+        // What matters: distances should be approximately the same for each rank,
+        // meaning the same items are returned with similar relevance scores.
+        // Mean Average Distance Error (MADE) should be small.
+        let mut total_diff = 0.0f32;
+        for (i, (bd, ad)) in before_dists.iter().zip(after_dists.iter()).enumerate() {
+            let diff = (bd - ad).abs();
+            total_diff += diff;
+            assert!(
+                diff < 0.1,
+                "distance mismatch at position {i}: before={bd}, after={ad}, diff={diff}"
+            );
+        }
+        let avg_diff = total_diff / before_dists.len() as f32;
+        assert!(
+            avg_diff < 0.05,
+            "average distance error across all results too high: {avg_diff}"
+        );
+    }
 }

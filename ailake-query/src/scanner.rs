@@ -2633,4 +2633,342 @@ mod tests {
             embedding_fields[0].data_type()
         );
     }
+
+    // ── Edge cases: dimension mismatch ───────────────────────────────────
+
+    #[tokio::test]
+    async fn search_dimension_mismatch_rejected() {
+        let dir = TempDir::new().unwrap();
+        write_demo_table(&dir, 8, 5).await;
+
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        // Query with wrong dimension (4 instead of 8)
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let config = SearchConfig::default();
+        let result = search(
+            &table,
+            &query,
+            config,
+            "embedding",
+            8,
+            Arc::clone(&catalog),
+            Arc::clone(&store),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "search with wrong dim should error, got Ok"
+        );
+    }
+
+    // ── Fuzzing: FailStore round-trips ────────────────────────────────
+
+    #[cfg(test)]
+    mod fuzz_tests {
+        use super::*;
+        use crate::writer::TableWriter;
+        use ailake_catalog::{HadoopCatalog, TableIdent, TableProperties};
+        use ailake_core::{VectorMetric, VectorPrecision, VectorStoragePolicy};
+        use ailake_store::{fail_store::FailStore, LocalStore};
+        use arrow_array::{Int32Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use proptest::prelude::*;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        fn make_fuzz_policy(dim: u32) -> VectorStoragePolicy {
+            VectorStoragePolicy {
+                column_name: "embedding".to_string(),
+                dim,
+                metric: VectorMetric::Cosine,
+                precision: VectorPrecision::F16,
+                pq: None,
+                keep_raw_for_reranking: true,
+                pre_normalize: false,
+                hnsw_m: None,
+                hnsw_ef_construction: None,
+                ivf_residual: false,
+                embedding_model: None,
+                modality: None,
+                partition_by: None,
+                partition_value: None,
+                partition_column_type: None,
+                partition_fields: vec![],
+            }
+        }
+
+        #[derive(Debug, Clone)]
+        struct FailProfile {
+            fail_get: bool,
+            fail_get_range: bool,
+            fail_put: bool,
+            fail_list: bool,
+            fail_file_size: bool,
+        }
+
+        fn arb_fail_profile() -> impl Strategy<Value = FailProfile> {
+            (
+                proptest::bool::ANY,
+                proptest::bool::ANY,
+                proptest::bool::ANY,
+                proptest::bool::ANY,
+                proptest::bool::ANY,
+            )
+                .prop_map(|(g, gr, p, l, fs)| FailProfile {
+                    fail_get: g,
+                    fail_get_range: gr,
+                    fail_put: p,
+                    fail_list: l,
+                    fail_file_size: fs,
+                })
+        }
+
+        #[derive(Debug, Clone, PartialEq)]
+        enum FuzzOutcome {
+            Ok,
+            StoreError,
+            OtherError,
+        }
+
+        fn is_store_err(e: &ailake_core::AilakeError) -> bool {
+            matches!(e, ailake_core::AilakeError::Store(_))
+        }
+
+        async fn write_search_rt(profile: &FailProfile, rows: usize, dim: u32) -> FuzzOutcome {
+            let dir = TempDir::new().unwrap();
+            let inner = LocalStore::new(dir.path());
+            let fail = FailStore::new(inner)
+                .with_fail_get(profile.fail_get)
+                .with_fail_get_range(profile.fail_get_range)
+                .with_fail_put(profile.fail_put)
+                .with_fail_list(profile.fail_list)
+                .with_fail_file_size(profile.fail_file_size);
+            let store: Arc<dyn Store> = Arc::new(fail);
+            let catalog: Arc<dyn CatalogProvider> =
+                Arc::new(HadoopCatalog::new(Arc::clone(&store), "warehouse"));
+            let table = TableIdent::new("default", "fuzz_test");
+            let policy = make_fuzz_policy(dim);
+
+            if catalog
+                .create_table(
+                    &table,
+                    &TableProperties {
+                        policy: policy.clone(),
+                        format_version: 2,
+                        extra: Default::default(),
+                        partition_column_type: None,
+                    },
+                )
+                .await
+                .is_err()
+            {
+                return FuzzOutcome::StoreError;
+            }
+
+            let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+            let ids: Vec<i32> = (0..rows as i32).collect();
+            let batch =
+                RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(ids))]).unwrap();
+            let embeddings: Vec<Vec<f32>> = (0..rows)
+                .map(|i| {
+                    let mut v = vec![0.0f32; dim as usize];
+                    v[i % dim as usize] = 1.0;
+                    v
+                })
+                .collect();
+
+            let mut writer = match TableWriter::create_or_open(
+                Arc::clone(&catalog),
+                Arc::clone(&store),
+                policy.clone(),
+                table.clone(),
+                2,
+            )
+            .await
+            {
+                Ok(w) => w,
+                Err(e) => {
+                    return if is_store_err(&e) {
+                        FuzzOutcome::StoreError
+                    } else {
+                        FuzzOutcome::OtherError
+                    }
+                }
+            };
+
+            if let Err(e) = writer.write_batch(&batch, &embeddings).await {
+                return if is_store_err(&e) {
+                    FuzzOutcome::StoreError
+                } else {
+                    FuzzOutcome::OtherError
+                };
+            }
+
+            if let Err(e) = writer.commit().await {
+                return if is_store_err(&e) {
+                    FuzzOutcome::StoreError
+                } else {
+                    FuzzOutcome::OtherError
+                };
+            }
+
+            let query: Vec<f32> = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+            let config = SearchConfig {
+                top_k: 3.min(rows),
+                ef_search: 50,
+                pruning_threshold: f32::INFINITY,
+                ..Default::default()
+            };
+
+            match search(
+                &table,
+                &query[..dim as usize],
+                config,
+                "embedding",
+                dim,
+                Arc::clone(&catalog),
+                Arc::clone(&store),
+            )
+            .await
+            {
+                Ok(results) => {
+                    assert!(results.len() <= rows.min(3), "more results than requested");
+                    for r in &results {
+                        assert!(r.distance.is_finite(), "non-finite distance");
+                        assert!(r.distance >= 0.0, "negative distance");
+                    }
+                    FuzzOutcome::Ok
+                }
+                Err(e) => {
+                    if is_store_err(&e) {
+                        FuzzOutcome::StoreError
+                    } else {
+                        panic!("unexpected non-store search error: {:?}", e);
+                    }
+                }
+            }
+        }
+
+        async fn compact_rt(profile: &FailProfile, rows: usize, dim: u32) -> &'static str {
+            let dir = TempDir::new().unwrap();
+            let inner = LocalStore::new(dir.path());
+            let fail = FailStore::new(inner)
+                .with_fail_get(profile.fail_get)
+                .with_fail_get_range(profile.fail_get_range)
+                .with_fail_put(profile.fail_put)
+                .with_fail_list(profile.fail_list)
+                .with_fail_file_size(profile.fail_file_size);
+            let store: Arc<dyn Store> = Arc::new(fail);
+            let catalog: Arc<dyn CatalogProvider> =
+                Arc::new(HadoopCatalog::new(Arc::clone(&store), "warehouse"));
+            let table = TableIdent::new("default", "fuzz_compact");
+            let policy = make_fuzz_policy(dim);
+
+            if catalog
+                .create_table(
+                    &table,
+                    &TableProperties {
+                        policy: policy.clone(),
+                        format_version: 2,
+                        extra: Default::default(),
+                        partition_column_type: None,
+                    },
+                )
+                .await
+                .is_err()
+            {
+                return "store_err";
+            }
+
+            for i in 0..2 {
+                let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+                let ids: Vec<i32> = (0..rows as i32).collect();
+                let batch =
+                    RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(ids))]).unwrap();
+                let embeddings: Vec<Vec<f32>> = (0..rows)
+                    .map(|j| {
+                        let mut v = vec![0.0f32; dim as usize];
+                        v[(i * rows + j) % dim as usize] = 1.0;
+                        v
+                    })
+                    .collect();
+
+                let mut writer = match TableWriter::create_or_open(
+                    Arc::clone(&catalog),
+                    Arc::clone(&store),
+                    policy.clone(),
+                    table.clone(),
+                    2,
+                )
+                .await
+                {
+                    Ok(w) => w,
+                    Err(_) => return "store_err",
+                };
+                if writer.write_batch(&batch, &embeddings).await.is_err() {
+                    return "store_err";
+                }
+                if writer.commit().await.is_err() {
+                    return "store_err";
+                }
+            }
+
+            let files = match catalog.list_files(&table, None).await {
+                Ok(f) => f,
+                Err(_) => return "store_err",
+            };
+            if files.len() < 2 {
+                return "too_few";
+            }
+
+            let config = crate::compaction::CompactionConfig {
+                min_files_to_compact: 2,
+                target_file_size_bytes: 10 * 1024 * 1024,
+                ..Default::default()
+            };
+            let planner = crate::compaction::CompactionPlanner::new(config);
+            let executor =
+                crate::compaction::CompactionExecutor::new(Arc::clone(&store), policy.clone());
+
+            match executor
+                .run(&planner, &table, Arc::clone(&catalog), "data/merged")
+                .await
+            {
+                Ok(Some(_)) => "ok",
+                Ok(None) => "noop",
+                Err(e) if is_store_err(&e) => "store_err",
+                Err(_) => "unexpected_err",
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn prop_write_search_under_failstore(
+                profile in arb_fail_profile(),
+                rows in 1usize..8,
+                dim in 2u32..8,
+            ) {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let outcome = rt.block_on(write_search_rt(&profile, rows, dim));
+                assert_ne!(outcome, FuzzOutcome::OtherError,
+                    "unexpected non-store error during write+search under FailStore");
+            }
+
+            #[test]
+            fn prop_compact_under_failstore(
+                profile in arb_fail_profile(),
+                rows in 2usize..6,
+                dim in 2u32..8,
+            ) {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let outcome = rt.block_on(compact_rt(&profile, rows, dim));
+                assert_ne!(outcome, "unexpected_err",
+                    "compaction failed with non-store error under FailStore");
+            }
+        }
+    }
 }

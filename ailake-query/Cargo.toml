@@ -8,6 +8,9 @@ repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["vector-search", "iceberg", "lakehouse", "hnsw", "rag"]
 categories  = ["database", "algorithms"]
 
+[features]
+loom = ["dep:loom"]
+
 [dependencies]
 ailake-core    = { path = "../ailake-core", version = "0.1.6" }
 ailake-fts     = { workspace = true }
@@ -31,12 +34,18 @@ futures        = { workspace = true }
 rayon          = { workspace = true }
 tracing        = { workspace = true }
 roaring        = { workspace = true }
+loom           = { version = "0.7", optional = true }
 
 [dev-dependencies]
 tempfile     = { workspace = true }
 rand         = { workspace = true }
 serde_json   = { workspace = true }
 async-trait  = { workspace = true }
+proptest     = { workspace = true }
+# Enables ailake_store::fail_store::FailStore (test-only) for scanner.rs fuzz_tests,
+# without shipping it in release builds of ailake-query itself (see ailake-store's
+# `test-utils` feature).
+ailake-store = { path = "../ailake-store", version = "0.1.6", features = ["test-utils"] }
 
 [[example]]
 name = "demo"

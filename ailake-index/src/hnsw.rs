@@ -132,6 +132,11 @@ impl VisitedTracker {
 
     #[inline(always)]
     fn visit(&mut self, idx: usize) -> bool {
+        debug_assert!(
+            idx < self.gen.len(),
+            "visit idx={idx} out of bounds (len={})",
+            self.gen.len()
+        );
         let slot = unsafe { self.gen.get_unchecked_mut(idx) };
         if *slot == self.current {
             false
@@ -185,7 +190,10 @@ impl HnswBuilder {
     /// Build HNSW graph (Algorithm 1). Parallel on multi-core when n ≥ 500.
     /// Dispatches on metric once here; all inner functions are monomorphic.
     pub fn build(self) -> HnswIndex {
-        let parallel = rayon::current_num_threads() > 1 && self.vectors.len() >= 500;
+        // len() check first: avoids touching rayon's global thread pool (and the
+        // Miri Stacked-Borrows UB that triggers under Miri's interpreter) on the
+        // common small-n path, where the pool state is irrelevant anyway.
+        let parallel = self.vectors.len() >= 500 && rayon::current_num_threads() > 1;
         match self.metric {
             VectorMetric::Cosine => {
                 if parallel {
@@ -1253,6 +1261,52 @@ mod tests {
 
         let results = idx.search(&[1.0, 0.0, 0.0, 0.0], 1, 50);
         assert_eq!(results[0].0, RowId::new(1));
+    }
+
+    #[cfg(miri)]
+    mod miri_tests {
+        use super::*;
+        use rand::SeedableRng;
+
+        /// Exercita o visited tracker (get_unchecked_mut) com 100 nós sob Miri.
+        /// Miri detecta OOB writes mesmo com get_unchecked_mut se o idx for inválido.
+        #[test]
+        fn miri_hnsw_search_visited_tracker_bounds() {
+            let dim = 4u32;
+            let n = 100;
+            let mut b = HnswBuilder::new(
+                dim,
+                VectorMetric::Cosine,
+                HnswConfig {
+                    m: 8,
+                    ef_construction: 50,
+                    max_elements: 200,
+                },
+            );
+            let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+            for i in 0..n {
+                let v: Vec<f32> = (0..dim as usize).map(|_| rng.gen::<f32>()).collect();
+                b.insert(RowId::new(i as u64), v);
+            }
+            let idx = b.build();
+
+            let query: Vec<f32> = (0..dim as usize).map(|_| rng.gen::<f32>()).collect();
+            let results = idx.search(&query, 10, 100);
+            assert!(results.len() <= 10);
+        }
+
+        /// Serialização/deserialização sem mmap (Miri não suporta mmap).
+        #[test]
+        fn miri_hnsw_serialize_roundtrip() {
+            use crate::serialize::HnswSerializer;
+            let mut b = HnswBuilder::new(4, VectorMetric::Cosine, Default::default());
+            b.insert(RowId::new(0), vec![1.0, 0.0, 0.0, 0.0]);
+            b.insert(RowId::new(1), vec![0.0, 1.0, 0.0, 0.0]);
+            let idx = b.build();
+            let bytes = HnswSerializer::to_bytes(&idx).unwrap();
+            let loaded = HnswSerializer::from_bytes(&bytes).unwrap();
+            assert_eq!(loaded.node_count(), 2);
+        }
     }
 
     /// quantize_to_f16 works for all metrics (including NormalizedCosine).

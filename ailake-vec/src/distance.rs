@@ -193,9 +193,14 @@ pub fn compute_centroid_and_radius(vectors: &[Vec<f32>], metric: VectorMetric) -
     let centroid: Vec<f32> = (0..dim)
         .map(|i| vectors.iter().map(|v| v[i]).sum::<f32>() / n)
         .collect();
+    // Exclude non-finite per-vector distances (e.g. from a NaN/Infinity-poisoned
+    // embedding) rather than letting one corrupted vector produce a non-finite
+    // radius for the whole file — a non-finite radius can't round-trip through
+    // the manifest's JSON-encoded key_metadata (serde_json serializes it as `null`).
     let radius = vectors
         .iter()
         .map(|v| exact_distance(metric, &centroid, v))
+        .filter(|d| d.is_finite())
         .fold(0.0_f32, f32::max);
     Centroid {
         values: centroid,
@@ -208,11 +213,25 @@ pub fn compute_centroid_and_radius(vectors: &[Vec<f32>], metric: VectorMetric) -
 
 #[inline(always)]
 fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(
+        a.len(),
+        b.len(),
+        "dot_scalar: dimension mismatch {} vs {}",
+        a.len(),
+        b.len()
+    );
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 #[inline(always)]
 fn euclidean_scalar(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(
+        a.len(),
+        b.len(),
+        "euclidean_scalar: dimension mismatch {} vs {}",
+        a.len(),
+        b.len()
+    );
     a.iter()
         .zip(b.iter())
         .map(|(x, y)| (x - y) * (x - y))
@@ -222,6 +241,13 @@ fn euclidean_scalar(a: &[f32], b: &[f32]) -> f32 {
 
 #[inline(always)]
 fn cosine_scalar(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(
+        a.len(),
+        b.len(),
+        "cosine_scalar: dimension mismatch {} vs {}",
+        a.len(),
+        b.len()
+    );
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -807,6 +833,114 @@ mod neon_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    // ── Proptest: SIMD kernels match scalar fallback ──────────────────────
+
+    fn arb_vec(dim: usize) -> impl Strategy<Value = Vec<f32>> {
+        proptest::collection::vec(proptest::num::f32::ANY, dim)
+    }
+
+    fn arb_vecs() -> impl Strategy<Value = (Vec<f32>, Vec<f32>)> {
+        (1usize..2048).prop_flat_map(|dim| (arb_vec(dim), arb_vec(dim)))
+    }
+
+    fn arb_f16_vec(dim: usize) -> impl Strategy<Value = Vec<f16>> {
+        proptest::collection::vec(proptest::num::f32::ANY, dim)
+            .prop_map(|v| v.into_iter().map(f16::from_f32).collect())
+    }
+
+    fn arb_f16_vecs() -> impl Strategy<Value = (Vec<f32>, Vec<f16>)> {
+        (1usize..2048).prop_flat_map(|dim| (arb_vec(dim), arb_f16_vec(dim)))
+    }
+
+    proptest! {
+        #[test]
+        fn prop_dot_matches_scalar((a, b) in arb_vecs()) {
+            let expected = dot_scalar(&a, &b);
+            let actual = dot_product(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-4;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "dot simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+
+        #[test]
+        fn prop_euclidean_matches_scalar((a, b) in arb_vecs()) {
+            let expected = euclidean_scalar(&a, &b);
+            let actual = euclidean_distance(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-4;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "euclidean simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+
+        #[test]
+        fn prop_cosine_matches_scalar((a, b) in arb_vecs()) {
+            let expected = cosine_scalar(&a, &b);
+            let actual = cosine_distance(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-4;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "cosine simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+
+        #[test]
+        fn prop_dot_f16_matches_scalar((a, b) in arb_f16_vecs()) {
+            let expected = dot_f16_scalar(&a, &b);
+            let actual = dot_product_f16(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-3;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "f16 dot simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+
+        #[test]
+        fn prop_euclidean_f16_matches_scalar((a, b) in arb_f16_vecs()) {
+            let expected = euclidean_f16_scalar(&a, &b);
+            let actual = euclidean_distance_f16(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-3;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "f16 euclidean simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+
+        #[test]
+        fn prop_cosine_f16_matches_scalar((a, b) in arb_f16_vecs()) {
+            let expected = cosine_f16_scalar(&a, &b);
+            let actual = cosine_distance_f16(&a, &b);
+            let max_err = (expected.abs().max(1.0)) * 1e-3;
+            if expected.is_finite() && actual.is_finite() {
+                prop_assert!(
+                    (actual - expected).abs() <= max_err,
+                    "f16 cosine simd={actual} scalar={expected} dim={}",
+                    a.len()
+                );
+            }
+        }
+    }
+
+    // ── Deterministic edge cases ──────────────────────────────────────────
 
     #[test]
     fn cosine_identical() {
@@ -922,5 +1056,175 @@ mod tests {
         let c = compute_centroid_and_radius(&vs, VectorMetric::Euclidean);
         assert!((c.values[0] - 1.0).abs() < 1e-6);
         assert!(c.radius > 0.0);
+    }
+
+    // ── Edge cases: NaN, Inf, zero vectors ───────────────────────────────
+
+    #[test]
+    fn dot_product_nan_inputs() {
+        let a = vec![f32::NAN, 1.0];
+        let b = vec![1.0, 2.0];
+        let result = dot_product(&a, &b);
+        assert!(
+            result.is_nan(),
+            "dot with NaN should produce NaN, got {result}"
+        );
+    }
+
+    #[test]
+    fn dot_product_inf_inputs() {
+        let a = vec![f32::INFINITY, 1.0];
+        let b = vec![1.0, 2.0];
+        let result = dot_product(&a, &b);
+        assert!(
+            result.is_infinite(),
+            "dot with Inf should produce Inf, got {result}"
+        );
+    }
+
+    #[test]
+    fn dot_product_zero_vector() {
+        let a = vec![0.0f32; 4];
+        let b = vec![1.0, 2.0, 3.0, 4.0];
+        let result = dot_product(&a, &b);
+        assert_eq!(
+            result, 0.0,
+            "dot with zero vector should be 0, got {result}"
+        );
+    }
+
+    #[test]
+    fn euclidean_nan_input() {
+        let a = vec![f32::NAN, 1.0];
+        let b = vec![1.0, 2.0];
+        let result = euclidean_distance(&a, &b);
+        assert!(
+            result.is_nan(),
+            "euclidean with NaN should produce NaN, got {result}"
+        );
+    }
+
+    #[test]
+    fn euclidean_zero_vector() {
+        let a = vec![0.0f32; 3];
+        let b = vec![3.0, 4.0, 0.0];
+        let result = euclidean_distance(&a, &b);
+        assert!((result - 5.0).abs() < 1e-5, "expected 5.0, got {result}");
+    }
+
+    #[test]
+    fn cosine_zero_vector_handles_gracefully() {
+        let zero = vec![0.0f32; 4];
+        let other = vec![1.0, 0.0, 0.0, 0.0];
+        // Cosine with a zero vector: ||zero|| = 0 → division by zero
+        // Should return a finite value (1.0 = max distance) rather than panicking
+        let result = cosine_distance(&zero, &other);
+        assert!(
+            result.is_finite(),
+            "cosine with zero vector should return finite value, got {result}"
+        );
+    }
+
+    #[test]
+    fn cosine_both_zero_vectors() {
+        let zero = vec![0.0f32; 4];
+        let result = cosine_distance(&zero, &zero);
+        assert!(
+            result.is_finite(),
+            "cosine with both zero should return finite value, got {result}"
+        );
+    }
+
+    #[test]
+    fn normalize_l2_zero_vector() {
+        let v = vec![0.0f32; 4];
+        let n = normalize_l2(&v);
+        // Should return zero vector (not NaN)
+        for x in &n {
+            assert!(x.is_finite(), "normalized zero vector has non-finite {x}");
+        }
+        let norm: f32 = n.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(norm.abs() < 1e-6, "norm should be 0, got {norm}");
+    }
+
+    // ── Dimension mismatch ───────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "dimension mismatch")]
+    fn dot_dimension_mismatch_panics() {
+        let a = vec![1.0f32; 3];
+        let b = vec![2.0f32; 5];
+        dot_product(&a, &b);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension mismatch")]
+    fn euclidean_dimension_mismatch_panics() {
+        euclidean_distance(&[1.0f32; 3], &[2.0f32; 5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension mismatch")]
+    fn cosine_dimension_mismatch_panics() {
+        cosine_distance(&[1.0f32; 3], &[2.0f32; 5]);
+    }
+
+    #[cfg(miri)]
+    mod miri_tests {
+        use super::*;
+
+        /// Scalar dot product under Miri — exercita o path safe (não-SIMD).
+        #[test]
+        fn miri_scalar_dot_product() {
+            let a = vec![1.0f32; 100];
+            let b = vec![2.0f32; 100];
+            let r = dot_scalar(&a, &b);
+            assert!((r - 200.0).abs() < 1e-5);
+        }
+
+        /// Cosine com vetor zero — divisão por zero, deve retornar finito.
+        #[test]
+        fn miri_scalar_cosine_zero_vectors() {
+            let zero = vec![0.0f32; 64];
+            let r = cosine_scalar(&zero, &zero);
+            assert!(r.is_finite());
+        }
+
+        /// Dimension mismatch — deve panic via assert! na função scalar.
+        #[test]
+        #[should_panic(expected = "dimension mismatch")]
+        fn miri_scalar_dimension_mismatch() {
+            dot_scalar(&[1.0f32; 3], &[2.0f32; 5]);
+        }
+
+        /// Normalize L2 — edge case de vetor zero.
+        #[test]
+        fn miri_normalize_l2_zero() {
+            let v = vec![0.0f32; 32];
+            let n = normalize_l2(&v);
+            for x in &n {
+                assert!(x.is_finite(), "non-finite {x}");
+            }
+        }
+    }
+
+    // ── NormalizedCosine edge cases ──────────────────────────────────────
+
+    #[test]
+    fn normalized_cosine_identity() {
+        let v = vec![0.5f32, 0.5, 0.5, 0.5];
+        let d = normalized_cosine_distance(&v, &v);
+        assert!(d.abs() < 1e-6, "identity distance should be 0, got {d}");
+    }
+
+    #[test]
+    fn normalized_cosine_orthogonal() {
+        let a = normalize_l2(&[1.0f32, 0.0]);
+        let b = normalize_l2(&[0.0f32, 1.0]);
+        let d = normalized_cosine_distance(&a, &b);
+        assert!(
+            (d - 1.0).abs() < 1e-5,
+            "orthogonal distance should be 1, got {d}"
+        );
     }
 }

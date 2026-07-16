@@ -19,6 +19,7 @@ jobs:
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write   # needed to create tags and GitHub Releases
     outputs:
@@ -182,6 +183,7 @@ jobs:
     name: Sync version bump to develop
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: write
     steps:
@@ -217,6 +219,7 @@ jobs:
     name: Publish to crates.io
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:
@@ -262,6 +265,7 @@ jobs:
     name: Build and upload JVM plugin JARs
     needs: [release, publish-crates]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     env:
@@ -308,6 +312,7 @@ jobs:
     name: Build and publish Airflow provider
     needs: [release, publish-jvm]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     env:
@@ -348,6 +353,7 @@ jobs:
     name: Build Python wheel — Linux (${{ matrix.target }})
     needs: [release, publish-airflow]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         target: [x86_64, aarch64]
@@ -400,6 +406,7 @@ jobs:
     name: Build Python wheel — macOS (${{ matrix.target }})
     needs: [release, pypi-linux]
     runs-on: macos-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         target: [x86_64-apple-darwin, aarch64-apple-darwin]
@@ -435,6 +442,7 @@ jobs:
     name: Build Python wheel — Windows (x86_64)
     needs: [release, pypi-linux]
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -481,6 +489,7 @@ jobs:
     name: Build Python sdist
     needs: [release, pypi-linux]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Fix Docker-owned file permissions
         run: |
@@ -512,6 +521,7 @@ jobs:
     name: Publish Python wheel to PyPI
     needs: [release, pypi-linux, pypi-macos, pypi-windows, pypi-sdist]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       actions: read
       contents: write

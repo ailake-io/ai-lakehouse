@@ -284,6 +284,12 @@ fn assemble_context(chunk_jsons: Vec<String>, max_tokens: u64) -> String {
 
 // ── C-ABI exports (JNA bridge for Trino / Spark / Flink plugins) ─────────────
 
+/// Upper bound on `top_k` accepted at the C-ABI boundary. `top_k` flows into
+/// `ef.max(top_k)` and then `BinaryHeap::with_capacity(ef * 2)` in the HNSW search —
+/// an unvalidated `u32::MAX` there triggers a multi-GB allocation whose failure
+/// aborts the process (not catchable by `catch_ffi_panic`'s `catch_unwind`).
+const MAX_TOP_K: u32 = 100_000;
+
 fn cstr_empty_json() -> *mut c_char {
     CString::new("[]").unwrap().into_raw()
 }
@@ -375,6 +381,11 @@ pub unsafe extern "C" fn ailake_vector_search_json(
         if query_len > 65_536 {
             return cstr_err_json(format!(
                 "query_len {query_len} exceeds maximum supported dimension (65536)"
+            ));
+        }
+        if top_k > MAX_TOP_K {
+            return cstr_err_json(format!(
+                "top_k {top_k} exceeds maximum supported value ({MAX_TOP_K})"
             ));
         }
         let uri = match unsafe { CStr::from_ptr(table_uri) }.to_str() {
@@ -500,6 +511,12 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
                 return cstr_err_json(e);
             }
         };
+        if req.top_k > MAX_TOP_K {
+            return cstr_err_json(format!(
+                "top_k {} exceeds maximum supported value ({MAX_TOP_K})",
+                req.top_k
+            ));
+        }
 
         debug!(
             "ailake_search_json: warehouse={} table={}.{} dim={} top_k={}",
@@ -1535,6 +1552,12 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
                 return cstr_err_json(e);
             }
         };
+        if req.top_k > MAX_TOP_K {
+            return cstr_err_json(format!(
+                "top_k {} exceeds maximum supported value ({MAX_TOP_K})",
+                req.top_k
+            ));
+        }
 
         debug!(
             "ailake_search_text_json: warehouse={} table={}.{} query={:?} top_k={}",
@@ -1678,6 +1701,12 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
         };
         if req.queries.is_empty() {
             return cstr_err_json("queries array must not be empty");
+        }
+        if req.top_k > MAX_TOP_K {
+            return cstr_err_json(format!(
+                "top_k {} exceeds maximum supported value ({MAX_TOP_K})",
+                req.top_k
+            ));
         }
 
         let table = TableIdent::new(&req.namespace, &req.table);
@@ -2054,6 +2083,12 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
                 return cstr_err_json(e);
             }
         };
+        if req.top_k > MAX_TOP_K {
+            return cstr_err_json(format!(
+                "top_k {} exceeds maximum supported value ({MAX_TOP_K})",
+                req.top_k
+            ));
+        }
 
         debug!(
             "ailake_scan_json: warehouse={} table={}.{} dim={} top_k={}",
@@ -3115,5 +3150,267 @@ mod tests {
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         unsafe { ailake_free_string(ptr) };
         assert!(json.contains("negative"), "got: {json}");
+    }
+
+    // ── Proptest: FFI fuzzing ─────────────────────────────────────
+    //
+    // 1. Garbage strings — every single-param JSON export must survive
+    //    arbitrary non-null byte sequences and return valid JSON.
+    // 2. Extreme numeric values at the legacy binary C-ABI boundary.
+    // 3. Random IPC buffers — must not crash.
+    // 4. Round-trip: write random valid data, search it back.
+
+    use proptest::prelude::*;
+    use proptest::proptest;
+
+    // ── 1. FFI string layer fuzzing ────────────────────────────────
+    //
+    // Generate byte sequences without interior nulls (valid UTF-8 or not).
+    // Every export must return `{...}` or `[...]` JSON, never crash.
+
+    proptest! {
+        #[test]
+        fn ffi_search_json_arbitrary_string(
+            bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_input = CString::new(bytes).unwrap();
+            let ptr = unsafe { ailake_search_json(c_input.as_ptr()) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+
+        #[test]
+        fn ffi_write_batch_json_arbitrary_string(
+            bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_input = CString::new(bytes).unwrap();
+            let ptr = unsafe { ailake_write_batch_json(c_input.as_ptr()) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+
+        #[test]
+        fn ffi_search_text_json_arbitrary_string(
+            bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_input = CString::new(bytes).unwrap();
+            let ptr = unsafe { ailake_search_text_json(c_input.as_ptr()) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+
+        #[test]
+        fn ffi_scan_json_arbitrary_string(
+            bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_input = CString::new(bytes).unwrap();
+            let ptr = unsafe { ailake_scan_json(c_input.as_ptr()) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+
+        #[test]
+        fn ffi_compact_json_arbitrary_string(
+            bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_input = CString::new(bytes).unwrap();
+            let ptr = unsafe { ailake_compact_json(c_input.as_ptr()) };
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+    }
+
+    // ── 2. Legacy binary API: boundary values ────────────────────
+    //
+    // ailake_vector_search_json takes raw f32 pointer + length + top_k.
+    // Must not crash for boundary dims (0, 1, max allocatable), zero top_k,
+    // or large top_k. query_len always matches the actual allocation.
+
+    proptest! {
+        #[test]
+        fn ffi_legacy_api_boundary_values(
+            table_uri_bytes in proptest::collection::vec(1u8..=255u8, 0..100),
+            dim in 0u32..4097,  // covers 0..4096 inclusive
+            top_k in prop::num::u32::ANY,
+        ) {
+            let c_uri = CString::new(table_uri_bytes).unwrap();
+            // Cap allocation at 4096 f32s = 16 KB, keeps test fast
+            let safe_dim = dim.min(4096);
+            let query = vec![0.0f32; safe_dim as usize];
+            let ptr = unsafe { ailake_vector_search_json(
+                c_uri.as_ptr(),
+                query.as_ptr(),
+                safe_dim, // always matches allocated buffer
+                top_k,
+            )};
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+    }
+
+    #[test]
+    fn top_k_over_limit_rejected_not_aborted() {
+        // top_k = u32::MAX used to flow unchecked into `BinaryHeap::with_capacity(ef*2)`
+        // in the HNSW search, whose alloc failure aborts the process — not a panic
+        // catch_ffi_panic can catch. Both the legacy pointer API and the JSON-envelope
+        // API must reject it up front with an error, never reach that allocation.
+        let c_uri = CString::new("/tmp/does-not-matter").unwrap();
+        let query = [0.0f32; 4];
+        let ptr = unsafe { ailake_vector_search_json(c_uri.as_ptr(), query.as_ptr(), 4, u32::MAX) };
+        assert!(!ptr.is_null());
+        let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+        unsafe { ailake_free_string(ptr) };
+        assert!(s.contains("top_k") && s.contains("exceeds"), "got: {s}");
+
+        let req = serde_json::json!({
+            "warehouse": "/tmp/does-not-matter",
+            "namespace": "default",
+            "table": "docs",
+            "vec_col": "embedding",
+            "dim": 4,
+            "query": [0.0, 0.0, 0.0, 0.0],
+            "top_k": u32::MAX,
+        })
+        .to_string();
+        let c_req = CString::new(req).unwrap();
+        let ptr = unsafe { ailake_search_json(c_req.as_ptr()) };
+        assert!(!ptr.is_null());
+        let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+        unsafe { ailake_free_string(ptr) };
+        assert!(s.contains("top_k") && s.contains("exceeds"), "got: {s}");
+    }
+
+    // ── 3. IPC API: random byte buffers ───────────────────────────
+    //
+    // ailake_write_batch_ipc takes raw bytes + i64 length + opts JSON.
+    // Random byte buffers + random opts must return error JSON.
+
+    proptest! {
+        #[test]
+        fn ffi_ipc_random_buffers(
+            buf_bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..100),
+            opts_bytes in proptest::collection::vec(1u8..=255u8, 0..200),
+        ) {
+            let c_opts = CString::new(opts_bytes).unwrap();
+            let ptr = unsafe { ailake_write_batch_ipc(
+                buf_bytes.as_ptr(),
+                buf_bytes.len() as i64,
+                c_opts.as_ptr(),
+            )};
+            assert!(!ptr.is_null());
+            let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            assert!(s.starts_with('{') || s.starts_with('['), "non-JSON: {s}");
+        }
+    }
+
+    // ── 4. Round-trip: write random valid data → search it back ──
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 20, .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn ffi_write_search_roundtrip(
+            dim in 1u32..8,
+            num_rows in 1usize..6,
+        ) {
+            let dir = tempfile::TempDir::new().unwrap();
+            let warehouse = dir.path().to_str().unwrap().to_string();
+
+            // Build deterministic embeddings from dim/num_rows
+            let ids: Vec<i64> = (0..num_rows as i64).collect();
+            let embeddings: Vec<Vec<f32>> = (0..num_rows)
+                .map(|i| {
+                    (0..dim as usize)
+                        .map(|j| ((i * dim as usize + j) as f32) / 100.0)
+                        .collect()
+                })
+                .collect();
+            let texts: Vec<String> = (0..num_rows)
+                .map(|i| format!("row {i}"))
+                .collect();
+            let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+
+            let buf = build_ipc_stream_list_f32(&ids, &embeddings, &text_refs);
+
+            let opts = serde_json::json!({
+                "warehouse": warehouse,
+                "namespace": "default",
+                "table": "proptest_t",
+                "vec_col": "embedding",
+                "dim": dim,
+                "metric": "euclidean",
+            }).to_string();
+
+            let write_json = call_write_batch_ipc(&buf, &opts);
+            assert!(
+                write_json.contains("\"ok\":true"),
+                "write failed: {write_json}"
+            );
+
+            // Search with the first embedding as query
+            let query_vec: Vec<f32> = embeddings[0].clone();
+            let search_req = serde_json::json!({
+                "warehouse": warehouse,
+                "namespace": "default",
+                "table": "proptest_t",
+                "vec_col": "embedding",
+                "dim": dim,
+                "query": query_vec,
+                "top_k": num_rows as u32,
+            }).to_string();
+            let c_search = CString::new(search_req).unwrap();
+            let ptr = unsafe { ailake_search_json(c_search.as_ptr()) };
+            assert!(!ptr.is_null());
+            let search_json = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+            unsafe { ailake_free_string(ptr) };
+            let parsed: serde_json::Value = serde_json::from_str(&search_json).unwrap();
+            assert!(
+                parsed["ok"] == serde_json::Value::Bool(true),
+                "search failed: {search_json}"
+            );
+            let results = parsed["results"].as_array();
+            assert!(
+                results.is_some() && results.unwrap().len() == num_rows,
+                "expected {num_rows} results, got: {search_json}"
+            );
+        }
+    }
+
+    #[cfg(miri)]
+    mod miri_tests {
+        use super::*;
+        use std::ffi::{CStr, CString};
+
+        /// CStr::from_ptr com string UTF-8 válida sob Miri.
+        #[test]
+        fn miri_cstr_from_ptr_valid() {
+            let s = CString::new(r#"{"ok":true}"#).unwrap();
+            let cstr = unsafe { CStr::from_ptr(s.as_ptr()) };
+            let parsed: serde_json::Value = serde_json::from_str(cstr.to_str().unwrap()).unwrap();
+            assert!(parsed["ok"] == serde_json::Value::Bool(true));
+        }
+
+        /// CStr::from_ptr com string vazia.
+        #[test]
+        fn miri_cstr_from_ptr_empty() {
+            let s = CString::new("").unwrap();
+            let cstr = unsafe { CStr::from_ptr(s.as_ptr()) };
+            assert!(cstr.to_bytes().is_empty());
+        }
     }
 }
