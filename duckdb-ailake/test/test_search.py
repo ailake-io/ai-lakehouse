@@ -131,8 +131,20 @@ def test_search_result_schema():
     require("file_path" in col_names, f"missing file_path column, got {col_names}")
     print(f"PASS: schema correct {list(zip(col_names, col_types))}")
 
-def test_search_no_lib_returns_empty():
-    """When lib is not loaded, search must return 0 rows (not error)."""
+def test_search_nonexistent_table_raises():
+    """Querying a table path that doesn't exist must raise a clear SQL error,
+    not silently return 0 rows.
+
+    AilakeLib is a process-wide singleton (`AilakeLib::get()`'s static instance);
+    by the time this test runs, earlier tests in this same script have already
+    triggered a real search, so is_ready() is already true here regardless of
+    using a fresh connection — this test was previously (and incorrectly, given
+    that) asserting on a code path that never actually ran. The real thing
+    exercised was the *other* early-return: an ok:false backend response
+    (I/O error: table root doesn't exist) used to be silently folded into an
+    empty result, indistinguishable from a genuine zero-match search. It's now
+    surfaced as an exception.
+    """
     conn = duckdb.connect(config={
         "allow_unsigned_extensions": True,
         "allow_extensions_metadata_mismatch": True,
@@ -146,16 +158,18 @@ def test_search_no_lib_returns_empty():
     query = load_fixture_query()
     q_sql = ", ".join(str(f) for f in query)
 
-    # Without pre-loading the native lib, is_ready() = false → 0 rows
-    rows = conn.execute(f"""
-        SELECT count(*) FROM ailake_search(
-            '/nonexistent/path',
-            [{q_sql}]::FLOAT[],
-            10
-        )
-    """).fetchone()
-    require(rows[0] == 0, f"expected 0 rows without native lib, got {rows[0]}")
-    print("PASS: graceful degradation without native lib")
+    try:
+        conn.execute(f"""
+            SELECT count(*) FROM ailake_search(
+                '/nonexistent/path',
+                [{q_sql}]::FLOAT[],
+                10
+            )
+        """).fetchone()
+        require(False, "expected an exception for a nonexistent table path, got a result")
+    except duckdb.Error as e:
+        require("ailake_search failed" in str(e), f"unexpected error message: {e}")
+        print("PASS: nonexistent table path raises a clear error")
 
 def test_search_vec_col_named_param():
     conn = setup_connection()
@@ -355,7 +369,7 @@ if __name__ == "__main__":
     test_search_result_schema()
     test_search_returns_rows()
     test_search_ordered_by_distance()
-    test_search_no_lib_returns_empty()
+    test_search_nonexistent_table_raises()
     test_search_vec_col_named_param()
     test_search_partition_filter_named_param()
     test_search_hybrid_named_params()

@@ -144,8 +144,17 @@ def test_multimodal_returns_rows():
     conn.close()
 
 
-def test_multimodal_no_lib_returns_empty():
-    """When libailake_jni.so is not loaded, function returns 0 rows gracefully."""
+def test_multimodal_nonexistent_table_raises():
+    """A table path that doesn't exist raises a clear SQL error, not silent 0 rows.
+
+    AilakeLib is a process-wide singleton; by the time this test runs, earlier
+    tests in this script already triggered a real search, so is_ready() is
+    already true regardless of using a fresh connection here — the scenario
+    this test actually exercises is a genuine ok:false backend response
+    (I/O error: table root doesn't exist), previously folded into an empty
+    result indistinguishable from a real zero-match search. It's now surfaced
+    as an exception (same fix as ailake_search/ailake_scan/ailake_compact/...).
+    """
     ext_path = os.environ.get("AILAKE_EXT", "")
     if not ext_path:
         return
@@ -155,16 +164,16 @@ def test_multimodal_no_lib_returns_empty():
     })
     try:
         conn2.execute(f"LOAD '{ext_path}'")
-        count = conn2.execute("""
+        conn2.execute("""
             SELECT count(*) FROM ailake_search_multimodal(
                 '/nonexistent/path',
                 [{'col': 'embedding', 'query': [0.1, 0.2]::FLOAT[], 'weight': 1.0}],
                 5
             )
-        """).fetchone()[0]
-        require(count == 0, f"returns 0 rows when native lib not present (got {count})")
-    except Exception as e:
-        require(False, f"raised instead of returning empty: {e}")
+        """).fetchone()
+        require(False, "expected an exception for a nonexistent table path, got a result")
+    except duckdb.Error as e:
+        require("ailake_search_multimodal failed" in str(e), f"unexpected error message: {e}")
     conn2.close()
 
 
@@ -189,7 +198,7 @@ if __name__ == "__main__":
     test_extension_loads()
     test_multimodal_result_schema()
     test_multimodal_returns_rows()
-    test_multimodal_no_lib_returns_empty()
+    test_multimodal_nonexistent_table_raises()
     test_multimodal_partition_filter_named_param()
     print(f"\n{'PASS' if FAIL == 0 else 'FAIL'}  {PASS} passed, {FAIL} failed")
     sys.exit(0 if FAIL == 0 else 1)
