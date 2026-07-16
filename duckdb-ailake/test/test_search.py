@@ -357,16 +357,18 @@ def test_search_namespace_named_param_isolation():
     """).fetchall()
     require(len(matched) > 0, "search with correct namespace/table_name found 0 rows")
 
-    unmatched = conn.execute(f"""
-        SELECT row_id FROM ailake_search('file://{table_dir}', {q_sql}, 5)
-    """).fetchall()
-    require(
-        len(unmatched) == 0,
-        f"search with default namespace/table_name unexpectedly found {len(unmatched)} rows "
-        "— namespace isolation broken"
-    )
+    try:
+        conn.execute(f"""
+            SELECT row_id FROM ailake_search('file://{table_dir}', {q_sql}, 5)
+        """).fetchall()
+        require(False, "default namespace search on custom_ns-only table should raise")
+    except duckdb.Error as e:
+        require(
+            "ailake_search failed" in str(e),
+            f"unexpected error for default namespace search: {e}"
+        )
     print(f"PASS: ailake_search namespace named param — found {len(matched)} row(s) in "
-          f"custom_ns/my_table, 0 rows under default namespace")
+          f"custom_ns/my_table, default namespace raises (table not found)")
 
 
 if __name__ == "__main__":
