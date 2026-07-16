@@ -50,7 +50,7 @@ ailake-fts  = { path = "ailake-fts", version = "0.1.6" }
 # Vector index
 hnsw_rs     = "0.3"
 bincode     = "1"
-memmap2     = "0.9"
+memmap2     = "0.9.11"
 rayon       = "1"
 roaring     = "0.10"
 

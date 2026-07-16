@@ -74,6 +74,26 @@ ignore = [
     { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic attribute parsing, transitive via object_store; no object_store release pins quick-xml >=0.41.0 yet" },
     { id = "RUSTSEC-2026-0195", reason = "quick-xml unbounded namespace-decl allocation, transitive via object_store; no object_store release pins quick-xml >=0.41.0 yet" },
 
+    # crossbeam-epoch 0.9.18 — invalid pointer dereference in fmt::Pointer impl.
+    # Fixed in >=0.9.20. Transitive via rayon-core → rayon.
+    # Last reviewed: 2026-07-15
+    { id = "RUSTSEC-2026-0204", reason = "crossbeam-epoch soundness, transitive via rayon; fix in crossbeam-epoch >=0.9.20" },
+
+    # quinn-proto 0.11.x — memory exhaustion from unbounded stream reassembly.
+    # Fixed in >=0.11.15. Transitive via reqwest (object_store aws feature).
+    # AI-Lake does not act as a QUIC endpoint (client-side only).
+    # Last reviewed: 2026-07-15
+    { id = "RUSTSEC-2026-0185", reason = "quinn-proto memory exhaustion, transitive via object_store/reqwest; client-side only, no upstream object_store release pins quinn >=0.11.15 yet" },
+
+    # lexical-core 0.8.x — multiple soundness issues.
+    # Transitive via arrow-rs 52.x. Fix in arrow >=53 (atoi migration).
+    # Last reviewed: 2026-07-15
+    { id = "RUSTSEC-2023-0086", reason = "lexical-core soundness, transitive via arrow-rs 52.x; fix in arrow >=53" },
+
+    # lru 0.12.x — IterMut violates Stacked Borrows.
+    # Transitive via tantivy 0.22. No upstream fix yet.
+    # Last reviewed: 2026-07-15
+    { id = "RUSTSEC-2026-0002", reason = "lru IterMut stacked borrows, transitive via tantivy 0.22; no tantivy release drops lru yet" },
 ]
 
 # ---------------------------------------------------------------------------
