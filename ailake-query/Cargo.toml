@@ -8,6 +8,9 @@ repository  = "https://github.com/ThiagoLange/ai-lakehouse"
 keywords    = ["vector-search", "iceberg", "lakehouse", "hnsw", "rag"]
 categories  = ["database", "algorithms"]
 
+[features]
+loom = ["dep:loom"]
+
 [dependencies]
 ailake-core    = { path = "../ailake-core", version = "0.1.6" }
 ailake-fts     = { workspace = true }
@@ -31,6 +34,7 @@ futures        = { workspace = true }
 rayon          = { workspace = true }
 tracing        = { workspace = true }
 roaring        = { workspace = true }
+loom           = { version = "0.7", optional = true }
 
 [dev-dependencies]
 tempfile     = { workspace = true }

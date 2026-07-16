@@ -3323,4 +3323,28 @@ mod tests {
             );
         }
     }
+
+    #[cfg(miri)]
+    mod miri_tests {
+        use super::*;
+        use std::ffi::{CStr, CString};
+
+        /// CStr::from_ptr com string UTF-8 válida sob Miri.
+        #[test]
+        fn miri_cstr_from_ptr_valid() {
+            let s = CString::new(r#"{"ok":true}"#).unwrap();
+            let cstr = unsafe { CStr::from_ptr(s.as_ptr()) };
+            let parsed: serde_json::Value =
+                serde_json::from_str(cstr.to_str().unwrap()).unwrap();
+            assert!(parsed["ok"] == serde_json::Value::Bool(true));
+        }
+
+        /// CStr::from_ptr com string vazia.
+        #[test]
+        fn miri_cstr_from_ptr_empty() {
+            let s = CString::new("").unwrap();
+            let cstr = unsafe { CStr::from_ptr(s.as_ptr()) };
+            assert!(cstr.to_bytes().is_empty());
+        }
+    }
 }

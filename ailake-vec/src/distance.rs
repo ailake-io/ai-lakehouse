@@ -1143,6 +1143,45 @@ mod tests {
         cosine_distance(&[1.0f32; 3], &[2.0f32; 5]);
     }
 
+    #[cfg(miri)]
+    mod miri_tests {
+        use super::*;
+
+        /// Scalar dot product under Miri — exercita o path safe (não-SIMD).
+        #[test]
+        fn miri_scalar_dot_product() {
+            let a = vec![1.0f32; 100];
+            let b = vec![2.0f32; 100];
+            let r = dot_scalar(&a, &b);
+            assert!((r - 200.0).abs() < 1e-5);
+        }
+
+        /// Cosine com vetor zero — divisão por zero, deve retornar finito.
+        #[test]
+        fn miri_scalar_cosine_zero_vectors() {
+            let zero = vec![0.0f32; 64];
+            let r = cosine_scalar(&zero, &zero);
+            assert!(r.is_finite());
+        }
+
+        /// Dimension mismatch — deve panic via assert! na função scalar.
+        #[test]
+        #[should_panic(expected = "dimension mismatch")]
+        fn miri_scalar_dimension_mismatch() {
+            dot_scalar(&[1.0f32; 3], &[2.0f32; 5]);
+        }
+
+        /// Normalize L2 — edge case de vetor zero.
+        #[test]
+        fn miri_normalize_l2_zero() {
+            let v = vec![0.0f32; 32];
+            let n = normalize_l2(&v);
+            for x in &n {
+                assert!(x.is_finite(), "non-finite {x}");
+            }
+        }
+    }
+
     // ── NormalizedCosine edge cases ──────────────────────────────────────
 
     #[test]
