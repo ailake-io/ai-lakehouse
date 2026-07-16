@@ -178,19 +178,28 @@ def test_multimodal_nonexistent_table_raises():
 
 
 def test_multimodal_partition_filter_named_param():
-    """partition_filter= is accepted as a named parameter without raising an error."""
+    """partition_filter= is accepted as a named parameter without raising an error.
+
+    Uses a nonexistent path (same as test_multimodal_nonexistent_table_raises);
+    the backend raises an I/O error instead of returning 0 rows since the
+    ok:false→throw change — the real assertion here is that the named param
+    binds without a parse/type error, not that the query succeeds.
+    """
     conn = setup_connection()
     queries_sql = "[{'col': 'embedding', 'query': [0.1, 0.2]::FLOAT[], 'weight': 1.0}]"
-    count = conn.execute(f"""
-        SELECT count(*) FROM ailake_search_multimodal(
-            '/nonexistent/path',
-            {queries_sql},
-            5,
-            partition_filter='nonexistent-agent'
-        )
-    """).fetchone()[0]
-    require(count >= 0, "partition_filter named param caused unexpected error")
-    print(f"PASS: partition_filter named param accepted (returned {count} rows)")
+    try:
+        conn.execute(f"""
+            SELECT count(*) FROM ailake_search_multimodal(
+                '/nonexistent/path',
+                {queries_sql},
+                5,
+                partition_filter='nonexistent-agent'
+            )
+        """).fetchone()
+        require(False, "expected an exception for nonexistent path, got a result")
+    except duckdb.Error as e:
+        require("ailake_search_multimodal failed" in str(e), f"unexpected error message: {e}")
+    print("PASS: partition_filter named param accepted (raises I/O error as expected)")
 
 
 if __name__ == "__main__":
