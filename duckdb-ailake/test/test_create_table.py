@@ -9,21 +9,30 @@ Verifies that:
   3. Creating the same table again raises an error.
 """
 
+import os
+import pathlib
 import pytest
 import duckdb
 
 
 def _ext_path():
-    import subprocess, sysconfig
-    ext = "build/release/ailake.duckdb_extension"
-    res = subprocess.run(["find", ".", "-name", ext], capture_output=True, text=True, timeout=5)
-    candidates = [l.strip() for l in res.stdout.strip().split("\n") if l.strip()]
-    return candidates[0] if candidates else "../../build/release/ailake.duckdb_extension"
+    env = os.environ.get("AILAKE_EXT")
+    if env:
+        return env
+    here = pathlib.Path(__file__).resolve().parent
+    candidates = [
+        here.parent / "build" / "release" / "ailake.duckdb_extension",
+        here.parent / "build" / "ailake.duckdb_extension",
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    raise RuntimeError(f"ailake.duckdb_extension not found — set AILAKE_EXT env var or build first. Tried: {[str(x) for x in candidates]}")
 
 
 @pytest.fixture
 def db(tmp_path):
-    conn = duckdb.connect()
+    conn = duckdb.connect(config={"allow_unsigned_extensions": True})
     conn.execute(f"LOAD '{_ext_path()}'")
     yield conn
     conn.close()
