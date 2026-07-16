@@ -190,7 +190,10 @@ impl HnswBuilder {
     /// Build HNSW graph (Algorithm 1). Parallel on multi-core when n ≥ 500.
     /// Dispatches on metric once here; all inner functions are monomorphic.
     pub fn build(self) -> HnswIndex {
-        let parallel = rayon::current_num_threads() > 1 && self.vectors.len() >= 500;
+        // len() check first: avoids touching rayon's global thread pool (and the
+        // Miri Stacked-Borrows UB that triggers under Miri's interpreter) on the
+        // common small-n path, where the pool state is irrelevant anyway.
+        let parallel = self.vectors.len() >= 500 && rayon::current_num_threads() > 1;
         match self.metric {
             VectorMetric::Cosine => {
                 if parallel {
@@ -1263,6 +1266,7 @@ mod tests {
     #[cfg(miri)]
     mod miri_tests {
         use super::*;
+        use rand::SeedableRng;
 
         /// Exercita o visited tracker (get_unchecked_mut) com 100 nós sob Miri.
         /// Miri detecta OOB writes mesmo com get_unchecked_mut se o idx for inválido.

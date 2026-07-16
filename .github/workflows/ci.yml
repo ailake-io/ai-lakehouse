@@ -105,12 +105,18 @@ jobs:
         run: cargo miri test -p ailake-core --lib
         env:
           MIRI_TEST_NUMERICS: "100"  # reduce iteration count for Miri's slowness
+      # Filtered to `miri_`-prefixed tests: ailake-vec's full suite includes a zstd
+      # compression test (extern "C" FFI) and ailake-index's includes a GPU driver
+      # probe via libloading::Library::new (dlopen) — both fundamentally
+      # uninterpretable by Miri, so an unfiltered `--lib` run always fails here
+      # regardless of the code under test. `miri_`-prefixed tests are the ones
+      # written to only exercise Miri-interpretable (scalar/safe-Rust) code paths.
       - name: Run Miri on ailake-vec (scalar fallback only, no SIMD)
-        run: cargo miri test -p ailake-vec --lib
+        run: cargo miri test -p ailake-vec --lib -- miri_
         env:
           MIRI_TEST_NUMERICS: "100"
       - name: Run Miri on ailake-index (mmap + HNSW only, no GPU)
-        run: cargo miri test -p ailake-index --lib
+        run: cargo miri test -p ailake-index --lib -- miri_
         env:
           MIRI_TEST_NUMERICS: "100"
 
