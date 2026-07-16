@@ -102,6 +102,9 @@ object AilakeNative {
     /** Compact small files. Returns `{"ok":true,"files_compacted":N}`. Caller must free. */
     def ailake_compact_json(requestJson: String): Pointer
 
+    /** Create an empty AI-Lake table. Returns `{"ok":true}`. Caller must free. */
+    def ailake_create_table_json(requestJson: String): Pointer
+
     def ailake_free_string(ptr: Pointer): Unit
   }
 
@@ -767,6 +770,53 @@ object AilakeNative {
         } catch {
           case e: Exception =>
             log.error(s"[ailake] Failed to parse compact response for table=$tableName: ${e.getMessage}", e)
+            None
+        }
+    }
+  }
+
+  def createTable(
+    warehouse:      String,
+    namespace:      String,
+    table:          String,
+    vectorColumn:   String = "embedding",
+    dim:            Int    = 1536,
+    metric:         String = "cosine",
+    precision:      String = "f16",
+    formatVersion:  Int    = 2,
+  ): Option[Unit] = {
+    lib match {
+      case None => None
+      case Some(native) =>
+        val requestJson =
+          s"""{"warehouse":${jsonStr(warehouse)},"namespace":${jsonStr(namespace)},""" +
+          s""""table":${jsonStr(table)},"vector_column":${jsonStr(vectorColumn)},""" +
+          s""""dim":$dim,"metric":${jsonStr(metric)},"precision":${jsonStr(precision)},""" +
+          s""""format_version":$formatVersion}"""
+        val ptr = native.ailake_create_table_json(requestJson)
+        if (ptr == null) {
+          log.warn(s"[ailake] ailake_create_table_json returned null for table=$namespace.$table")
+          return None
+        }
+        val json = try { ptr.getString(0) } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read create_table result string: ${e.getMessage}", e)
+            Try(native.ailake_free_string(ptr))
+            return None
+        }
+        native.ailake_free_string(ptr)
+        try {
+          val root = mapper.readTree(json)
+          if (!root.path("ok").asBoolean(false)) {
+            log.warn(s"[ailake] create_table ok=false for table=$namespace.$table: ${root.path("error").asText()}")
+            None
+          } else {
+            log.info(s"[ailake] create_table OK table=$namespace.$table")
+            Some(())
+          }
+        } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to parse create_table response for table=$namespace.$table: ${e.getMessage}", e)
             None
         }
     }

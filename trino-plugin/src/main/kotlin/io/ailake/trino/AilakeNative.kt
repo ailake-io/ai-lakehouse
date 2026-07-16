@@ -102,6 +102,9 @@ object AilakeNative {
         /** Compact small files. Returns `{"ok":true,"files_compacted":N}`. Caller must free. */
         fun ailake_compact_json(requestJson: String): Pointer?
 
+        /** Create an empty AI-Lake table. Returns `{"ok":true}`. Caller must free. */
+        fun ailake_create_table_json(requestJson: String): Pointer?
+
         fun ailake_free_string(ptr: Pointer?)
     }
 
@@ -736,6 +739,56 @@ object AilakeNative {
         } catch (e: Exception) {
             log.error("[ailake] Failed to parse compact response for table={}.{}: {}", namespace, tableName, e.message, e)
             null
+        } finally {
+            runCatching { native.ailake_free_string(ptr) }
+        }
+    }
+
+    /**
+     * Create an empty AI-Lake table via the native library.
+     * Returns true on success, false if the library is absent or the call fails.
+     */
+    fun createTable(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        vectorColumn: String = "embedding",
+        dim: Int = 1536,
+        metric: String = "cosine",
+        precision: String = "f16",
+        formatVersion: Int = 2,
+    ): Boolean {
+        val native = lib ?: return false
+
+        val payload = mapOf(
+            "warehouse" to warehouse,
+            "namespace" to namespace,
+            "table" to table,
+            "vector_column" to vectorColumn,
+            "dim" to dim,
+            "metric" to metric,
+            "precision" to precision,
+            "format_version" to formatVersion,
+        )
+        val requestJson = mapper.writeValueAsString(payload)
+
+        val ptr = native.ailake_create_table_json(requestJson) ?: run {
+            log.warn("[ailake] ailake_create_table_json returned null for table={}.{}", namespace, table)
+            return false
+        }
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) {
+                log.warn("[ailake] createTable ok=false for table={}.{}: {}", namespace, table, resp["error"])
+                false
+            } else {
+                log.info("[ailake] createTable OK table={}.{}", namespace, table)
+                true
+            }
+        } catch (e: Exception) {
+            log.error("[ailake] Failed to parse createTable response for table={}.{}: {}", namespace, table, e.message, e)
+            false
         } finally {
             runCatching { native.ailake_free_string(ptr) }
         }

@@ -96,6 +96,7 @@ public:
     using delete_where_fn_t  = char *(*)(const char *);
     using evolve_schema_fn_t = char *(*)(const char *);
     using write_multi_fn_t   = char *(*)(const char *);
+    using create_table_fn_t  = char *(*)(const char *);
     using compact_fn_t       = char *(*)(const char *);
     using free_fn_t          = void (*)(char *);
 
@@ -113,6 +114,7 @@ public:
     bool is_evolve_ready()       const { return evolve_schema_fn_ != nullptr; }
     bool is_write_multi_ready()  const { return write_multi_fn_   != nullptr; }
     bool is_compact_ready()      const { return compact_fn_       != nullptr; }
+    bool is_create_table_ready() const { return create_table_fn_ != nullptr; }
 
     // Execute ailake_search_json. Returns empty on any error.
     // hybrid_text: when non-empty, enables hybrid BM25+vector RRF fusion.
@@ -229,6 +231,45 @@ public:
         bool                                  deferred       = false
     ) const;
 
+    // Execute ailake_create_table_json. Returns true on success.
+    // warehouse: table root path.
+    // ns: namespace (default "default").
+    // table_name: table name (default "table").
+    // vector_column: vector column name (default "embedding").
+    // dim: vector dimension.
+    // metric: distance metric (default "cosine").
+    // precision: storage precision (default "f16").
+    // format_version: Iceberg format version (2 or 3, default 2).
+    // hnsw_m, hnsw_ef_construction: HNSW params (-1 = use default).
+    // pre_normalize: normalize vectors to unit L2 at write time.
+    // modality: vector modality (empty = unset).
+    // partition_by, partition_value, partition_column_type: partition settings.
+    // partition_fields_json: JSON array of {column, transform, column_type}.
+    // fts_columns: comma-separated FTS text columns (empty = no FTS).
+    // fts_tokenizer: FTS tokenizer (default empty).
+    // embedding_model: model name (empty = unset).
+    bool create_table(
+        const std::string &warehouse,
+        const std::string &ns,
+        const std::string &table_name,
+        const std::string &vector_column,
+        int                dim,
+        const std::string &metric,
+        const std::string &precision,
+        int                format_version     = 2,
+        int                hnsw_m             = -1,
+        int                hnsw_ef_construction = -1,
+        bool               pre_normalize      = false,
+        const std::string &modality           = "",
+        const std::string &partition_by       = "",
+        const std::string &partition_value    = "",
+        const std::string &partition_column_type = "",
+        const std::string &partition_fields_json  = "",
+        const std::string &fts_columns        = "",
+        const std::string &fts_tokenizer      = "",
+        const std::string &embedding_model    = ""
+    ) const;
+
     // Execute ailake_compact_json. Returns files_compacted count, or -1 on
     // error/lib-not-ready. -1 sentinel for min_files/target_size_bytes/
     // max_files_per_pass means "use the native default" (4 / 128MiB / 20).
@@ -254,6 +295,7 @@ private:
     delete_where_fn_t  delete_where_fn_  = nullptr;
     evolve_schema_fn_t evolve_schema_fn_ = nullptr;
     write_multi_fn_t   write_multi_fn_   = nullptr;
+    create_table_fn_t  create_table_fn_  = nullptr;
     compact_fn_t       compact_fn_       = nullptr;
     free_fn_t          free_fn_          = nullptr;
 };

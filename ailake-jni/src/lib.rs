@@ -13,8 +13,12 @@ use std::{
 
 use ailake_catalog::{
     CatalogProvider, HadoopCatalog, RestCatalog, RestCatalogAuth, RestCatalogConfig, TableIdent,
+    TableProperties,
 };
-use ailake_core::{EmbeddingModelInfo, VectorMetric};
+use ailake_core::{
+    EmbeddingModelInfo, PartitionDef, VectorMetric, VectorModality, VectorPrecision,
+    VectorStoragePolicy,
+};
 use ailake_query::{
     fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
     Chunk, CompactionConfig, CompactionExecutor, CompactionPlanner, ContextAssembler,
@@ -2601,6 +2605,194 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
             }
         }
     })
+}
+
+// ── ailake_create_table_json — create an empty table ─────────────────────────
+
+/// Creates an empty AI-Lake/Iceberg table with the given schema and policy.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_create_table_json(request_json: *const c_char) -> *mut c_char {
+    catch_ffi_panic("ailake_create_table_json", move || {
+        #[derive(serde::Deserialize)]
+        struct Req {
+            warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
+            #[serde(default = "ct_default_ns")]
+            namespace: String,
+            table: String,
+            #[serde(default = "ct_default_vec_col")]
+            vector_column: String,
+            dim: u32,
+            #[serde(default = "ct_default_metric")]
+            metric: String,
+            #[serde(default = "ct_default_precision")]
+            precision: String,
+            #[serde(default)]
+            format_version: u8,
+            #[serde(default)]
+            hnsw_m: Option<u32>,
+            #[serde(default)]
+            hnsw_ef_construction: Option<u32>,
+            #[serde(default)]
+            pre_normalize: bool,
+            #[serde(default)]
+            modality: Option<String>,
+            #[serde(default)]
+            partition_by: Option<String>,
+            #[serde(default)]
+            partition_value: Option<String>,
+            #[serde(default)]
+            partition_column_type: Option<String>,
+            #[serde(default)]
+            partition_fields: Vec<PartitionDefReq>,
+            #[serde(default)]
+            fts_columns: Option<String>,
+            #[serde(default)]
+            fts_tokenizer: String,
+            #[serde(default)]
+            embedding_model: Option<String>,
+        }
+        fn ct_default_ns() -> String { "default".into() }
+        fn ct_default_vec_col() -> String { "embedding".into() }
+        fn ct_default_metric() -> String { "cosine".into() }
+        fn ct_default_precision() -> String { "f16".into() }
+
+        #[derive(serde::Deserialize)]
+        struct PartitionDefReq {
+            column: String,
+            #[serde(default)]
+            transform: String,
+            column_type: String,
+        }
+
+        if request_json.is_null() {
+            return cstr_err_json("null request_json");
+        }
+        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let req: Req = match serde_json::from_str(json_str) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("ailake_create_table_json: JSON parse error: {}", e);
+                return cstr_err_json(e);
+            }
+        };
+
+        debug!(
+            "ailake_create_table_json: warehouse={} table={}.{} col={} dim={} format_v={}",
+            req.warehouse, req.namespace, req.table, req.vector_column, req.dim, req.format_version
+        );
+
+        let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
+        let table_ident = TableIdent::new(&req.namespace, &req.table);
+
+        let metric = parse_metric(&req.metric);
+        let precision = match parse_precision(&req.precision) {
+            Some(p) => p,
+            None => return cstr_err_json(format!("unknown precision: {}", req.precision)),
+        };
+        let modality = match req.modality.as_deref() {
+            None | Some("") => None,
+            Some(s) => match s.parse::<VectorModality>() {
+                Ok(m) => Some(m),
+                Err(_) => return cstr_err_json(format!("unknown modality: {s}")),
+            },
+        };
+
+        let partition_fields: Vec<PartitionDef> = req
+            .partition_fields
+            .into_iter()
+            .map(|f| {
+                let transform = if f.transform.is_empty() {
+                    "identity".to_string()
+                } else {
+                    f.transform
+                };
+                PartitionDef {
+                    column: f.column,
+                    transform,
+                    column_type: f.column_type,
+                }
+            })
+            .collect();
+
+        let mut extra = std::collections::HashMap::new();
+        if let Some(ref cols) = req.fts_columns {
+            extra.insert("ailake.fts.enabled".to_string(), "true".to_string());
+            extra.insert("ailake.fts.text-columns".to_string(), cols.clone());
+            if !req.fts_tokenizer.is_empty() {
+                extra.insert("ailake.fts.tokenizer".to_string(), req.fts_tokenizer);
+            }
+        }
+
+        let policy = VectorStoragePolicy {
+            column_name: req.vector_column,
+            dim: req.dim,
+            metric,
+            precision,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: req.pre_normalize,
+            hnsw_m: req.hnsw_m,
+            hnsw_ef_construction: req.hnsw_ef_construction,
+            ivf_residual: false,
+            embedding_model: req.embedding_model.map(EmbeddingModelInfo::new),
+            modality,
+            partition_by: req.partition_by,
+            partition_value: req.partition_value,
+            partition_column_type: req.partition_column_type,
+            partition_fields,
+        };
+
+        let props = TableProperties {
+            policy,
+            extra,
+            format_version: req.format_version,
+            partition_column_type: None,
+        };
+
+        let result = rt().block_on(catalog.create_table(&table_ident, &props));
+
+        #[derive(serde::Serialize)]
+        struct Resp {
+            ok: bool,
+        }
+        match result {
+            Ok(_) => {
+                info!(
+                    "ailake_create_table_json: created table {}.{}",
+                    req.namespace, req.table
+                );
+                serde_json::to_string(&Resp { ok: true })
+                    .map(cstr_json)
+                    .unwrap_or_else(cstr_err_json)
+            }
+            Err(e) => {
+                warn!("ailake_create_table_json: failed: {}", e);
+                cstr_err_json(e)
+            }
+        }
+    })
+}
+
+/// Parse a precision string into VectorPrecision.
+fn parse_precision(s: &str) -> Option<VectorPrecision> {
+    match s {
+        "f32" => Some(VectorPrecision::F32),
+        "f16" => Some(VectorPrecision::F16),
+        "i8" => Some(VectorPrecision::I8),
+        _ => None,
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

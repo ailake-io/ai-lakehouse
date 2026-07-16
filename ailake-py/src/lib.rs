@@ -20,10 +20,13 @@ use tracing::{debug, warn};
 
 use ailake_catalog::{
     hadoop::HadoopCatalog,
-    provider::{CatalogProvider, TableIdent},
+    provider::{CatalogProvider, TableIdent, TableProperties},
     RestCatalog, RestCatalogAuth, RestCatalogConfig,
 };
-use ailake_core::{EmbeddingModelInfo, VectorMetric, VectorModality, VectorStoragePolicy};
+use ailake_core::{
+    EmbeddingModelInfo, PartitionDef, VectorMetric, VectorModality, VectorPrecision,
+    VectorStoragePolicy,
+};
 use ailake_query::{
     delete_rows as rs_delete_rows, fetch_rows as rs_fetch_rows, search as rs_search,
     search_multimodal as rs_search_multimodal, Chunk, ContextAssembler, ContextAssemblerConfig,
@@ -2080,7 +2083,129 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(backfill_vector_column, m)?)?;
     m.add_function(wrap_pyfunction!(compact, m)?)?;
     m.add_function(wrap_pyfunction!(estimate, m)?)?;
+    m.add_function(wrap_pyfunction!(create_table, m)?)?;
     Ok(())
+}
+
+/// Create an empty AI-Lake/Iceberg table with the given schema and policy.
+///
+/// Args:
+///     path: table root path (local dir or s3://...)
+///     dim: vector dimension
+///     vector_column: vector column name (default "embedding")
+///     metric: distance metric (default "cosine")
+///     precision: storage precision (default "f16")
+///     format_version: Iceberg format version (2 or 3, default 2)
+///     hnsw_m: HNSW M parameter (default None = use native default)
+///     hnsw_ef_construction: HNSW ef_construction (default None = use native default)
+///     pre_normalize: normalize vectors to unit L2 (default False)
+///     modality: vector modality ("text", "image", "audio", "video", default "")
+///     partition_by: column to partition by (default "")
+///     partition_value: runtime partition value (default "")
+///     partition_column_type: Iceberg partition column type (default "")
+///     partition_fields_json: JSON array of partition fields (default "")
+///     fts_columns: comma-separated FTS text columns (default "")
+///     fts_tokenizer: FTS tokenizer (default "")
+///     embedding_model: embedding model name (default "")
+///     namespace: Iceberg namespace (default "default")
+///     table_name: table name (default "table")
+///     catalog_opts: optional dict with "catalog", "rest_uri", etc.
+///
+/// Returns:
+///     True on success, raises ValueError on error.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (path, dim, vector_column="embedding", metric="cosine", precision="f16",
+    format_version=2, hnsw_m=None, hnsw_ef_construction=None, pre_normalize=false,
+    modality="", partition_by="", partition_value="", partition_column_type="",
+    partition_fields_json="", fts_columns="", fts_tokenizer="", embedding_model="",
+    namespace="default", table_name="table", catalog_opts=None))]
+fn create_table(
+    path: &str,
+    dim: u32,
+    vector_column: &str,
+    metric: &str,
+    precision: &str,
+    format_version: u8,
+    hnsw_m: Option<u32>,
+    hnsw_ef_construction: Option<u32>,
+    pre_normalize: bool,
+    modality: &str,
+    partition_by: &str,
+    partition_value: &str,
+    partition_column_type: &str,
+    partition_fields_json: &str,
+    fts_columns: &str,
+    fts_tokenizer: &str,
+    embedding_model: &str,
+    namespace: &str,
+    table_name: &str,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
+) -> PyResult<bool> {
+    let rt = rt()?;
+    let (catalog, _store) = local_catalog_store(path, catalog_opts.as_ref())?;
+    let table = TableIdent::new(namespace, table_name);
+
+    let metric = parse_metric(metric)?;
+    let precision = match precision {
+        "f32" => VectorPrecision::F32,
+        "i8" => VectorPrecision::I8,
+        _ => VectorPrecision::F16,
+    };
+    let modality = if modality.is_empty() {
+        None
+    } else {
+        match modality.parse::<VectorModality>() {
+            Ok(m) => Some(m),
+            Err(_) => return Err(PyValueError::new_err(format!("unknown modality: {modality}"))),
+        }
+    };
+
+    let partition_fields: Vec<PartitionDef> = if partition_fields_json.is_empty() {
+        vec![]
+    } else {
+        serde_json::from_str(partition_fields_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid partition_fields_json: {e}")))?
+    };
+
+    let mut extra = std::collections::HashMap::new();
+    if !fts_columns.is_empty() {
+        extra.insert("ailake.fts.enabled".to_string(), "true".to_string());
+        extra.insert("ailake.fts.text-columns".to_string(), fts_columns.to_string());
+        if !fts_tokenizer.is_empty() {
+            extra.insert("ailake.fts.tokenizer".to_string(), fts_tokenizer.to_string());
+        }
+    }
+
+    let policy = VectorStoragePolicy {
+        column_name: vector_column.to_string(),
+        dim,
+        metric,
+        precision,
+        pq: None,
+        keep_raw_for_reranking: true,
+        pre_normalize,
+        hnsw_m,
+        hnsw_ef_construction,
+        ivf_residual: false,
+        embedding_model: if embedding_model.is_empty() { None } else { Some(EmbeddingModelInfo::new(embedding_model.to_string())) },
+        modality,
+        partition_by: if partition_by.is_empty() { None } else { Some(partition_by.to_string()) },
+        partition_value: if partition_value.is_empty() { None } else { Some(partition_value.to_string()) },
+        partition_column_type: if partition_column_type.is_empty() { None } else { Some(partition_column_type.to_string()) },
+        partition_fields,
+    };
+
+    let props = TableProperties {
+        policy,
+        extra,
+        format_version,
+        partition_column_type: None,
+    };
+
+    rt.block_on(catalog.create_table(&table, &props))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(true)
 }
 
 /// Return detected hardware capabilities as a plain dict.
@@ -2091,7 +2216,7 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
 ///   has_rocm          — "true" / "false"
 ///   cpu_logical_cores — number of logical cores available to rayon
 ///   has_avx2          — "true" / "false" (x86_64 only)
-///   has_avx512        — "true" / "false" (x86_64 AVX-512F only)
+///   has_avx512        — "true" / "false" (x86_64 AVX512F only)
 ///   recommend_ivf_pq  — "true" / "false" for a 5 000-vector batch (threshold probe)
 ///
 /// Example::

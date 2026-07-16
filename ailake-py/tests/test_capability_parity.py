@@ -294,3 +294,40 @@ def test_write_batch_rejects_non_finite_embedding(tmp_path):
     w = ailake.TableWriter(path, dim=4)
     with pytest.raises(ValueError, match="non-finite"):
         w.write_batch(["a"], [[1.0, float("nan"), 0.0, 0.0]])
+
+
+# ── New: create_table (Fase 15+) ──────────────────────────────────────────────
+
+def test_create_empty_table_search_returns_zero_rows(tmp_path):
+    path = str(tmp_path / "empty_table")
+    ailake.create_table(path, dim=4)
+    results = ailake.search(path, [1.0, 0.0, 0.0, 0.0], top_k=10).to_list()
+    assert len(results) == 0
+
+
+def test_create_table_duplicate_raises(tmp_path):
+    path = str(tmp_path / "dup_table")
+    ailake.create_table(path, dim=4)
+    with pytest.raises((ValueError, RuntimeError)):
+        ailake.create_table(path, dim=4)
+
+
+def test_create_table_with_custom_params(tmp_path):
+    path = str(tmp_path / "custom_params")
+    ailake.create_table(
+        path, dim=768, vector_column="my_vec",
+        metric="euclidean", precision="f32",
+        format_version=2,
+    )
+    results = ailake.search(path, [1.0] * 768, top_k=5).to_list()
+    assert len(results) == 0
+
+
+def test_create_table_then_write_then_search(tmp_path):
+    path = str(tmp_path / "crt_write_search")
+    ailake.create_table(path, dim=4)
+    w = ailake.TableWriter(path, dim=4)
+    w.write_batch(["hello", "world"], [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
+    w.commit()
+    results = ailake.search(path, [1.0, 0.0, 0.0, 0.0], top_k=10).to_list()
+    assert len(results) == 2
