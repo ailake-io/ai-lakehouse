@@ -116,7 +116,7 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Should finish with `296 passed` (7 ignored — doctests/GPU tests requiring live credentials, a GPU backend, or other runtime context not available in a plain local run).
+Should finish with `375 passed` (7 ignored — doctests/GPU tests requiring live credentials, a GPU backend, or other runtime context not available in a plain local run).
 
 ### Tests by crate
 

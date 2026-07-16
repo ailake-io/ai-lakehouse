@@ -1,6 +1,7 @@
 # AI-Lake Format
 
 [![CI](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci.yml)
+[![Safety](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci-safety.yml/badge.svg)](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci-safety.yml)
 [![crates.io](https://img.shields.io/crates/v/ailake-core.svg)](https://crates.io/crates/ailake-core)
 [![PyPI](https://img.shields.io/pypi/v/ailake.svg)](https://pypi.org/p/ailake)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
