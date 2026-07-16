@@ -170,6 +170,10 @@ queries
 
 ### 3C — Writing data (Scala)
 
+> Embeddings containing `NaN`/`Infinity` are rejected at write time with a clear error
+> (both here and in Trino's `INSERT`) rather than being silently accepted — the exception
+> propagates through Spark's `commit()`/Trino's `finish()` and fails the job visibly.
+
 ```scala
 import io.ailake.spark.implicits._
 
@@ -675,7 +679,7 @@ LIMIT  10;
 | Property | Type | Default | Description |
 |---|---|---|---|
 | `query_vector` | `varchar` | `""` | Comma-separated f32 values |
-| `top_k` | `integer` | `10` | Nearest neighbors to return |
+| `top_k` | `integer` | `10` | Nearest neighbors to return. Capped at `ailake_core::MAX_TOP_K` (100,000) — a value above that is rejected with an error rather than silently proceeding (unbounded `top_k` used to risk an out-of-memory abort) |
 | `query_text` | `varchar` | `""` | Query text. Alone → pure full-text search (Tantivy O(log N) if `ailake.fts-columns` indexed, else O(N) BM25). With `query_vector` → hybrid BM25+vector RRF fusion |
 | `hybrid_weight` | `double` | `0.5` | BM25 weight in RRF fusion when both `query_vector` and `query_text` are set (`0.0` = pure vector, `1.0` = pure BM25) |
 | `multimodal_queries` | `varchar` | `""` | JSON array of `{col, query (csv f32), weight}` for cross-modal RRF search of `ailake.default.search_multimodal` (see below) |
@@ -787,6 +791,11 @@ as two Flink `CREATE TABLE` statements sharing the same `warehouse`/`namespace`/
 `table-name` (i.e. the same physical AI-Lake table). Mixing them up (e.g. trying
 to `SELECT` from a table declared with the write-shaped schema) fails at
 DDL-resolution time with a clear `ValidationException`, not a runtime crash.
+
+> Same as Spark/Trino: a `NaN`/`Infinity` value in `embedding` is rejected at write time
+> with a clear error; `search.top-k` above 100,000 is rejected the same way. Flink's
+> `AilakeNativeLoader` already throws `RuntimeException` on either, failing the job
+> visibly (the reference behavior the Spark/Trino write path was brought in line with).
 
 ```sql
 -- Write (sink): id + vector + any number of extra STRING columns
@@ -1017,7 +1026,7 @@ loader.evolveSchema(
 | `vector.column` | `"embedding"` | Column containing `ARRAY<FLOAT>` |
 | `vector.metric` | `"euclidean"` | `cosine` \| `euclidean` \| `dot_product` |
 | `vector.precision` | `"f16"` | `f32` \| `f16` \| `i8` |
-| `search.top-k` | `10` | Nearest neighbors to return (source tables) |
+| `search.top-k` | `10` | Nearest neighbors to return (source tables). Capped at 100,000 — a higher value fails the job with a clear error |
 | `search.ef` | `50` | HNSW `ef_search` (source tables) |
 | `embedding.model` | unset | Stored in `ailake.embedding-model` Iceberg property |
 | `partition.fields` | `"[]"` | JSON array of `{column, transform, column_type}` |

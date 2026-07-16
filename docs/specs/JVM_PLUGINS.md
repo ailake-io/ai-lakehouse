@@ -112,9 +112,12 @@ The library exports C-ABI symbols consumed by JNA. All three plugins use the JSO
 //                "text_column":"chunk_text",        ← optional, default "chunk_text"
 //                "bm25_weight":0.5}                 ← optional, default 0.5
 // Returns: {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
+// top_k above 100,000 returns {"ok":false,"error":"..."} instead of proceeding.
 char* ailake_search_json(const char* request_json);
 
 // Write batch (auto-selects IVF-PQ or HNSW based on HardwareProfile::detect())
+// An embedding containing NaN/Infinity returns {"ok":false,"error":"..."} — Spark's
+// commit()/Trino's finish() throw on this (not treat it as a snapshot-less success).
 // request_json: {"warehouse":"...","namespace":"default","table":"...",
 //                "dim":1536,"ids":[...],"embeddings":[[...],...],
 //                "metric":"cosine","precision":"f16",
@@ -273,7 +276,7 @@ Multiple AI-Lake tables → multiple catalog files with different names and `tab
 | Property | Type | Default | Description |
 |---|---|---|---|
 | `query_vector` | `varchar` | `""` | Comma-separated f32 values: `"0.1,-0.2,0.3,..."` |
-| `top_k` | `integer` | `10` | Nearest neighbors to return |
+| `top_k` | `integer` | `10` | Nearest neighbors to return. Capped at 100,000 (rejected above that) |
 
 ### Schema
 

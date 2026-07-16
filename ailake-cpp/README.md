@@ -295,6 +295,8 @@ Uses geometric pruning on the primary column centroid, dispatches HNSW search pe
 
 The C++ header-only SDK delegates write operations (write_batch, write_batch_multi, delete_where, evolve_schema, compact) to the `ailake` CLI binary via subprocess. No Rust FFI required at the C++ layer.
 
+A row with a `NaN`/`Infinity` embedding value is rejected by the CLI; `run_cmd` captures the CLI's combined stdout+stderr and throws `std::runtime_error` with the full output, so the actual reason reaches the caller. `search`/`search_text`'s `top_k` is capped at 100,000 by the underlying `ailake_query` core (same limit enforced at the JNI C-ABI boundary used by Spark/Trino/Flink).
+
 ### `ailake::write_batch_multi`
 
 ```cpp

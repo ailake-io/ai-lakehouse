@@ -195,6 +195,13 @@ pub async fn search(
     catalog: Arc<dyn CatalogProvider>,
     store: Arc<dyn Store>,
 ) -> AilakeResult<Vec<SearchResult>> {
+    if config.top_k > ailake_core::MAX_TOP_K {
+        return Err(AilakeError::InvalidArgument(format!(
+            "top_k {} exceeds maximum supported value ({})",
+            config.top_k,
+            ailake_core::MAX_TOP_K
+        )));
+    }
     // Get file metadata (includes centroid info) without reading any data files
     let all_files = catalog.list_files(table, None).await?;
 
@@ -893,6 +900,13 @@ pub async fn search_multimodal(
             "search_multimodal requires at least one ModalQuery".into(),
         ));
     }
+    if config.top_k > ailake_core::MAX_TOP_K {
+        return Err(AilakeError::InvalidArgument(format!(
+            "top_k {} exceeds maximum supported value ({})",
+            config.top_k,
+            ailake_core::MAX_TOP_K
+        )));
+    }
 
     // Load table metadata once for dim auto-detection and metric resolution.
     let table_meta = catalog.load_table(table).await?;
@@ -1373,6 +1387,12 @@ pub async fn search_text(
         return Err(AilakeError::InvalidArgument(
             "search_text requires at least one text column".into(),
         ));
+    }
+    if top_k > ailake_core::MAX_TOP_K {
+        return Err(AilakeError::InvalidArgument(format!(
+            "top_k {top_k} exceeds maximum supported value ({})",
+            ailake_core::MAX_TOP_K
+        )));
     }
 
     let all_files = catalog.list_files(table, None).await?;
@@ -2663,6 +2683,83 @@ mod tests {
             result.is_err(),
             "search with wrong dim should error, got Ok"
         );
+    }
+
+    #[tokio::test]
+    async fn search_top_k_over_cap_rejected() {
+        // No table written — top_k validation must reject before any catalog/file I/O,
+        // matching how ailake-jni's C-ABI boundary already validates top_k, but closing
+        // the same gap for every caller that reaches scanner::search directly (Python
+        // bindings, CLI, and transitively Go/C++/Airflow via CLI shell-out) instead of
+        // going through ailake-jni.
+        let dir = TempDir::new().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        let config = SearchConfig {
+            top_k: ailake_core::MAX_TOP_K + 1,
+            ..SearchConfig::default()
+        };
+        let result = search(
+            &table,
+            &[1.0f32, 0.0, 0.0, 0.0],
+            config,
+            "embedding",
+            4,
+            catalog,
+            store,
+        )
+        .await;
+        let err = result.expect_err("top_k over cap should error");
+        assert!(err.to_string().contains("top_k"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn search_multimodal_top_k_over_cap_rejected() {
+        let dir = TempDir::new().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        let config = SearchConfig {
+            top_k: ailake_core::MAX_TOP_K + 1,
+            ..SearchConfig::default()
+        };
+        let queries = vec![ModalQuery {
+            column: "embedding",
+            query: &[1.0f32, 0.0, 0.0, 0.0],
+            weight: 1.0,
+            dim: 4,
+        }];
+        let result =
+            search_multimodal(&table, &queries, config, catalog, store, FusionMethod::Rrf).await;
+        let err = result.expect_err("top_k over cap should error");
+        assert!(err.to_string().contains("top_k"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn search_text_top_k_over_cap_rejected() {
+        let dir = TempDir::new().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let table = TableIdent::new("default", "table");
+
+        let result = search_text(
+            &table,
+            "hello",
+            &["chunk_text"],
+            ailake_core::MAX_TOP_K + 1,
+            catalog,
+            store,
+            None,
+        )
+        .await;
+        let err = result.expect_err("top_k over cap should error");
+        assert!(err.to_string().contains("top_k"), "{err}");
     }
 
     // ── Fuzzing: FailStore round-trips ────────────────────────────────

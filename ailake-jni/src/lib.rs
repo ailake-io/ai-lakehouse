@@ -284,11 +284,12 @@ fn assemble_context(chunk_jsons: Vec<String>, max_tokens: u64) -> String {
 
 // ── C-ABI exports (JNA bridge for Trino / Spark / Flink plugins) ─────────────
 
-/// Upper bound on `top_k` accepted at the C-ABI boundary. `top_k` flows into
-/// `ef.max(top_k)` and then `BinaryHeap::with_capacity(ef * 2)` in the HNSW search —
-/// an unvalidated `u32::MAX` there triggers a multi-GB allocation whose failure
-/// aborts the process (not catchable by `catch_ffi_panic`'s `catch_unwind`).
-const MAX_TOP_K: u32 = 100_000;
+/// Upper bound on `top_k` accepted at the C-ABI boundary — same limit as
+/// `ailake_core::MAX_TOP_K` (the single source of truth also enforced independently in
+/// `ailake_query::scanner` for callers that reach it without going through this C-ABI, e.g.
+/// the Python bindings and the CLI). Checked here too so a panic/abort from an oversized
+/// `top_k` never reaches `catch_ffi_panic`'s `catch_unwind` in the first place.
+const MAX_TOP_K: u32 = ailake_core::MAX_TOP_K as u32;
 
 fn cstr_empty_json() -> *mut c_char {
     CString::new("[]").unwrap().into_raw()

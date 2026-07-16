@@ -278,10 +278,15 @@ func WriteBatch(
 		args = append(args, "--deferred")
 	}
 
-	cmd := exec.Command(bin, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	// Capture stderr instead of piping straight to os.Stderr (as this used to do) so a
+	// CLI-side rejection — e.g. the new NaN/Infinity embedding validation — reaches the
+	// caller's error message, not just the terminal. Matches SearchText/SearchHybrid's
+	// existing pattern below.
+	if _, err := exec.Command(bin, args...).Output(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return fmt.Errorf("ailake insert: %w\nstderr: %s", err, exitErr.Stderr)
+		}
 		return fmt.Errorf("ailake insert: %w", err)
 	}
 	return nil

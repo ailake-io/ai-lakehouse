@@ -116,9 +116,20 @@ std::vector<MultimodalRow> AilakeLib::search_multimodal(
     std::string resp(raw);
     free_fn_(raw);
 
+    nlohmann::json j;
     try {
-        auto j = nlohmann::json::parse(resp);
-        if (!j.value("ok", false)) return {};
+        j = nlohmann::json::parse(resp);
+    } catch (...) {
+        return {};
+    }
+    if (!j.value("ok", false)) {
+        // A real backend rejection (e.g. top_k over the cap) must fail visibly, not be
+        // folded into the same "no matches" empty result callers can't distinguish.
+        throw InvalidInputException(
+            "ailake_search_multimodal failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    try {
         std::vector<MultimodalRow> rows;
         for (auto &r : j["results"]) {
             rows.push_back({
@@ -180,10 +191,18 @@ std::vector<SearchRow> AilakeLib::search(
     std::string resp(raw);
     free_fn_(raw);
 
+    nlohmann::json j;
     try {
-        auto j = nlohmann::json::parse(resp);
-        if (!j.value("ok", false)) return {};
-
+        j = nlohmann::json::parse(resp);
+    } catch (...) {
+        return {};
+    }
+    if (!j.value("ok", false)) {
+        throw InvalidInputException(
+            "ailake_search failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    try {
         std::vector<SearchRow> rows;
         for (auto &r : j["results"]) {
             rows.push_back({
@@ -237,9 +256,18 @@ std::vector<SearchRow> AilakeLib::search_text(
     std::string resp(raw);
     free_fn_(raw);
 
+    nlohmann::json j;
     try {
-        auto j = nlohmann::json::parse(resp);
-        if (!j.value("ok", false)) return {};
+        j = nlohmann::json::parse(resp);
+    } catch (...) {
+        return {};
+    }
+    if (!j.value("ok", false)) {
+        throw InvalidInputException(
+            "ailake_search_text failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    try {
         std::vector<SearchRow> rows;
         for (auto &r : j["results"]) {
             // FTS results carry "score" (higher = more relevant); vector search uses "distance".
@@ -339,13 +367,21 @@ int64_t AilakeLib::write_batch(
     std::string resp(raw);
     free_fn_(raw);
 
+    nlohmann::json j;
     try {
-        auto j = nlohmann::json::parse(resp);
-        if (!j.value("ok", false)) return -1;
-        return j.value("snapshot_id", int64_t(-1));
+        j = nlohmann::json::parse(resp);
     } catch (...) {
         return -1;
     }
+    if (!j.value("ok", false)) {
+        // A real backend rejection (e.g. NaN/Infinity embeddings) must fail visibly — a
+        // batch that used to be silently accepted now gets silently dropped instead
+        // (returns -1 with no way for the SQL caller to see why) if left unfixed.
+        throw InvalidInputException(
+            "ailake_write_batch failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    return j.value("snapshot_id", int64_t(-1));
 }
 
 bool AilakeLib::delete_where(
@@ -408,13 +444,18 @@ int32_t AilakeLib::evolve_schema(
     std::string resp(raw);
     free_fn_(raw);
 
+    nlohmann::json j;
     try {
-        auto j = nlohmann::json::parse(resp);
-        if (!j.value("ok", false)) return -1;
-        return j.value("new_schema_id", int32_t(-1));
+        j = nlohmann::json::parse(resp);
     } catch (...) {
         return -1;
     }
+    if (!j.value("ok", false)) {
+        throw InvalidInputException(
+            "ailake_evolve_schema failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    return j.value("new_schema_id", int32_t(-1));
 }
 
 int64_t AilakeLib::write_batch_multi(
@@ -480,13 +521,18 @@ int64_t AilakeLib::write_batch_multi(
     std::string resp(raw);
     free_fn_(raw);
 
+    nlohmann::json j;
     try {
-        auto j = nlohmann::json::parse(resp);
-        if (!j.value("ok", false)) return -1;
-        return j.value("snapshot_id", int64_t(-1));
+        j = nlohmann::json::parse(resp);
     } catch (...) {
         return -1;
     }
+    if (!j.value("ok", false)) {
+        throw InvalidInputException(
+            "ailake_write_batch_multi failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    return j.value("snapshot_id", int64_t(-1));
 }
 
 int64_t AilakeLib::compact(
@@ -520,13 +566,18 @@ int64_t AilakeLib::compact(
     std::string resp(raw);
     free_fn_(raw);
 
+    nlohmann::json j;
     try {
-        auto j = nlohmann::json::parse(resp);
-        if (!j.value("ok", false)) return -1;
-        return j.value("files_compacted", int64_t(-1));
+        j = nlohmann::json::parse(resp);
     } catch (...) {
         return -1;
     }
+    if (!j.value("ok", false)) {
+        throw InvalidInputException(
+            "ailake_compact failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    return j.value("files_compacted", int64_t(-1));
 }
 
 ScanResult AilakeLib::scan(
