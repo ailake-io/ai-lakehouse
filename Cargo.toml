@@ -39,16 +39,14 @@ arrow-buffer = "52"
 arrow-ipc    = "52"
 object_store = { version = "0.10" }  # cloud features added per-crate via ailake-store feature flags
 
-# Iceberg
-iceberg     = "0.3"
+# Iceberg — metadata/avro manipulation; custom code in ailake-catalog, not the iceberg crate
 apache-avro = "0.16"
 
 # Full-text search
 tantivy     = { version = "0.22", default-features = false, features = ["mmap"] }
 ailake-fts  = { path = "ailake-fts", version = "0.1.6" }
 
-# Vector index
-hnsw_rs     = "0.3"
+# Vector index — HNSW is custom Rust code in ailake-index; no hnsw_rs dep needed
 bincode     = "1"
 memmap2     = "0.9.11"
 rayon       = "1"

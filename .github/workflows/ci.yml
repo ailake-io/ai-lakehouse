@@ -64,7 +64,7 @@ jobs:
       - name: Test all crates (Linux) or subset (macOS)
         run: |
           if [ "${{ matrix.os }}" = macos-latest ]; then
-            EXCLUDE="--exclude ailake-py --exclude ailake-jni --exclude ailake-bench"
+            EXCLUDE="--exclude ailake-py --exclude ailake-jni"
           else
             EXCLUDE=""
           fi
