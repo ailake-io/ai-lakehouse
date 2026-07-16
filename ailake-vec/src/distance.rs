@@ -193,9 +193,14 @@ pub fn compute_centroid_and_radius(vectors: &[Vec<f32>], metric: VectorMetric) -
     let centroid: Vec<f32> = (0..dim)
         .map(|i| vectors.iter().map(|v| v[i]).sum::<f32>() / n)
         .collect();
+    // Exclude non-finite per-vector distances (e.g. from a NaN/Infinity-poisoned
+    // embedding) rather than letting one corrupted vector produce a non-finite
+    // radius for the whole file — a non-finite radius can't round-trip through
+    // the manifest's JSON-encoded key_metadata (serde_json serializes it as `null`).
     let radius = vectors
         .iter()
         .map(|v| exact_distance(metric, &centroid, v))
+        .filter(|d| d.is_finite())
         .fold(0.0_f32, f32::max);
     Centroid {
         values: centroid,

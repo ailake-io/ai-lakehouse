@@ -25,12 +25,26 @@ STRIDE per component. Trust boundary: **every C-ABI call boundary** (JNA from JV
 | **T**ampering: malicious JSON, null pointers, non-UTF-8 | Medium | Every export: null check + `catch_ffi_panic` + `CStr::to_str()` (UTF-8 validation). Returns error JSON, never UB |
 | **R**epudiation: no audit log | Low | No mitigation; callers should log at JVM layer |
 | **I**nformation disclosure: oversized IPC buffer reads beyond allocation | Medium | `ipc_len ≤ 0` check; no max cap (gap #3). Attacker controls IPC buffer content fully |
-| **D**enial of service: `query_len = 65536`, `ipc_len = i64::MAX` | Low | `query_len` capped at 65536; IPC len rejected if ≤ 0 but no upper cap (gap #3, 16 GB theoretical) |
+| **D**enial of service: `query_len = 65536`, `ipc_len = i64::MAX`, `top_k = u32::MAX` | Low | `query_len` capped at 65536; IPC len rejected if ≤ 0 but no upper cap (gap #3, 16 GB theoretical); `top_k` capped at `MAX_TOP_K = 100_000` across all 5 search entry points (fixed, THR-014, see below) |
 | **E**levation of privilege: panic across FFI → JVM compromise | **High** | `catch_ffi_panic` on every export — panic becomes error JSON, never unwinds across FFI |
 
 ### Key finding: Release-build dim mismatch (Critical)
 
 `debug_assert_eq` (distance.rs:8,33,58) is compiled out in release. A JVM caller sending `query_len=128` to a table with `dim=256` produces OOB read in SIMD kernels. Mitigated by caller-side validation in `scanner.rs:218` and `writer.rs:206`, but any code path that bypasses these (e.g., direct `ailake_vector_search_json` binary API) is vulnerable.
+
+### Key finding: unbounded `top_k` → process abort (High, fixed)
+
+None of the 5 C-ABI search entry points (`ailake_vector_search_json`,
+`ailake_search_json`, `ailake_search_text_json`, `ailake_search_multimodal_json`,
+`ailake_scan_json`) validated `top_k` before this fix. It flows into
+`ef.max(top_k)` and then `BinaryHeap::with_capacity(ef * 2)` in the HNSW search —
+`top_k = u32::MAX` requests a ~8.6 billion-element allocation. Allocation failure
+calls Rust's global alloc-error handler, which **aborts the process** — this does
+not unwind, so `catch_ffi_panic`'s `catch_unwind` cannot catch it. A single
+attacker-controlled `top_k` value crashed the entire embedding host process (Spark
+executor, Trino worker, etc.), not just the call. Fixed: `MAX_TOP_K = 100_000`
+validated at the top of all 5 entry points, before any allocation-sizing math
+(THR-014).
 
 ### Test coverage
 
@@ -108,11 +122,28 @@ STRIDE per component. Trust boundary: **every C-ABI call boundary** (JNA from JV
 
 ### Key finding: Release dim mismatch (Critical, see §1)
 
+### Key finding: HNSW graph-structure validation (High, fixed)
+
+The file-format layer's `checked_add`/`NotAnAilakeFile` mitigation (row above) only
+validates *byte offsets into the file* — it says nothing about whether a
+successfully-decoded HNSW graph is internally consistent. `HnswSerializer::from_bytes`
+(`ailake-index/src/serialize.rs`) used to bincode-deserialize `neighbors`/`entry_point`
+straight into `HnswIndex` with no check that node indices stay within
+`row_ids.len()`; the only downstream guard was a `debug_assert!` in
+`VisitedTracker::visit` (`ailake-index/src/hnsw.rs`), compiled out in release, ahead of
+an `unsafe { get_unchecked_mut(idx) }`. A structurally-valid-bincode-but-corrupt graph
+(bit flip, truncation that still decodes, malicious IPC/S3 payload) caused
+undefined behavior in release builds. Fixed: `from_bytes` now validates
+`entry_point`/`neighbors`/`node_levels`/`flat_vecs` bounds and returns
+`AilakeError::Bincode` instead of constructing an invalid index (THR-013).
+
 ### Test coverage
 
 - 7 corrupt file format tests (Phase 3E)
 - 2 mmap proptest (Phase 1A)
 - 10 distance proptests + 12 edge case tests (Phase 1A + 3B)
+- 3 `HnswSerializer::from_bytes` bounds-validation tests (out-of-bounds neighbor,
+  out-of-bounds entry_point, flat_vecs length mismatch)
 
 ---
 
@@ -136,6 +167,25 @@ STRIDE per component. Trust boundary: **every C-ABI call boundary** (JNA from JV
 - Concurrent stress test (1 compactor + 4 searchers, 5 passes)
 - Dimension mismatch rejection test
 - 41 unit tests (scanner, writer, compaction, pruner, bm25, mem_table)
+- 3 Loom models (`ailake-query/src/loom_tests.rs`) — see coverage gap below
+
+### Known gap: Loom models don't cover the JNI lock+block_on pattern (Open)
+
+The 3 Loom models verify: per-key mutex acquisition from a shared map doesn't
+deadlock (`jni_table_lock_model`), a generic once-init race pattern in isolation
+(`once_init_flag_model` — doesn't correspond to a real call site; actual once-init
+uses `std::sync::OnceLock`), and the real `part_counter` increment ordering
+(`writer_batch_counter_model`, `Ordering::SeqCst`, matches `writer.rs:387` exactly).
+
+None of them model that `ailake-jni/src/lib.rs` (lines 787, 1149, 1409, 2208, 2355,
+2456) takes a `std::sync::Mutex` per-table lock and then calls
+`rt().block_on(async { ... })` **while holding it** — blocking an OS thread on a
+shared Tokio runtime from inside a lock the runtime's own tasks might need. Loom
+models thread interleavings, not async runtime scheduling, so this class of runtime
+starvation is out of reach for Loom as used here. Not fixed in this pass (THR-012)
+— would need either restructuring those call sites to not block while holding the
+lock, or a different verification approach (e.g. `tokio-console`, load testing under
+contention) than Loom can provide.
 
 ---
 
@@ -185,3 +235,7 @@ STRIDE per component. Trust boundary: **every C-ABI call boundary** (JNA from JV
 | THR-009 | **Fixed** | ailake-catalog | REST commit: AddPartitionSpec on every commit | Fixed Phase 17 |
 | THR-010 | **Fixed** | ailake-catalog | Missing namespace before create_table | Fixed Phase 17 |
 | THR-011 | **Fixed** | ailake-jni | C-ABI panic across FFI | Fixed v0.0.12: catch_ffi_panic on all exports |
+| THR-012 | **Medium** | ailake-jni | Mutex held across `block_on` (Tokio starvation) | Open. Not modeled by Loom; needs restructuring or a different verification tool |
+| THR-013 | **Fixed** | ailake-index | Unvalidated HNSW neighbor/entry_point indices → UB in release | Fixed: `HnswSerializer::from_bytes` bounds-validates before constructing the index |
+| THR-014 | **Fixed** | ailake-jni | Unbounded `top_k` → alloc failure aborts process | Fixed: `MAX_TOP_K = 100_000` at all 5 search entry points |
+| THR-015 | **Fixed** | ailake-vec, ailake-catalog | Non-finite `radius` silently lost on manifest round-trip | Fixed: excluded from the max-fold in `compute_centroid_and_radius`; explicit `warn!` + drop as defense in depth in `avro_manifest.rs` |

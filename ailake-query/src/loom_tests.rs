@@ -3,11 +3,21 @@
 //!
 //! Run: `LOOM_MAX_BRANCHES=10000 cargo test --features loom -p ailake-query -- loom_`
 
+use loom::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use loom::sync::{Arc, Mutex};
 use loom::thread;
-use loom::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-/// JNI table-lock pattern: 2 threads, 2 keys.
+/// Models the per-key lock acquisition pattern used at `ailake-jni/src/lib.rs`
+/// (lines 787, 1149, 1409, 2208, 2355, 2456: look up/insert a per-table `Mutex` in a
+/// shared `HashMap`, then lock it) — proves that acquiring a per-key lock from a
+/// shared map doesn't deadlock under concurrent access to the same or different keys.
+///
+/// **Known gap, not modeled here:** the real call sites take this `std::sync::Mutex`
+/// and then call `rt().block_on(async { ... })` *while holding it* — blocking a
+/// thread on a shared Tokio runtime from inside a std (non-async-aware) lock. Loom
+/// models thread interleavings, not async runtime scheduling, so it cannot detect
+/// runtime starvation from this pattern. Tracked as an open risk in
+/// `docs/architecture/THREAT_MODEL.md`.
 #[test]
 fn jni_table_lock_model() {
     loom::model(|| {
@@ -36,7 +46,15 @@ fn jni_table_lock_model() {
     });
 }
 
-/// Once-init flag pattern: 2 threads, AtomicBool guard.
+/// Generic hand-rolled "check flag, take lock, init, set flag" pattern — 2 threads
+/// racing to initialize a shared value exactly once.
+///
+/// **Known gap, not modeled here:** this does NOT correspond to any real call site.
+/// Actual once-init in this codebase (e.g. `ailake-jni/src/lib.rs:58,195`,
+/// `ailake-index/src/hardware.rs:75`) uses `std::sync::OnceLock::get_or_init`, a
+/// std-verified primitive, not this hand-rolled `AtomicBool` + `Mutex<Option<_>>`
+/// combination. Kept as a general sanity check of the pattern in isolation, not as
+/// evidence that any specific production call site is race-free.
 #[test]
 fn once_init_flag_model() {
     loom::model(|| {
@@ -65,7 +83,10 @@ fn once_init_flag_model() {
     });
 }
 
-/// Batch counter: 2 threads, AtomicU32 relaxado.
+/// Models the part-counter increment at `ailake-query/src/writer.rs:387`
+/// (`part_counter.fetch_add(1, Ordering::SeqCst)`) — same `Ordering::SeqCst` as the
+/// real code (not `Relaxed`), so the interleavings Loom explores here match what the
+/// real counter actually does.
 #[test]
 fn writer_batch_counter_model() {
     loom::model(|| {
@@ -75,13 +96,13 @@ fn writer_batch_counter_model() {
         for _ in 0..2 {
             let c = counter.clone();
             threads.push(thread::spawn(move || {
-                c.fetch_add(1, Ordering::Relaxed);
+                c.fetch_add(1, Ordering::SeqCst);
             }));
         }
         for t in threads {
             t.join().unwrap();
         }
-        let final_val = counter.load(Ordering::Relaxed);
+        let final_val = counter.load(Ordering::SeqCst);
         assert_eq!(final_val, 2, "counter lost updates: got {final_val}");
     });
 }

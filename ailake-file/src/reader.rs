@@ -533,7 +533,6 @@ mod tests {
             reader.ailk_offset().unwrap() as usize
         };
         let mut corrupted = file.to_vec();
-        // Overwrite AILK magic at header start
         corrupted[ailk_start..ailk_start + 4].copy_from_slice(b"BADC");
         let corrupted = Bytes::from(corrupted);
         let reader = AilakeFileReader::new(corrupted, "embedding", 4);
@@ -555,7 +554,6 @@ mod tests {
         let header_bytes = &corrupted[ailk_start..];
         let hnsw_offset = u64::from_le_bytes(header_bytes[48..56].try_into().unwrap()) as usize;
         let hnsw_len = u64::from_le_bytes(header_bytes[40..48].try_into().unwrap()) as usize;
-        // Corrupt HNSW blob
         let blob_start = ailk_start + hnsw_offset;
         let garbage = vec![0xABu8; hnsw_len];
         corrupted[blob_start..blob_start + hnsw_len].copy_from_slice(&garbage);
@@ -594,7 +592,6 @@ mod tests {
     fn missing_parquet_footer_fails_gracefully() {
         let file = write_file(3, 4);
         let parquet_footer = "PAR1";
-        // Find the last "PAR1" footer marker and truncate before it
         if let Some(pos) = file
             .windows(4)
             .rposition(|w| w == parquet_footer.as_bytes())

@@ -132,7 +132,11 @@ impl VisitedTracker {
 
     #[inline(always)]
     fn visit(&mut self, idx: usize) -> bool {
-        debug_assert!(idx < self.gen.len(), "visit idx={idx} out of bounds (len={})", self.gen.len());
+        debug_assert!(
+            idx < self.gen.len(),
+            "visit idx={idx} out of bounds (len={})",
+            self.gen.len()
+        );
         let slot = unsafe { self.gen.get_unchecked_mut(idx) };
         if *slot == self.current {
             false
@@ -1269,7 +1273,11 @@ mod tests {
             let mut b = HnswBuilder::new(
                 dim,
                 VectorMetric::Cosine,
-                HnswConfig { m: 8, ef_construction: 50, max_elements: 200 },
+                HnswConfig {
+                    m: 8,
+                    ef_construction: 50,
+                    max_elements: 200,
+                },
             );
             let mut rng = rand::rngs::StdRng::seed_from_u64(42);
             for i in 0..n {

@@ -129,6 +129,10 @@ impl FailStore {
         AilakeError::Store(self.custom_error.clone())
     }
 
+    fn should_fail(flag: &AtomicBool) -> bool {
+        flag.load(Ordering::Acquire)
+    }
+
     fn should_fail_get(&self) -> bool {
         if !self.fail_get.load(Ordering::Acquire) {
             return false;
@@ -136,9 +140,11 @@ impl FailStore {
         let mut nth = self.fail_get_nth.lock().unwrap();
         match *nth {
             Some(1) => {
-                // This call is the one that should fail
-                *nth = None; // consume the nth counter
-                             // If fail_get remains true, subsequent calls will also fail
+                // This call is the one that should fail — consume the counter and
+                // clear fail_get so the very next call succeeds, matching the
+                // "resets after the fail" contract documented on `with_fail_get_nth`.
+                *nth = None;
+                self.fail_get.store(false, Ordering::Release);
                 true
             }
             Some(n) => {
@@ -164,42 +170,42 @@ impl Store for FailStore {
     }
 
     async fn get_range(&self, path: &str, range: Range<u64>) -> AilakeResult<Bytes> {
-        if self.fail_get_range.load(Ordering::Acquire) {
+        if Self::should_fail(&self.fail_get_range) {
             return Err(self.err());
         }
         self.inner.get_range(path, range).await
     }
 
     async fn put(&self, path: &str, data: Bytes) -> AilakeResult<()> {
-        if self.fail_put.load(Ordering::Acquire) {
+        if Self::should_fail(&self.fail_put) {
             return Err(self.err());
         }
         self.inner.put(path, data).await
     }
 
     async fn list(&self, prefix: &str) -> AilakeResult<Vec<String>> {
-        if self.fail_list.load(Ordering::Acquire) {
+        if Self::should_fail(&self.fail_list) {
             return Err(self.err());
         }
         self.inner.list(prefix).await
     }
 
     async fn file_size(&self, path: &str) -> AilakeResult<u64> {
-        if self.fail_file_size.load(Ordering::Acquire) {
+        if Self::should_fail(&self.fail_file_size) {
             return Err(self.err());
         }
         self.inner.file_size(path).await
     }
 
     async fn exists(&self, path: &str) -> AilakeResult<bool> {
-        if self.fail_exists.load(Ordering::Acquire) {
+        if Self::should_fail(&self.fail_exists) {
             return Err(self.err());
         }
         self.inner.exists(path).await
     }
 
     async fn delete(&self, path: &str) -> AilakeResult<()> {
-        if self.fail_delete.load(Ordering::Acquire) {
+        if Self::should_fail(&self.fail_delete) {
             return Err(self.err());
         }
         self.inner.delete(path).await
@@ -256,15 +262,12 @@ mod tests {
         assert!(second.is_err(), "second get should fail");
         assert!(format!("{:?}", second).contains("injected fault"));
 
-        // Third call succeeds (counter exhausted, fail_get still true but
-        // without nth counter it defaults to "fail every call")
+        // Third call succeeds — the nth failure resets fail_get automatically,
+        // matching the "resets after the fail" contract on `with_fail_get_nth`.
         let third = store.get("nth.bin").await;
-        // Actually after nth consumes, fail_get is still true and nth is None,
-        // so every subsequent call fails too. That's fine — the user can
-        // toggle fail_get off after the expected failure.
         assert!(
-            third.is_err(),
-            "third get should fail (fail_get still true)"
+            third.is_ok(),
+            "third get should succeed (auto-reset after nth fail)"
         );
     }
 
@@ -274,15 +277,12 @@ mod tests {
         let inner = LocalStore::new(dir.path());
         let store = FailStore::new(inner).with_fail_get_nth(3);
 
-        // Succeed, succeed, fail, then toggle off
+        // Succeed, succeed, fail, then auto-reset — no manual toggle needed.
         store.put("nth2.bin", Bytes::from("x")).await.unwrap();
         assert!(store.get("nth2.bin").await.is_ok(), "call 1");
         assert!(store.get("nth2.bin").await.is_ok(), "call 2");
         assert!(store.get("nth2.bin").await.is_err(), "call 3 (fail)");
-
-        // After the nth failure, fail_get is still true — turn it off
-        store.set_fail_get(false);
-        assert!(store.get("nth2.bin").await.is_ok(), "call 4 (after reset)");
+        assert!(store.get("nth2.bin").await.is_ok(), "call 4 (auto-reset)");
     }
 
     #[tokio::test]

@@ -288,9 +288,23 @@ pub fn write_manifest_file(
         encode_union_null(&mut rec); // nan_value_counts — Parquet stats don't track NaN counts
         encode_int_bytes_map(&stats, |s| s.lower_bound_b64.as_deref(), &mut rec); // lower_bounds
         encode_int_bytes_map(&stats, |s| s.upper_bound_b64.as_deref(), &mut rec); // upper_bounds
+                                                                                  // serde_json silently encodes NaN/Infinity as JSON `null`, which decodes back to
+                                                                                  // `None` on the next read — round-trips as data loss with no error. Drop it
+                                                                                  // explicitly and log instead, so it's visible rather than silent.
+        let radius = f.radius.filter(|r| {
+            if r.is_finite() {
+                true
+            } else {
+                tracing::warn!(
+                    "dropping non-finite radius ({r}) for {}: cannot round-trip through JSON key_metadata",
+                    f.path
+                );
+                false
+            }
+        });
         let ext = AilakeEntryExt {
             centroid_b64: f.centroid_b64.clone(),
-            radius: f.radius,
+            radius,
             hnsw_offset: f.hnsw_offset,
             hnsw_len: f.hnsw_len,
             vector_column: f.vector_column.clone(),
@@ -1792,7 +1806,13 @@ mod tests {
             assert_eq!(a.record_count, b.record_count);
             assert_eq!(a.file_size_bytes, b.file_size_bytes);
             assert_eq!(a.centroid_b64, b.centroid_b64);
-            assert_eq!(a.radius, b.radius);
+            // Non-finite radius can't round-trip through JSON key_metadata (serde_json
+            // encodes it as `null`) — write_manifest_file drops it explicitly instead of
+            // letting that happen silently, so it comes back as `None`, not the original.
+            match a.radius {
+                Some(r) if !r.is_finite() => assert_eq!(b.radius, None),
+                _ => assert_eq!(a.radius, b.radius),
+            }
             assert_eq!(a.hnsw_offset, b.hnsw_offset);
             assert_eq!(a.hnsw_len, b.hnsw_len);
             assert_eq!(a.vector_column, b.vector_column);
@@ -1874,10 +1894,9 @@ mod tests {
                 0u64..10_000,
                 0u64..1_000_000,
                 proptest::option::of("[A-Za-z0-9+/=]{10,100}"),
-                proptest::option::of(
-                    proptest::num::f32::ANY
-                        .prop_filter("NaN not allowed in radius", |v| v.is_finite()),
-                ),
+                // Includes NaN/Infinity deliberately — assert_entry_eq documents and
+                // exercises the intentional non-finite-radius-drops-to-None behavior.
+                proptest::option::of(proptest::num::f32::ANY),
                 proptest::option::of(0u64..10_000_000),
                 proptest::option::of(0u64..5_000_000),
                 proptest::option::of("[a-zA-Z_][a-zA-Z0-9_]{2,15}"),

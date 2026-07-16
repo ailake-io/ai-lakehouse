@@ -42,6 +42,10 @@ rand         = { workspace = true }
 serde_json   = { workspace = true }
 async-trait  = { workspace = true }
 proptest     = { workspace = true }
+# Enables ailake_store::fail_store::FailStore (test-only) for scanner.rs fuzz_tests,
+# without shipping it in release builds of ailake-query itself (see ailake-store's
+# `test-utils` feature).
+ailake-store = { path = "../ailake-store", version = "0.1.6", features = ["test-utils"] }
 
 [[example]]
 name = "demo"

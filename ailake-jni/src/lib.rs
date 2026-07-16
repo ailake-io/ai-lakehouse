@@ -284,6 +284,12 @@ fn assemble_context(chunk_jsons: Vec<String>, max_tokens: u64) -> String {
 
 // ── C-ABI exports (JNA bridge for Trino / Spark / Flink plugins) ─────────────
 
+/// Upper bound on `top_k` accepted at the C-ABI boundary. `top_k` flows into
+/// `ef.max(top_k)` and then `BinaryHeap::with_capacity(ef * 2)` in the HNSW search —
+/// an unvalidated `u32::MAX` there triggers a multi-GB allocation whose failure
+/// aborts the process (not catchable by `catch_ffi_panic`'s `catch_unwind`).
+const MAX_TOP_K: u32 = 100_000;
+
 fn cstr_empty_json() -> *mut c_char {
     CString::new("[]").unwrap().into_raw()
 }
@@ -375,6 +381,11 @@ pub unsafe extern "C" fn ailake_vector_search_json(
         if query_len > 65_536 {
             return cstr_err_json(format!(
                 "query_len {query_len} exceeds maximum supported dimension (65536)"
+            ));
+        }
+        if top_k > MAX_TOP_K {
+            return cstr_err_json(format!(
+                "top_k {top_k} exceeds maximum supported value ({MAX_TOP_K})"
             ));
         }
         let uri = match unsafe { CStr::from_ptr(table_uri) }.to_str() {
@@ -500,6 +511,12 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
                 return cstr_err_json(e);
             }
         };
+        if req.top_k > MAX_TOP_K {
+            return cstr_err_json(format!(
+                "top_k {} exceeds maximum supported value ({MAX_TOP_K})",
+                req.top_k
+            ));
+        }
 
         debug!(
             "ailake_search_json: warehouse={} table={}.{} dim={} top_k={}",
@@ -1535,6 +1552,12 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
                 return cstr_err_json(e);
             }
         };
+        if req.top_k > MAX_TOP_K {
+            return cstr_err_json(format!(
+                "top_k {} exceeds maximum supported value ({MAX_TOP_K})",
+                req.top_k
+            ));
+        }
 
         debug!(
             "ailake_search_text_json: warehouse={} table={}.{} query={:?} top_k={}",
@@ -1678,6 +1701,12 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
         };
         if req.queries.is_empty() {
             return cstr_err_json("queries array must not be empty");
+        }
+        if req.top_k > MAX_TOP_K {
+            return cstr_err_json(format!(
+                "top_k {} exceeds maximum supported value ({MAX_TOP_K})",
+                req.top_k
+            ));
         }
 
         let table = TableIdent::new(&req.namespace, &req.table);
@@ -2054,6 +2083,12 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
                 return cstr_err_json(e);
             }
         };
+        if req.top_k > MAX_TOP_K {
+            return cstr_err_json(format!(
+                "top_k {} exceeds maximum supported value ({MAX_TOP_K})",
+                req.top_k
+            ));
+        }
 
         debug!(
             "ailake_scan_json: warehouse={} table={}.{} dim={} top_k={}",
@@ -3225,6 +3260,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn top_k_over_limit_rejected_not_aborted() {
+        // top_k = u32::MAX used to flow unchecked into `BinaryHeap::with_capacity(ef*2)`
+        // in the HNSW search, whose alloc failure aborts the process — not a panic
+        // catch_ffi_panic can catch. Both the legacy pointer API and the JSON-envelope
+        // API must reject it up front with an error, never reach that allocation.
+        let c_uri = CString::new("/tmp/does-not-matter").unwrap();
+        let query = [0.0f32; 4];
+        let ptr = unsafe { ailake_vector_search_json(c_uri.as_ptr(), query.as_ptr(), 4, u32::MAX) };
+        assert!(!ptr.is_null());
+        let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+        unsafe { ailake_free_string(ptr) };
+        assert!(s.contains("top_k") && s.contains("exceeds"), "got: {s}");
+
+        let req = serde_json::json!({
+            "warehouse": "/tmp/does-not-matter",
+            "namespace": "default",
+            "table": "docs",
+            "vec_col": "embedding",
+            "dim": 4,
+            "query": [0.0, 0.0, 0.0, 0.0],
+            "top_k": u32::MAX,
+        })
+        .to_string();
+        let c_req = CString::new(req).unwrap();
+        let ptr = unsafe { ailake_search_json(c_req.as_ptr()) };
+        assert!(!ptr.is_null());
+        let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+        unsafe { ailake_free_string(ptr) };
+        assert!(s.contains("top_k") && s.contains("exceeds"), "got: {s}");
+    }
+
     // ── 3. IPC API: random byte buffers ───────────────────────────
     //
     // ailake_write_batch_ipc takes raw bytes + i64 length + opts JSON.
@@ -3334,8 +3401,7 @@ mod tests {
         fn miri_cstr_from_ptr_valid() {
             let s = CString::new(r#"{"ok":true}"#).unwrap();
             let cstr = unsafe { CStr::from_ptr(s.as_ptr()) };
-            let parsed: serde_json::Value =
-                serde_json::from_str(cstr.to_str().unwrap()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(cstr.to_str().unwrap()).unwrap();
             assert!(parsed["ok"] == serde_json::Value::Bool(true));
         }
 

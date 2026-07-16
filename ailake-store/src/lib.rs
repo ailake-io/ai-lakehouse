@@ -27,6 +27,7 @@
 //! }, "warehouse/my_table/")?;
 //! ```
 
+#[cfg(any(test, feature = "test-utils"))]
 pub mod fail_store;
 pub mod from_url;
 pub mod local;
