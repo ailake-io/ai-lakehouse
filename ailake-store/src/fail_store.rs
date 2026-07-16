@@ -58,9 +58,11 @@ impl FailStore {
 
     pub fn with_fail_get(self, fail: bool) -> Self {
         self.fail_get.store(fail, Ordering::Release);
-        if !fail {
-            *self.fail_get_nth.lock().unwrap() = None;
-        }
+        // with_fail_get_nth is the only API that should populate the nth counter — always
+        // clear it here so a leftover Some(n) from an earlier with_fail_get_nth call can't
+        // combine with a later with_fail_get(true)/with_fail_all(true) and silently let
+        // should_fail_get's nth-consumption auto-reset turn fail_get back off early.
+        *self.fail_get_nth.lock().unwrap() = None;
         self
     }
 
@@ -315,6 +317,25 @@ mod tests {
         assert!(store.file_size("x.bin").await.is_err());
         assert!(store.exists("x.bin").await.is_err());
         assert!(store.delete("x.bin").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fail_all_after_get_nth_ignores_leftover_counter() {
+        // with_fail_get_nth(2) leaves an nth counter behind; with_fail_all(true) called
+        // after it must still make every get() call fail, not just the 2nd (should_fail_get's
+        // nth-consumption auto-reset would otherwise silently turn fail_get back off after
+        // the 2nd call, defeating fail_all's "everything fails" contract).
+        let dir = TempDir::new().unwrap();
+        let inner = LocalStore::new(dir.path());
+        let store = FailStore::new(inner)
+            .with_fail_get_nth(2)
+            .with_fail_all(true);
+        assert!(store.get("x.bin").await.is_err(), "call 1");
+        assert!(store.get("x.bin").await.is_err(), "call 2");
+        assert!(
+            store.get("x.bin").await.is_err(),
+            "call 3 — fail_all must still hold"
+        );
     }
 
     #[tokio::test]

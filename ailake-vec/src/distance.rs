@@ -181,23 +181,34 @@ pub fn normalized_cosine_distance_f16(a: &[f32], b: &[f16]) -> f32 {
 }
 
 pub fn compute_centroid_and_radius(vectors: &[Vec<f32>], metric: VectorMetric) -> Centroid {
-    if vectors.is_empty() {
+    // Exclude non-finite vectors up front — a single NaN/Infinity-poisoned embedding
+    // would otherwise poison the shared centroid's sum/n average for every dimension,
+    // silently corrupting the geometric bound for every OTHER, healthy vector in the
+    // file too (radius would collapse toward 0.0 once nearly every distance to the
+    // poisoned centroid comes out non-finite and gets filtered below).
+    let finite: Vec<&Vec<f32>> = vectors
+        .iter()
+        .filter(|v| v.iter().all(|x| x.is_finite()))
+        .collect();
+    if finite.is_empty() {
         return Centroid {
             values: vec![],
             radius: 0.0,
             metric,
         };
     }
-    let dim = vectors[0].len();
-    let n = vectors.len() as f32;
+    let dim = finite[0].len();
+    let n = finite.len() as f32;
     let centroid: Vec<f32> = (0..dim)
-        .map(|i| vectors.iter().map(|v| v[i]).sum::<f32>() / n)
+        .map(|i| finite.iter().map(|v| v[i]).sum::<f32>() / n)
         .collect();
-    // Exclude non-finite per-vector distances (e.g. from a NaN/Infinity-poisoned
-    // embedding) rather than letting one corrupted vector produce a non-finite
-    // radius for the whole file — a non-finite radius can't round-trip through
-    // the manifest's JSON-encoded key_metadata (serde_json serializes it as `null`).
-    let radius = vectors
+    // Exclude non-finite per-vector distances (e.g. from numeric overflow in the
+    // distance computation itself) rather than letting one such value produce a
+    // non-finite radius for the whole file — a non-finite radius can't round-trip
+    // through the manifest's JSON-encoded key_metadata (serde_json serializes it as
+    // `null`). With the centroid and inputs already finite, this is now a rare
+    // defensive fallback rather than the primary guard.
+    let radius = finite
         .iter()
         .map(|v| exact_distance(metric, &centroid, v))
         .filter(|d| d.is_finite())
@@ -1056,6 +1067,26 @@ mod tests {
         let c = compute_centroid_and_radius(&vs, VectorMetric::Euclidean);
         assert!((c.values[0] - 1.0).abs() < 1e-6);
         assert!(c.radius > 0.0);
+    }
+
+    #[test]
+    fn centroid_excludes_nan_poisoned_vector_instead_of_collapsing_radius() {
+        // One NaN-poisoned embedding mixed in with healthy vectors clustered around
+        // (10, 10) — before the fix, the poisoned vector alone corrupted every dimension
+        // of the shared centroid average, driving nearly every distance non-finite and
+        // radius silently to 0.0. The centroid/radius should now reflect only the
+        // healthy vectors.
+        let vs = vec![
+            vec![10.0f32, 10.0],
+            vec![11.0f32, 9.0],
+            vec![9.0f32, 11.0],
+            vec![f32::NAN, 10.0],
+        ];
+        let c = compute_centroid_and_radius(&vs, VectorMetric::Euclidean);
+        assert!(c.values.iter().all(|x| x.is_finite()), "{:?}", c.values);
+        assert!((c.values[0] - 10.0).abs() < 1e-6, "{:?}", c.values);
+        assert!((c.values[1] - 10.0).abs() < 1e-6, "{:?}", c.values);
+        assert!(c.radius > 0.5, "radius collapsed to {}", c.radius);
     }
 
     // ── Edge cases: NaN, Inf, zero vectors ───────────────────────────────

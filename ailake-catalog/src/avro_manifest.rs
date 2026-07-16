@@ -235,6 +235,22 @@ fn encode_int_bytes_map(
     encode_long(0, rec); // array end marker
 }
 
+/// serde_json silently encodes NaN/Infinity as JSON `null`, which decodes back to
+/// `None` on the next read — round-trips as data loss with no error. Drop it
+/// explicitly and log instead, so it's visible rather than silent.
+fn sanitize_radius(radius: Option<f32>, context: &str) -> Option<f32> {
+    radius.filter(|r| {
+        if r.is_finite() {
+            true
+        } else {
+            tracing::warn!(
+                "dropping non-finite radius ({r}) for {context}: cannot round-trip through JSON key_metadata"
+            );
+            false
+        }
+    })
+}
+
 pub fn write_manifest_file(
     files: &[DataFileEntry],
     snapshot_id: SnapshotId,
@@ -288,20 +304,16 @@ pub fn write_manifest_file(
         encode_union_null(&mut rec); // nan_value_counts — Parquet stats don't track NaN counts
         encode_int_bytes_map(&stats, |s| s.lower_bound_b64.as_deref(), &mut rec); // lower_bounds
         encode_int_bytes_map(&stats, |s| s.upper_bound_b64.as_deref(), &mut rec); // upper_bounds
-                                                                                  // serde_json silently encodes NaN/Infinity as JSON `null`, which decodes back to
-                                                                                  // `None` on the next read — round-trips as data loss with no error. Drop it
-                                                                                  // explicitly and log instead, so it's visible rather than silent.
-        let radius = f.radius.filter(|r| {
-            if r.is_finite() {
-                true
-            } else {
-                tracing::warn!(
-                    "dropping non-finite radius ({r}) for {}: cannot round-trip through JSON key_metadata",
-                    f.path
-                );
-                false
-            }
-        });
+        let radius = sanitize_radius(f.radius, &f.path);
+        let extra_vector_indexes: Vec<crate::provider::ExtraVectorIndex> = f
+            .extra_vector_indexes
+            .iter()
+            .map(|idx| {
+                let mut idx = idx.clone();
+                idx.radius = sanitize_radius(idx.radius, &format!("{} col={}", f.path, idx.column));
+                idx
+            })
+            .collect();
         let ext = AilakeEntryExt {
             centroid_b64: f.centroid_b64.clone(),
             radius,
@@ -309,7 +321,7 @@ pub fn write_manifest_file(
             hnsw_len: f.hnsw_len,
             vector_column: f.vector_column.clone(),
             vector_dim: f.vector_dim,
-            extra_vector_indexes: f.extra_vector_indexes.clone(),
+            extra_vector_indexes,
             index_status: f.index_status.clone(),
             index_error: f.index_error.clone(),
             batch_id: f.batch_id.clone(),
@@ -1196,6 +1208,63 @@ mod tests {
         assert_eq!(entries[0].path, "data/part-0.parquet");
         assert_eq!(entries[0].record_count, 5);
         assert_eq!(entries[0].hnsw_offset, Some(100));
+    }
+
+    #[test]
+    fn extra_vector_index_non_finite_radius_dropped_not_corrupted() {
+        let file = DataFileEntry {
+            path: "data/part-multi.parquet".to_string(),
+            record_count: 5,
+            file_size_bytes: 1024,
+            centroid_b64: None,
+            radius: Some(0.1),
+            hnsw_offset: Some(100),
+            hnsw_len: Some(50),
+            vector_column: Some("emb".to_string()),
+            vector_dim: Some(4),
+            extra_vector_indexes: vec![
+                crate::provider::ExtraVectorIndex {
+                    column: "image_emb".to_string(),
+                    dim: 512,
+                    hnsw_offset: 200,
+                    hnsw_len: 60,
+                    centroid_b64: None,
+                    radius: Some(f32::NAN),
+                },
+                crate::provider::ExtraVectorIndex {
+                    column: "audio_emb".to_string(),
+                    dim: 256,
+                    hnsw_offset: 300,
+                    hnsw_len: 40,
+                    centroid_b64: None,
+                    radius: Some(0.5),
+                },
+            ],
+            index_status: IndexStatus::Ready,
+            index_error: None,
+            batch_id: None,
+            embedding_model: None,
+            partition_value: None,
+            deletion_vector: None,
+            first_row_id: None,
+            column_stats: None,
+        };
+        let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
+        let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
+        let bytes = write_manifest_file(&[file], 99, 1, schema_json, partition_spec, 2, None);
+        let entries = read_manifest_file(&bytes).expect("read_manifest_file failed");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].radius, Some(0.1), "top-level radius unaffected");
+        assert_eq!(entries[0].extra_vector_indexes.len(), 2);
+        assert_eq!(
+            entries[0].extra_vector_indexes[0].radius, None,
+            "NaN radius on a secondary vector column must be dropped, not silently corrupted"
+        );
+        assert_eq!(
+            entries[0].extra_vector_indexes[1].radius,
+            Some(0.5),
+            "healthy secondary-column radius unaffected"
+        );
     }
 
     #[test]

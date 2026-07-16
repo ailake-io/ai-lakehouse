@@ -112,7 +112,17 @@ impl HnswSerializer {
                     snap.node_levels.len()
                 )));
             }
-            for per_node in &snap.neighbors {
+            // HnswBuilder always pushes `vec![Vec::new(); l + 1]` for a node at level `l`
+            // (hnsw.rs), so this must hold exactly — a mismatch means a layer index derived
+            // from node_levels would index out of bounds into neighbors[i] during search.
+            for (i, per_node) in snap.neighbors.iter().enumerate() {
+                if per_node.len() != snap.node_levels[i] + 1 {
+                    return Err(AilakeError::Bincode(format!(
+                        "corrupt HNSW graph: node {i} has node_levels={} but neighbors[{i}].len()={}",
+                        snap.node_levels[i],
+                        per_node.len()
+                    )));
+                }
                 for per_layer in per_node {
                     for &nb in per_layer {
                         if nb >= n {
@@ -123,6 +133,22 @@ impl HnswSerializer {
                     }
                 }
             }
+            // max_layer must equal the highest level any node was actually built at
+            // (HnswBuilder only ever raises it to `l` when inserting a node at level `l`,
+            // hnsw.rs). An inflated max_layer drives `for lc in (1..=self.max_layer).rev()`
+            // in the search hot path into an effectively unbounded loop.
+            let max_node_level = snap.node_levels.iter().copied().max().unwrap_or(0);
+            if snap.max_layer != max_node_level {
+                return Err(AilakeError::Bincode(format!(
+                    "corrupt HNSW graph: max_layer={} != max(node_levels)={max_node_level}",
+                    snap.max_layer
+                )));
+            }
+        } else if snap.max_layer != 0 {
+            return Err(AilakeError::Bincode(format!(
+                "corrupt HNSW graph: max_layer={} but neighbors is empty (old format)",
+                snap.max_layer
+            )));
         }
         let expected_flat_len = n * snap.dim as usize;
         if snap.flat_vecs.len() != expected_flat_len {
@@ -199,6 +225,56 @@ mod tests {
         let bytes = bincode::serialize(&snap).unwrap();
         let err = HnswSerializer::from_bytes(&bytes).err().unwrap();
         assert!(err.to_string().contains("out of bounds"), "{err}");
+    }
+
+    #[test]
+    fn from_bytes_rejects_inflated_max_layer() {
+        // Structurally consistent otherwise (bounds/lengths all check out), but max_layer
+        // claims a level far above what node_levels actually reaches. Uncaught, this drives
+        // `for lc in (1..=self.max_layer).rev()` in the search hot path into an effectively
+        // unbounded loop — a DoS via a single crafted/corrupted graph.
+        let snap = HnswSnapshot {
+            m: 16,
+            ef_construction: 150,
+            max_elements: 100,
+            metric: metric_to_u8(VectorMetric::Cosine),
+            dim: 3,
+            row_ids: vec![0, 1],
+            flat_vecs: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            neighbors: vec![vec![vec![]], vec![vec![]]],
+            node_levels: vec![0, 0],
+            entry_point: Some(0),
+            max_layer: 1_000_000,
+        };
+        let bytes = bincode::serialize(&snap).unwrap();
+        let err = HnswSerializer::from_bytes(&bytes).err().unwrap();
+        assert!(err.to_string().contains("max_layer"), "{err}");
+    }
+
+    #[test]
+    fn from_bytes_rejects_node_levels_neighbors_mismatch() {
+        // node 0 claims level 5 (so a query could traverse layers 1..=5 for it) but only has
+        // a single per-layer neighbor list (layer 0) — HnswBuilder never produces this
+        // shape (neighbors[i].len() == node_levels[i] + 1 always), so this is corrupt/
+        // malicious input. Uncaught, `neighbors[c.idx][layer]` in search_layer indexes out
+        // of bounds and panics the first time a query traverses through this node above
+        // layer 0.
+        let snap = HnswSnapshot {
+            m: 16,
+            ef_construction: 150,
+            max_elements: 100,
+            metric: metric_to_u8(VectorMetric::Cosine),
+            dim: 3,
+            row_ids: vec![0, 1],
+            flat_vecs: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            neighbors: vec![vec![vec![]], vec![vec![]]],
+            node_levels: vec![5, 0],
+            entry_point: Some(0),
+            max_layer: 5,
+        };
+        let bytes = bincode::serialize(&snap).unwrap();
+        let err = HnswSerializer::from_bytes(&bytes).err().unwrap();
+        assert!(err.to_string().contains("node_levels"), "{err}");
     }
 
     #[test]
