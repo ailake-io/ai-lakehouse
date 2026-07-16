@@ -1,0 +1,71 @@
+[package]
+name = "ailake-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes         = "1"
+
+ailake-core    = { path = "../ailake-core" }
+ailake-file    = { path = "../ailake-file" }
+ailake-catalog = { path = "../ailake-catalog" }
+ailake-index   = { path = "../ailake-index" }
+ailake-parquet = { path = "../ailake-parquet" }
+ailake-fts     = { path = "../ailake-fts" }
+ailake-jni     = { path = "../ailake-jni" }
+
+[[bin]]
+name = "fuzz_ailake_header"
+path = "fuzz_targets/fuzz_ailake_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ailake_file_reader"
+path = "fuzz_targets/fuzz_ailake_file_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_avro_manifest"
+path = "fuzz_targets/fuzz_avro_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bincode_hnsw"
+path = "fuzz_targets/fuzz_bincode_hnsw.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parquet_reader"
+path = "fuzz_targets/fuzz_parquet_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_fts_blob"
+path = "fuzz_targets/fuzz_fts_blob.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_json_apis"
+path = "fuzz_targets/fuzz_json_apis.rs"
+test = false
+doc = false
+bench = false
