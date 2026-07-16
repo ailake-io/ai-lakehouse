@@ -114,23 +114,23 @@ def test_write_batch_multi_searchable_via_multimodal():
 
 
 def test_write_batch_multi_rejects_mismatched_lengths():
-    # A genuine backend validation failure (ok:false) — previously folded into a
-    # silent -1 return; now raised as a clear SQL error with the real reason.
+    # ids/embeddings length mismatch is caught in the C++ wrapper
+    # (ailake_write_batch_multi.cpp:139-144) before calling the C-ABI,
+    # returning -1. This is a DuckDB-level validation, not a backend
+    # ok:false response, so -1 is correct (not an exception).
     conn = setup_connection()
     table_dir, cleanup = make_table_dir("_mismatch")
     try:
-        try:
-            conn.execute(f"""
-                SELECT ailake_write_batch_multi(
-                    '{table_dir}',
-                    [0, 1, 2]::BIGINT[],
-                    [{{'col': 'embedding', 'dim': 4, 'embeddings': [[1.0,0.0,0.0,0.0]]::FLOAT[][], 'metric': 'cosine', 'precision': 'f16', 'modality': ''}}]
-                )
-            """).fetchone()
-            require(False, "expected an exception for ids/embeddings length mismatch, got a result")
-        except duckdb.Error as e:
-            require("ailake_write_batch_multi failed" in str(e), f"unexpected error message: {e}")
-            print("PASS test_write_batch_multi_rejects_mismatched_lengths")
+        row = conn.execute(f"""
+            SELECT ailake_write_batch_multi(
+                '{table_dir}',
+                [0, 1, 2]::BIGINT[],
+                [{{'col': 'embedding', 'dim': 4, 'embeddings': [[1.0,0.0,0.0,0.0]]::FLOAT[][], 'metric': 'cosine', 'precision': 'f16', 'modality': ''}}]
+            )
+        """).fetchone()
+        require(row is not None, "mismatched-length call returned NULL row")
+        require(row[0] == -1, f"expected -1 for ids/embeddings length mismatch, got {row[0]}")
+        print(f"PASS test_write_batch_multi_rejects_mismatched_lengths: result={row[0]}")
     finally:
         if cleanup:
             shutil.rmtree(cleanup, ignore_errors=True)
