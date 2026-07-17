@@ -16,8 +16,54 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  wait-for-ci:
+    name: Wait for CI checks to pass
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      checks: read
+      actions: read
+    steps:
+      - name: Poll check-runs for this commit until everything else is green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA="${{ github.sha }}"
+          REPO="${{ github.repository }}"
+          # Excludes this workflow's own job names — Release always reports pending/
+          # in-progress for itself, which would deadlock the wait otherwise.
+          SELF_JOBS='^(Wait for CI checks to pass|Create GitHub Release|Sync version bump to develop|Publish to crates\.io|Build and upload JVM plugin JARs)$'
+
+          echo "Waiting for all other check-runs on $SHA to complete successfully..."
+          for i in $(seq 1 90); do
+            runs_json=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate -q '.check_runs')
+            others=$(echo "$runs_json" | jq --arg self "$SELF_JOBS" '[.[] | select(.name | test($self) | not)]')
+            total=$(echo "$others" | jq 'length')
+            pending=$(echo "$others" | jq '[.[] | select(.status != "completed")] | length')
+            failed=$(echo "$others" | jq '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "action_required")]')
+            failed_count=$(echo "$failed" | jq 'length')
+
+            if [ "$failed_count" -gt 0 ]; then
+              echo "::error::One or more required checks failed for $SHA:"
+              echo "$failed" | jq -r '.[] | "  - \(.name): \(.conclusion)"'
+              exit 1
+            fi
+
+            if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+              echo "All $total required check(s) completed successfully."
+              exit 0
+            fi
+
+            echo "  [$((i * 20))s] $pending/$total check(s) still pending (or none reported yet)..."
+            sleep 20
+          done
+          echo "::error::Timed out after 30 minutes waiting for CI checks to complete on $SHA."
+          exit 1
+
   release:
     name: Create GitHub Release
+    needs: wait-for-ci
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
