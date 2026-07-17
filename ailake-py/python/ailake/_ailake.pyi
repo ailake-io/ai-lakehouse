@@ -697,6 +697,29 @@ def backfill_vector_column(
     """
     ...
 
+def create_table(
+    path: str,
+    dim: int,
+    vector_column: str = "embedding",
+    metric: str = "cosine",
+    precision: str = "f16",
+    format_version: int = 2,
+    hnsw_m: int | None = None,
+    hnsw_ef_construction: int | None = None,
+    pre_normalize: bool = False,
+    modality: str = "",
+    partition_by: str = "",
+    partition_value: str = "",
+    partition_column_type: str = "",
+    partition_fields_json: str = "",
+    fts_columns: str = "",
+    fts_tokenizer: str = "",
+    embedding_model: str = "",
+    namespace: str = "default",
+    table_name: str = "table",
+    catalog_opts: Optional[dict[str, str]] = None,
+) -> bool: ...
+
 def compact(
     path: str,
     min_files: int = 4,
