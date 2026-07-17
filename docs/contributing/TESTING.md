@@ -696,6 +696,21 @@ Fails the step with a descriptive error if cargo is not found. Adding the found 
 | `miri` | `cargo miri test -p ailake-vec -p ailake-index -p ailake-jni -- miri_` | Miri (nightly): detects UB in `get_unchecked_mut` (visited tracker), scalar SIMD fallback paths, CStr FFI boundary. Each crate's `#[cfg(miri)]` tests exercise edge cases (zero vectors, dimension mismatch, null-terminated strings). |
 | `loom` | `cargo test --features loom -p ailake-query -- loom_` | Loom (stable): explores all thread interleavings for JNI table-lock pattern, once-init flag, and `AtomicU32` batch counter. Limited to 2 threads / `LOOM_MAX_BRANCHES=10000` for bounded model checking. |
 
+### `fuzz.yml` — weekly schedule + push on fuzz-relevant paths (`workflow_dispatch`)
+
+7 `cargo-fuzz` targets under `fuzz/fuzz_targets/` (`fuzz_ailake_header`, `fuzz_ailake_file_reader`, `fuzz_avro_manifest`, `fuzz_bincode_hnsw`, `fuzz_fts_blob`, `fuzz_json_apis`, `fuzz_parquet_reader`), covering untrusted-input parsing at the AILK header, Avro manifest, bincode HNSW graph, FTS blob, JNI JSON request, and Parquet reader boundaries.
+
+| Job | Command | What it covers |
+|---|---|---|
+| `build` | `cargo +nightly fuzz build` | Compiles all 7 fuzz targets — catches build breakage on every push touching a fuzzed crate. |
+| `smoke` | `cargo +nightly fuzz run <target> -- -runs=1000` | Runs `fuzz_ailake_header`, `fuzz_avro_manifest`, `fuzz_fts_blob` for 1000 iterations each on every PR/push; full corpus fuzzing runs on the weekly schedule via `.oss-fuzz` integration. |
+
+### `audit.yml` — weekly schedule + push/PR on dependency-relevant paths (`workflow_dispatch`)
+
+| Job | Command | What it covers |
+|---|---|---|
+| `audit` | `cargo audit` | Weekly scan of `Cargo.lock` against the RustSec advisory database; also runs on any push/PR touching `Cargo.toml`/`Cargo.lock`/`deny.toml`. Complements `cargo deny check licenses advisories sources` (point-in-time, run in `ci.yml`) with a scheduled recheck that catches newly-disclosed advisories against an unchanged lockfile. |
+
 ### `compat-heavy.yml` — manual dispatch (`workflow_dispatch`)
 
 | Job | What it covers |

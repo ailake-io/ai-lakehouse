@@ -296,6 +296,48 @@ SELECT ailake_write_batch_multi(
 );
 ```
 
+### `ailake_create_table` — create an empty table
+
+```sql
+SELECT ailake_create_table(
+    table_path            VARCHAR,   -- table root path/URI
+    dim                   INTEGER,   -- vector dimension
+    -- named or positional (optional), in order:
+    vector_column          VARCHAR,  -- default 'embedding'
+    metric                 VARCHAR,  -- default 'cosine'
+    precision              VARCHAR,  -- default 'f16'
+    format_version         INTEGER,  -- default 2 (2 or 3)
+    hnsw_m                 INTEGER,  -- default -1 (use native default)
+    hnsw_ef_construction   INTEGER,  -- default -1 (use native default)
+    pre_normalize          BOOLEAN,  -- default false
+    modality               VARCHAR,  -- default ''
+    partition_by           VARCHAR,  -- default ''
+    partition_value        VARCHAR,  -- default ''
+    partition_column_type  VARCHAR,  -- default ''
+    partition_fields_json  VARCHAR,  -- default ''
+    fts_columns            VARCHAR,  -- default ''
+    fts_tokenizer          VARCHAR,  -- default ''
+    embedding_model        VARCHAR,  -- default ''
+    namespace               VARCHAR, -- default 'default'
+    table_name               VARCHAR -- default 'table'
+) → BOOLEAN  -- TRUE on success, FALSE on any error or if the lib isn't loaded
+```
+
+Creates an empty AI-Lake/Iceberg table (schema/policy only, no data files) — useful
+when a table needs to exist and be searchable (returning zero rows) before any
+embeddings are ready. Backed by `ailake_create_table_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_create_table('file:///data/my_table', 1536);
+
+SELECT ailake_create_table(
+    'file:///data/my_table', 768,
+    vector_column := 'image_embedding', metric := 'euclidean'
+);
+```
+
 ### `ailake_delete_where` — logical delete
 
 ```sql
@@ -448,10 +490,16 @@ D SELECT * FROM ailake_search('file:///data/docs', [0.1, 0.2]::FLOAT[], 5);
 
 ## Design
 
-- C-ABI bridge: `dlopen("libailake_jni.so")` → `ailake_search_json` / `ailake_scan_json` / `ailake_search_multimodal_json` / `ailake_search_text_json` / `ailake_write_batch_json` / `ailake_write_batch_multi_json` / `ailake_delete_where_json` / `ailake_evolve_schema_json` / `ailake_compact_json`
+- C-ABI bridge: `dlopen("libailake_jni.so")` → `ailake_search_json` / `ailake_scan_json` / `ailake_search_multimodal_json` / `ailake_search_text_json` / `ailake_write_batch_json` / `ailake_write_batch_multi_json` / `ailake_delete_where_json` / `ailake_evolve_schema_json` / `ailake_compact_json` / `ailake_create_table_json`
 - Same JSON-envelope protocol as Spark (`AilakeNative.scala`) and Trino (`AilakeNative.kt`)
 - `ailake_search` executes the full search (pruning + HNSW) inside Rust; DuckDB sees a virtual table
 - Graceful degradation: if `libailake_jni.so` is not found, search returns 0 rows instead of aborting
+- **Error surfacing**: a real backend rejection (e.g. `top_k` above `ailake_core::MAX_TOP_K`
+  (100,000), or a `NaN`/`Infinity` embedding value passed to `ailake_write_batch*`) throws
+  `duckdb::InvalidInputException` with the real error message — `ailake_search`/`ailake_scan`/
+  `ailake_write_batch`/`ailake_write_batch_multi`/`ailake_evolve_schema`/`ailake_compact` no
+  longer fold a genuine error into the same empty-result/`-1`/`FALSE` return used for benign
+  "no matches"/no-op outcomes.
 
 ## Comparison with Spark and Trino plugins
 

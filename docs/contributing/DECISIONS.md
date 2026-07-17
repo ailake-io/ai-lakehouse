@@ -50,7 +50,7 @@ Decisions are numbered and immutable once merged. To change a decision, add a ne
 ## ADR-003: `hnsw_rs` for HNSW indexing
 
 **Date**: 2024-08  
-**Status**: Accepted (supersedes earlier proposal of usearch)  
+**Status**: Superseded — `ailake-index` never actually depended on the `hnsw_rs` crate in practice. From the very first Phase 1 commit, `ailake-index/src/hnsw.rs` implemented HNSW directly in-crate (only a comment aspired to "replace with hnsw_rs" — that swap never happened); `ailake-index/Cargo.toml` has never listed `hnsw_rs` as a dependency. The workspace-root `Cargo.toml` carried an unused `hnsw_rs = "0.3"` line for a long time regardless, cleaned up in a later "remove dead config" commit. The rationale below (pure Rust, no C++ toolchain, native Serde/bincode serialization, no FFI adapter) still holds — it just describes the in-house implementation's actual properties rather than the external crate's. See "Por que HNSW próprio" in `CLAUDE.md` §11 for the current, accurate version of this decision.
 
 **Context**: HNSW is the standard algorithm for approximate nearest neighbor search. The main Rust-accessible implementations are Faiss (C++ via FFI), usearch (C++ with Rust bindings), and hnsw_rs (pure Rust).
 
@@ -66,7 +66,7 @@ Decisions are numbered and immutable once merged. To change a decision, add a ne
 **Rejected alternatives**:
 - Faiss via C FFI: would require `libfaiss.so` as a runtime dependency, complicating distribution. Cross-compilation becomes a non-trivial build engineering project.
 - usearch: hybrid C++/Rust, still requires C++ toolchain in some configurations.
-- Building HNSW from scratch: months of work; correctness hard to validate against ANN benchmarks.
+- Building HNSW from scratch: months of work; correctness hard to validate against ANN benchmarks. (In practice this is what shipped — see Status above.)
 
 ---
 
@@ -82,7 +82,7 @@ Decisions are numbered and immutable once merged. To change a decision, add a ne
 **Consequences**:
 - 50% storage reduction with < 0.1% recall@10 degradation for tested models (text-embedding-3-small, nomic-embed-text).
 - F16 requires `half` crate for Rust and is not natively understood by all Parquet readers. The Parquet column stores F16 bytes, which readers treat as opaque.
-- hnsw_rs operates on F32 — F16 vectors are expanded to F32 when feeding the HNSW builder and at search time. The HNSW graph itself stores the F32 representation it was built with. This is acceptable: the HNSW graph is 10-20× smaller than raw vectors.
+- `ailake-index`'s HNSW builder operates on F32 — F16 vectors are expanded to F32 when feeding the HNSW builder and at search time. The HNSW graph itself stores the F32 representation it was built with. This is acceptable: the HNSW graph is 10-20× smaller than raw vectors.
 
 **Rejected alternatives**:
 - F32 default: too expensive at scale; makes the format uncompetitive with purpose-built vector DBs.
@@ -137,7 +137,7 @@ The single-file design unifies dimensional data, vectors, and the HNSW index int
 
 **Rejected alternatives**:
 - Load full HNSW into RAM via `Vec<u8>`: simpler but wasteful for cold indexes.
-- Stream HNSW from S3 directly: hnsw_rs requires random access; streaming is not viable.
+- Stream HNSW from S3 directly: the HNSW graph traversal requires random access; streaming is not viable.
 - Custom paging layer: redundant with what the OS already provides for mmap'd files.
 
 ---

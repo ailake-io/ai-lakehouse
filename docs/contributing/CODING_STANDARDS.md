@@ -135,9 +135,9 @@ pub async fn build_hnsw(
 
 ## `unsafe` policy
 
-`unsafe` is banned in all crates except `ailake-vec`, `ailake-index`, and `ailake-file`.
+`unsafe` is banned in all crates except `ailake-vec`, `ailake-index`, `ailake-file`, and `ailake-jni`.
 
-In those three crates:
+In those crates:
 - Every `unsafe` block requires a `// SAFETY:` comment explaining the invariant being upheld.
 - `unsafe` is permitted for:
   - Memory layout operations (casting `&[f32]` to `&[u8]`, mmap operations)

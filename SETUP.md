@@ -7,13 +7,13 @@ Guide for running the file format locally: writing batches, vector search with g
 ## Fastest path — Docker demo (no Rust toolchain required)
 
 ```bash
-# From the repository root — builds ailake-py wheel on first run (~3-5 min, cached after)
+# From the repository root — builds ailake-py wheel + ailake CLI (catalog-ducklake) on first run (~8-12 min, cached after)
 docker compose -f tests/docker/compose-demo.yml up -d
 ```
 
 Open **http://localhost:8888** — JupyterLab starts with pre-built fixture tables (HNSW, PQ-only, Residual-PQ, Deferred, multimodal, agent memory, BM25, Tantivy FTS, partitioned Iceberg v3, delete demo, schema evolution) and 500 synthetic documents indexed across them.
 
-**12 notebooks** cover the full SDK:
+**13 notebooks** cover the full SDK:
 
 | Notebook | Requires | Topics |
 |---|---|---|
@@ -29,6 +29,7 @@ Open **http://localhost:8888** — JupyterLab starts with pre-built fixture tabl
 | `10_gpu_demo.ipynb` | `--profile gpu` | CUDA/ROCm auto-detection, GPU QPS |
 | `11_fts.ipynb` | — | Tantivy FTS, `search_text` O(log N), hybrid |
 | `12_airflow.ipynb` | `--profile airflow` | Airflow DAG trigger, XCom, operators |
+| `13_ducklake.ipynb` | — | DuckLake catalog backend (`--catalog ducklake`), sidecar + native SQL |
 
 Optional profiles add heavyweight services:
 
@@ -116,7 +117,7 @@ cargo test -p tests
 cargo test --workspace
 ```
 
-Should finish with `375 passed` (7 ignored — doctests/GPU tests requiring live credentials, a GPU backend, or other runtime context not available in a plain local run).
+Should finish with `430 passed` (10 ignored — doctests/GPU tests requiring live credentials, a GPU backend, or other runtime context not available in a plain local run).
 
 ### Tests by crate
 

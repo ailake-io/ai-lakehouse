@@ -101,6 +101,11 @@ Optional fields:
 
 **Response JSON:** `{"ok": true, "snapshot_id": 7}` or `{"ok": false, "error": "..."}`.
 
+A row with a `NaN`/`Infinity` value in `embeddings` returns `{"ok": false, "error":
+"embedding contains non-finite value (...); NaN/Infinity embeddings are rejected at
+write time"}` instead of being silently accepted. Spark's `commit()`/Trino's
+`finish()` throw on this rather than treating it as a successful, snapshot-less write.
+
 ---
 
 ### `ailake_write_batch_multi_json`
@@ -329,6 +334,55 @@ Full-read scan: performs nearest-neighbor search and returns complete Parquet ro
 
 ---
 
+### `ailake_create_table_json`
+
+```
+fn ailake_create_table_json(request_json: *const c_char) -> *mut c_char
+```
+
+Creates an empty AI-Lake/Iceberg table (schema/policy only, no data files) via
+`CatalogProvider::create_table()` — useful when a table needs to exist and be
+searchable (returning zero rows) before any embeddings are ready.
+
+**Request JSON:**
+
+```json
+{
+  "warehouse":       "/path/to/warehouse",
+  "namespace":       "default",
+  "table":           "my_table",
+  "vector_column":   "embedding",
+  "dim":             1536,
+  "metric":          "cosine",
+  "precision":       "f16",
+  "format_version":  2,
+  "hnsw_m":          null,
+  "hnsw_ef_construction": null,
+  "pre_normalize":   false,
+  "modality":        null,
+  "partition_by":    null,
+  "partition_value": null,
+  "partition_column_type": null,
+  "partition_fields": [],
+  "fts_columns":     null,
+  "fts_tokenizer":   "",
+  "embedding_model": null
+}
+```
+
+Only `warehouse`, `table`, and `dim` are required. Defaults for the rest:
+`namespace` `"default"`, `vector_column` `"embedding"`, `metric` `"cosine"`,
+`precision` `"f16"`, `format_version` `0` if omitted (pass `2` or `3` explicitly —
+every other caller of this endpoint, e.g. the DuckDB extension, always sends an
+explicit `format_version`), `pre_normalize` `false`, everything else absent/empty.
+Also accepts the flattened `catalog_opts` fields (`catalog`, `rest_uri`, etc. — see
+`docs/guides/REST_CATALOG.md`) alongside `warehouse`.
+
+**Response JSON:** `{"ok": true}` or `{"ok": false, "error": "..."}` (e.g. table
+already exists).
+
+---
+
 ### `ailake_vector_search_json` (legacy binary API)
 
 ```
@@ -355,6 +409,7 @@ Binary-parameter API — accepts a raw `f32` array pointer rather than a JSON-en
 |---|---|---|
 | Max `query_len` (legacy API) | `ailake_vector_search_json` | 65 536 dimensions |
 | Max `ef_search` | `ailake_search_json`, `ailake_scan_json` | 100 000 (clamped via `.min(100_000)`) |
+| Max `top_k` | `ailake_search_json`, `ailake_scan_json`, `ailake_search_multimodal_json`, `ailake_search_text_json` | `ailake_core::MAX_TOP_K` = 100 000 — rejected with `{"ok":false,"error":"top_k N exceeds maximum supported value (100000)"}` rather than risking an unbounded-allocation crash (`BinaryHeap::with_capacity` sized off `top_k`). Enforced in `ailake_query::scanner` itself, so this applies to every caller, not just the JNI boundary. |
 
 ---
 
