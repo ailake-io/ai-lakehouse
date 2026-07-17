@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # Copyright (c) 2026 Thiago Egon Lange
 cmake_minimum_required(VERSION 3.20)
-project(duckdb_ailake VERSION 0.1.7 LANGUAGES CXX)
+project(duckdb_ailake VERSION 0.1.8 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
