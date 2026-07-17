@@ -189,6 +189,23 @@ interface AilakeNativeLib : Library {
      */
     fun ailake_compact_json(requestJson: String): Pointer?
 
+    /**
+     * Create an empty AI-Lake table.
+     *
+     * Request JSON fields:
+     *   warehouse         (String)  warehouse root path
+     *   namespace         (String)  Iceberg namespace
+     *   table             (String)  table name
+     *   vector_column     (String)  vector column name, default "embedding"
+     *   dim               (Int)     vector dimensionality
+     *   metric            (String?) "euclidean" | "cosine" | "dot_product"
+     *   precision         (String?) "f32" | "f16" | "i8"
+     *   format_version    (Int?)    Iceberg format version, default 2
+     *
+     * Response JSON: `{"ok":true}` or `{"ok":false,"error":"..."}`
+     */
+    fun ailake_create_table_json(requestJson: String): Pointer?
+
     /** Free a string pointer returned by any ailake_* function. */
     fun ailake_free_string(ptr: Pointer?)
 }

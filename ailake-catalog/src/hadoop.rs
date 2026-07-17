@@ -97,6 +97,21 @@ impl HadoopCatalog {
 #[async_trait]
 impl CatalogProvider for HadoopCatalog {
     async fn create_table(&self, name: &TableIdent, props: &TableProperties) -> AilakeResult<()> {
+        // save_metadata() below always writes the *next* version and never checks
+        // whether one already exists — without this guard, calling create_table on an
+        // existing table silently resets it to a fresh, snapshot-less v(N+1), orphaning
+        // every data file the old metadata referenced (still on disk, referenced by
+        // nothing). Iceberg's own CREATE TABLE semantics reject a duplicate name (no
+        // "IF NOT EXISTS"/"OR REPLACE" was requested here), and RestCatalog already gets
+        // this for free from the server (a spec-compliant REST catalog 409s on a
+        // duplicate `POST /namespaces/{ns}/tables`) — Hadoop is file-based, so the check
+        // has to live here.
+        if self.current_version(name).await? > 0 {
+            return Err(AilakeError::Catalog(format!(
+                "table {}.{} already exists",
+                name.namespace, name.name
+            )));
+        }
         let location = self.table_root(name);
         // Prefer TableProperties.partition_column_type; fall back to policy field (set via Python/CLI).
         let pct = props

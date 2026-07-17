@@ -16,6 +16,7 @@ using namespace duckdb;
 void RegisterAilakeSearch(duckdb::ExtensionLoader &loader);
 void RegisterAilakeSearchMultimodal(duckdb::ExtensionLoader &loader);
 void RegisterAilakeWrite(duckdb::ExtensionLoader &loader);
+void RegisterAilakeCreateTable(duckdb::ExtensionLoader &loader);
 
 // ── AilakeLib implementation ──────────────────────────────────────────────────
 
@@ -52,6 +53,7 @@ bool AilakeLib::load(const std::string &lib_path) {
     auto ev  = reinterpret_cast<evolve_schema_fn_t>(AILAKE_DLSYM(sym_handle, "ailake_evolve_schema_json"));
     auto wm  = reinterpret_cast<write_multi_fn_t>  (AILAKE_DLSYM(sym_handle, "ailake_write_batch_multi_json"));
     auto cp  = reinterpret_cast<compact_fn_t>      (AILAKE_DLSYM(sym_handle, "ailake_compact_json"));
+    auto ct  = reinterpret_cast<create_table_fn_t> (AILAKE_DLSYM(sym_handle, "ailake_create_table_json"));
     auto f   = reinterpret_cast<free_fn_t>         (AILAKE_DLSYM(sym_handle, "ailake_free_string"));
 
     if (!s || !w || !f) {
@@ -69,6 +71,7 @@ bool AilakeLib::load(const std::string &lib_path) {
     evolve_schema_fn_ = ev;  // may be nullptr for older builds
     write_multi_fn_   = wm;  // may be nullptr for older builds
     compact_fn_       = cp;  // may be nullptr for older builds
+    create_table_fn_  = ct;  // may be nullptr for older builds
     free_fn_          = f;
     return true;
 }
@@ -580,6 +583,83 @@ int64_t AilakeLib::compact(
     return j.value("files_compacted", int64_t(-1));
 }
 
+bool AilakeLib::create_table(
+    const std::string &warehouse,
+    const std::string &ns,
+    const std::string &table_name,
+    const std::string &vector_column,
+    int                dim,
+    const std::string &metric,
+    const std::string &precision,
+    int                format_version,
+    int                hnsw_m,
+    int                hnsw_ef_construction,
+    bool               pre_normalize,
+    const std::string &modality,
+    const std::string &partition_by,
+    const std::string &partition_value,
+    const std::string &partition_column_type,
+    const std::string &partition_fields_json,
+    const std::string &fts_columns,
+    const std::string &fts_tokenizer,
+    const std::string &embedding_model
+) const {
+    if (!create_table_fn_ || !free_fn_) return false;
+
+    std::string req =
+        "{\"warehouse\":"        + json_escape(warehouse)       +
+        ",\"namespace\":"        + json_escape(ns)              +
+        ",\"table\":"            + json_escape(table_name)      +
+        ",\"vector_column\":"    + json_escape(vector_column)   +
+        ",\"dim\":"              + std::to_string(dim)          +
+        ",\"metric\":"           + json_escape(metric)          +
+        ",\"precision\":"        + json_escape(precision);
+    if (format_version > 0)
+        req += ",\"format_version\":" + std::to_string(format_version);
+    if (hnsw_m >= 0)
+        req += ",\"hnsw_m\":" + std::to_string(hnsw_m);
+    if (hnsw_ef_construction >= 0)
+        req += ",\"hnsw_ef_construction\":" + std::to_string(hnsw_ef_construction);
+    if (pre_normalize)
+        req += ",\"pre_normalize\":true";
+    if (!modality.empty())
+        req += ",\"modality\":" + json_escape(modality);
+    if (!partition_by.empty())
+        req += ",\"partition_by\":" + json_escape(partition_by);
+    if (!partition_value.empty())
+        req += ",\"partition_value\":" + json_escape(partition_value);
+    if (!partition_column_type.empty())
+        req += ",\"partition_column_type\":" + json_escape(partition_column_type);
+    if (!partition_fields_json.empty())
+        req += ",\"partition_fields\":" + partition_fields_json;
+    if (!fts_columns.empty())
+        req += ",\"fts_columns\":" + json_escape(fts_columns);
+    if (!fts_tokenizer.empty())
+        req += ",\"fts_tokenizer\":" + json_escape(fts_tokenizer);
+    if (!embedding_model.empty())
+        req += ",\"embedding_model\":" + json_escape(embedding_model);
+    req += "}";
+
+    char *raw = create_table_fn_(req.c_str());
+    if (!raw) return false;
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(resp);
+    } catch (...) {
+        return false;
+    }
+    if (!j.value("ok", false)) {
+        throw InvalidInputException(
+            "ailake_create_table failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    return true;
+}
+
 ScanResult AilakeLib::scan(
     const std::string        &warehouse,
     const std::string        &table_name,
@@ -753,6 +833,7 @@ DUCKDB_CPP_EXTENSION_ENTRY(ailake, loader) {
     RegisterAilakeSearch(loader);
     RegisterAilakeSearchMultimodal(loader);
     RegisterAilakeWrite(loader);
+    RegisterAilakeCreateTable(loader);
     RegisterAilakeScan(loader);
     RegisterAilakeSearchText(loader);
     RegisterAilakeWriteBatchMulti(loader);

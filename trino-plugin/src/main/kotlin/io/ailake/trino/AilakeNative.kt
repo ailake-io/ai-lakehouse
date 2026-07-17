@@ -102,6 +102,9 @@ object AilakeNative {
         /** Compact small files. Returns `{"ok":true,"files_compacted":N}`. Caller must free. */
         fun ailake_compact_json(requestJson: String): Pointer?
 
+        /** Create an empty AI-Lake table. Returns `{"ok":true}`. Caller must free. */
+        fun ailake_create_table_json(requestJson: String): Pointer?
+
         fun ailake_free_string(ptr: Pointer?)
     }
 
@@ -739,5 +742,56 @@ object AilakeNative {
         } finally {
             runCatching { native.ailake_free_string(ptr) }
         }
+    }
+
+    /**
+     * Create an empty AI-Lake table via the native library.
+     * Returns true on success, false if the library is absent or the call fails.
+     */
+    fun createTable(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        vectorColumn: String = "embedding",
+        dim: Int = 1536,
+        metric: String = "cosine",
+        precision: String = "f16",
+        formatVersion: Int = 2,
+    ): Boolean {
+        val native = lib ?: return false
+
+        val payload = mapOf(
+            "warehouse" to warehouse,
+            "namespace" to namespace,
+            "table" to table,
+            "vector_column" to vectorColumn,
+            "dim" to dim,
+            "metric" to metric,
+            "precision" to precision,
+            "format_version" to formatVersion,
+        )
+        val requestJson = mapper.writeValueAsString(payload)
+
+        val ptr = native.ailake_create_table_json(requestJson) ?: run {
+            log.warn("[ailake] ailake_create_table_json returned null for table={}.{}", namespace, table)
+            return false
+        }
+        val resp: Map<String, Any>? = try {
+            val json = ptr.getString(0)
+            mapper.readValue<Map<String, Any>>(json)
+        } catch (e: Exception) {
+            log.error("[ailake] Failed to parse createTable response for table={}.{}: {}", namespace, table, e.message, e)
+            null
+        } finally {
+            runCatching { native.ailake_free_string(ptr) }
+        }
+        if (resp == null) return false
+        // Same as writeBatch/writeBatchMulti: a real backend rejection (e.g. the
+        // table already exists) must fail visibly.
+        if (resp["ok"] != true) {
+            throw RuntimeException("ailake create_table failed for table=$namespace.$table: ${resp["error"]}")
+        }
+        log.info("[ailake] createTable OK table={}.{}", namespace, table)
+        return true
     }
 }
