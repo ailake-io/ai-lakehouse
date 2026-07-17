@@ -186,11 +186,13 @@ def test_multimodal_partition_filter_named_param():
     """
     conn = setup_connection()
     table_path = fixture_path()
-    queries_sql = "[{'col': 'embedding', 'query': [0.1, 0.2]::FLOAT[], 'weight': 1.0}]"
+    # Fixture has dim=128; build a 128-element query matching the fixture dimension.
+    query_128 = "[" + ",".join(["0.1"] * 128) + "]"
+    queries_sql = f"{{'col': 'embedding', 'query': {query_128}::FLOAT[], 'weight': 1.0}}"
     count = conn.execute(f"""
         SELECT count(*) FROM ailake_search_multimodal(
             '{table_path}',
-            {queries_sql},
+            [{queries_sql}],
             5,
             partition_filter='nonexistent-agent'
         )
