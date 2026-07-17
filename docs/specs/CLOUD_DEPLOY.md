@@ -28,11 +28,11 @@ cargo build --release -p ailake-jni
 
 # Spark plugin fat-jar
 cd spark-plugin && ./gradlew shadowJar
-# → spark-plugin/build/libs/spark-plugin-0.1.7-plugin.jar
+# → spark-plugin/build/libs/spark-plugin-0.1.8-plugin.jar
 
 # Trino plugin fat-jar
 cd trino-plugin && ./gradlew shadowJar
-# → trino-plugin/build/libs/trino-plugin-0.1.7-plugin.jar
+# → trino-plugin/build/libs/trino-plugin-0.1.8-plugin.jar
 
 # Python wheel
 cd ailake-py && maturin build --release --out dist
@@ -50,7 +50,7 @@ Upload to your cloud artifact store before running the steps below.
 **Upload artifacts to S3:**
 ```bash
 aws s3 cp target/release/libailake_jni.so        s3://my-bucket/ailake/libs/
-aws s3 cp spark-plugin/build/libs/spark-plugin-0.1.7-plugin.jar \
+aws s3 cp spark-plugin/build/libs/spark-plugin-0.1.8-plugin.jar \
                                                   s3://my-bucket/ailake/jars/
 aws s3 cp scripts/emr-bootstrap.sh               s3://my-bucket/ailake/bootstrap/
 ```
@@ -78,7 +78,7 @@ aws emr create-cluster \
     {
       "Classification": "spark-defaults",
       "Properties": {
-        "spark.jars":                          "s3://my-bucket/ailake/jars/spark-plugin-0.1.7-plugin.jar",
+        "spark.jars":                          "s3://my-bucket/ailake/jars/spark-plugin-0.1.8-plugin.jar",
         "spark.sql.extensions":                "io.ailake.spark.AilakeSparkExtensions",
         "spark.driver.extraJavaOptions":       "-Djava.library.path=/opt/ailake/lib",
         "spark.executor.extraJavaOptions":     "-Djava.library.path=/opt/ailake/lib"
@@ -146,8 +146,8 @@ GlueVersion: "4.0"
 WorkerType: G.1X
 NumberOfWorkers: 10
 DefaultArguments:
-  --extra-jars: "s3://my-bucket/ailake/jars/spark-plugin-0.1.7-plugin.jar"
-  --additional-python-modules: "ailake==0.1.7"
+  --extra-jars: "s3://my-bucket/ailake/jars/spark-plugin-0.1.8-plugin.jar"
+  --additional-python-modules: "ailake==0.1.8"
   --conf: "spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions"
 ```
 
@@ -242,7 +242,7 @@ sudo chmod 755 /opt/ailake/lib/libailake_jni.so
 
 # Plugin dir
 sudo mkdir -p $TRINO_HOME/plugin/ailake
-sudo aws s3 cp s3://my-bucket/ailake/jars/trino-plugin-0.1.7-plugin.jar \
+sudo aws s3 cp s3://my-bucket/ailake/jars/trino-plugin-0.1.8-plugin.jar \
               $TRINO_HOME/plugin/ailake/
 ```
 
@@ -275,7 +275,7 @@ SELECT * FROM ailake.default.search ORDER BY distance;
 **Upload artifacts to GCS:**
 ```bash
 gsutil cp target/release/libailake_jni.so          gs://my-bucket/ailake/libs/
-gsutil cp spark-plugin/build/libs/spark-plugin-0.1.7-plugin.jar \
+gsutil cp spark-plugin/build/libs/spark-plugin-0.1.8-plugin.jar \
                                                    gs://my-bucket/ailake/jars/
 gsutil cp scripts/dataproc-init.sh                 gs://my-bucket/ailake/init/
 ```
@@ -298,7 +298,7 @@ gcloud dataproc clusters create ailake-cluster \
   --num-workers 3 \
   --initialization-actions gs://my-bucket/ailake/init/dataproc-init.sh \
   --properties \
-    spark:spark.jars=gs://my-bucket/ailake/jars/spark-plugin-0.1.7-plugin.jar,\
+    spark:spark.jars=gs://my-bucket/ailake/jars/spark-plugin-0.1.8-plugin.jar,\
     spark:spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions,\
     spark:spark.driver.extraJavaOptions=-Djava.library.path=/opt/ailake/lib,\
     spark:spark.executor.extraJavaOptions=-Djava.library.path=/opt/ailake/lib
@@ -417,8 +417,8 @@ job.run(
 databricks fs cp target/release/libailake_jni.so \
     dbfs:/FileStore/ailake/libs/libailake_jni.so
 
-databricks fs cp spark-plugin/build/libs/spark-plugin-0.1.7-plugin.jar \
-    dbfs:/FileStore/ailake/jars/spark-plugin-0.1.7-plugin.jar
+databricks fs cp spark-plugin/build/libs/spark-plugin-0.1.8-plugin.jar \
+    dbfs:/FileStore/ailake/jars/spark-plugin-0.1.8-plugin.jar
 ```
 
 **Cluster init script** (create in Databricks UI → Compute → Init Scripts):
@@ -441,8 +441,8 @@ chmod 755 /opt/ailake/lib/libailake_jni.so
     "spark.executor.extraJavaOptions": "-Djava.library.path=/opt/ailake/lib"
   },
   "libraries": [
-    { "jar": "dbfs:/FileStore/ailake/jars/spark-plugin-0.1.7-plugin.jar" },
-    { "pypi": { "package": "ailake==0.1.7" } }
+    { "jar": "dbfs:/FileStore/ailake/jars/spark-plugin-0.1.8-plugin.jar" },
+    { "pypi": { "package": "ailake==0.1.8" } }
   ],
   "init_scripts": [
     { "dbfs": { "destination": "dbfs:/FileStore/ailake/init/install.sh" } }
@@ -513,7 +513,7 @@ az hdinsight create \
 ```bash
 spark-submit \
   --master yarn \
-  --jars wasbs://ailake@mystorageaccount.blob.core.windows.net/jars/spark-plugin-0.1.7-plugin.jar \
+  --jars wasbs://ailake@mystorageaccount.blob.core.windows.net/jars/spark-plugin-0.1.8-plugin.jar \
   --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions \
   --conf "spark.driver.extraJavaOptions=-Djava.library.path=/opt/ailake/lib" \
   --conf "spark.executor.extraJavaOptions=-Djava.library.path=/opt/ailake/lib" \
@@ -533,7 +533,7 @@ channels:
 dependencies:
   - python=3.12
   - pip:
-    - ailake==0.1.7
+    - ailake==0.1.8
 ```
 
 **Or via Docker:**
@@ -593,7 +593,7 @@ spark-submit \
   --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions \
   --conf "spark.driver.extraJavaOptions=-Djava.library.path=/opt/ailake/lib" \
   --conf "spark.executor.extraJavaOptions=-Djava.library.path=/opt/ailake/lib" \
-  --jars s3a://my-bucket/jars/spark-plugin-0.1.7-plugin.jar \
+  --jars s3a://my-bucket/jars/spark-plugin-0.1.8-plugin.jar \
   s3a://my-bucket/jobs/my-job.jar
 ```
 
@@ -610,7 +610,7 @@ cargo build --release -p ailake-jni          # build native lib
 
 cd ailake-flink
 ./gradlew shadowJar
-# → build/libs/ailake-flink-0.1.7-plugin.jar
+# → build/libs/ailake-flink-0.1.8-plugin.jar
 ```
 
 ### 5.2 Deploy on AWS (Kinesis Data Analytics / EMR Flink)
@@ -623,7 +623,7 @@ cd ailake-flink
    "S3ContentLocation": {"BucketARN": "arn:aws:s3:::my-bucket", "FileKey": "libs/libailake_jni.so"}
    ```
 3. Add JVM option: `-Djava.library.path=/tmp/flink-artifacts`
-4. Upload `ailake-flink-0.1.7-plugin.jar` as an application JAR.
+4. Upload `ailake-flink-0.1.8-plugin.jar` as an application JAR.
 
 **EMR on EC2 with Flink:**
 
@@ -636,7 +636,7 @@ sudo chmod 755 /opt/ailake/lib/libailake_jni.so
 # Flink job submission
 flink run \
   -D env.java.opts.taskmanager="-Djava.library.path=/opt/ailake/lib" \
-  -c my.job.Main ailake-flink-0.1.7-plugin.jar
+  -c my.job.Main ailake-flink-0.1.8-plugin.jar
 ```
 
 ### 5.3 SQL DDL (Flink Table API)
@@ -698,4 +698,4 @@ spec:
 | Empty search results | Native lib absent (graceful degradation) | Confirm `java.library.path` points to dir with `.so` |
 | `OutOfMemoryError` in executor | HNSW loading too many files in parallel | Reduce `search.ef` or add executor memory |
 | Plugin jar version mismatch | `spark-plugin` built for Spark 3.5, cluster is 3.3 | Rebuild `spark-plugin` against matching Spark version |
-| Flink `ClassNotFoundException: io.ailake.flink.*` | Fat JAR not on classpath | Copy `ailake-flink-0.1.7-plugin.jar` to `$FLINK_HOME/lib/` or use `flink run -C` |
+| Flink `ClassNotFoundException: io.ailake.flink.*` | Fat JAR not on classpath | Copy `ailake-flink-0.1.8-plugin.jar` to `$FLINK_HOME/lib/` or use `flink run -C` |

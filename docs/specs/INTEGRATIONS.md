@@ -105,7 +105,7 @@ native library; the physical table is created lazily by the first write.
 import io.ailake.spark.implicits._
 
 val spark = SparkSession.builder()
-  .config("spark.jars", "/path/to/spark-plugin-0.1.7-plugin.jar")
+  .config("spark.jars", "/path/to/spark-plugin-0.1.8-plugin.jar")
   .config("spark.sql.extensions",
     "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions," +
     "io.ailake.spark.AilakeSparkExtensions")
@@ -421,7 +421,7 @@ AilakeCatalogFactory  →  AilakeCatalog  (Flink catalog API, delegates to ailak
 ```bash
 cd ailake-flink
 ./gradlew shadowJar
-# Output: build/libs/ailake-flink-0.1.7-plugin.jar
+# Output: build/libs/ailake-flink-0.1.8-plugin.jar
 ```
 
 The shadow jar bundles JNA and Jackson. Flink dependencies are `compileOnly` — provided by the cluster.
@@ -492,7 +492,7 @@ SHOW DATABASES;
 ### Deploy to Flink cluster
 
 1. Build the plugin jar: `./gradlew shadowJar`
-2. Copy `ailake-flink-0.1.7-plugin.jar` to `$FLINK_HOME/lib/`
+2. Copy `ailake-flink-0.1.8-plugin.jar` to `$FLINK_HOME/lib/`
 3. Copy `libailake_jni.so` to a path in `java.library.path` on all TaskManagers:
 
 ```yaml
