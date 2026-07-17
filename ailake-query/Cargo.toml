@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-query"
-version = "0.1.6"
+version = "0.1.7"
 edition     = "2021"
 description = "Query planner and executor for AI-Lake — vector search, compaction, ContextAssembler"
 license     = "MIT OR Apache-2.0"
@@ -12,14 +12,14 @@ categories  = ["database", "algorithms"]
 loom = ["dep:loom"]
 
 [dependencies]
-ailake-core    = { path = "../ailake-core", version = "0.1.6" }
+ailake-core    = { path = "../ailake-core", version = "0.1.7" }
 ailake-fts     = { workspace = true }
-ailake-file    = { path = "../ailake-file", version = "0.1.6" }
-ailake-catalog = { path = "../ailake-catalog", version = "0.1.6" }
-ailake-store   = { path = "../ailake-store", version = "0.1.6" }
-ailake-index   = { path = "../ailake-index", version = "0.1.6" }
-ailake-vec     = { path = "../ailake-vec", version = "0.1.6" }
-ailake-parquet = { path = "../ailake-parquet", version = "0.1.6" }
+ailake-file    = { path = "../ailake-file", version = "0.1.7" }
+ailake-catalog = { path = "../ailake-catalog", version = "0.1.7" }
+ailake-store   = { path = "../ailake-store", version = "0.1.7" }
+ailake-index   = { path = "../ailake-index", version = "0.1.7" }
+ailake-vec     = { path = "../ailake-vec", version = "0.1.7" }
+ailake-parquet = { path = "../ailake-parquet", version = "0.1.7" }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
 arrow-select   = { workspace = true }
@@ -45,7 +45,7 @@ proptest     = { workspace = true }
 # Enables ailake_store::fail_store::FailStore (test-only) for scanner.rs fuzz_tests,
 # without shipping it in release builds of ailake-query itself (see ailake-store's
 # `test-utils` feature).
-ailake-store = { path = "../ailake-store", version = "0.1.6", features = ["test-utils"] }
+ailake-store = { path = "../ailake-store", version = "0.1.7", features = ["test-utils"] }
 
 [[example]]
 name = "demo"
