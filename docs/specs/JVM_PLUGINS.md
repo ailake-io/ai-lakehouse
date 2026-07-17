@@ -34,6 +34,7 @@ Reference guide for the two JVM query-engine plugins that expose AI-Lake vector 
              │  ailake_scan_json()          ← full-read│
              │  ailake_search_text_json()   ← BM25 FTS │
              │  ailake_search_multimodal_json() ← RRF  │
+             │  ailake_create_table_json()  ← create   │
              │  ailake_version()            ← version  │
              │  ailake_free_string()        ← free ptr │
              │          │                              │
@@ -154,6 +155,23 @@ char* ailake_evolve_schema_json(const char* request_json);
 
 // Multimodal search (search across multiple HNSW columns, fused via RRF)
 char* ailake_search_multimodal_json(const char* request_json);
+
+// Create an empty table (schema only, no data written)
+// request_json: {"warehouse":"...","namespace":"default","table":"...",
+//                "vector_column":"embedding","dim":1536,
+//                "metric":"cosine","precision":"f16","format_version":2,
+//                "hnsw_m":16,"hnsw_ef_construction":150,        ← optional
+//                "pre_normalize":false,"modality":"text",       ← optional
+//                "partition_by":"agent_id","partition_value":"agent-42"} ← optional
+// Returns: {"ok":true} or {"ok":false,"error":"..."} (fails if the table already exists)
+// Bridged into Spark's `AilakeNative.createTable`, Trino's `AilakeNative.createTable`
+// (Kotlin), and Flink's `AilakeNativeLoader.createTable`, but as of PR #104 none of the
+// three wire it into SQL `CREATE TABLE` DDL — the existing `AilakeCatalog.createTable`
+// overrides in all three plugins remain lazy, schema-on-read table builders unrelated to
+// this call. Only DuckDB's `ailake_create_table` SQL function and Python's
+// `ailake.create_table()` are reachable from a query surface today; the JVM bridge exists
+// so a future SQL wiring is a JVM-side change only, no native code needed.
+char* ailake_create_table_json(const char* request_json);
 
 void ailake_free_string(char* ptr);
 

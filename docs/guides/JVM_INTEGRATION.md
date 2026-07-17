@@ -303,9 +303,21 @@ val fullDf = spark.ailakeSearchWithData(
 fullDf.orderBy("_distance").show(truncate = false)
 ```
 
-### 3E — Delete, schema evolution, compact (Scala)
+### 3E — Delete, schema evolution, compact, create table (Scala)
 
 ```scala
+// Create an empty table (schema only, no data written) — raw AilakeNative call, same
+// pattern as compact/deleteWhere before they grew a SparkSession-level wrapper. No SQL
+// CREATE TABLE DDL surface yet — this is the only way to reach it from Spark today.
+AilakeNative.createTable(
+  warehouse    = "s3://my-lake/docs/",
+  namespace    = "default",
+  table        = "docs",
+  vectorColumn = "embedding",
+  dim          = 1536,
+  metric       = "cosine",
+)
+
 // Equality delete — writes Iceberg delete file, no data rewrite
 AilakeNative.deleteWhere(
   tableUri  = "s3://my-lake/docs/",
