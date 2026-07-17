@@ -73,7 +73,7 @@ def test_create_empty_table_search_returns_zero_rows():
     try:
         # Signature: (table_path, dim, vector_column, metric, precision, format_version).
         conn.execute(f"SELECT ailake_create_table('{table_dir}', 1536, 'embedding', 'cosine', 'f16', 2)")
-        rows = conn.execute(f"SELECT ailake_search('{table_dir}', {float_list_sql(1536)}, 10)").fetchall()
+        rows = conn.execute(f"SELECT * FROM ailake_search('{table_dir}', {float_list_sql(1536)}, 10)").fetchall()
         require(len(rows) == 0, f"expected 0 results from empty table, got {len(rows)}")
         print("PASS test_create_empty_table_search_returns_zero_rows")
     finally:
@@ -90,7 +90,7 @@ def test_create_duplicate_raises():
         try:
             conn.execute(f"SELECT ailake_create_table('{table_dir}', 1536, 'embedding', 'cosine', 'f16', 2)")
             require(False, "expected an exception creating a duplicate table, got a result")
-        except duckdb.Error as e:
+        except Exception as e:
             require(
                 "already exists" in str(e) or "TableAlreadyExists" in str(e) or "Conflict" in str(e),
                 f"unexpected error message: {e}",
@@ -108,7 +108,7 @@ def test_create_with_custom_params():
     try:
         conn.execute(f"SELECT ailake_create_table('{table_dir}', 768, 'my_vec', 'euclidean', 'f32', 2)")
         rows = conn.execute(
-            f"SELECT ailake_search('{table_dir}', {float_list_sql(768)}, 5, vec_col='my_vec')"
+            f"SELECT * FROM ailake_search('{table_dir}', {float_list_sql(768)}, 5, vec_col='my_vec')"
         ).fetchall()
         require(len(rows) == 0, f"expected 0 results from empty table, got {len(rows)}")
         print("PASS test_create_with_custom_params")
@@ -132,7 +132,7 @@ def test_create_then_insert_then_search():
                 [[1.0,0.0,0.0],[0.0,1.0,0.0]]::FLOAT[][]
             )
         """)
-        rows = conn.execute(f"SELECT ailake_search('{table_dir}', [1.0,0.0,0.0]::FLOAT[], 5)").fetchall()
+        rows = conn.execute(f"SELECT * FROM ailake_search('{table_dir}', [1.0,0.0,0.0]::FLOAT[], 5)").fetchall()
         require(len(rows) == 2, f"expected 2 rows after insert, got {len(rows)}")
         print("PASS test_create_then_insert_then_search")
     finally:
