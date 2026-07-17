@@ -24,9 +24,11 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-openai  = ["openai>=1.0"]
-cohere  = ["cohere>=4.0"]
-dev     = ["pytest>=7", "pytest-mock"]
+openai                = ["openai>=1.0"]
+cohere                = ["cohere>=4.0"]
+fastembed             = ["fastembed>=0.3"]
+sentence-transformers = ["sentence-transformers>=2.7"]
+dev                   = ["pytest>=7", "pytest-mock"]
 
 [project.urls]
 Repository    = "https://github.com/ThiagoLange/ai-lakehouse"

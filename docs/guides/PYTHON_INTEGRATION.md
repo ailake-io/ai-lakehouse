@@ -227,6 +227,40 @@ table = ailake.open_table(
 )
 ```
 
+**`embed_fn` with a free, local model — no API key:**
+
+`embed_fn` is a plain `Callable[[list[str]], list[list[float]]]` — any local model works,
+no special integration needed. Two lightweight, well-regarded free options:
+
+```python
+# fastembed — ONNX Runtime, no PyTorch, smallest install footprint
+from fastembed import TextEmbedding
+
+_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")  # dim=384
+
+def embed_fastembed(texts: list[str]) -> list[list[float]]:
+    return [v.tolist() for v in _model.embed(texts)]
+
+table = ailake.open_table("s3://my-lake/docs/", dim=384, embed_fn=embed_fastembed)
+```
+
+```python
+# sentence-transformers — PyTorch, widest model selection, GPU via device=
+from sentence_transformers import SentenceTransformer
+
+_model = SentenceTransformer("BAAI/bge-small-en-v1.5")  # dim=384
+
+def embed_st(texts: list[str]) -> list[list[float]]:
+    return _model.encode(texts, convert_to_numpy=True).tolist()
+
+table = ailake.open_table("s3://my-lake/docs/", dim=384, embed_fn=embed_st)
+```
+
+Both run entirely in-process, require no API key, and need only a one-time model download
+(cached locally afterward). `pip install fastembed` or `pip install sentence-transformers`.
+The same two backends are also available as `embed_mode: fastembed`/`sentence_transformers`
+in the Airbyte destination connector (`airbyte-destination-ailake/README.md`).
+
 **Context manager (auto-commit not applied — commit explicitly):**
 
 ```python

@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`fastembed`/`sentence_transformers` embed modes — free, local, in-process embeddings, no API key** — audited every embedding path in the project and found none demonstrated a real free/local model in-process: `nomic-embed-text` only appeared in a storage-size table (never used), the multimodal notebook's "CLIP" vectors are synthetic (`np.random`), and `airbyte-destination-ailake/demo/demo_local.py` generates deterministic random vectors, not real embeddings. Added `FastEmbedEmbedder` (ONNX Runtime via `fastembed`, no PyTorch) and `SentenceTransformersEmbedder` (PyTorch, widest Hugging Face model selection, GPU via `device=`) to `airbyte-destination-ailake/airbyte_destination_ailake/embedder.py`, following the existing `Embedder` protocol/`build_embedder()` dispatch pattern used by `OpenAIEmbedder`/`CohereEmbedder`. Both default to `BAAI/bge-small-en-v1.5` (dim=384). New `embed_mode: fastembed`/`sentence_transformers` config options (`spec.json`, `config.py`), new `pip install airbyte-destination-ailake[fastembed]`/`[sentence-transformers]` extras, new combined demo (`demo/demo_local_models.py`), and concrete `embed_fn` examples in `docs/guides/PYTHON_INTEGRATION.md` and `tests/docker/demo/notebooks/01_ailake_demo.ipynb` §19B (real `fastembed` embeddings, no synthetic stand-in). `sentence-transformers` deliberately not added to the Docker demo image (PyTorch weight) — `fastembed` was, and is now part of the demo container's pip install list.
+
 ## [0.1.8] — 2026-07-17
 
 ### Fixed

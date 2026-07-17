@@ -160,6 +160,7 @@ RUN pip install --no-cache-dir \
         pyarrow \
         polars \
         boto3 \
+        fastembed \
     && rm -rf /wheels
 
 # Pre-download Iceberg Spark runtime JAR — avoids Ivy/Maven download at notebook runtime.

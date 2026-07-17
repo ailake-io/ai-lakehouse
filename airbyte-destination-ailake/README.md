@@ -16,9 +16,11 @@ Tables created this way are fully compatible with Apache Iceberg — Spark, Trin
 ## Installation
 
 ```bash
-pip install airbyte-destination-ailake          # core (cmd embed mode only)
+pip install airbyte-destination-ailake          # core (cmd/http embed modes only)
 pip install "airbyte-destination-ailake[openai]"  # + OpenAI Embeddings API
 pip install "airbyte-destination-ailake[cohere]"  # + Cohere Embed API
+pip install "airbyte-destination-ailake[fastembed]"              # + local ONNX embeddings, no API key
+pip install "airbyte-destination-ailake[sentence-transformers]"  # + local PyTorch embeddings, no API key
 ```
 
 ## Configuration
@@ -26,7 +28,7 @@ pip install "airbyte-destination-ailake[cohere]"  # + Cohere Embed API
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `table_base_path` | string | **required** | S3/GCS/Azure/local base path. Each stream lands at `{base}/{stream}/`. |
-| `embed_mode` | `cmd` / `openai` / `cohere` | **required** | Embedding backend. |
+| `embed_mode` | `cmd` / `openai` / `cohere` / `http` / `fastembed` / `sentence_transformers` | **required** | Embedding backend. |
 | `text_field` | string | `content` | Record field to embed. Dot-notation for nested: `meta.body`. |
 | `embedding_dim` | int | `1536` | Vector dimension — must match model output. |
 | `embedding_metric` | string | `cosine` | Distance metric: `cosine`, `euclidean`, `dot_product`, `normalized_cosine`. |
@@ -39,6 +41,9 @@ pip install "airbyte-destination-ailake[cohere]"  # + Cohere Embed API
 | `cohere_api_key` | string | `` | Cohere API key (secret). |
 | `cohere_model` | string | `embed-english-v3.0` | Cohere model name. |
 | `cohere_input_type` | string | `search_document` | Cohere input type. |
+| `fastembed_model` | string | `BAAI/bge-small-en-v1.5` | fastembed model name (local ONNX, no API key, no PyTorch). |
+| `sentence_transformers_model` | string | `BAAI/bge-small-en-v1.5` | Any Hugging Face sentence-embedding model name (local, no API key). |
+| `sentence_transformers_device` | string | `` | `cpu`/`cuda`/etc. Empty = auto-detect. |
 | `batch_size` | int | `512` | Records per embed call and per write_batch. |
 | `pre_normalize` | bool | `false` | Normalize vectors to unit L2 at write time (recommended for cosine). |
 | `pq_only` | bool | `false` | Discard raw F16 vectors after index build — maximum compression, no reranking. |
@@ -96,6 +101,39 @@ For Azure OpenAI set `openai_base_url` to your deployment endpoint.
   "embedding_dim": 1024
 }
 ```
+
+### `fastembed` — local ONNX embeddings (no API key)
+
+```json
+{
+  "embed_mode": "fastembed",
+  "fastembed_model": "BAAI/bge-small-en-v1.5",
+  "embedding_dim": 384
+}
+```
+
+Runs entirely in-process via ONNX Runtime — no PyTorch dependency, smallest install
+footprint of the local options. Good default for CI/demos and low-memory environments.
+Requires `pip install "airbyte-destination-ailake[fastembed]"`.
+
+### `sentence-transformers` — local embeddings (no API key)
+
+```json
+{
+  "embed_mode": "sentence_transformers",
+  "sentence_transformers_model": "BAAI/bge-small-en-v1.5",
+  "sentence_transformers_device": "",
+  "embedding_dim": 384
+}
+```
+
+PyTorch-based — widest model selection (any Hugging Face sentence-embedding model),
+supports GPU via `sentence_transformers_device: "cuda"`. Heavier install than `fastembed`.
+Requires `pip install "airbyte-destination-ailake[sentence-transformers]"`.
+
+Both local modes default to `BAAI/bge-small-en-v1.5` (dim=384) — a small, fast,
+well-regarded open model. Neither requires an API key, an internet connection after the
+first model download, or any external service.
 
 ## Running locally (CLI)
 
