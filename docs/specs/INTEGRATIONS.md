@@ -96,6 +96,11 @@ Key classes:
 - `io.ailake.spark.VectorScanExec` — physical `LeafExecNode`; calls `libailake_jni.so` via JNA
 - `io.ailake.spark.implicits.AilakeSession` — implicit `spark.ailakeSearch(uri, query, topK)`
 
+`AilakeNative.createTable(...)` (wraps `ailake_create_table_json` — schema-only, no data) exists as a
+direct Scala method call, but is not yet wired into `CREATE TABLE ... USING ailake` SQL DDL —
+`AilakeCatalog.createTable` currently just builds an in-memory `Table` object without touching the
+native library; the physical table is created lazily by the first write.
+
 ```scala
 import io.ailake.spark.implicits._
 
@@ -116,6 +121,8 @@ val results = spark.ailakeSearch(
 )
 results.orderBy("distance").show(10)
 ```
+
+`topK` (like every plugin's `top_k`/`top-k`) is capped at `ailake_core::MAX_TOP_K` = 100,000 — the underlying `ailake_search_json` call returns an error above that rather than proceeding, enforced uniformly in `ailake-query::scanner` for every binding (CLI, Python, JNI).
 
 See `SETUP.md §16` for a complete walkthrough including demo table generation and cluster submission.
 
@@ -228,6 +235,10 @@ Key classes:
 - `io.ailake.trino.VectorScanMetadata` — schema `default`, table `search` with columns `row_id / distance / file_path`
 - `io.ailake.trino.AilakeNative` — JNA bridge to `libailake_jni.so`; graceful degradation when lib absent
 
+`AilakeNative.createTable(...)` (wraps `ailake_create_table_json`) exists as a direct Kotlin method
+call with no other caller in the plugin today — there is no `CREATE TABLE`/`CALL` surface wired to it
+in Trino yet.
+
 **Catalog config** (`etc/catalog/ailake.properties`):
 ```properties
 connector.name=ailake
@@ -245,6 +256,8 @@ SELECT row_id, distance, file_path
 FROM ailake.default.search
 ORDER BY distance;
 ```
+
+`ailake.top_k` is capped at 100,000 (rejected above that — same `MAX_TOP_K` enforced in `ailake-query::scanner` for every plugin/binding).
 
 See `SETUP.md §15` for a complete walkthrough including demo table generation.
 
@@ -345,15 +358,15 @@ Beam does not support vector search via `Managed.ICEBERG` — that IO is tabular
 import ailake
 
 class VectorSearchFn(beam.DoFn):
-    def setup(self):
-        # initialize SDK once per worker (not per element)
-        self.searcher = ailake.TableSearcher("s3://my-bucket/warehouse/db/my_table/")
-
     def process(self, query_embedding):
-        results = self.searcher.search(
-            query=query_embedding,
+        # ailake.search() is a plain function, not a class to instantiate in setup() —
+        # note the same storage-binding caveat as elsewhere in this doc: ailake-py only
+        # constructs a LocalStore, so table_path must be a local/mounted path, not s3://
+        results = ailake.search(
+            "/local/path/to/warehouse/db/my_table/",
+            query_embedding,
             top_k=10,
-            filter="category = 'finance'"
+            partition_filter="finance",  # optional — Iceberg identity-partition value, not a SQL predicate
         )
         yield from results
 
@@ -391,6 +404,8 @@ AilakeCatalogFactory  →  AilakeCatalog  (Flink catalog API, delegates to ailak
 ```
 
 `AilakeInputFormat.open()` degrades gracefully when the native lib can't be loaded — same contract as the Spark/Trino/DuckDB bridges — returning an empty result set instead of failing the Flink task. The write path (`AilakeVectorTableSink`) intentionally does not degrade: a missing native lib fails the sink loudly rather than silently dropping a write batch.
+
+`AilakeNativeLoader.createTable(...)` (wraps `ailake_create_table_json`) exists but has no caller anywhere in this module today — `AilakeCatalog.createTable` (the real `CREATE TABLE` DDL entry point) only registers an in-memory `CatalogTableImpl`; the physical AI-Lake table is created lazily by the first write, same as Spark.
 
 ### Version support
 
@@ -498,16 +513,22 @@ Or set `ailake.native.lib` system property or `AILAKE_NATIVE_LIB` env var to poi
 | `vector.column` | | `embedding` | Vector column name |
 | `vector.metric` | | `euclidean` | `cosine` / `euclidean` / `dot_product` |
 | `vector.precision` | | `f16` | `f16` / `f32` / `i8` |
-| `search.top-k` | | `10` | Results per query |
+| `search.top-k` | | `10` | Results per query. Capped at 100,000 (`MAX_TOP_K`, rejected above that) |
 | `search.ef` | | `50` | HNSW ef_search parameter (ignored for IVF-PQ index type) |
 | `search.rerank-factor` | | `1` | Rerank multiplier for IVF-PQ (fetches `top_k × factor` candidates, reranks with exact distances). Ignored for HNSW. |
 | `partition.by` | | `` | Iceberg identity partition column (e.g. `agent_id`). Enables manifest-level per-agent pruning (Phase 9). |
 | `partition.value` | | `` | Partition value for this table source/sink instance. |
 | `search.partition-filter` | | `` | Restrict search to files with this partition_value (Phase 9). |
 | `fts.columns` | | `` | Comma-separated text columns to build Tantivy FTS index (Phase T). E.g. `chunk_text,document_title`. |
-| `fts.tokenizer` | | `simple` | Tantivy tokenizer for FTS index. |
+| `fts.tokenizer` | | `default` | Tantivy tokenizer for FTS index. |
 | `search.hybrid-text` | | `` | Query text for BM25 hybrid RRF fusion (Phase 9). |
 | `search.bm25-weight` | | `0.5` | BM25 weight in RRF fusion. |
+| `search.mode` | | `search` | `search` (fixed 3-column shape) or `full` (Phase 11 — search + full-row fetch via `AilakeScanTableSource`, dynamic columns from the DDL, no JOIN needed; last declared column must be `_distance`). |
+| `hnsw.m` | | native default | HNSW graph degree *M*. |
+| `hnsw.ef-construction` | | native default | HNSW build-time beam width. |
+| `pre-normalize` | | `false` | Normalize vectors to unit L2 at write time. |
+| `deferred` | | `false` | Write Parquet immediately, build the index asynchronously. |
+| `vector.columns` | | `[]` | JSON array `[{"column","dim","metric"?,"precision"?,"modality"?}]` for multi-column (Phase 8 multimodal) writes — one `ARRAY<FLOAT>` per entry instead of the single `vector.column`, via `ailake_write_batch_multi_json`. |
 
 ### FTS and hybrid search (Flink)
 
@@ -542,7 +563,7 @@ val results = AilakeNative.search(
 
 ### What it does
 
-`duckdb-ailake/` is a C++ DuckDB community extension that bridges DuckDB SQL to `libailake_jni.so` via `dlopen`. It exposes two table/scalar functions:
+`duckdb-ailake/` is a C++ DuckDB community extension that bridges DuckDB SQL to `libailake_jni.so` via `dlopen`. It exposes these table/scalar functions (top_k-bearing functions are capped at 100,000, same `MAX_TOP_K` as every other binding):
 
 | Function | Signature | Description |
 |---|---|---|
@@ -551,8 +572,11 @@ val results = AilakeNative.search(
 | `ailake_search_text` | `(table_path VARCHAR, query_text VARCHAR, top_k INTEGER [, text_columns VARCHAR[], text_column VARCHAR, partition_filter VARCHAR, table_name VARCHAR, namespace VARCHAR]) → TABLE(row_id BIGINT, score FLOAT, file_path VARCHAR)` | Pure BM25 full-text search (Tantivy O(log N) when FTS index present; brute-force fallback) |
 | `ailake_scan` | `(table_path VARCHAR, query FLOAT[], top_k INTEGER [, vec_col VARCHAR, ef_search INTEGER, table_name VARCHAR, namespace VARCHAR]) → TABLE(<all Parquet columns>, _distance FLOAT)` | Vector search + full row fetch in one call (no JOIN required) |
 | `ailake_write_batch` | `(table_path VARCHAR, ids BIGINT[], embeddings FLOAT[][] [, vec_col, metric, precision, partition_by, partition_value, partition_fields, format_version, fts_columns, fts_tokenizer, hnsw_m, hnsw_ef_construction, pre_normalize, deferred, namespace, table_name]) → BIGINT` | Write a batch; returns snapshot ID or -1 on error |
+| `ailake_write_batch_multi` | `(table_path VARCHAR, ids BIGINT[], vector_columns LIST(STRUCT(col VARCHAR, dim INTEGER, embeddings FLOAT[][], metric VARCHAR, precision VARCHAR, modality VARCHAR))) → BIGINT` | Write a batch with N independent vector columns (Phase 8 multimodal); returns snapshot ID or -1 |
 | `ailake_delete_where` | `(table_path VARCHAR, column VARCHAR, values VARCHAR[] [, namespace VARCHAR, table_name VARCHAR]) → BOOLEAN` | Equality-delete matching rows |
 | `ailake_evolve_schema` | `(table_path VARCHAR, add_columns_json VARCHAR, rename_columns_json VARCHAR [, namespace VARCHAR, table_name VARCHAR]) → INTEGER` | Metadata-only schema evolution; returns new schema_id |
+| `ailake_compact` | `(table_path VARCHAR [, min_files BIGINT, target_size_bytes BIGINT, max_files_per_pass BIGINT, deferred BOOLEAN, namespace VARCHAR, table_name VARCHAR]) → BIGINT` | Compacts small files into a larger merged file; returns files compacted (0 = nothing eligible), -1 on error |
+| `ailake_create_table` | `(table_path VARCHAR, dim INTEGER [, vector_column, metric, precision, format_version, hnsw_m, hnsw_ef_construction, pre_normalize, modality, partition_by, partition_value, partition_column_type, partition_fields_json, fts_columns, fts_tokenizer, embedding_model, namespace, table_name]) → BOOLEAN` | Creates an empty AI-Lake/Iceberg table (schema only, no data) |
 
 `namespace` (default `'default'`) and `table_name` (default `'table'`) are optional trailing parameters on every function above — pass them (as named params on the table functions, or positionally on the scalar functions) to address a table other than the warehouse root's default. `partition_filter` (search) and `partition_by`/`partition_value` (write, single-column identity) are optional named parameters for per-agent/per-tenant file pruning (Phase 9). `partition_fields` accepts a JSON array (`[{"column":"topic_id","transform":"identity","column_type":"int"}]`) for multi-column Iceberg partition specs with any transform (identity, bucket, truncate, year, month, day, hour) — Phase L/R. `format_version` (default 2) enables Iceberg v3 when set to `3`. `hnsw_m`/`hnsw_ef_construction` (default -1 = use table default) tune the HNSW index; `pre_normalize` (default false) normalizes vectors to unit L2 at write time; `deferred` (default false) builds the index asynchronously. All functions degrade gracefully when `libailake_jni.so` is not loaded — `ailake_search`/`ailake_search_text`/`ailake_search_multimodal`/`ailake_scan` return 0 rows, `ailake_write_batch` returns -1, `ailake_delete_where` returns false, `ailake_evolve_schema` returns -1.
 
@@ -693,69 +717,57 @@ When `libailake_jni.so` is not found or not pre-loaded, `ailake_search` returns 
 
 #### Storage: Amazon S3
 
-AI-Lake tables on S3 use the `object_store` crate's S3 backend.
+AI-Lake tables on S3 use the `object_store` crate's S3 backend, behind `ailake-store`'s
+`store-s3` Cargo feature. Only `ailake-cli` enables this feature today — `ailake-jni`
+(Spark/Trino/Flink) and `ailake-py` link `ailake-store` without `store-s3`/`store-gcs`/
+`store-azure` and only ever construct `LocalStore`, so the object-storage builders below
+are reachable from the CLI binary and Rust callers, not from the Python or JVM bindings
+(see `CLOUD_DEPLOY.md`'s storage-backend caveat).
 
 ```rust
-// ailake-store: S3 configuration
-let store = S3Store::new(S3Config {
-    bucket: "my-bucket".to_string(),
-    region: "us-east-1".to_string(),
-    prefix: "warehouse/db/my_table/".to_string(),
-    credentials: S3Credentials::FromEnv,  // AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
-    // or: S3Credentials::InstanceProfile for EC2/ECS/Lambda
-    // or: S3Credentials::WebIdentity for EKS (IRSA)
-});
+// ailake-store: S3 configuration (ailake_store::s3::{S3Config, S3Credentials, s3_store})
+let store = s3_store(
+    S3Config {
+        bucket: "my-bucket".to_string(),
+        region: "us-east-1".to_string(),
+        endpoint: None,       // Some("http://localhost:9000") for MinIO/LocalStack
+        allow_http: false,    // true required for MinIO without TLS
+        credentials: S3Credentials::Default,  // env → ~/.aws → IMDSv2 → WebIdentity chain
+        // or: S3Credentials::Static { access_key_id, secret_access_key, session_token }
+        // or: S3Credentials::InstanceProfile for EC2/ECS/Lambda
+        // or: S3Credentials::WebIdentity for EKS (IRSA)
+    },
+    "warehouse/db/my_table/",  // prefix — separate argument, not a config field
+)?;
 ```
+
+Or the zero-config dispatcher: `ailake_store::store_from_url("s3://my-bucket/warehouse/db/my_table/")`.
 
 Environment variables recognized:
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`
 - `AWS_REGION` or `AWS_DEFAULT_REGION`
 - `AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA on EKS)
 
-S3-compatible endpoints (Minio, Localstack):
-```rust
-S3Config {
-    endpoint: Some("http://localhost:9000".to_string()),
-    path_style: true,   // required for Minio
-    ...
-}
-```
-
 #### Catalog: AWS Glue Data Catalog
 
-The standard Iceberg catalog for AWS. AI-Lake `ailake-catalog` uses `iceberg-rust`'s Glue catalog implementation.
+`ailake-catalog::GlueCatalog` — its own AWS SDK-based implementation (not backed by the
+`iceberg` crate, which is not a dependency of this workspace; see `CLAUDE.md` §11).
 
 ```rust
-let catalog = GlueCatalog::new(GlueConfig {
-    region: "us-east-1".to_string(),
-    database: "my_database".to_string(),
-    warehouse: "s3://my-bucket/warehouse".to_string(),
-});
+// GlueCatalog::from_client(aws_sdk_glue::Client, GlueCatalogConfig, Arc<dyn Store>) -> Self
+// (there is also an env-credential constructor; see ailake-catalog/src/glue.rs)
 ```
 
-Glue creates a native Glue table entry with the Iceberg metadata location. Athena, EMR, Glue ETL, and Redshift Spectrum can all read the table directly.
+Glue creates a native Glue table entry with the Iceberg metadata location. Athena, EMR, Glue ETL, and Redshift Spectrum can all read the table directly. **Not wired into `ailake-cli`, `ailake-py`, or `ailake-jni` today** — usable only as a direct Rust dependency (`ailake-catalog::GlueCatalog`), same status as `JdbcCatalog`/`NessieCatalog` (see §8).
 
 #### Catalog: AWS S3 Tables (managed Iceberg)
 
-AWS S3 Tables (GA 2024) provides fully-managed Iceberg tables stored in S3:
-
-```python
-# Python SDK — writing to S3 Tables
-import ailake
-
-writer = ailake.TableWriter(
-    table_uri="arn:aws:s3tables:us-east-1:123456789:bucket/my-bucket/namespace/my_table",
-    catalog_type="s3tables",
-    region="us-east-1"
-)
-```
-
-S3 Tables uses its own Iceberg REST catalog API. Configure via:
-```
-catalog_type = s3tables
-s3tables.region = us-east-1
-s3tables.warehouse = arn:aws:s3tables:...
-```
+AWS S3 Tables (GA 2024) provides fully-managed Iceberg tables stored in S3, exposed through
+its own Iceberg REST catalog API. `ailake-catalog::RestCatalog` (feature `rest-catalog`,
+wired into `ailake-cli --catalog rest`, `ailake-py`'s `catalog_opts={"catalog": "rest", ...}`,
+and `ailake-jni`'s `catalog_opts` — see `docs/guides/REST_CATALOG.md`) can target any
+spec-compliant REST catalog server, including S3 Tables' endpoint, but this combination is
+not specifically documented or tested against S3 Tables yet.
 
 #### Query engines on AWS
 
@@ -774,14 +786,21 @@ s3tables.warehouse = arn:aws:s3tables:...
 
 #### Storage: Google Cloud Storage (GCS)
 
+Same binding-scope caveat as S3 above — only `ailake-cli` (`store-gcs` feature) reaches GCS directly; `ailake-py`/`ailake-jni` do not.
+
 ```rust
-let store = GcsStore::new(GcsConfig {
-    bucket: "my-bucket".to_string(),
-    prefix: "warehouse/db/my_table/".to_string(),
-    credentials: GcsCredentials::ApplicationDefault,
-    // or: GcsCredentials::ServiceAccount { key_file: "/path/sa.json" }
-    // or: GcsCredentials::WorkloadIdentity  (GKE)
-});
+// ailake_store::gcs::{GcsConfig, GcsCredentials, gcs_store}
+let store = gcs_store(
+    GcsConfig {
+        bucket: "my-bucket".to_string(),
+        credentials: GcsCredentials::ApplicationDefault,
+        // reads GOOGLE_APPLICATION_CREDENTIALS, falls back to the GCE metadata
+        // server automatically — covers GKE Workload Identity and Cloud Run
+        // or: GcsCredentials::ServiceAccountFile("/path/sa.json".into())
+        // or: GcsCredentials::ServiceAccountJson(inline_json)
+    },
+    "warehouse/db/my_table/",  // prefix — separate argument
+)?;
 ```
 
 Environment:
@@ -790,21 +809,12 @@ Environment:
 
 #### Catalog: Google BigLake Metastore (BigLake + Iceberg)
 
-GCP's managed Iceberg catalog via BigLake:
-
-```python
-import ailake
-
-writer = ailake.TableWriter(
-    table_uri="bigquery://project.dataset.my_table",
-    catalog_type="biglake",
-    project="my-gcp-project",
-    region="us-central1",
-    warehouse_gcs="gs://my-bucket/warehouse"
-)
-```
-
-BigLake Metastore provides the REST catalog API — use `catalog_type=rest` with the BigLake endpoint as a generic alternative.
+BigLake Metastore provides the Iceberg REST catalog API. Reach it the same way as any other
+REST catalog — via `ailake-catalog::RestCatalog` (`ailake-cli --catalog rest`, `ailake-py`'s
+`catalog_opts={"catalog": "rest", "rest_uri": "https://<biglake-endpoint>", ...}`, or
+`ailake-jni`'s `catalog_opts`; see `docs/guides/REST_CATALOG.md`). There is no
+BigLake-specific `catalog_type` — it is a REST catalog like any other, and the combination is
+not specifically documented or tested against BigLake yet.
 
 #### Query engines on GCP
 
@@ -822,34 +832,31 @@ BigLake Metastore provides the REST catalog API — use `catalog_type=rest` with
 
 #### Storage: Azure Blob Storage / ADLS Gen2
 
+Same binding-scope caveat as S3/GCS above — only `ailake-cli` (`store-azure` feature) reaches Azure directly; `ailake-py`/`ailake-jni` do not.
+
 ```rust
-let store = AzureStore::new(AzureConfig {
-    account: "mystorageaccount".to_string(),
-    container: "warehouse".to_string(),
-    prefix: "db/my_table/".to_string(),
-    credentials: AzureCredentials::ClientSecret {
-        tenant_id: std::env::var("AZURE_TENANT_ID")?,
-        client_id: std::env::var("AZURE_CLIENT_ID")?,
-        client_secret: std::env::var("AZURE_CLIENT_SECRET")?,
+// ailake_store::azure::{AzureConfig, AzureCredentials, azure_store}
+let store = azure_store(
+    AzureConfig {
+        account_name: "mystorageaccount".to_string(),
+        container: "warehouse".to_string(),
+        credentials: AzureCredentials::ClientSecret {
+            tenant_id: std::env::var("AZURE_TENANT_ID")?,
+            client_id: std::env::var("AZURE_CLIENT_ID")?,
+            client_secret: std::env::var("AZURE_CLIENT_SECRET")?,
+        },
+        // or: AzureCredentials::ManagedIdentity { client_id: None }  (system-assigned, AKS)
+        // or: AzureCredentials::AccessKey(key) / AzureCredentials::SasToken(token) / AzureCredentials::AzureCli
     },
-    // or: AzureCredentials::WorkloadIdentity  (AKS)
-    // or: AzureCredentials::ConnectionString(std::env::var("AZURE_STORAGE_CONNECTION_STRING")?)
-});
+    "db/my_table/",  // prefix — separate argument
+)?;
 ```
 
 ADLS Gen2 path format: `abfss://container@account.dfs.core.windows.net/prefix`
 
 #### Catalog: Azure Purview / Unity Catalog
 
-For Azure, the recommended catalog is an Iceberg REST catalog (Unity Catalog on Databricks or self-hosted Polaris/Nessie):
-
-```
-iceberg.catalog.type=rest
-iceberg.rest-catalog.uri=https://my-catalog.azurewebsites.net
-iceberg.rest-catalog.security=OAUTH2
-iceberg.rest-catalog.oauth2.credential=<client_id>:<client_secret>
-iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL
-```
+For Azure, the recommended catalog is an Iceberg REST catalog (Unity Catalog on Databricks or self-hosted Polaris/Nessie), reached the same way as any other REST catalog — via `ailake-catalog::RestCatalog` (`ailake-cli --catalog rest --rest-uri ... --rest-auth oauth2 ...`, `ailake-py`'s `catalog_opts`, or `ailake-jni`'s `catalog_opts`; see `docs/guides/REST_CATALOG.md` for the full flag/kwarg set, including OAuth2).
 
 #### Query engines on Azure
 
@@ -876,42 +883,41 @@ The most portable option. Any implementation of the Iceberg REST Catalog spec wo
 | **Lakeformation** | AWS-managed | Via Glue REST API |
 | **Unity Catalog** | Databricks | Also exposes REST API |
 
-AI-Lake `ailake-catalog` uses `iceberg-rust`'s REST catalog client:
+`ailake-catalog::RestCatalog` is AI-Lake's own implementation (not backed by the `iceberg` crate, which is not a workspace dependency) — this is the catalog backend wired into `ailake-cli --catalog rest`, `ailake-py`'s `catalog_opts={"catalog": "rest", ...}`, and `ailake-jni`'s `catalog_opts` (see `docs/guides/REST_CATALOG.md` for the full CLI-flag/kwarg reference). Direct Rust construction:
 
 ```rust
-let catalog = RestCatalog::new(RestCatalogConfig {
-    uri: "https://my-catalog.example.com".to_string(),
-    warehouse: "my_warehouse".to_string(),
-    oauth2_server_uri: Some("https://auth.example.com/token".to_string()),
-    credential: Some("client_id:client_secret".to_string()),
-    scope: Some("PRINCIPAL_ROLE:ALL".to_string()),
-});
+// ailake_catalog::rest::{RestCatalog, RestCatalogConfig, RestCatalogAuth}
+let catalog = RestCatalog::new(
+    RestCatalogConfig {
+        uri: "https://my-catalog.example.com".to_string(),
+        prefix: None,          // catalog name (Polaris) / branch (Nessie), if required
+        warehouse: Some("my_warehouse".to_string()),
+        auth: RestCatalogAuth::OAuth2 {
+            token_endpoint: "https://auth.example.com/token".to_string(),
+            client_id: "client_id".to_string(),
+            client_secret: "client_secret".to_string(),
+            scope: Some("PRINCIPAL_ROLE:ALL".to_string()),
+        },
+    },
+    store,
+);
 ```
 
 #### Nessie catalog (Git-like branching)
 
-For environments requiring branching and versioning of the catalog:
+`ailake-catalog::NessieCatalog` wraps a `RestCatalog` internally and adds Nessie-specific branch/tag operations (`/api/v2/trees/*`). **Not wired into `ailake-cli`, `ailake-py`, or `ailake-jni` today** — usable only as a direct Rust dependency, same status as `GlueCatalog`/`JdbcCatalog` (see §8). Generic Nessie access over the plain Iceberg REST protocol (no branch operations) works today through `RestCatalog` the same way as any other REST catalog server.
 
 ```rust
-let catalog = NessieCatalog::new(NessieConfig {
-    uri: "http://localhost:19120/api/v1".to_string(),
-    ref_name: "main".to_string(),
-    auth: NessieAuth::None,  // or Bearer, OAuth2
-    warehouse: "s3://my-bucket/warehouse".to_string(),
-});
-```
-
-Nessie supports creating branches per feature/experiment:
-
-```python
-# Python — write to a feature branch, merge to main when ready
-writer = ailake.TableWriter(
-    table_uri="my_table",
-    catalog_type="nessie",
-    nessie_uri="http://localhost:19120",
-    nessie_ref="feature/new-embeddings"   # writes go to this branch
-)
-# merge via Nessie API when ready
+// ailake_catalog::nessie::{NessieCatalog, NessieCatalogConfig}
+let catalog = NessieCatalog::new(
+    NessieCatalogConfig {
+        uri: "http://localhost:19120/api".to_string(),
+        default_branch: "main".to_string(),
+        warehouse: Some("s3://my-bucket/warehouse".to_string()),
+        auth: RestCatalogAuth::None,  // or Bearer, OAuth2 — shared with RestCatalog
+    },
+    store,
+);
 ```
 
 ---
@@ -973,61 +979,71 @@ impl CatalogProvider for RestCatalog { ... }
 
 ### Python API — catalog selection
 
+Only two of the five `CatalogProvider` implementations are wired into `ailake-py` today:
+`HadoopCatalog` (default) and `RestCatalog` (Polaris / Nessie / Unity Catalog / S3 Tables /
+BigLake / any Iceberg REST Catalog spec server). There are no `ailake.GlueCatalog`,
+`ailake.RestCatalog`, or `ailake.HadoopCatalog` Python classes — selection is a plain
+`catalog_opts: dict[str, str]` kwarg accepted by `TableWriter`, `Table`/`open_table`,
+`search()`, `compact()`, and the other catalog-touching functions (see `docs/guides/REST_CATALOG.md`):
+
 ```python
 import ailake
 
-# AWS Glue
-writer = ailake.TableWriter(
-    table_uri="s3://my-bucket/warehouse/db/my_table",
-    catalog=ailake.GlueCatalog(region="us-east-1", database="db")
-)
+# Hadoop-style filesystem catalog — local dev/CLI default, no catalog_opts needed
+writer = ailake.TableWriter("/tmp/warehouse/db/my_table")
 
-# REST catalog (Polaris / Nessie / Unity Catalog)
+# REST catalog (Polaris / Nessie / Unity Catalog / S3 Tables / BigLake / Gravitino)
 writer = ailake.TableWriter(
-    table_uri="s3://my-bucket/warehouse/db/my_table",
-    catalog=ailake.RestCatalog(
-        uri="https://my-catalog.example.com",
-        warehouse="my_warehouse",
-        credential="client_id:client_secret"
-    )
-)
-
-# Filesystem catalog (local dev, no external service)
-writer = ailake.TableWriter(
-    table_uri="/tmp/warehouse/db/my_table",
-    catalog=ailake.HadoopCatalog(warehouse="/tmp/warehouse")
+    "s3://my-bucket/warehouse/db/my_table",
+    catalog_opts={
+        "catalog": "rest",
+        "rest_uri": "https://my-catalog.example.com",
+        "rest_warehouse": "my_warehouse",
+        "rest_auth": "oauth2",
+        "rest_oauth_token_endpoint": "https://auth.example.com/token",
+        "rest_oauth_client_id": "client_id",
+        "rest_oauth_client_secret": "client_secret",
+    },
 )
 ```
+
+`GlueCatalog`/`NessieCatalog`/`JdbcCatalog` remain Rust-only (`ailake-catalog`), not reachable from `ailake-py`, `ailake-jni`, or `ailake-cli`.
 
 ---
 
-## 9. AI-Lake-specific SQL UDF (Phase 3)
+## 9. AI-Lake SQL / DataFrame surface (Phase 3, 11, 12)
 
-When the AI-Lake plugin is loaded in Spark or Trino, the following SQL surface is exposed:
+There is no `ailake_search(...)` SQL function or `ailake_embed(...)` text-to-embedding
+function in either plugin — Spark's own `VectorSearchPlan.scala` documents this explicitly
+("Not currently reachable via SQL — no parser/function is registered for an
+`ailake_vector_search(...)` syntax"), and no `AILAKE_EMBED_MODEL_URI`-style embedding
+function exists in either plugin's source. Embedding text into a query vector is the
+caller's responsibility (e.g. `ailake_embed()` from your own model client) before calling
+search. The actual surfaces:
 
-```sql
--- Spark SQL
-SELECT *
-FROM ailake_search(
-    'catalog.database.table',       -- fully-qualified table name
-    ailake_embed('my query text'),  -- optional: text → embedding via configured model
-    top_k => 100,
-    filter => "category = 'finance' AND created_at > '2024-01-01'",
-    metric => 'cosine',             -- optional: cosine (default), euclidean, dot_product
-    embedding_column => 'context_embedding'  -- optional: which column to search
-);
-
--- Trino SQL
-SELECT *
-FROM TABLE(ailake.system.vector_search(
-    table_name => 'catalog.schema.table',
-    query_vector => ailake.system.embed('my query text'),
-    top_k => BIGINT '100',
-    filter => 'category = ''finance'''
-));
+```scala
+// Spark — DataFrame API, not raw SQL (io.ailake.spark.implicits.AilakeSession)
+val results = spark.ailakeSearch(
+    tableUri    = "s3://my-lake/docs/",
+    queryVector = myEmbedding,   // pre-computed Array[Float]
+    topK        = 100,
+)
+results.filter("distance < 0.3").orderBy("distance").show(10)
+// Full-row fetch (no JOIN): spark.ailakeSearchWithData(...) — see §1
 ```
 
-The `ailake_embed` / `ailake.system.embed` function calls a configured embedding model (env var `AILAKE_EMBED_MODEL_URI`). This is optional — callers can pass a pre-computed vector as a hex blob.
+```sql
+-- Trino — query the connector's virtual tables directly
+SET SESSION ailake.query_vector = '0.021,-0.043,0.118,...';
+SET SESSION ailake.top_k = 100;
+
+SELECT row_id, distance, file_path
+FROM ailake.default.search       -- or search_full (full row data), search_multimodal
+ORDER BY distance;
+
+-- Trino stored procedure for compaction
+CALL ailake.system.compact();
+```
 
 ---
 
@@ -1042,31 +1058,33 @@ cargo test --workspace
 # includes: positional_invariant, vector_pruning, parquet_trailing_bytes, write_read_roundtrip
 ```
 
-### Phase 2 tests (requires Docker)
+### Manual local testing against Docker services (not run by CI)
+
+`tests/docker/compose.yml` (MinIO, Project Nessie, Localstack) and `tests/docker/compose-engines.yml`
+(Spark, Trino) exist for local developer use — spinning up real S3/REST-catalog/engine backends to
+test against manually. Neither file is referenced by any GitHub Actions workflow; there is no
+`--features integration` Cargo feature. The handful of tests that hit a live service (e.g.
+`ailake-catalog::rest`'s `live_create_table_auto_creates_namespace`) are `#[ignore]`-by-default and
+must be run explicitly (`cargo test -- --ignored`) against a manually-started server.
 
 ```bash
-docker compose -f tests/docker/compose.yml up -d   # MinIO, Nessie, mock Glue
-cargo test --workspace --features integration
+docker compose -f tests/docker/compose.yml up -d
+# then run whichever #[ignore]-marked tests target that service, e.g.:
+cargo test -p ailake-catalog -- --ignored
 ```
 
-Services spun up:
-- **MinIO** (`localhost:9000`) — S3-compatible storage
-- **Project Nessie** (`localhost:19120`) — REST catalog
-- **Localstack** (`localhost:4566`) — mock AWS Glue + S3
+### CI compat testing (`ci.yml` always-on + `compat-heavy.yml` manual/scheduled)
 
-### Phase 3+ tests (requires Docker + JVM — triggered via `compat-heavy.yml` manual dispatch)
+The real CI compat jobs spin up services directly as inline `services:`/container steps within the
+workflow YAML (not via the `tests/docker/*.yml` compose files above). See `ICEBERG_COMPAT.md` §"Verifying
+compatibility in CI" for the authoritative list: `compat-pyarrow`/`compat-duckdb`/`compat-pyiceberg`/
+`compat-ailake-py` run on every PR; `compat-spark`/`compat-trino`/`compat-jvm-plugins`/`compat-fts`/
+`compat-bigquery` run via `compat-heavy.yml` (manual dispatch + scheduled/push to `main`). There is no
+automated Beam compat CI job today — Beam's `Managed.ICEBERG` read/write path (§3) is exercised
+manually, not asserted in CI.
 
-```bash
-docker compose -f tests/docker/compose-engines.yml up -d  # Spark, Trino
-./tests/compat/run_spark_compat.sh
-./tests/compat/run_trino_compat.sh
-./tests/compat/run_beam_compat.sh
-```
+Each engine compat test follows the same pattern: writes an AI-Lake table via the Rust SDK, reads it
+via the target engine without the AI-Lake plugin, and asserts correct row count, schema, and that the
+vector column round-trips as bytes with no errors about unrecognized file format.
 
-Each test:
-1. Writes an AI-Lake table via Rust SDK
-2. Reads it via the target engine (Spark/Trino/Beam) without AI-Lake plugin
-3. Asserts: correct row count, correct schema, vector column as bytes
-4. Asserts: no errors or warnings about unrecognized file format
-
-Failure of any compat test is a release blocker.
+Failure of the always-on PR jobs is a PR blocker; failure of the `compat-heavy.yml` jobs is a release blocker.

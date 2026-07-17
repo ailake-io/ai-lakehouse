@@ -234,23 +234,16 @@ GPU wins at scale:
 
 **Do not add GPU FFI in Phase 4. Recommended path:**
 
-### Step 1 — Wire up `hnsw_rs` (already in workspace deps)
+### Step 1 — Real HNSW graph search (done — superseded this section's original plan)
 
-`hnsw_rs` is declared in `[workspace.dependencies]` but not added to
-`ailake-index/Cargo.toml`. Adding it reduces search latency by 10–100×
-at zero deployment cost:
-
-```toml
-# ailake-index/Cargo.toml
-[dependencies]
-hnsw_rs = { workspace = true }
-```
-
-Replace `HnswIndex`'s brute-force scan with a real HNSW graph:
-- Build: `Hnsw::<f32, dist::DistCosine>::new(M, max_elements, ef_construction, …)`
-- Search: `hnsw.search_neighbours(query, top_k, ef_search)`
-
-This alone would make the CPU path competitive at every realistic file size.
+This section originally recommended wiring up the external `hnsw_rs` crate (then
+declared but unused in `[workspace.dependencies]`) to replace `HnswIndex`'s
+brute-force scan. That path was not taken: `ailake-index` instead grew its own
+pure-Rust HNSW implementation (`ailake-index/src/hnsw.rs`, graph build + traversal
+search, not the naive brute-force fallback this document originally described),
+and `hnsw_rs` was removed from the workspace entirely — it is not a dependency of
+any crate today. The net effect (graph-based ANN search replacing brute force) is
+the same one this step aimed for.
 
 ### Step 2 — SIMD distance functions (free speedup, no deps)
 
@@ -320,8 +313,8 @@ build setup.
 | GPU priority | ROCm > CUDA > CPU | AMD probed first (ROCm CUDA-compat layer can mask NVIDIA) |
 
 **`HardwareProfile::recommend_ivf_pq(n_vectors: usize) → bool`** returns `true` when:
-- Any GPU detected (`has_cuda || has_rocm`), regardless of `n_vectors`, OR
-- `n_vectors >= MIN_VECTORS_FOR_IVF_PQ` AND `cpu_logical_cores > MIN_CORES_FOR_IVF_PQ`
+- `n_vectors >= MIN_VECTORS_FOR_IVF_PQ` (checked first — returns `false` immediately below this threshold, even with a GPU present), AND
+- Any GPU detected (`has_cuda || has_rocm`) OR `cpu_logical_cores > MIN_CORES_FOR_IVF_PQ`
 
 **Library names probed at runtime (dlopen/LoadLibrary):**
 
@@ -334,7 +327,7 @@ build setup.
 
 **Implemented in Phase 4 — Adaptive index selection:**
 
-- `ailake-file::IndexType::Auto` — resolved at write time via `HardwareProfile::detect()`; IVF-PQ chosen when `has_cuda || has_rocm || cpu_logical_cores > 8 && n >= 5000`; HNSW otherwise
+- `ailake-file::IndexType::Auto` — resolved at write time via `HardwareProfile::detect()` and `recommend_ivf_pq()`; IVF-PQ chosen when `n >= 5000 && (has_cuda || has_rocm || cpu_logical_cores > 8)`; HNSW otherwise
 - `ailake-query::TableWriter::write_batch_auto()` — thin wrapper that delegates to IVF-PQ or HNSW path based on hardware profile
 - `ailake-query::CompactionIndexStrategy` — Auto/ForceHnsw/ForceIvfPq; compaction respects same hardware-adaptive logic
 
@@ -350,12 +343,13 @@ build setup.
 
 `SearchConfig.partition_filter` prunes at manifest level before any GPU or HNSW work begins.
 The GPU flat-scan path (`SearchSession.search_batch()`) also respects `partition_filter` — files
-from other partitions are excluded by `scanner.rs:212` before the shard list is handed to the GPU.
-No GPU-specific changes required; filter is applied at the Rust layer uniformly.
+from other partitions are excluded in `scanner.rs` (`search()`'s partition-pruning step, before
+the shard list is handed to the GPU). No GPU-specific changes required; filter is applied at the
+Rust layer uniformly.
 
 ### `score_fn` limitation during deferred build window
 
-`score_fn: Option<ScoreFn>` is applied in `scanner.rs` at lines 265 and 308, after each HNSW
+`score_fn: Option<ScoreFn>` is applied via `apply_score_fn()` in `scanner.rs`, after each HNSW
 candidate is read alongside Parquet row data. However, `SearchSession.search_batch()` — the GPU
 flat-scan path used during the deferred index build window — does **not** have access to Parquet
 row data and therefore **cannot apply `score_fn`**.

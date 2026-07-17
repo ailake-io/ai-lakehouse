@@ -28,37 +28,20 @@ Records in un-compacted files are still searchable (their indexes exist, just sm
 When a deferred background index build fails (e.g. k-means divergence, OOM), `patch_index_failed()` transitions the file's catalog entry to `IndexStatus::Failed` with an `index_error` reason string. Files in `Failed` state:
 
 1. **Continue serving reads** via flat scan (exact O(N) brute-force) — no data loss, no downtime.
-2. **Are selected first** by `CompactionPlanner` — the planner prioritises `Failed` files regardless of size or age.
-3. **Get their index rebuilt** during compaction — the compactor reads their Parquet row data and rebuilds HNSW/IVF-PQ from scratch, transitioning them back to `Ready`.
+2. **Compete for a slot like any other file** — `CompactionPlanner::plan()` gives priority scheduling only to **foreign** files (missing `centroid_b64` — never written by the AI-Lake SDK, see below). A `Failed` file already has a centroid (computed before the HNSW build that failed), so it is not foreign, and is only picked up once it's part of the normal size-eligible candidate pool — it is not fast-tracked ahead of other files.
+3. **Get their index rebuilt** whenever next included in a compaction pass — the executor reads their Parquet row data and rebuilds HNSW/IVF-PQ from scratch (or extends a dominant file's graph, see below), transitioning them back to `Ready`.
 
-This makes compaction the **self-healing** path for transient build failures (transient GPU OOM, k-means seed instability). No operator intervention required — the next compaction run recovers all `Failed` files automatically.
+This makes compaction the **self-healing** path for transient build failures (transient GPU OOM, k-means seed instability). No operator intervention required — the file is repaired automatically the next time it's swept into a compaction pass.
 
 ---
 
 ## Compaction triggers
 
-Three conditions trigger compaction, evaluated by the `Compactor` Tokio task on a schedule (default: every 5 minutes):
+There is no built-in scheduler in `ailake-query` — no background Tokio task polls file counts, sizes, or elapsed time. Compaction only runs when explicitly invoked: CLI (`ailake compact`), the Python binding (`ailake.compact()`), the Rust API (`CompactionExecutor::run()`), or a caller-provided external scheduler (cron, an Airflow `AilakeCompactOperator` DAG, a periodic Spark/Beam job — see below). Once invoked, `CompactionPlanner::plan()` decides which files are eligible for that pass using `CompactionConfig`:
 
-### Trigger 1 — File count threshold
-```
-if snapshot.file_count(partition) > MAX_FILES_PER_PARTITION:
-    compact(partition)
-```
-Default: `MAX_FILES_PER_PARTITION = 16`. After 16 files accumulate, merge them all into one.
-
-### Trigger 2 — File size threshold
-```
-if any(file.size_bytes < MIN_FILE_SIZE for file in snapshot.files()):
-    compact_small_files(partition)
-```
-Default: `MIN_FILE_SIZE = 64 MB`. Files smaller than 64 MB are merged.
-
-### Trigger 3 — Time-based
-```
-if time_since_last_compaction(partition) > MAX_COMPACTION_INTERVAL:
-    compact(partition)
-```
-Default: `MAX_COMPACTION_INTERVAL = 1 hour`. Ensures the HNSW is refreshed regularly even if file count stays low.
+- `min_files_to_compact` (default: `4`) — skip the pass if fewer than this many size-eligible files exist (foreign files bypass this floor — see "Failed index recovery" above).
+- `target_file_size_bytes` (default: `128 MB` in the Rust struct default; `ailake compact`/`ailake.compact()` default to `512 MB` instead) — files below this size are candidates.
+- `max_files_per_pass` (default: `20`) — candidates are sorted smallest-first and capped here, bounding peak RAM and HNSW-rebuild cost per pass.
 
 ### Manual trigger
 ```bash
@@ -67,69 +50,76 @@ ailake compact s3://my-bucket/warehouse/db/my_table/
 
 # Python SDK
 import ailake
-ailake.compact("s3://my-bucket/warehouse/db/my_table/", partition_filter="year=2024")
+ailake.compact("s3://my-bucket/warehouse/db/my_table/", min_files=4, target_size_bytes=536_870_912)
 
 # Rust SDK
-compactor.compact_now(&table_uri, &partition_filter).await?;
+let planner = CompactionPlanner::new(CompactionConfig::default());
+executor.run(&planner, &table, catalog, "data").await?;
 ```
 
 ---
 
 ## Compaction algorithm
 
+One `compact()`/`compact_incremental()` call always merges its whole input into **exactly one** output file — there is no bin-packing into multiple parallel output groups. `CompactionExecutor::run()` fetches the table's full file list, hands it to `CompactionPlanner::plan()` (see "Compaction triggers" above), and merges the resulting single batch of eligible files (at most `max_files_per_pass`) into one new `.parquet` file per invocation.
+
 ```
-Input: List<DataFileEntry> (files to compact, from one partition)
+Input: List<DataFileEntry> (the files selected by CompactionPlanner::plan(), one pass)
 
-1. PLAN
-   Sort input files by record_count descending.
-   Target output file size: MAX_OUTPUT_FILE_BYTES (default: 512 MB of Parquet data).
-   Bin-pack files into groups each fitting the target size.
+1. COLLECT
+   Read all selected files in parallel (futures::future::try_join_all) via
+   AilakeFileReader::read_parquet — decodes rows + vector column directly
+   from Parquet, independent of whether the file's AILK footer/index exists.
+   Concatenate all RecordBatches.
 
-2. FOR EACH GROUP (in parallel, bounded by MAX_CONCURRENT_COMPACTIONS=4):
+2. FILTER DELETES
+   Deletion-vector-masked rows are dropped before the merge (row positions are
+   about to change, so old bitmaps can't be carried forward).
 
-   a. COLLECT
-      For each file in group:
-        - GET Parquet section via partial read → RecordBatch
-        - GET HNSW footer (optional — not strictly needed for rebuild)
-      Concatenate all RecordBatches.
+3. COMPUTE CENTROID
+   centroid, radius = compute_centroid_and_radius(&all_vectors, metric)
 
-   b. FILTER DELETES
-      Load Position Delete Files for this snapshot.
-      Remove rows referenced by position delete files.
-      Reindex surviving rows: new RowId(0..N) where N = surviving row count.
+4. QUANTIZE
+   Apply F16 quantization (or configured precision) to all vectors.
 
-   c. COMPUTE CENTROID
-      centroid, radius = compute_centroid_and_radius(&all_vectors, metric)
+5. BUILD INDEX — two paths:
+   - compact() (explicit full rebuild): always builds a brand-new HNSW/IVF-PQ
+     index from every input vector. Algorithm choice is CompactionExecutor's
+     index_strategy: Auto (detects hardware — IVF-PQ on GPU/many-core, HNSW
+     otherwise; the default), ForceHnsw, or ForceIvfPq. Not exposed via CLI
+     or Python today — always Auto through those bindings.
+   - compact_incremental() (what CompactionExecutor::run() calls by default):
+     when one input file holds more than 40% of the merged row count and has
+     no deletion-vector-masked rows, its existing HNSW graph is reused and
+     extended in place (HnswIndex::insert_node for every non-dominant row)
+     instead of rebuilt from scratch. Falls back to a full compact() rebuild
+     when there's no dominant file, the dominant file has DV-masked rows, or
+     index_strategy == ForceIvfPq (incremental extension only ever produces
+     HNSW, never IVF-PQ).
+   Default HNSW parameters: M=16, ef_construction=150 (HnswConfig::default()).
 
-   d. QUANTIZE
-      Apply F16 quantization (or configured precision) to all vectors.
+6. WRITE
+   AilakeFileWriter writes the merged RecordBatch + index + centroid/radius
+   → one new .parquet file with the index in its footer.
 
-   e. BUILD HNSW
-      Run HnswBuilder.build(all_vectors_f32) — CPU-bound, in spawn_blocking.
-      This is O(N log N) where N = total rows in the group.
-      Default HNSW parameters: M=16, ef_construction=200.
-
-   f. WRITE
-      AilakeFileWriter.write(record_batch, hnsw, centroid, radius)
-      → produces one new .parquet file with HNSW in footer.
-
-   g. COMMIT
-      SnapshotManager.replace_files(old_files, new_file, custom_properties)
-      → atomic Iceberg snapshot: removes old DataFile entries, adds new one.
-      → old files enter retention period (default: 7 days before vacuum).
-
-3. UPDATE METRICS
-   Log: files_in, files_out, rows_in, rows_out (deleted rows), hnsw_build_time_ms
+7. COMMIT
+   catalog.commit_snapshot(..., SnapshotOperation::Replace)
+   → atomic Iceberg snapshot: removes old DataFile entries, adds the new one.
+   → for catalog backends where retires_files_physically() is true (the
+     default HadoopCatalog), the old files are deleted from object storage
+     immediately after the commit succeeds — no retention window (see
+     "Compaction and snapshot isolation" below). Backends that manage
+     physical reclamation themselves (e.g. DuckLake) skip this step.
 ```
 
 ### Why rebuild HNSW from scratch instead of merging
 
-`hnsw_rs` does not expose a merge primitive. Merging two HNSW graphs while maintaining quality invariants is a non-trivial research problem. Rebuilding from scratch:
+The HNSW implementation (`ailake-index`, pure Rust — no longer built on the external `hnsw_rs` crate) does not expose a primitive for merging two independently-built graphs while maintaining quality invariants — that stays a non-trivial research problem, and `compact()`'s full rebuild remains correct by construction for the general case. The one merge shortcut that does exist is narrower: `compact_incremental()`'s dominant-file extension (see above), which *extends* one file's existing graph node-by-node rather than merging two separate graphs — it only applies when a single input file already accounts for most of the rows and has no pending deletes, and it always falls back to a full rebuild otherwise.
 
-- Is correct by definition.
+A full rebuild:
+
 - Produces optimal recall at the configured `M` and `ef_construction`.
-- Is bounded in cost: compaction runs on a batch, not on the entire table. The batch size is bounded by `MAX_OUTPUT_FILE_BYTES`.
-- Is parallelizable: groups compact independently.
+- Is bounded in cost: one compaction pass merges at most `max_files_per_pass` files, not the entire table.
 
 For a 512 MB Parquet file containing ~200k rows of dim=1536 F16 vectors, HNSW rebuild takes approximately 45–90 seconds on a 4-core worker. This is acceptable for a background job.
 
@@ -143,55 +133,23 @@ Iceberg's snapshot model provides full isolation:
 Timeline:
 
 T0: Snapshot S1 → files: [A, B, C, D]   (readers use S1)
-T1: Compactor starts, reads A+B+C+D
+T1: Compaction starts, reads A+B+C+D
 T2: New write arrives → Snapshot S2 → files: [A, B, C, D, E]
-T3: Compactor finishes → Snapshot S3 → files: [ABCD_merged, E]
-    (A, B, C, D marked for deletion after retention period)
+T3: Compaction commits → Snapshot S3 → files: [ABCD_merged, E]
+    (A, B, C, D deleted from object storage right after this commit — see caveat below)
 
 Readers at T2 see S2 (A+B+C+D+E), not affected by compaction.
 Readers after T3 see S3 (merged+E), better performance.
 ```
 
-A reader that started at S1 and is still running at T3 continues to use S1's files (A, B, C, D) until its query completes. They remain in S3-compatible storage until vacuum runs after the retention period.
+**Caveat — no retention window for the default catalog backend**: for `HadoopCatalog` (the default) and any other backend where `retires_files_physically()` is true, superseded files (A, B, C, D above) are deleted from object storage immediately once the `Replace` snapshot commits — there is no grace period. A reader still mid-query against S1 at that point can hit a missing-file error rather than transparently finishing against S1's files. Backends that manage physical reclamation themselves (e.g. DuckLake) are unaffected the same way. There is no vacuum step and no configurable retention window today.
 
 ### Conflict detection
 
-If two compaction jobs race on the same partition (should not happen in normal operation but must be safe):
+Optimistic-concurrency retry-on-conflict is implemented per catalog backend, not as a shared `ailake-catalog`-level wrapper, and coverage differs:
 
-```
-Job 1 plans: compact [A, B, C]
-Job 2 plans: compact [A, B, D]
-
-Job 1 commits first → creates snapshot with merged_ABC
-Job 2 tries to commit → detects that A and B are no longer in the latest snapshot
-                     → RETRY: re-plan using the current snapshot
-```
-
-This is the standard Iceberg optimistic concurrency pattern. `ailake-catalog` wraps the Iceberg commit and retries on conflict up to `MAX_COMMIT_RETRIES=5`.
-
----
-
-## Compaction modes
-
-### Mode 1 — `full` (default)
-Rebuilds HNSW from scratch for every output file. Highest quality, highest CPU cost.
-
-### Mode 2 — `index_only`
-Rewrites HNSW for existing Parquet files without changing the Parquet data. Used when:
-- The Parquet data is already well-compacted (large files, no small file problem).
-- The HNSW was never built (streaming ingest without compaction).
-- HNSW parameters changed (e.g. M or ef_construction were updated).
-
-```bash
-ailake compact --mode index_only s3://my-bucket/warehouse/db/my_table/
-```
-
-Produces new `.parquet` files identical in data content to the originals, with HNSW appended. No rows are moved or merged. Fast: skips the HNSW rebuild and only reads/writes the HNSW footer.
-
-### Mode 3 — `data_only`
-Runs standard Iceberg `rewrite_data_files` compaction (merges small Parquet files) but does NOT rebuild HNSW. The resulting merged Parquet file has no AI-Lake footer. Run `index_only` compaction afterwards to add HNSW.
-
-Useful when: existing Spark/Trino `OPTIMIZE` job already handles Parquet compaction, and AI-Lake only needs to add the HNSW on top.
+- **Glue, JDBC, REST catalogs** each have their own local commit-retry loop (read → re-apply → conditional write), capped at a backend-local `MAX_RETRIES = 5`.
+- **`HadoopCatalog`** (the default) instead serializes commits through an in-process `tokio::sync::Mutex` — this prevents two compactions racing *within the same process*, but provides no cross-process/cross-machine optimistic-concurrency retry. Two compactors on different hosts committing against the same Hadoop-style warehouse concurrently are not automatically reconciled by a retry loop the way Glue/JDBC/REST are.
 
 ---
 
@@ -234,40 +192,9 @@ query = df_stream \
 
 ---
 
-## Vacuum — cleaning up old files after compaction
+## No separate vacuum step
 
-Files superseded by compaction are not deleted immediately — they remain in object storage for the retention period, allowing time-travel queries and in-flight readers to complete.
-
-Vacuum removes files that are:
-1. Not referenced by any snapshot within the retention window.
-2. Older than `retention_period` (default: 7 days).
-
-```bash
-# CLI
-ailake vacuum s3://my-bucket/warehouse/db/my_table/ --older-than 7d
-
-# Python
-ailake.vacuum("s3://my-bucket/warehouse/db/my_table/", retention_days=7)
-```
-
-Vacuum is separate from compaction. It should be run after compaction on the same schedule (weekly is typical).
-
----
-
-## Configuration reference
-
-Set in `metadata.json` `properties` (applied to all future compaction runs):
-
-| Property | Default | Description |
-|---|---|---|
-| `ailake.compaction.max-files-per-partition` | `16` | Trigger threshold (file count) |
-| `ailake.compaction.min-file-size-bytes` | `67108864` (64 MB) | Trigger threshold (small file) |
-| `ailake.compaction.max-output-file-bytes` | `536870912` (512 MB) | Target output file size |
-| `ailake.compaction.max-concurrent-jobs` | `4` | Parallel compaction groups |
-| `ailake.compaction.hnsw-m` | `16` | HNSW M parameter for rebuilt indexes |
-| `ailake.compaction.hnsw-ef-construction` | `200` | HNSW ef_construction for rebuilt indexes |
-| `ailake.compaction.mode` | `full` | `full`, `index_only`, or `data_only` |
-| `ailake.vacuum.retention-days` | `7` | Days to retain superseded files |
+There is no `vacuum` command (CLI, Python, or Rust) and no `ailake.vacuum.*`/`ailake.compaction.*` property is read by any code path — `metadata.json` `properties` do not configure compaction behavior. As noted above, physical deletion of superseded files happens as the last step of compaction itself (`delete_old_files`, immediately after the `Replace` snapshot commits, for backends where `retires_files_physically()` is true), not as a separate scheduled job with a retention window.
 
 ---
 
@@ -279,38 +206,63 @@ ailake-query/src/
 ```
 
 ```rust
+pub enum CompactionIndexStrategy {
+    Auto,       // detect hardware, pick HNSW vs IVF-PQ (default)
+    ForceHnsw,
+    ForceIvfPq,
+}
+
 pub struct CompactionConfig {
     /// Minimum number of files to trigger compaction (default: 4)
     pub min_files_to_compact: usize,
     /// Files below this size are candidates for compaction (default: 128 MB)
     pub target_file_size_bytes: u64,
+    /// Index algorithm for the merged output file (default: Auto)
+    pub index_strategy: CompactionIndexStrategy,
+    /// Maximum files merged in a single pass (default: 20)
+    pub max_files_per_pass: usize,
 }
 
 pub struct CompactionPlanner {
-    pub config: CompactionConfig,
+    config: CompactionConfig, // private; set via CompactionPlanner::new(config)
 }
 
 impl CompactionPlanner {
-    /// Returns files smaller than target_file_size_bytes if their count
-    /// meets min_files_to_compact. Returns empty vec otherwise.
+    /// Foreign files (missing centroid_b64) first, then size-eligible files
+    /// smallest-first, capped at max_files_per_pass. Empty vec if fewer than
+    /// min_files_to_compact size-eligible files exist and there are no
+    /// foreign files to repair.
     pub fn plan(&self, files: &[DataFileEntry]) -> Vec<DataFileEntry>;
 }
 
 pub struct CompactionExecutor {
     store: Arc<dyn Store>,
     policy: VectorStoragePolicy,
+    index_strategy: CompactionIndexStrategy,
+    fts_config: Option<ailake_fts::FtsConfig>,
 }
 
 impl CompactionExecutor {
-    /// Read N files, concat RecordBatches, rebuild HNSW, write one unified file.
+    /// Read N files, concat RecordBatches, rebuild HNSW/IVF-PQ from scratch,
+    /// write one unified file.
     pub async fn compact(
         &self,
         files: &[DataFileEntry],
         output_path: &str,
     ) -> AilakeResult<DataFileEntry>;
 
-    /// Full cycle: plan → compact → catalog.commit_snapshot → delete old files.
-    /// Returns None if planner finds nothing to compact.
+    /// Same output contract as compact(), but reuses/extends a dominant
+    /// input file's existing HNSW graph when eligible instead of rebuilding
+    /// from scratch (falls back to compact() otherwise).
+    pub async fn compact_incremental(
+        &self,
+        files: &[DataFileEntry],
+        output_path: &str,
+    ) -> AilakeResult<DataFileEntry>;
+
+    /// Full cycle: plan → compact_incremental → catalog.commit_snapshot →
+    /// delete old files (when the catalog backend retires files physically).
+    /// Returns None if the planner finds nothing to compact.
     pub async fn run(
         &self,
         planner: &CompactionPlanner,

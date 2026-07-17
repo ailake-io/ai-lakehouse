@@ -4,6 +4,17 @@ Step-by-step deployment of `spark-plugin`, `trino-plugin`, and `ailake-py` on ea
 
 For storage/catalog configuration see [`INTEGRATIONS.md`](./INTEGRATIONS.md).
 
+> **Storage-backend caveat**: `ailake-jni` (the native library backing every Spark/Trino/Flink
+> example below) and `ailake-py` link `ailake-store` *without* the `store-s3`/`store-gcs`/
+> `store-azure` Cargo features — only the `ailake-cli` binary enables them. The only backend those
+> two bindings construct is `LocalStore`, which merely strips a leading `file://` prefix; it does
+> not resolve `s3://`/`gs://`/`abfss://` warehouse paths against real object storage (a real bug of
+> this exact shape — an `s3://` warehouse silently falling through as a literal relative path
+> instead of failing — was caught in `trino-plugin`'s test suite; see `CHANGELOG.md`). Treat the
+> cloud object-storage URIs used throughout this guide as illustrative of table/warehouse
+> addressing, not as functioning against real S3/GCS/Azure via these two bindings today — use a
+> locally-mounted path until object-store support lands for `ailake-jni`/`ailake-py`.
+
 ---
 
 ## Prerequisites — build artifacts
@@ -169,11 +180,11 @@ os.environ["LD_LIBRARY_PATH"] = "/opt/python:" + os.environ.get("LD_LIBRARY_PATH
 
 def handler(event, context):
     results = ailake.search(
-        table="s3://my-lake/docs/",
-        query=event["embedding"],
+        "s3://my-lake/docs/",
+        event["embedding"],
         top_k=event.get("top_k", 10),
     )
-    return [r.__dict__ for r in results]
+    return results.to_list()
 ```
 
 **Function config:**
@@ -330,11 +341,8 @@ class VectorSearchFn(beam.DoFn):
     def __init__(self, table_uri):
         self._table_uri = table_uri
 
-    def setup(self):
-        self._searcher = ailake.TableSearcher(self._table_uri)
-
     def process(self, query_embedding):
-        results = self._searcher.search(query=query_embedding, top_k=10)
+        results = ailake.search(self._table_uri, query_embedding, top_k=10)
         yield from results
 
 options = PipelineOptions([

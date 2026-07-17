@@ -66,7 +66,7 @@ pub mod llm_columns {
 | `chunk_summary` | `Utf8` | Yes | 1-2 sentence summary of chunk |
 | `source_uri` | `Utf8` | No | Original document URI |
 | `page_number` | `UInt32` | Yes | PDF page or equivalent |
-| `created_at` | `Timestamp(Micros, UTC)` | No | Ingest timestamp |
+| `created_at` | `Timestamp(Nanosecond, UTC)` | No | Ingest timestamp — use `ailake_core::now_ns()` / Python `ailake.TimestampNs` |
 | `document_date` | `Date32` | Yes | Document publication date |
 | `embedding` | `FIXED_LEN_BYTE_ARRAY(dim*2)` | No | F16 vector, primary search |
 | `context_embedding` | `FIXED_LEN_BYTE_ARRAY(dim*2)` | No | F16 vector, contextual search |
@@ -76,9 +76,9 @@ pub mod llm_columns {
 When a table has both `embedding` and `context_embedding`:
 
 - Both columns are stored in the Parquet section as `FIXED_LEN_BYTE_ARRAY`.
-- The AI-Lake footer contains **two HNSW graphs**, one per column.
-- The AI-Lake header has the `multi-column` flag set (bit 1).
-- See [`FILE_FORMAT.md`](./FILE_FORMAT.md) for multi-column footer layout.
+- The AI-Lake footer contains **two HNSW graphs**, one per column, each with its own independent AILK section.
+- There is no header "multi-column" flag bit — instead, the Parquet footer's `key_value_metadata` carries one offset per column: `ailake.footer_offset` for the primary column and `ailake.<column_name>.footer_offset` for each secondary column. Readers resolve a specific column's index by checking `ailake.<col>.footer_offset` first, falling back to `ailake.footer_offset` for single-column files.
+- See [`FILE_FORMAT.md`](./FILE_FORMAT.md) §12 for the full multi-column layout.
 
 The file remains a single self-contained unit. The trade-off: file size grows because each column needs its own HNSW (~10-20% of vector data per column).
 
@@ -158,30 +158,19 @@ Columns may have different dimensions (`dim=1536` for text, `dim=512` for images
 
 ### Reciprocal Rank Fusion (RRF) for dual-embedding search
 
-```rust
-// ailake-query/src/scanner.rs
+`search_multimodal()`'s `FusionMethod::Rrf` (`ailake-query/src/scanner.rs`) implements this for
+any number of query columns, not just two — the dual-embedding case (`embedding` +
+`context_embedding`) is just `queries.len() == 2`. There is no separate `rrf_merge(results_a,
+results_b, ...)` function; the fusion accumulates per-column ranked lists into one
+`HashMap` keyed by `(file_path, row_id)` directly inside `search_multimodal()`. The formula per
+column `i`, standard RRF constant `k = 60.0`:
 
-pub fn rrf_merge(
-    results_a: &[(RowId, f32)],  // from embedding search
-    results_b: &[(RowId, f32)],  // from context_embedding search
-    k: f32,                       // RRF constant, typically 60.0
-    top_n: usize,
-) -> Vec<(RowId, f32)> {
-    let mut scores: HashMap<RowId, f32> = HashMap::new();
-
-    for (rank, (row_id, _)) in results_a.iter().enumerate() {
-        *scores.entry(*row_id).or_default() += 1.0 / (k + rank as f32 + 1.0);
-    }
-    for (rank, (row_id, _)) in results_b.iter().enumerate() {
-        *scores.entry(*row_id).or_default() += 1.0 / (k + rank as f32 + 1.0);
-    }
-
-    let mut merged: Vec<(RowId, f32)> = scores.into_iter().collect();
-    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    merged.truncate(top_n);
-    merged
-}
 ```
+score(d) = Σ_i weight_i / (k + rank_i(d) + 1)
+```
+
+`SearchResult.distance` stores `-score(d)` so existing sort-ascending-by-distance callers get the
+correct RRF ranking (higher fused score = better = more negative distance = sorts first).
 
 ---
 
@@ -300,20 +289,33 @@ fn estimate_tokens(text: &str) -> usize {
 
 ## Ingest pipeline (reference implementation)
 
+`ailake.TableWriter.write_batch()` (the native PyO3 class, `path`/`texts`/`embeddings` — a single
+vector per row) only writes **one** vector column. Dual embeddings need
+`write_batch_multi(texts, columns, extra_columns)`, where `columns` is
+`list[(VectorColSpec, list[list[float]])]` — one secondary column per entry, each with its own
+HNSW index. `texts` populates the base `text` Parquet column (`ailake-py`'s
+`build_batch_with_extra` names it literally `"text"`); every other `LlmContextSchema` field
+(including `chunk_text` if you want that exact canonical name, `document_title`,
+`section_path`, …) goes through `extra_columns`, a `dict[str, list]` of parallel column arrays
+(same length as `texts`) — not a list of per-row dicts. Timestamp columns (`created_at`) must use
+`ailake.TimestampNs(ns_int)`, not a raw `datetime`, or `ailake.decay_memories()`-style downstream
+consumers reject the column type (see `now_ns()`'s doc comment, `ailake-core/src/schema.rs`).
+
 ```python
-# Reference Python ingest pipeline using ailake-py bindings (Phase 2)
+# Reference Python ingest pipeline using ailake-py bindings
 import ailake
-import numpy as np
-from uuid import uuid4
-from datetime import datetime, timezone
 
 def ingest_document(doc, embed_fn, writer: ailake.TableWriter):
     chunks = chunk_document(doc, chunk_size=512, overlap=50)
     doc_summary = embed_fn.summarize(doc.full_text, max_tokens=256)
 
-    rows = []
-    raw_embeddings = []
-    ctx_embeddings = []
+    texts, raw_embeddings, ctx_embeddings = [], [], []
+    extra = {
+        "chunk_id": [], "document_id": [], "chunk_index": [], "total_chunks": [],
+        "document_title": [], "section_path": [], "preceding_context": [],
+        "following_context": [], "document_summary": [], "chunk_summary": [],
+        "source_uri": [], "page_number": [], "created_at": [],
+    }
 
     for i, chunk in enumerate(chunks):
         preceding = chunks[i-1].text[-200:] if i > 0 else ""
@@ -325,32 +327,31 @@ def ingest_document(doc, embed_fn, writer: ailake.TableWriter):
             ctx_string += f"[SECTION: {chunk.section}]\n"
         ctx_string += f"[SUMMARY: {doc_summary}]\n---\n{chunk.text}"
 
-        rows.append({
-            "chunk_id": str(uuid4()),
-            "document_id": doc.id,
-            "chunk_index": i,
-            "total_chunks": len(chunks),
-            "chunk_text": chunk.text,
-            "document_title": doc.title,
-            "section_path": chunk.section or "",
-            "preceding_context": preceding,
-            "following_context": following,
-            "document_summary": doc_summary,
-            "chunk_summary": embed_fn.summarize(chunk.text, max_tokens=64),
-            "source_uri": doc.uri,
-            "page_number": chunk.page,
-            "created_at": datetime.now(timezone.utc),
-        })
+        texts.append(chunk.text)  # base "text" column
+        extra["chunk_id"].append(str(uuid.uuid4()))
+        extra["document_id"].append(doc.id)
+        extra["chunk_index"].append(i)
+        extra["total_chunks"].append(len(chunks))
+        extra["document_title"].append(doc.title)
+        extra["section_path"].append(chunk.section or "")
+        extra["preceding_context"].append(preceding)
+        extra["following_context"].append(following)
+        extra["document_summary"].append(doc_summary)
+        extra["chunk_summary"].append(embed_fn.summarize(chunk.text, max_tokens=64))
+        extra["source_uri"].append(doc.uri)
+        extra["page_number"].append(chunk.page)
+        extra["created_at"].append(ailake.TimestampNs(ailake.now_ns()))
 
         raw_embeddings.append(embed_fn.embed(chunk.text))
         ctx_embeddings.append(embed_fn.embed(ctx_string))
 
-    writer.write_batch(
-        rows=rows,
-        embeddings={
-            "embedding": np.array(raw_embeddings, dtype=np.float32),
-            "context_embedding": np.array(ctx_embeddings, dtype=np.float32),
-        }
+    writer.write_batch_multi(
+        texts,
+        columns=[
+            (ailake.VectorColSpec("embedding", dim=1536), raw_embeddings),
+            (ailake.VectorColSpec("context_embedding", dim=1536), ctx_embeddings),
+        ],
+        extra_columns=extra,
     )
     # Each batch creates one unified .parquet file with both HNSW graphs in its footer
 ```
@@ -409,7 +410,7 @@ pub mod episodic_columns {
 |---|---|---|
 | `recency_weight` | `Float32` | Updated by `MemoryDecayJob`; starts at 1.0 |
 | `access_count` | `UInt32` | Incremented each time this memory is recalled |
-| `last_accessed_at` | `Timestamp(Micros, UTC)` | Updated on each recall |
+| `last_accessed_at` | `Timestamp(Nanosecond, UTC)` | Updated on each recall — use `ailake_core::now_ns()` / Python `ailake.TimestampNs` |
 | `importance_score` | `Float32` | Agent-assigned importance; multiplied into final score |
 
 ### Hybrid scoring with `ScoreFn`
@@ -423,6 +424,7 @@ results = ailake.search(
     "s3://my-lake/agents/",
     query_vec,
     top_k=10,
+    fetch_data=True,  # required for score_fn — row data isn't fetched in pointer-only mode
     score_fn=lambda distance, row: (
         distance
         * float(row["recency_weight"][0])
