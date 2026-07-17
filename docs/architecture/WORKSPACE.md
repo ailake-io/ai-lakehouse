@@ -67,7 +67,7 @@ Vector data transformations. No I/O.
 - `BlockCompressor::zstd(level)`, `BlockCompressor::lz4()` — block-level compression
 
 ### `ailake-index`
-HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA (compile-time feature) + AMD ROCm (runtime libloading). CPU fallback always available.
+HNSW + IVF-PQ index lifecycle. GPU backends: NVIDIA CUDA + AMD ROCm, both loaded at runtime via `libloading` — no compile-time feature, no build-time SDK dependency. CPU fallback always available.
 
 - `HnswBuilder` — builds HNSW from `(RowId, &[f32])` pairs
   - Parameters: `M` (max connections), `ef_construction`, `metric`
@@ -276,24 +276,23 @@ arrow-array  = "52"
 arrow-schema = "52"
 arrow-select = "52"
 arrow-buffer = "52"
+arrow-ipc    = "52"
 object_store = { version = "0.10" }  # cloud features added per-crate via ailake-store feature flags
 
-# Iceberg
-iceberg     = "0.3"
+# Iceberg — metadata/avro manipulation; custom code in ailake-catalog, not the iceberg crate
 apache-avro = "0.16"
 
 # Full-text search
 tantivy     = { version = "0.22", default-features = false, features = ["mmap"] }
 ailake-fts  = { path = "ailake-fts", version = "0.1.6" }
 
-# Vector index
-hnsw_rs     = "0.3"
+# Vector index — HNSW is custom Rust code in ailake-index; no hnsw_rs dep needed
 bincode     = "1"
-memmap2     = "0.9"
+memmap2     = "0.9.11"
 rayon       = "1"
 roaring     = "0.10"
 
-# GPU — runtime dlopen, both vendors; no build-time SDK required
+# Runtime dynamic library loading — GPU backend detection without build-time SDK
 libloading  = "0.8"
 
 # Compression
@@ -343,7 +342,7 @@ debug       = true
 | **Phase 4** | ✅ Complete | PQ reranking, public format spec, GPU search (NVIDIA cuBLAS + AMD hipBLAS runtime-only), HNSW perf optimizations, IVF-PQ native index, GPU k-means, adaptive index selection, `ailake-flink` Kotlin connector (Flink Table API + Catalog, JNA bridge) |
 | **Phase 5** | ✅ Complete | Multi-language SDKs (`ailake-go`, `ailake-cpp`), `ailake serve` HTTP server, Airflow provider, idempotent writes, Compat Heavy CI, TruffleHog scanning, cloud deployment guides |
 | **Phase 6** | ✅ Complete | Public distribution — crates.io pipeline, PyPI manylinux wheels, Airflow provider on PyPI, pre-built JVM JARs + native lib on GitHub Releases, dynamic Python versioning |
-| **Phase 7** | ✅ Complete | DuckDB extension (`duckdb-ailake/`), Python `fetch_data=True`, `write_batch_auto_deferred` + async (~200k vec/s), `pq_only`/`ivf_residual` in Python SDK, Airbyte CDK v3 destination connector, expanded JupyterLab demo (`01`–`12` notebooks, 11 fixture tables in `init_demo.py`), **Tantivy FTS** (`ailake-fts` crate, `AILK_FTS` section, O(log N) `search_text()`, `fts_columns` in all SDKs + JVM plugins — delivered in Phase T), **hybrid BM25+vector** (`SearchConfig::hybrid`, RRF fusion — delivered in Phase 9). DuckLake catalog backend deferred indefinitely. |
+| **Phase 7** | ✅ Complete | DuckDB extension (`duckdb-ailake/`), Python `fetch_data=True`, `write_batch_auto_deferred` + async (~200k vec/s), `pq_only`/`ivf_residual` in Python SDK, Airbyte CDK v3 destination connector, expanded JupyterLab demo (`01`–`13` notebooks, 11 fixture tables in `init_demo.py`), **Tantivy FTS** (`ailake-fts` crate, `AILK_FTS` section, O(log N) `search_text()`, `fts_columns` in all SDKs + JVM plugins — delivered in Phase T), **hybrid BM25+vector** (`SearchConfig::hybrid`, RRF fusion — delivered in Phase 9), **DuckLake catalog backend** (`ailake-catalog::DuckLakeCatalog`, opt-in `catalog-ducklake` feature, sidecar table for AI-Lake vector metadata over a real DuckLake attachment). |
 | **Phase 8** | ✅ Complete | Multimodal — `VectorModality` enum, `ailake.modality-<col>` Iceberg property, N generalized vector columns with independent HNSW, `write_batch_multi`, CLI `--vector-cols`, cross-modal RRF (`search_multimodal`), `MultimodalContextSchema`, Python `VectorColSpec`. Propagated to all plugins: `ailake_search_multimodal_json` C-ABI, `searchMultimodal()` Spark/Trino/Flink, `ailake_search_multimodal()` DuckDB, `SearchMultimodal()` Go SDK, `search_multimodal()` C++ SDK |
 | **Phase 9** | ✅ Complete | BM25 Hybrid Search + Agent Memory — `BM25Scorer`, `IdfStats` at write time, `SearchConfig::hybrid` (RRF + linear fusion), `search_text()` pure-lexical scan, `ailake_search_text_json` C-ABI, `ailake_search_text()` DuckDB, Flink `searchText()` + hybrid params; `ToolCallSchema`, `EpisodicMemorySchema` with recency decay, injectable `ScoreFn`, `agent_id` Iceberg identity partitioning, `WorkingMemoryBuffer`, `MemoryDecayJob`, Python `ailake.Agent` helper |
 
@@ -451,12 +450,13 @@ Delivered in Phase 6:
 - **`publish-jvm.yml`** — builds Spark/Trino/Flink fat-JARs (via Gradle `shadowJar`) + `libailake_jni.so` (Rust `--release`); uploads all four artifacts to GitHub Release; pre-built JARs downloadable without Rust toolchain or Gradle
 - **CI Go** (`ci-go.yml`) — `go build ./...` + `go vet ./...` for `ailake-go`
 - **CI C++** (`ci-cpp.yml`) — CMake configure + build for `ailake-cpp` (CPU-only, no CUDA)
-- **CI GPU** (`ci-gpu.yml`, `ci-gpu-data.yml`) — three-platform GPU tests: Windows bare-metal (existing), Linux/CUDA Docker (new, runner label `gpu-nvidia`), Linux/ROCm Docker (new, runner label `gpu-amd`). Previously Windows-only; `hardware.rs` Linux paths (`libcuda.so.1`, `libamdhip64.so`) now exercised in CI.
+- **CI GPU** (`ci-gpu.yml`) — three-platform GPU tests: Windows bare-metal (existing), Linux/CUDA Docker (new, runner label `gpu-nvidia`), Linux/ROCm Docker (new, runner label `gpu-amd`). Previously Windows-only; `hardware.rs` Linux paths (`libcuda.so.1`, `libamdhip64.so`) now exercised in CI. `ci-gpu-data.yml` was merged into `ci-gpu.yml` (its sole test target `gpu_data` is a strict subset of `cargo test -p ailake-index`).
+- **CI Safety** (`ci-safety.yml`) — Miri UB detection on nightly (ailake-vec, ailake-index, ailake-jni) + Loom concurrency model checking on stable (ailake-query). Runs on every PR and push.
 - **Composite action `locate-rust-windows`** (`.github/actions/locate-rust-windows/action.yml`) — reusable PowerShell action that finds `cargo.exe` on Windows self-hosted runners (toolchain dir → rustup shim → PATH). Extracts ~60-line block previously duplicated in `ci-gpu.yml` and `ci-gpu-data.yml`.
 - **GPU Docker images** (`docker/gpu-cuda/Dockerfile`, `docker/gpu-rocm/Dockerfile`, `docker-compose.gpu.yml`) — purpose-built images for reproducible local and CI GPU testing. `gpu-cuda`: `nvidia/cuda:12.6.0-runtime-ubuntu22.04` (runtime-only; no CUDA Toolkit headers needed because `ailake-index` uses libloading). `gpu-rocm`: `rocm/dev-ubuntu-22.04:6.2`. Both pre-fetch deps and pre-build test harness for fast subsequent runs. `docker-compose.gpu.yml` wires up device passthrough flags.
-- **Node.js 24 opt-in** — `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` across all 9 workflows; eliminates deprecation warnings ahead of GitHub-forced switch
+- **Node.js 24 opt-in** — `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` across all 10 workflows; eliminates deprecation warnings ahead of GitHub-forced switch
 
-Manual Actions trigger order (pre-release): CI → CI Go → CI C++ → Compat Heavy → Release → Publish Python / Airflow Provider / JVM Plugins (parallel). GPU CI (steps 4–5) runs in parallel with CI Go and CI C++. See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.
+Manual Actions trigger order (pre-release): CI + CI Safety (parallel) → CI Go → CI C++ → Compat Heavy → Release → Publish Python / Airflow Provider / JVM Plugins (parallel). GPU CI runs in parallel with CI Go and CI C++. See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.
 
 ### Phase 7 — DuckDB Extension + Deferred Engine + Airbyte 🚧
 

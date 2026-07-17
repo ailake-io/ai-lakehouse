@@ -73,6 +73,11 @@ multimodal_write_op = AilakeWriteOperator(
 )
 ```
 
+A row with a `NaN`/`Infinity` embedding value is rejected by the CLI at write time; the
+underlying `ailake insert` call fails with a clear error (`embedding contains
+non-finite value (...); NaN/Infinity embeddings are rejected at write time`), which
+surfaces as a task failure rather than a silently accepted bad row.
+
 `AilakeCompactOperator` — compacts small files in an AI-Lake table. Wraps `ailake compact <table>`.
 
 ```python
@@ -219,6 +224,11 @@ search_op = AilakeSearchOperator(
 ```
 
 Returns the results list, which Airflow's default `do_xcom_push` behavior lands on XCom under the standard `"return_value"` key — pull with `{{ ti.xcom_pull(task_ids='recall_memories') }}`.
+
+`top_k` (here and on `AilakeHook.search`/`search_text`/`AilakeFtsSearchOperator`) is
+capped at `ailake_core::MAX_TOP_K` (100,000) by the underlying CLI — a value above
+that fails the task with a clear error instead of risking an unbounded-allocation
+crash.
 
 ### Sensor
 

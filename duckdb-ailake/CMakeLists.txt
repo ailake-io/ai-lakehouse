@@ -42,6 +42,7 @@ add_library(duckdb_ailake MODULE
     src/ailake_evolve_schema.cpp
     src/ailake_write_batch_multi.cpp
     src/ailake_compact.cpp
+    src/ailake_create_table.cpp
 )
 
 target_include_directories(duckdb_ailake PRIVATE

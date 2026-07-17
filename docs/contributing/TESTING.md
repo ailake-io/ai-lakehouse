@@ -13,11 +13,13 @@
 ## Test categories
 
 | Category | Location | Runs in | What it covers |
-|---|---|---|---|
+|---|---|---|---|---|
 | Unit | `src/` inline `#[cfg(test)]` | `cargo test` | Single function, no I/O |
 | Integration | `tests/` at workspace root | `cargo test -p ailake-tests` | Multiple crates, local FS |
 | Property-based | `src/` inline or `tests/` | `cargo test` | Invariants across random inputs |
 | Benchmark | external [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks) repo | `cargo run --release` (in that repo) | SIFT-1M write/index/search throughput + recall vs. LanceDB/pgvector/Deep Lake |
+| UB detection (Miri) | `src/` inline `#[cfg(miri)]` | `ci-safety.yml` — every PR | `get_unchecked_mut`, SIMD intrinsics, CStr FFI, scalar edge cases |
+| Concurrency model (Loom) | `src/` inline `#[cfg(feature = "loom")]` | `ci-safety.yml` — every PR | JNI table locks, shared codebooks, atomic counters |
 | Compat (Python/DuckDB) | `tests/compat/` | `ci.yml` — every PR | PyArrow, DuckDB, PyIceberg, ailake-py SDK |
 | Compat (Spark/Trino/JVM) | `tests/compat/` + Gradle | `compat-heavy.yml` — push to main + weekly | Spark+Iceberg, Trino+REST, Flink/Spark/Trino JVM plugins |
 
@@ -687,6 +689,28 @@ Fails the step with a descriptive error if cargo is not found. Adding the found 
 |---|---|---|
 | `trufflehog` | `trufflesecurity/trufflehog@main --only-verified` | Secret scanning — blocks on verified credential leaks |
 
+### `ci-safety.yml` — every PR and push
+
+| Job | Command | What it covers |
+|---|---|---|
+| `miri` | `cargo miri test -p ailake-vec -p ailake-index -p ailake-jni -- miri_` | Miri (nightly): detects UB in `get_unchecked_mut` (visited tracker), scalar SIMD fallback paths, CStr FFI boundary. Each crate's `#[cfg(miri)]` tests exercise edge cases (zero vectors, dimension mismatch, null-terminated strings). |
+| `loom` | `cargo test --features loom -p ailake-query -- loom_` | Loom (stable): explores all thread interleavings for JNI table-lock pattern, once-init flag, and `AtomicU32` batch counter. Limited to 2 threads / `LOOM_MAX_BRANCHES=10000` for bounded model checking. |
+
+### `fuzz.yml` — weekly schedule + push on fuzz-relevant paths (`workflow_dispatch`)
+
+7 `cargo-fuzz` targets under `fuzz/fuzz_targets/` (`fuzz_ailake_header`, `fuzz_ailake_file_reader`, `fuzz_avro_manifest`, `fuzz_bincode_hnsw`, `fuzz_fts_blob`, `fuzz_json_apis`, `fuzz_parquet_reader`), covering untrusted-input parsing at the AILK header, Avro manifest, bincode HNSW graph, FTS blob, JNI JSON request, and Parquet reader boundaries.
+
+| Job | Command | What it covers |
+|---|---|---|
+| `build` | `cargo +nightly fuzz build` | Compiles all 7 fuzz targets — catches build breakage on every push touching a fuzzed crate. |
+| `smoke` | `cargo +nightly fuzz run <target> -- -runs=1000` | Runs `fuzz_ailake_header`, `fuzz_avro_manifest`, `fuzz_fts_blob` for 1000 iterations each on every PR/push; full corpus fuzzing runs on the weekly schedule via `.oss-fuzz` integration. |
+
+### `audit.yml` — weekly schedule + push/PR on dependency-relevant paths (`workflow_dispatch`)
+
+| Job | Command | What it covers |
+|---|---|---|
+| `audit` | `cargo audit` | Weekly scan of `Cargo.lock` against the RustSec advisory database; also runs on any push/PR touching `Cargo.toml`/`Cargo.lock`/`deny.toml`. Complements `cargo deny check licenses advisories sources` (point-in-time, run in `ci.yml`) with a scheduled recheck that catches newly-disclosed advisories against an unchanged lockfile. |
+
 ### `compat-heavy.yml` — manual dispatch (`workflow_dispatch`)
 
 | Job | What it covers |
@@ -719,6 +743,7 @@ Re-builds and re-publishes `apache-airflow-providers-ailake` to PyPI + attaches 
 | `fmt`, `clippy` | Every PR |
 | `unit`, `integration`, `compat-parquet` | Every PR |
 | `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg`, `compat-ailake-py` | Every PR |
+| `miri` (UB), `loom` (concurrency model) | Every PR |
 | `compat-spark`, `compat-trino`, `compat-jvm-plugins`, `compat-bigquery` | Release (manual dispatch before triggering `release.yml`) |
 
 ---
@@ -730,6 +755,7 @@ All CI workflows are `workflow_dispatch`. Trigger in this order — each step mu
 | Step | Workflow | What it does | Blocks on |
 |---|---|---|---|
 | 1 | **CI** (`ci.yml`) | Rust fmt/clippy/deny, unit, integration, compat Python/DuckDB/PyIceberg/ailake-py, Airflow provider tests | Must pass |
+| 1b | **CI Safety** (`ci-safety.yml`) | Miri UB detection (nightly) + Loom concurrency model checking (stable). Runs in parallel with CI. | Must pass |
 | 2 | **CI Go** (`ci-go.yml`) | Go SDK build + vet | Must pass |
 | 3 | **CI C++** (`ci-cpp.yml`) | C++17 cmake build | Must pass |
 | 4 | **CI GPU** (`ci-gpu.yml`) | GPU unit + data integration tests on Windows bare-metal; Linux jobs disabled (`if: false`); skips gracefully if `AILAKE_GPU_BACKEND=none` | Must pass (on GPU runner) |

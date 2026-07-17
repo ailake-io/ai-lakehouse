@@ -426,6 +426,13 @@ impl TableWriter {
                     batch_dim: actual,
                 });
             }
+            // System boundary: reject NaN/Infinity here rather than letting it flow into
+            // the Parquet vector column, the HNSW graph, and centroid/radius computation.
+            if let Some(bad) = emb.iter().find(|x| !x.is_finite()) {
+                return Err(AilakeError::Catalog(format!(
+                    "embedding contains non-finite value ({bad}); NaN/Infinity embeddings are rejected at write time"
+                )));
+            }
         }
         Ok(())
     }
@@ -1732,6 +1739,22 @@ mod tests {
 
     fn update_for(schema: &Schema, pol: &VectorStoragePolicy) -> IcebergSchemaUpdate {
         arrow_schema_to_iceberg_update(schema, pol, &[])
+    }
+
+    #[test]
+    fn validate_embedding_dim_for_policy_rejects_nan() {
+        let pol = policy("embedding", 3);
+        let embeddings = vec![vec![1.0, 2.0, 3.0], vec![1.0, f32::NAN, 3.0]];
+        let err = TableWriter::validate_embedding_dim_for_policy(&embeddings, &pol).unwrap_err();
+        assert!(err.to_string().contains("non-finite"), "{err}");
+    }
+
+    #[test]
+    fn validate_embedding_dim_for_policy_rejects_infinity() {
+        let pol = policy("embedding", 3);
+        let embeddings = vec![vec![1.0, f32::INFINITY, 3.0]];
+        let err = TableWriter::validate_embedding_dim_for_policy(&embeddings, &pol).unwrap_err();
+        assert!(err.to_string().contains("non-finite"), "{err}");
     }
 
     #[test]

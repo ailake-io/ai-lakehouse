@@ -109,15 +109,19 @@ def test_compact_merges_small_files_and_preserves_rows():
         conn.close()
 
 
-def test_compact_not_ready_or_missing_table_returns_negative_one():
+def test_compact_missing_table_raises():
     conn = setup_connection()
     table_dir, cleanup = make_table_dir("_missing")
     try:
-        # Table was never created — load_table fails inside the native call.
-        row = conn.execute(f"SELECT ailake_compact('{table_dir}')").fetchone()
-        require(row is not None, "compact returned NULL row")
-        require(row[0] == -1, f"expected -1 for a nonexistent table, got {row[0]}")
-        print(f"PASS test_compact_not_ready_or_missing_table_returns_negative_one: result={row[0]}")
+        # Table was never created — load_table fails inside the native call
+        # (ok:false). Previously folded into a silent -1 return; now raised as
+        # a clear SQL error so the actual reason reaches the caller.
+        try:
+            conn.execute(f"SELECT ailake_compact('{table_dir}')").fetchone()
+            require(False, "expected an exception for a nonexistent table, got a result")
+        except duckdb.Error as e:
+            require("ailake_compact failed" in str(e), f"unexpected error message: {e}")
+            print("PASS test_compact_missing_table_raises")
     finally:
         if cleanup:
             shutil.rmtree(cleanup, ignore_errors=True)
@@ -127,6 +131,6 @@ def test_compact_not_ready_or_missing_table_returns_negative_one():
 if __name__ == "__main__":
     test_compact_nothing_eligible_returns_zero()
     test_compact_merges_small_files_and_preserves_rows()
-    test_compact_not_ready_or_missing_table_returns_negative_one()
+    test_compact_missing_table_raises()
     print()
     print("PASS: ailake_compact — all tests passed")

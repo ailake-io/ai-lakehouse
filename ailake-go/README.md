@@ -268,6 +268,8 @@ func WriteBatch(
 
 Writes a batch of rows from a local Parquet file into an AI-Lake table (`ailake insert` CLI). `opts.VecCol` identifies the embedding column (default `"embedding"`).
 
+A row with a `NaN`/`Infinity` embedding value is rejected by the CLI; the returned `error` includes the CLI's stderr with the actual reason. `SearchText`/`SearchHybrid`'s `top_k` is capped at 100,000 by the underlying `ailake_query` core (same limit enforced at the JNI C-ABI boundary used by Spark/Trino/Flink) — a value above that fails cleanly instead of risking an out-of-memory subprocess.
+
 ```go
 type WriteBatchOptions struct {
     VecCol             string

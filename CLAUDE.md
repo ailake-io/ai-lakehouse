@@ -13,7 +13,7 @@
 | **Linguagem core** | **Rust** | Zero-cost abstractions, segurança de memória sem GC, ideal para I/O de vetores em alta frequência |
 | **Layout físico** | **Arquivo único auto-contido** | Dados + vetores + índice HNSW no mesmo arquivo Parquet estendido — fonte única da verdade |
 | **Compatibilidade** | **Apache Iceberg Spec v2** | Qualquer framework com leitor Iceberg lê tabelas AI-Lake sem modificação |
-| **Indexação vetorial** | **`hnsw_rs`** | HNSW puro em Rust, sem deps C++, serialização nativa |
+| **Indexação vetorial** | **HNSW próprio (`ailake-index`)** | Implementação HNSW em Rust puro no próprio crate, sem dependência externa (a crate `hnsw_rs` foi removida — ver §11), serialização nativa via `bincode` |
 | **Engine de I/O** | **`parquet-rs` + `arrow-rs`** | Base oficial Apache para colunar em Rust |
 | **Carga do índice** | **`memmap2`** | mmap do rodapé HNSW sem carregar arquivo inteiro na RAM |
 | **Serialização do grafo** | **`bincode`** | Serialização binária ultra-rápida do HNSW |
@@ -647,7 +647,7 @@ ailake/
 ├── ailake-core/          # Tipos, traits, schema VECTOR, LlmContextSchema, RowId
 ├── ailake-parquet/       # Leitor/escritor Parquet com tipo VECTOR
 ├── ailake-vec/           # Quantização F32/F16/I8/PQ
-├── ailake-index/         # HNSW via hnsw_rs, IVF-PQ — serialização bincode, mmap
+├── ailake-index/         # HNSW próprio (sem hnsw_rs), IVF-PQ — serialização bincode, mmap
 ├── ailake-file/          # Arquivo unificado: Parquet + rodapé AI-Lake
 ├── ailake-catalog/       # Catálogo Iceberg: metadata.json, manifestos Avro
 ├── ailake-store/         # Abstração de object storage via object_store
@@ -666,14 +666,14 @@ arrow          = "52"                 # arrow-rs — in-memory columnar
 arrow-array    = "52"
 object_store   = { version = "0.10", features = ["aws", "gcp", "azure"] }
 
-# Indexação vetorial (Rust puro)
-hnsw_rs        = "0.3"               # HNSW puro Rust, serialização nativa
+# Indexação vetorial: HNSW é código Rust próprio em ailake-index — sem hnsw_rs
+# (removida; ver "Por que HNSW próprio" abaixo)
 
 # mmap
 memmap2        = "0.9"
 
-# Catálogo Iceberg
-iceberg        = "0.3"
+# Catálogo Iceberg: manipulação de metadata/manifesto Avro é código próprio em
+# ailake-catalog, não a crate `iceberg` (removida)
 apache-avro    = "0.16"
 
 # Serialização
@@ -700,9 +700,9 @@ half           = "2"                 # f16 type
 tracing        = "0.1"
 ```
 
-### Por que `hnsw_rs` em vez de Faiss/usearch?
+### Por que HNSW próprio em vez de Faiss/usearch/`hnsw_rs`?
 
-| Critério | Faiss (C++) | usearch | **hnsw_rs (Rust puro)** |
+| Critério | Faiss (C++) | usearch | **HNSW próprio (`ailake-index`)** |
 |---|---|---|---|
 | Dependência C++ | Sim | Híbrido | **Não** |
 | Compilação cruzada | Complexa | Média | **Simples** |
@@ -711,7 +711,12 @@ tracing        = "0.1"
 | Serialização nativa Serde | Não | Não | **Sim (bincode)** |
 | Licença | MIT | Apache 2.0 | **MIT/Apache 2.0** |
 
-`hnsw_rs` se integra naturalmente com o ecossistema Rust de serialização, permitindo armazenar o grafo HNSW como bytes via `bincode` sem necessidade de adaptadores FFI.
+Implementação HNSW é código Rust próprio em `ailake-index` (a crate externa `hnsw_rs`
+foi usada nas fases iniciais e depois removida — sem dependência externa hoje),
+permitindo controle total sobre o layout de serialização e otimizações específicas
+(SIMD, dispatch de métrica em tempo de compilação, mmap lazy) sem passar por uma API
+de terceiros. O grafo é armazenado como bytes via `bincode` sem necessidade de
+adaptadores FFI.
 
 ### Por que SDK direto em vez de DataFusion?
 

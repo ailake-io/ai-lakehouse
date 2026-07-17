@@ -1,6 +1,6 @@
 # ailake — AI-Lake Format Python SDK
 
-**Version**: 0.1.1 — Unified storage for tabular data, embeddings, and HNSW vector index in a single Parquet-compatible file. Apache Iceberg Spec v2/v3 compatible.
+**Version**: 0.1.6 — Unified storage for tabular data, embeddings, and HNSW vector index in a single Parquet-compatible file. Apache Iceberg Spec v2/v3 compatible.
 
 ## Install
 
@@ -146,6 +146,18 @@ Opens or creates an AI-Lake table at `path`.
 | `partition_value` | `None` | Per-write value for `partition_by`. Tagged in `key_metadata`; used for manifest-level pruning at search time. |
 | `partition_fields` | `None` | Multi-column Iceberg partition spec. List of `(column, transform, column_type)` tuples. Supports all Iceberg transforms: `"identity"`, `"year"`, `"month"`, `"day"`, `"hour"`, `"bucket[N]"`, `"truncate[N]"`. Takes precedence over `partition_by`. Example: `[("topic_id","identity","int"),("date","month","date")]`. |
 | `format_version` | `2` | Iceberg format version. Set to `3` to write an Iceberg v3 table. |
+| `catalog_opts` | `None` | Catalog backend selection/config. Omit for the default (Hadoop-style, file-based). Set `{"catalog": "rest", "rest_uri": "...", ...}` to talk to an Iceberg REST Catalog server (Polaris, Unity Catalog, BigLake, S3 Tables, Nessie, Gravitino) instead — keys mirror `ailake-cli`'s `--rest-*` flags. Accepted by `open_table`/`Table`, `search`/`search_text`/`search_with_data`/`search_multimodal`, and most other module-level functions. See [REST Catalog Backend](../docs/guides/REST_CATALOG.md). |
+
+### `create_table(path, dim, *, vector_column="embedding", metric="cosine", precision="f16", format_version=2, hnsw_m=None, hnsw_ef_construction=None, pre_normalize=False, modality="", partition_by="", partition_value="", partition_column_type="", partition_fields_json="", fts_columns="", fts_tokenizer="", embedding_model="", namespace="default", table_name="table", catalog_opts=None) → bool`
+
+Creates an empty AI-Lake/Iceberg table (schema/policy only, no data files) without a
+first `write_batch()`/`commit()` — useful when a table needs to exist and be
+searchable (returning zero rows) before any embeddings are ready. Returns `True` on
+success, raises `ValueError` on error (e.g. table already exists).
+
+```python
+ailake.create_table("s3://my-lake/docs/", dim=1536, metric="cosine")
+```
 
 ### `Table`
 
@@ -212,6 +224,7 @@ Module-level search returning the same chainable `SearchQuery`.
 - `ef_search` — HNSW search pool size. Larger = higher recall, slower. Default `None` = table default (50).
 - `rerank_factor` — when set, fetches `top_k * rerank_factor` HNSW candidates and reranks with exact F32 distances — corrects PQ approximation error on IVF-PQ-indexed tables. Default `None` = off. Also honored by `search_with_data`/`scan` and `search_multimodal`.
 - `score_fn` — re-ranking callable `(distance: float, row: Any) -> float`. Requires `fetch_data=True`.
+- `top_k` is capped at `ailake_core::MAX_TOP_K` (100,000) — a value above that raises `ValueError` rather than risking an unbounded-allocation crash (`search()` runs in-process, so this protects the embedding host process itself, not just a subprocess). Same limit applies to `search_text()` and `search_multimodal()`.
 
 ### `VectorColSpec(column, dim, metric="cosine", modality=None, precision="f16", pre_normalize=False, hnsw_m=None, hnsw_ef_construction=None)`
 
@@ -383,6 +396,10 @@ writer.commit()
 ```
 
 `TableWriter` parameters: same as `open_table()` (includes `pq_only`, `ivf_residual`, `pre_normalize`, `hnsw_m`, `hnsw_ef_construction`, `embedding_model`, `embedding_model_version`, `embed_fn`, `partition_by`, `partition_value`, `partition_fields`, `format_version`).
+
+A row with a `NaN`/`Infinity` embedding value is rejected at write time — every
+`write_batch*` method raises `ValueError` (`embedding contains non-finite value (...);
+NaN/Infinity embeddings are rejected at write time`) instead of silently accepting it.
 
 ### `delete_where(path, column, values) → None`
 

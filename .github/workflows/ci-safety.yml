@@ -1,0 +1,56 @@
+name: CI Safety (Miri + Loom)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  miri:
+    name: Miri — UB detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Miri — ailake-vec (scalar paths)
+        run: cargo miri test -p ailake-vec -- miri_ -- --nocapture
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-strict-provenance
+
+      - name: Miri — ailake-index (hnsw + serialize, no mmap)
+        run: cargo miri test -p ailake-index -- miri_ -- --nocapture
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-strict-provenance
+
+      - name: Miri — ailake-jni (CStr FFI boundary)
+        run: cargo miri test -p ailake-jni -- miri_ -- --nocapture
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-strict-provenance
+
+  loom:
+    name: Loom — concurrency model checking
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Loom — ailake-query concurrent models
+        run: LOOM_MAX_BRANCHES=10000 cargo test --features loom -p ailake-query -- loom_ -- --nocapture

@@ -16,6 +16,7 @@ flowchart TD
         NC["NessieCatalog\nREST + branching API\n(feature = catalog-nessie)"]
         JC["JdbcCatalog\nPostgreSQL / MySQL / SQLite\n(feature = catalog-jdbc)"]
         GC["GlueCatalog\nAWS Glue Data Catalog\n(feature = catalog-glue)"]
+        DL["DuckLakeCatalog\nreal ducklake DuckDB extension +\nAI-Lake sidecar table\n(feature = catalog-ducklake)"]
     end
 
     store["Arc&lt;dyn Store&gt;\nobject_store — S3 / GCS / Azure / local"]
@@ -27,12 +28,14 @@ flowchart TD
     CP --> NC
     CP --> JC
     CP --> GC
+    CP --> DL
 
     HC --> store
     RC --> store
     NC --> store
     JC --> store
     GC --> store
+    DL --> store
 ```
 
 ## JVM plugin integration — Rust core ↔ JVM via JNA
@@ -624,6 +627,13 @@ let catalog: Arc<dyn CatalogProvider> = Arc::new(
     GlueCatalog::from_env(glue_config, s3_store).await
 );
 
+// DuckLake (feature = "catalog-ducklake") — AI-Lake vector metadata lives in
+// a sidecar table alongside a real DuckLake attachment; see
+// docs/guides/DUCKLAKE_CATALOG.md for the full design and known limitations.
+let catalog: Arc<dyn CatalogProvider> = Arc::new(
+    DuckLakeCatalog::connect(root_db_path, ducklake_meta_path, data_path, catalog_alias, warehouse).await?
+);
+
 // Same search() call regardless of catalog backend
 let results = search(&table, &query, config, "embedding", dim, catalog, store).await?;
 ```
@@ -640,6 +650,7 @@ let results = search(&table, &query, config, "embedding", dim, catalog, store).a
 | `NessieCatalog` | ✅ Implemented | 3 |
 | `JdbcCatalog` | ✅ Implemented | 3 |
 | `GlueCatalog` | ✅ Implemented | 3 |
+| `DuckLakeCatalog` (feature = `catalog-ducklake`) | ✅ Implemented | 5 |
 
 ---
 

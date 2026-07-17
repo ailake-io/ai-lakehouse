@@ -164,6 +164,12 @@ Total: `dim × 4 + 4` bytes.
 `distance(query, centroid) - radius > pruning_threshold` without
 downloading or opening the file beyond the manifest.
 
+**Finiteness guarantee**: the writer (`compute_centroid_and_radius`, `ailake-vec/src/distance.rs`)
+excludes any non-finite (NaN/Infinity) input vector before averaging, so a single poisoned
+embedding cannot corrupt the centroid/radius for the rest of the file. Embeddings containing
+NaN/Infinity are rejected outright at write time, so in practice this exclusion is a defensive
+fallback — readers can assume every value in this blob is finite.
+
 ---
 
 ## 6. Index Blob
@@ -208,6 +214,26 @@ let hnsw: HnswIndex = HnswSerializer::from_bytes(blob)?;
 // or via mmap:
 let hnsw: HnswIndex = MmapLoader::from_bytes(blob)?;
 ```
+
+**Graph-structure validation**: `HnswSerializer::from_bytes` (`ailake-index/src/serialize.rs`)
+validates the deserialized graph's structural invariants before returning it — bytes read from
+disk/S3/IPC are untrusted input, and the search hot path (`VisitedTracker::visit`'s
+`get_unchecked_mut`) relies on these invariants holding rather than re-checking them per lookup.
+A corrupt or malicious blob is rejected with `Err` instead of risking undefined behavior or an
+effectively unbounded search loop. Checks performed (empty `neighbors` = pre-graph legacy format,
+exempted — triggers brute-force fallback instead):
+
+- `entry_point`, if `Some`, is `< row_ids.len()`
+- `neighbors.len() == row_ids.len()` and `node_levels.len() == row_ids.len()`
+- for every node `i`: `neighbors[i].len() == node_levels[i] + 1` (the shape `HnswBuilder` always produces for a node built at level `node_levels[i]`)
+- every neighbor index appearing anywhere in `neighbors` is `< row_ids.len()`
+- `max_layer == max(node_levels)` (an inflated `max_layer` would otherwise drive the `for lc in (1..=self.max_layer).rev()` search loop far past any real layer)
+- `flat_vecs.len() == row_ids.len() * dim`
+
+This is graph-structure-level validation, layered on top of the byte-offset-level checks in
+`ailake-file/src/reader.rs` (magic bytes, `checked_add` on section offsets, `NotAnAilakeFile`)
+that verify the AILK header/trailer envelope itself is well-formed before the index blob inside
+it is even sliced out.
 
 Key invariants of the serialized graph:
 
@@ -495,6 +521,11 @@ Conforming implementations MUST verify:
 3. `parquet_record_count == ailk_header.record_count == hnsw_graph.node_count()`
 4. `ailk_header.centroid_len == dim × 4 + 4`
 5. HNSW `row_id` values are in `[0, record_count)`
+6. HNSW graph structure is internally consistent — see the graph-structure validation checks
+   listed in §6.1 (`entry_point`/neighbor bounds, `neighbors`/`node_levels` shape, `max_layer`
+   consistency). The Rust reference implementation enforces this in
+   `HnswSerializer::from_bytes` (`ailake-index/src/serialize.rs`), rejecting corrupt or
+   malicious index blobs with `Err` at deserialization time rather than at search time.
 
 Violation of invariant (3) indicates a partially-written or corrupted file.
 Readers MUST return an error rather than silently returning wrong results.

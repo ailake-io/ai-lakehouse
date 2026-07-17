@@ -17,6 +17,7 @@ from ailake._ailake import (  # type: ignore[import]
     assemble_context as _assemble_context_raw,
     backfill_vector_column,
     compact as _compact_native,
+    create_table,
     decay_memories,
     delete_rows,
     delete_where,
@@ -76,6 +77,7 @@ __all__ = [
     "backfill_vector_column",
     "now_ns",
     "hardware_info",
+    "create_table",
 ]
 
 # Backward-compat re-export: ailake.TableWriter still works.

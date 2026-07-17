@@ -112,8 +112,17 @@ static unique_ptr<FunctionData> AilakeScanBind(
         data->ns
     );
 
-    if (!data->result.ok || data->result.columns.empty()) {
-        // Empty result or error: single _distance column so DuckDB has something.
+    if (!data->result.ok) {
+        // A real backend rejection (e.g. top_k over the cap, NaN/Infinity query) must
+        // fail visibly — previously folded into the same "empty result" fallback as a
+        // genuinely-zero-matches scan, so callers saw silent zero rows instead of an error.
+        throw InvalidInputException(
+            "ailake_scan failed: " + (data->result.error.empty() ? "unknown error" : data->result.error)
+        );
+    }
+    if (data->result.columns.empty()) {
+        // Genuinely empty result (zero matches, ok=true): single _distance column so
+        // DuckDB has something to return.
         return_types = {LogicalType::FLOAT};
         names        = {"_distance"};
         return std::move(data);

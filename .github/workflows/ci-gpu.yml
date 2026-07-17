@@ -22,6 +22,7 @@ jobs:
   index-gpu-windows:
     name: index — gpu (Windows)
     runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -69,6 +70,7 @@ jobs:
     name: index — gpu (Linux/CUDA Docker)
     if: false
     runs-on: [self-hosted, Linux, X64, gpu-nvidia]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -105,6 +107,7 @@ jobs:
     name: index — gpu (Linux/ROCm Docker)
     if: false
     runs-on: [self-hosted, Linux, X64, gpu-amd]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 

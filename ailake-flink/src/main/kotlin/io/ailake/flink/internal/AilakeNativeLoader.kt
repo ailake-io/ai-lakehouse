@@ -568,6 +568,48 @@ object AilakeNativeLoader {
     }
 
     /**
+     * Create an empty AI-Lake table.
+     * Returns true on success.
+     * Throws [RuntimeException] on native error.
+     */
+    fun createTable(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        vectorColumn: String = "embedding",
+        dim: Int = 1536,
+        metric: String = "cosine",
+        precision: String = "f16",
+        formatVersion: Int = 2,
+    ): Boolean {
+        val payload = mapOf(
+            "warehouse" to warehouse,
+            "namespace" to namespace,
+            "table" to table,
+            "vector_column" to vectorColumn,
+            "dim" to dim,
+            "metric" to metric,
+            "precision" to precision,
+            "format_version" to formatVersion,
+        )
+        val req = mapper.writeValueAsString(payload)
+        val ptr = lib.ailake_create_table_json(req)
+            ?: throw RuntimeException("ailake_create_table_json returned null for table=$namespace.$table")
+        return try {
+            val json = ptr.getString(0)
+            val resp = mapper.readValue<Map<String, Any>>(json)
+            if (resp["ok"] != true) {
+                log.error("[ailake] ailake_create_table_json returned error for table={}.{}: {}", namespace, table, resp["error"])
+                throw RuntimeException("ailake_create_table_json error: ${resp["error"]}")
+            }
+            log.info("[ailake] createTable OK table={}.{}", namespace, table)
+            true
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    /**
      * Compact small files in an AI-Lake table.
      *
      * @param minFiles          minimum eligible files to trigger compaction (default 4)

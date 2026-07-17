@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc da065d3f964523bbd0969875dc8961096ec2db736bd110eb368eb60d43281727 # shrinks to entry = DataFileEntry { path: "-A__0.parquet", record_count: 0, file_size_bytes: 0, centroid_b64: None, radius: Some(NaN), hnsw_offset: None, hnsw_len: None, vector_column: None, vector_dim: None, extra_vector_indexes: [], index_status: Ready, index_error: None, batch_id: None, embedding_model: None, partition_value: None, deletion_vector: None, first_row_id: None, column_stats: None }
+cc e8eadcd1e9e5051e152717fd18f04067406bf6c017e13e8e96f8470df22af85d # shrinks to entries = [DataFileEntry { path: "0a_AA.parquet", record_count: 0, file_size_bytes: 0, centroid_b64: None, radius: Some(-inf), hnsw_offset: None, hnsw_len: None, vector_column: None, vector_dim: None, extra_vector_indexes: [], index_status: Ready, index_error: None, batch_id: None, embedding_model: None, partition_value: None, deletion_vector: None, first_row_id: None, column_stats: None }]

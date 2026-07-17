@@ -221,7 +221,7 @@ The main SDK reference notebook. 32 sections covering:
 
 | Sections | Topics |
 |---|---|
-| 1–5 | `open_table()`, `insert()`, `commit()`, `SearchQuery`, `fetch_data`, fluent API |
+| 1–5 | `open_table()`, `insert()`, `commit()`, `create_table()` (empty schema-only table, §1B), `SearchQuery`, `fetch_data`, fluent API |
 | 6–7 | `pre_normalize`, `normalized_cosine`, `hnsw_m`, `hnsw_ef_construction`, idempotent writes |
 | 8–10 | Iceberg compat (PyArrow + PyIceberg), DuckDB SQL, `assemble_context()` |
 | 11–14 | MinIO upload, IVF-PQ `pq_only` + `rerank_factor`, Residual-PQ, `write_batch_auto_deferred` |
@@ -252,7 +252,7 @@ Shows that AI-Lake Parquet files are standard DuckDB-readable without any plugin
 | 11 | `ailake_search` + `ailake_scan` — native vector search / search+full-row over SQL |
 | 12 | `ailake_search_text` — Tantivy FTS over SQL |
 | 13 | `ailake_search_multimodal` — cross-modal RRF over SQL |
-| 14 | Write lifecycle from SQL — `ailake_write_batch`, `ailake_delete_where`, `ailake_evolve_schema`, `ailake_compact` |
+| 14 | Write lifecycle from SQL — `ailake_create_table`, `ailake_write_batch`, `ailake_delete_where`, `ailake_evolve_schema`, `ailake_compact` |
 
 ---
 

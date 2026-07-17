@@ -1,0 +1,54 @@
+name: Fuzz (cargo-fuzz)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"  # weekly Monday 06:00 UTC
+  push:
+    branches: [main, develop]
+    paths:
+      - "ailake-core/**"
+      - "ailake-file/**"
+      - "ailake-catalog/**"
+      - "ailake-index/**"
+      - "ailake-parquet/**"
+      - "ailake-fts/**"
+      - "ailake-jni/**"
+      - "fuzz/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: build (7 targets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: Build all 7 fuzz targets
+        run: cargo +nightly fuzz build
+
+  smoke:
+    name: smoke (header + avro + fts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build
+      - name: Fuzz AILK header (1000 runs)
+        run: cargo +nightly fuzz run fuzz_ailake_header -- -runs=1000 -max_len=64
+      - name: Fuzz Avro manifest (1000 runs)
+        run: cargo +nightly fuzz run fuzz_avro_manifest -- -runs=1000 -max_len=4096 -rss_limit_mb=4096
+      - name: Fuzz FTS blob (1000 runs)
+        run: cargo +nightly fuzz run fuzz_fts_blob -- -runs=1000 -max_len=4096

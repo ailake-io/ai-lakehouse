@@ -35,6 +35,7 @@ Optional (for full compat-heavy tests):
 | **Docker** | Runs Spark, Trino, and BigQuery emulator in `compat-heavy.yml` |
 | **NVIDIA CUDA runtime** | Enables GPU search (`libcudart.so` + `libcublas.so`) |
 | **AMD ROCm runtime** | Enables GPU search (`libamdhip64.so` + `libhipblas.so`) |
+| **Rust nightly + Miri** | UB detection — `rustup toolchain install nightly && rustup component add miri --toolchain nightly` |
 
 ---
 
@@ -223,6 +224,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # License and advisory audit
 cargo deny check licenses advisories sources
+
+# UB detection (Miri) — nightly required
+cargo +nightly miri test -p ailake-vec -p ailake-index -p ailake-jni -- miri_
+
+# Concurrency model checking (Loom)
+cargo test --features loom -p ailake-query -- loom_
 ```
 
 To auto-fix formatting:
@@ -402,11 +409,12 @@ feat(ailake-index): add IVF-PQ adaptive nlist selection
 - [ ] `CHANGELOG.md` updated under `[Unreleased]`
 - [ ] No `unwrap()` without justification comment
 - [ ] No `eprintln!` / `System.err.println` / `fmt.Println` in production code
+- [ ] Miri (nightly) passes: `cargo +nightly miri test -p ailake-vec -p ailake-index -p ailake-jni -- miri_`
 
 ### Review process
 
 1. One approval required from a maintainer.
-2. CI must be green (fmt + clippy + deny + unit + integration + compat-python).
+2. CI must be green (fmt + clippy + deny + unit + integration + compat-python + safety).
 3. Compat Heavy (`compat-heavy.yml`) is run manually by maintainers before merging significant changes to storage, catalog, or index code.
 4. Maintainer merges to `develop`. Periodic batches are merged `develop → main` as releases.
 

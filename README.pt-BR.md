@@ -1,6 +1,7 @@
 # AI-Lake Format
 
 [![CI](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci.yml)
+[![Safety](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci-safety.yml/badge.svg)](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci-safety.yml)
 [![crates.io](https://img.shields.io/crates/v/ailake-core.svg)](https://crates.io/crates/ailake-core)
 [![PyPI](https://img.shields.io/pypi/v/ailake.svg)](https://pypi.org/p/ailake)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
@@ -49,7 +50,7 @@ Formato de Lakehouse nativo para vetores, construído sobre o Apache Iceberg Spe
 Sobe um ambiente local com MinIO, Nessie e JupyterLab pré-carregado com 500 documentos sintéticos e um índice HNSW — sem conta cloud, sem credenciais:
 
 ```bash
-# Da raiz do repositório — constrói o wheel ailake-py na primeira execução (~3-5 min, cacheado depois)
+# Da raiz do repositório — constrói o wheel ailake-py + CLI ailake (catalog-ducklake) na primeira execução (~8-12 min, cacheado depois)
 docker compose -f tests/docker/compose-demo.yml up -d
 ```
 
@@ -62,14 +63,16 @@ Depois abra **http://localhost:8888** e execute os notebooks:
 | `03_spark.ipynb` | PySpark local[*], SQL Iceberg, histórico de snapshots, time-travel `VERSION AS OF`, leitura de tabela particionada v3, visibilidade de delete, leitura de schema evolutivo |
 | `04_trino.ipynb` | SQL Trino, propriedades de tabela AI-Lake, tabelas do sistema `$files` / `$manifests`, inspeção de DDL `partition_fields`, visibilidade de equality delete |
 | `05_bigquery.ipynb` | Inserções no emulador BigQuery, decodificação BYTES F16, padrão GCS + BigQuery Omni em produção |
+| `06_airbyte_destination.ipynb` | Conector de destino Airbyte — stream de registros para `TableWriter`, commits de snapshot Iceberg |
 | `07_multimodal.ipynb` | `VectorColSpec`, `write_batch_multi`, tags de modalidade, fusão RRF cross-modal, ablação de pesos, constantes `MultimodalContextSchema` |
 | `08_agents.ipynb` | `ailake.Agent`, memória episódica, `ToolCallSchema`, `EpisodicMemorySchema`, `WorkingMemoryBuffer`, `decay_memories`, isolamento por agente via partição |
 | `09_hybrid_search.ipynb` | Escrita BM25 (`bm25_text_column`), `search_text` lexical puro, RRF híbrido (vetor + BM25), ablação de pesos |
 | `10_gpu_demo.ipynb` | `hardware_info()`, `write_batch_auto_deferred`, comparação de tempo HNSW vs diferido, QPS de busca, recall@10, fallback CPU |
 | `11_fts.ipynb` | FTS Tantivy por arquivo (`fts_text_columns`), `search_text` fast path O(log N), indexação multi-coluna, sintaxe de query, fallback BM25 para arquivos legados, re-ranking FTS + HNSW híbrido, layout de storage |
 | `12_airflow.ipynb` | Apache Airflow 2.9 + provider AI-Lake: `AilakeWriteOperator`, `AilakeSearchOperator`, `AilakeFtsSearchOperator`, trigger de DAG via API REST, inspeção de XCom, padrão PythonOperator direto, configuração de conexão em produção |
+| `13_ducklake.ipynb` | Backend de catálogo DuckLake via CLI `ailake` (`--catalog ducklake`): create/insert/search/evolve/compact/info, depois SQL direto contra o sidecar e o attachment DuckLake real |
 
-Notebooks 03 e 04 requerem o perfil `engines` (adiciona Trino). Notebook 10 requer o perfil `gpu` (NVIDIA Container Toolkit). Notebook 12 requer o perfil `airflow`:
+Notebooks 04 e 05 requerem o perfil `engines` (adiciona Trino + emulador BigQuery). Notebook 10 requer o perfil `gpu` (NVIDIA Container Toolkit). Notebook 12 requer o perfil `airflow`:
 
 ```bash
 docker compose -f tests/docker/compose-demo.yml --profile engines up -d   # Trino
@@ -110,7 +113,7 @@ Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Convenções Rust, tratamento de erros, política de unsafe, regras de testes |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | Log de ADRs — por que cada escolha-chave foi feita |
 | [`SETUP.md`](./SETUP.md) | Setup de dev local — roda a stack completa (MinIO, Nessie, testes de compat) na sua máquina |
-| [`docs/guides/DEMO_NOTEBOOKS.md`](./docs/guides/DEMO_NOTEBOOKS.md) | Guia passo-a-passo da demo — pré-requisitos, 12 notebooks, profiles, troubleshooting |
+| [`docs/guides/DEMO_NOTEBOOKS.md`](./docs/guides/DEMO_NOTEBOOKS.md) | Guia passo-a-passo da demo — pré-requisitos, os 13 notebooks, profiles, troubleshooting |
 
 ## Instalação
 
@@ -190,7 +193,7 @@ ailake/
 ├── ailake-file/                # Arquivo unificado: Parquet + rodapé AI-Lake
 ├── ailake-catalog/             # Catálogo Iceberg: metadata.json, manifestos Avro
 ├── ailake-store/               # Abstração de object storage (S3/GCS/Azure/local)
-├── ailake-index/               # HNSW via hnsw_rs, IVF-PQ, backends GPU
+├── ailake-index/               # HNSW próprio (Rust puro, sem hnsw_rs), IVF-PQ, backends GPU
 ├── ailake-query/               # Pruning, scan, TableWriter, ContextAssembler
 ├── ailake-cli/                 # CLI: ailake create / insert / search / compact / info / serve / estimate
 ├── ailake-py/                  # Bindings Python via PyO3 (wheel abi3-py39)
@@ -255,7 +258,8 @@ tests/
             ├── 09_hybrid_search.ipynb
             ├── 10_gpu_demo.ipynb
             ├── 11_fts.ipynb
-            └── 12_airflow.ipynb
+            ├── 12_airflow.ipynb
+            └── 13_ducklake.ipynb
 ```
 
 ## Storage
@@ -310,7 +314,7 @@ cargo check --workspace
 | **Fase 4** | ✅ Completa | Reranking pós-PQ, spec pública do formato, busca GPU (NVIDIA cuBLAS + AMD hipBLAS, ambos runtime-only), otimizações HNSW, índice nativo IVF-PQ, k-means GPU, `MemTableWriter`, colunas multi-vetor, seleção adaptativa de índice, conector Kotlin `ailake-flink`; **codebook compartilhado IVF-PQ**; **`write_batch_ivf_pq_deferred`**; **fix k-means++ O(n×k)**; **fix `HadoopCatalog` Replace** |
 | **Fase 5** | ✅ Completa | SDKs multi-linguagem (`ailake-go`, `ailake-cpp`), servidor HTTP REST `ailake serve`, provider Apache Airflow, escritas idempotentes, CI Compat Heavy, scanning de segredos TruffleHog, guias de deploy em cloud |
 | **Fase 6** | ✅ Completa | Pipeline de distribuição pública — crates.io, PyPI (wheels manylinux abi3), provider Airflow no PyPI, JARs JVM pré-compilados + `libailake_jni.so` no GitHub Releases, versionamento Python dinâmico |
-| **Fase 7** | 🚧 Em andamento | Concluído: extensão DuckDB (`duckdb-ailake/`), leitura completa Python (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` expostos no SDK Python, guia dbt (`docs/guides/DBT_INTEGRATION.md`), `partition_fields` (spec de partição Iceberg multi-coluna), `format_version=3` (tabelas Iceberg v3), `delete_where` + `evolve_schema` em todos os SDKs (Python, Go, C++, Spark, Trino, Flink, DuckDB, Airflow, Airbyte), binding `hardware_info()` Python, notebook de demo GPU (`10_gpu_demo.ipynb`), demo JupyterLab expandida (10 notebooks), **FTS Tantivy por arquivo** (crate `ailake-fts` — seção `AILK_FTS`, zstd; fast path `search_text()` O(log N); opt-in via `fts_columns` em todos os SDKs e plugins JVM), **busca híbrida BM25+vetor** (`SearchConfig::hybrid`, fusão RRF, fallback BM25 brute-force para arquivos legados). Restante: backend de catálogo DuckLake |
+| **Fase 7** | ✅ Completa | Extensão DuckDB (`duckdb-ailake/`), leitura completa Python (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` expostos no SDK Python, guia dbt (`docs/guides/DBT_INTEGRATION.md`), `partition_fields` (spec de partição Iceberg multi-coluna), `format_version=3` (tabelas Iceberg v3), `delete_where` + `evolve_schema` em todos os SDKs (Python, Go, C++, Spark, Trino, Flink, DuckDB, Airflow, Airbyte), binding `hardware_info()` Python, notebook de demo GPU (`10_gpu_demo.ipynb`), demo JupyterLab expandida (10 notebooks), **FTS Tantivy por arquivo** (crate `ailake-fts` — seção `AILK_FTS`, zstd; fast path `search_text()` O(log N); opt-in via `fts_columns` em todos os SDKs e plugins JVM), **busca híbrida BM25+vetor** (`SearchConfig::hybrid`, fusão RRF, fallback BM25 brute-force para arquivos legados), **backend de catálogo DuckLake** (`ailake-catalog::DuckLakeCatalog`, feature opt-in `catalog-ducklake`) |
 | **Fase 8** | ✅ Completa | Multimodal — enum `VectorModality`, propriedade Iceberg `ailake.modality-<col>`, N colunas vetoriais generalizadas com HNSW independente, `write_batch_multi`, CLI `--vector-cols`, `search_multimodal` (RRF cross-modal), `MultimodalContextSchema` + módulo `multimodal_columns`, Python `VectorColSpec`, notebook e fixture multimodal |
 | **Fase 9** | ✅ Completa | Memória de agentes — `ToolCallSchema` (histórico de tool calls pesquisável), `EpisodicMemorySchema` (decaimento de recência, contagem de acesso, pontuação de importância), `ScoreFn` injetável para scoring híbrido (distância × recência × importância), `partition_by`/`partition_value` para isolamento por agente via particionamento Iceberg, `partition_filter` para pruning ao nível de manifesto antes de centroide e HNSW, helper Python `ailake.Agent` (LangChain/CrewAI/AutoGen). Propagado para todos os SDKs e conectores: Spark, Trino, Flink, Go, C++, DuckDB, Airbyte, Airflow. Fix: `TableWriter::create_or_open` inicializa `part_counter` a partir da contagem de arquivos existentes. |
 

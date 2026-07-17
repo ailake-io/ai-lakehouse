@@ -1,0 +1,12 @@
+homepage: "https://opencode.ai"
+language: rust
+primary_contact: "thiago@anomaly.co"
+auto_ccs:
+  - "thiago@anomaly.co"
+sanitizers:
+  - address
+  - memory
+main_repo: "https://github.com/anomalyco/ai-lakehouse.git"
+fuzzing_engines:
+  - libfuzzer
+build_system: cargo_fuzz

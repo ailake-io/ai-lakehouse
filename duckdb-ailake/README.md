@@ -4,6 +4,14 @@ DuckDB community extension that exposes AI-Lake vector search and write via SQL 
 
 Bridges DuckDB to [`libailake_jni.so`](../ailake-jni) using the same C-ABI as the Spark and Trino plugins — zero additional Rust code required.
 
+> **Error handling**: a genuine backend rejection (`ok:false` in the JSON response — e.g. a
+> nonexistent table path, `NaN`/`Infinity` embeddings, mismatched `ids`/`embeddings` lengths,
+> `top_k` above `ailake_core::MAX_TOP_K` (100,000)) is now raised as a `duckdb::InvalidInputException`
+> with the real error message, for every function below except `ailake_delete_where` (which still
+> returns `FALSE`, unchanged). This used to be silently folded into an empty result / `-1` / `FALSE`,
+> indistinguishable from a genuine zero-match search or no-op. `libailake_jni.so` not being loaded
+> (or not exporting a given symbol) is a separate, still-silent case — see "Design" below.
+
 ## Functions
 
 ### `ailake_search` — vector similarity search
@@ -129,7 +137,7 @@ SELECT * FROM ailake_search_multimodal(
 ) ORDER BY rrf_score DESC;
 ```
 
-Returns 0 rows (no error) if `libailake_jni.so` is not loaded or does not export `ailake_search_multimodal_json`.
+Returns 0 rows (no error) if `libailake_jni.so` is not loaded or does not export `ailake_search_multimodal_json`. A backend rejection (e.g. nonexistent table path) raises `InvalidInputException` instead — see "Error handling" above.
 
 ---
 
@@ -166,7 +174,7 @@ SELECT * FROM ailake_search_text(
 ) ORDER BY distance;
 ```
 
-Returns 0 rows (graceful degradation) when `libailake_jni.so` is not loaded. Backed by `ailake_search_text_json` C-ABI.
+Returns 0 rows (graceful degradation) when `libailake_jni.so` is not loaded. A backend rejection raises `InvalidInputException` instead — see "Error handling" above. Backed by `ailake_search_text_json` C-ABI.
 
 ---
 
@@ -178,7 +186,9 @@ SELECT ailake_write_batch(
     table_path      VARCHAR,         -- table root path/URI
     ids             BIGINT[],        -- row identifiers
     embeddings      FLOAT[][]        -- one embedding per id
-) → BIGINT  -- snapshot_id, or -1 on error
+) → BIGINT  -- snapshot_id; a backend rejection (e.g. NaN/Infinity embeddings) raises
+            -- InvalidInputException, not a silent -1 — see "Error handling" above.
+            -- -1 is still returned if libailake_jni.so isn't loaded.
 
 -- 6-arg form (explicit options)
 SELECT ailake_write_batch(
@@ -267,7 +277,8 @@ SELECT ailake_write_batch_multi(
     deferred        BOOLEAN                  -- default false — persist Parquet
                                               --   immediately, build all HNSW
                                               --   indexes in the background
-) → BIGINT  -- snapshot_id, or -1 on error
+) → BIGINT  -- snapshot_id; a backend rejection raises InvalidInputException, not a silent
+            -- -1 — see "Error handling" above. -1 is still returned if the lib isn't loaded.
 ```
 
 Writes a batch of rows with **N independent vector columns** (e.g. text + image embeddings on the same row), each getting its own HNSW section in the same AI-Lake file — searchable via `ailake_search_multimodal`'s RRF fusion. The **first entry in `vector_columns` is primary** (used for geometric pruning in the manifest). Backed by `ailake_write_batch_multi_json` C-ABI.
@@ -282,6 +293,48 @@ SELECT ailake_write_batch_multi(
         {'col': 'embedding',       'dim': 4, 'embeddings': [[0.1,0.2,0.3,0.4],[0.5,0.6,0.7,0.8]]::FLOAT[][], 'metric': 'cosine', 'precision': 'f16', 'modality': ''},
         {'col': 'image_embedding', 'dim': 2, 'embeddings': [[0.9,1.0],[1.1,1.2]]::FLOAT[][], 'metric': 'cosine', 'precision': 'f16', 'modality': 'image'}
     ]
+);
+```
+
+### `ailake_create_table` — create an empty table
+
+```sql
+SELECT ailake_create_table(
+    table_path            VARCHAR,   -- table root path/URI
+    dim                   INTEGER,   -- vector dimension
+    -- named or positional (optional), in order:
+    vector_column          VARCHAR,  -- default 'embedding'
+    metric                 VARCHAR,  -- default 'cosine'
+    precision              VARCHAR,  -- default 'f16'
+    format_version         INTEGER,  -- default 2 (2 or 3)
+    hnsw_m                 INTEGER,  -- default -1 (use native default)
+    hnsw_ef_construction   INTEGER,  -- default -1 (use native default)
+    pre_normalize          BOOLEAN,  -- default false
+    modality               VARCHAR,  -- default ''
+    partition_by           VARCHAR,  -- default ''
+    partition_value        VARCHAR,  -- default ''
+    partition_column_type  VARCHAR,  -- default ''
+    partition_fields_json  VARCHAR,  -- default ''
+    fts_columns            VARCHAR,  -- default ''
+    fts_tokenizer          VARCHAR,  -- default ''
+    embedding_model        VARCHAR,  -- default ''
+    namespace               VARCHAR, -- default 'default'
+    table_name               VARCHAR -- default 'table'
+) → BOOLEAN  -- TRUE on success, FALSE on any error or if the lib isn't loaded
+```
+
+Creates an empty AI-Lake/Iceberg table (schema/policy only, no data files) — useful
+when a table needs to exist and be searchable (returning zero rows) before any
+embeddings are ready. Backed by `ailake_create_table_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_create_table('file:///data/my_table', 1536);
+
+SELECT ailake_create_table(
+    'file:///data/my_table', 768,
+    vector_column := 'image_embedding', metric := 'euclidean'
 );
 ```
 
@@ -314,7 +367,9 @@ SELECT ailake_evolve_schema(
     table_path          VARCHAR,  -- path/URI to AI-Lake table root
     add_columns_json    VARCHAR,  -- JSON array: [{"name":"col","type":"string","initial_default":null}]
     rename_columns_json VARCHAR   -- JSON array: [{"from":"old_name","to":"new_name"}]
-) → INTEGER               -- new schema_id on success, -1 on any error
+) → INTEGER  -- new schema_id; a backend rejection raises InvalidInputException, not a
+             -- silent -1 — see "Error handling" above. -1 is still returned if the lib
+             -- isn't loaded.
 ```
 
 Either argument may be `'[]'` or `''` to skip. No data files are rewritten. Backed by `ailake_evolve_schema_json` C-ABI.
@@ -342,7 +397,9 @@ SELECT ailake_compact(
                                    --   build the HNSW index in the background
     namespace             VARCHAR, -- default 'default'
     table_name            VARCHAR  -- default 'table'
-) → BIGINT  -- number of files compacted (0 = nothing eligible), -1 on error
+) → BIGINT  -- number of files compacted (0 = nothing eligible); a backend rejection
+            -- (e.g. missing table) raises InvalidInputException, not a silent -1 —
+            -- see "Error handling" above. -1 is still returned if the lib isn't loaded.
 ```
 
 Compacts small files in an AI-Lake table into a larger merged file. Backed by `ailake_compact_json` C-ABI.
@@ -433,10 +490,16 @@ D SELECT * FROM ailake_search('file:///data/docs', [0.1, 0.2]::FLOAT[], 5);
 
 ## Design
 
-- C-ABI bridge: `dlopen("libailake_jni.so")` → `ailake_search_json` / `ailake_scan_json` / `ailake_search_multimodal_json` / `ailake_search_text_json` / `ailake_write_batch_json` / `ailake_write_batch_multi_json` / `ailake_delete_where_json` / `ailake_evolve_schema_json` / `ailake_compact_json`
+- C-ABI bridge: `dlopen("libailake_jni.so")` → `ailake_search_json` / `ailake_scan_json` / `ailake_search_multimodal_json` / `ailake_search_text_json` / `ailake_write_batch_json` / `ailake_write_batch_multi_json` / `ailake_delete_where_json` / `ailake_evolve_schema_json` / `ailake_compact_json` / `ailake_create_table_json`
 - Same JSON-envelope protocol as Spark (`AilakeNative.scala`) and Trino (`AilakeNative.kt`)
 - `ailake_search` executes the full search (pruning + HNSW) inside Rust; DuckDB sees a virtual table
 - Graceful degradation: if `libailake_jni.so` is not found, search returns 0 rows instead of aborting
+- **Error surfacing**: a real backend rejection (e.g. `top_k` above `ailake_core::MAX_TOP_K`
+  (100,000), or a `NaN`/`Infinity` embedding value passed to `ailake_write_batch*`) throws
+  `duckdb::InvalidInputException` with the real error message — `ailake_search`/`ailake_scan`/
+  `ailake_write_batch`/`ailake_write_batch_multi`/`ailake_evolve_schema`/`ailake_compact` no
+  longer fold a genuine error into the same empty-result/`-1`/`FALSE` return used for benign
+  "no matches"/no-op outcomes.
 
 ## Comparison with Spark and Trino plugins
 

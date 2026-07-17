@@ -31,8 +31,17 @@ bundled DuckDB C++ build, so it's opt-in, not part of the default build):
 cargo build --release -p ailake-cli --features catalog-ducklake
 ```
 
+For the optional REST catalog backend (`--catalog rest` — Polaris, Unity Catalog,
+BigLake, S3 Tables, Nessie, Gravitino), build with the `catalog-rest` feature — see
+`docs/guides/REST_CATALOG.md` (keeps `reqwest` out of the default binary, same opt-in
+pattern as `catalog-ducklake`):
+
 ```bash
-ailake --version   # ailake 0.1.3
+cargo build --release -p ailake-cli --features catalog-rest
+```
+
+```bash
+ailake --version   # ailake 0.1.6
 ailake --help      # full command list
 ```
 
@@ -45,7 +54,7 @@ Every subcommand accepts these two:
 | Flag | Default | Description |
 |---|---|---|
 | `--store <STORE>` | `.` (env: `AILAKE_STORE_URL`) | `s3://bucket/prefix`, `gs://bucket/prefix`, `az://container/prefix`, or a local filesystem path |
-| `--catalog <CATALOG>` | `hadoop` | `hadoop` or `ducklake`. `ducklake` requires a local filesystem `--store` (no `s3://`/`gs://`/`az://`) and the `catalog-ducklake` build feature |
+| `--catalog <CATALOG>` | `hadoop` | `hadoop`, `ducklake`, or `rest`. `ducklake` requires a local filesystem `--store` (no `s3://`/`gs://`/`az://`) and the `catalog-ducklake` build feature; `rest` requires `--rest-uri` (or `AILAKE_REST_URI`) and the `catalog-rest` build feature — see `docs/guides/REST_CATALOG.md` |
 
 Table names are `namespace.table` or just `table` (defaults to namespace `default`).
 Most subcommands also accept `--format text|json` — `text` is human-readable,
@@ -113,6 +122,11 @@ Notable flags:
 | `--partition-by` / `--partition-value` / `--partition-fields` | Iceberg hidden partitioning; `--partition-fields` (JSON array) takes precedence over the single-column `--partition-by` |
 | `--hnsw-m` / `--hnsw-ef` | only take effect when this `insert` is the one creating the table — ignored on writes to an already-created table |
 
+A row with a `NaN`/`Infinity` embedding value is rejected at write time with a clear
+error (`embedding contains non-finite value (...); NaN/Infinity embeddings are rejected
+at write time`) instead of being silently accepted — same check applies to `migrate`
+and `backfill-vector-column`.
+
 ---
 
 ## 5. `search` — vector, full-text, or hybrid
@@ -156,6 +170,7 @@ ailake search docs.chunks --store ./lake --query "0.1,..." --top-k 2 --format js
 | `--query` / `--query-file` | comma-separated floats, or a path to a little-endian f32 binary file |
 | `--hybrid-text` + `--query`/`--query-file` | enables BM25+vector fusion; `--bm25-weight` (default `0.5`) controls the RRF balance |
 | `--pruning-threshold` | geometric pruning aggressiveness (0.0–1.0, lower = more files pruned; default `0.8`) |
+| `--top-k` | capped at `ailake_core::MAX_TOP_K` (100,000) — a value above that is rejected with an error rather than risking an unbounded-allocation crash (same limit shared by every binding — Python, Go, C++, and the JNI C-ABI boundary used by Spark/Trino/Flink) |
 
 The CLI's `search` is pointer-only (row_id/distance/file_path) — it does not fetch full
 row data (no-JOIN full-row fetch, `ailake_scan_json`, is exposed via the SDKs and the
@@ -417,6 +432,19 @@ relative-path resolution, `allow_missing` schema evolution).
 ailake create docs.chunks --dim 32 --catalog ducklake --store /local/warehouse
 ```
 
+`--catalog rest` — a real Iceberg REST catalog (Polaris, Unity Catalog, BigLake, S3
+Tables, Nessie, Gravitino), requires the `catalog-rest` build feature and `--rest-uri`
+(or `AILAKE_REST_URI`); `--rest-prefix`/`--rest-warehouse`/`--rest-auth`/`--rest-token`/
+`--rest-oauth-*` (all with `AILAKE_REST_*` env fallbacks) round out auth/namespace
+config. See `docs/guides/REST_CATALOG.md` for the full writeup, including four real bugs
+found wiring it up against a live REST server (namespace auto-creation, the `-1`
+no-snapshot sentinel, redundant partition-spec/schema updates on every commit).
+
+```bash
+ailake create docs.chunks --dim 32 --catalog rest --store /local/warehouse \
+  --rest-uri http://localhost:8181 --rest-warehouse s3://my-bucket/warehouse
+```
+
 ---
 
 ## 14. Full example — ingest → index → search pipeline
@@ -473,6 +501,7 @@ ailake search "$TABLE" --hybrid-text "DuckLake catalog changes" \
 - `docs/guides/PYTHON_INTEGRATION.md`, `GO_INTEGRATION.md`, `CPP_INTEGRATION.md`,
   `JVM_INTEGRATION.md` — SDK bindings, several of which shell out to this same CLI
 - `docs/guides/DUCKLAKE_CATALOG.md` — `--catalog ducklake` details
+- `docs/guides/REST_CATALOG.md` — `--catalog rest` details
 - `docs/guides/DBT_INTEGRATION.md` — dbt post-hook patterns (via Spark/Trino SQL
   functions, not this CLI)
 - `docs/specs/FILE_FORMAT.md` — physical file layout referenced in §4's F16 encoding note

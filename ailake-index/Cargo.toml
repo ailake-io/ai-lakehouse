@@ -23,4 +23,5 @@ libloading   = { workspace = true }
 tracing      = { workspace = true }
 
 [dev-dependencies]
+proptest    = { workspace = true }
 rand        = { workspace = true }

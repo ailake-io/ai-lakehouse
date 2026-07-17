@@ -116,6 +116,10 @@ err := ailake.WriteBatch(
 
 Query it back with `SearchMultimodal` (§7).
 
+A row with a `NaN`/`Infinity` embedding value is rejected by the CLI; the returned
+`error` includes the CLI's stderr with the actual reason (`embedding contains
+non-finite value (...); NaN/Infinity embeddings are rejected at write time`).
+
 **Compaction:**
 
 `Compact` merges small files into a larger one by delegating to `ailake
@@ -222,6 +226,12 @@ results, err := ailake.Search(
 
 Requires `ailake` CLI. Uses Tantivy O(log N) when FTS index present; falls back
 to BM25 brute-force for legacy files.
+
+`SearchText`/`SearchHybrid`'s `top_k` is capped at 100,000 by the underlying
+`ailake_query` core (same limit enforced at the JNI C-ABI boundary used by
+Spark/Trino/Flink) — a value above that fails cleanly instead of risking an
+out-of-memory subprocess. The pure-Go `Search`/`SearchMultimodal`/`Scan` paths
+(§4, §7) do not go through the CLI and are not currently subject to this cap.
 
 ```go
 hits, err := ailake.SearchText(

@@ -41,7 +41,7 @@ ailake-file / AilakeFileWriter
   │
   ├─► ailake-index / HnswBuilder
   │     │  6. build HNSW: insert each (RowId(N), vector_f32) pair
-  │     │     (vectors expanded F16 → F32 for hnsw_rs)
+  │     │     (vectors expanded F16 → F32 for the HNSW builder)
   │     │  7. serialize HNSW via bincode
   │     └─► returns: hnsw_bytes: Vec<u8>
   │
@@ -156,15 +156,16 @@ flowchart TD
     C["Caller\nsearch(table_uri, &[f32], top_k)"]
     CAT["ailake-catalog\n1. read metadata.json → snapshot\n2. read snap-NNN.avro → DataFileEntry list\n3. decode centroid_b64, radius per file"]
     PRUNE["ailake-query / VectorPruner\n4. dist(query, centroid) - radius > threshold?\n   YES → skip file (zero S3 I/O)"]
-    STORE["ailake-store\n5a. GET range [hnsw_offset, +hnsw_len)"]
-    MMAP["ailake-index / MmapLoader\n5b. write to tempfile\n5c. mmap → bincode::deserialize\n    HnswIndex or IvfPqIndex\n    (dispatched by AnyIndex from flags field)"]
-    SEARCH["ailake-index\n5d. index.search(query, candidate_k)"]
+    FILTER["ailake-parquet / ParquetVectorReader\n5a. column_filter set? → matching_row_ids()\n   (row-group skip + column projection;\n    empty match → skip file entirely)"]
+    STORE["ailake-store\n5b. primary column, no filter/rerank/hybrid/\n   score_fn/eq-delete, IndexStatus::Ready,\n   non-foreign → range-GET (footer→header→blob)\n   else → GET full file"]
+    MMAP["ailake-index / MmapLoader or index_loader\n5c. mmap or in-memory bincode::deserialize\n    HnswIndex or IvfPqIndex\n    (dispatched by AnyIndex from flags field)"]
+    SEARCH["ailake-index\n5d. index.search(query, candidate_k)\n   rows outside 5a's match set discarded"]
     MERGE["merge all per-file results\nglobal top-k sort"]
-    FETCH["ailake-parquet / ParquetVectorReader\n6. read specific row groups for winners\n   with predicate pushdown"]
+    FETCH["ailake-parquet / ParquetVectorReader\n6. read specific rows for winners"]
     OUT["RecordBatch\n(all columns + _distance: f32)"]
 
     C --> CAT --> PRUNE
-    PRUNE -->|surviving files, parallel| STORE --> MMAP --> SEARCH --> MERGE
+    PRUNE -->|surviving files, via try_join_all| FILTER --> STORE --> MMAP --> SEARCH --> MERGE
     MERGE --> FETCH --> OUT
 ```
 
@@ -190,27 +191,44 @@ ailake-query / VectorScanner
   │     │       if dist - candidate.radius > search_threshold → PRUNE
   │     └─► returns: Vec<FileCandidate>  (only survivors)
   │
-  ├─► [for each surviving candidate, in parallel via Tokio]
+  ├─► [for each surviving candidate — search_one_file() dispatched via
+  │    futures::future::try_join_all: cooperative concurrency on the current
+  │    task, overlapping I/O latencies; not tokio::spawn, not a thread pool]
+  │   │
+  │   ├─► ailake-core / SearchConfig::column_filter (if set)
+  │   │     │  5a. ParquetVectorReader::matching_row_ids() — row-group skip
+  │   │     │      via Parquet min/max stats + column-projected decode of
+  │   │     │      just the filtered column (no HNSW, no vector decode yet)
+  │   │     │  empty match set → skip this file entirely (zero further I/O)
+  │   │     └─► returns: HashSet<RowId> (file-relative positions)
   │   │
   │   ├─► ailake-store / Store
-  │   │     │  5a. GET range [hnsw_offset, hnsw_offset + hnsw_len)
-  │   │     │      → fetches only the AI-Lake footer extension
-  │   │     │  5b. write bytes to temp file
-  │   │     └─► returns: tmp_file_path
+  │   │     │  5b. if query only needs the primary column's index (no
+  │   │     │      column_filter/rerank_factor/score_fn/hybrid/equality-
+  │   │     │      delete, IndexStatus::Ready, non-foreign):
+  │   │     │        index_loader::load_primary_index — range-GET only
+  │   │     │        (speculative tail window → footer_offset → AILK header
+  │   │     │        → HNSW/IVF-PQ blob, reusing bytes already fetched)
+  │   │     │      else: GET the whole file (store.get)
+  │   │     └─► returns: file bytes (partial or whole)
   │   │
-  │   ├─► ailake-index / MmapLoader
-  │   │     │  6a. open tmp_file via memmap2::Mmap
-  │   │     │  6b. parse AI-Lake header flags:
+  │   ├─► ailake-index / MmapLoader or bincode::deserialize
+  │   │     │  6a. parse AI-Lake header flags:
   │   │     │       flags & 0x0001 → IvfPqSerializer::from_bytes
-  │   │     │       default         → MmapLoader::from_bytes (HNSW mmap)
+  │   │     │       default         → HNSW deserialize (mmap when loaded via
+  │   │     │                          a temp file, in-memory for range-GET
+  │   │     │                          bytes already resident from 5b)
   │   │     └─► returns: AnyIndex (Hnsw | IvfPq)
   │   │
   │   └─► AnyIndex::search(query, top_k, ef)
   │         │  HNSW:   greedy graph traversal, candidate heap
   │         │  IVF-PQ: coarse quantize, nprobe cells, ADC distance
+  │         │  rows outside 5a's match set (when column_filter is set) and
+  │         │  rows in the deletion-vector/equality-delete set are discarded
   │         └─► returns: Vec<(RowId, f32)>
   │
-  ├─► merge results across all surviving files, global top-k sort
+  ├─► merge results across all surviving files (folded after every
+  │   search_one_file() future resolves), global top-k sort
   │
   ├─► ailake-store / Store
   │     │  7. for each winning RowId, identify which Parquet file owns it
@@ -218,9 +236,9 @@ ailake-query / VectorScanner
   │     └─► returns: Vec<(file_path, RowId, distance)>
   │
   ├─► ailake-parquet / ParquetVectorReader
-  │     │  8. for each (file_path, RowId): read the specific row group
-  │     │     containing that row, with predicate pushdown for `filter`
-  │     │     (Parquet row group statistics enable this skip)
+  │     │  8. for each (file_path, RowId): read the specific row containing
+  │     │     that RowId (predicate pushdown already happened in step 5a,
+  │     │     not here — this step just fetches the winning rows' full data)
   │     └─► returns: RecordBatch with full row data
   │
   └─► return RecordBatch (columns: all table columns + _distance: f32)
@@ -230,8 +248,9 @@ ailake-query / VectorScanner
 
 **Network cost analysis** (per file):
 - Pruned file: 0 bytes from S3 (centroid read from Avro manifest, no Parquet/footer access)
-- Surviving file (no match): ~10-15 MB (HNSW footer fetch)
-- Surviving file (with match): ~10-15 MB + ~1 MB row group fetch = ~16 MB
+- Surviving file, primary-column fast path eligible (no `column_filter`/rerank/hybrid/`score_fn`/equality-delete, index `Ready`, non-foreign): range-GET only — tail window + AILK header + HNSW/IVF-PQ blob, typically ~1-15 MB depending on index size, not the whole file
+- Surviving file, fast path *not* eligible (secondary/multimodal column, `column_filter` set, rerank, hybrid, `score_fn`, equality-delete present, or index not yet `Ready`): full-file GET (`store.get`) — can be the entire Parquet + AILK footer, not just the index
+- Winning row fetch (step 8): ~1 MB row read per winner, on top of whichever GET pattern applied above
 
 ---
 
@@ -245,7 +264,8 @@ ailake-query / search_text
   ├─► ailake-catalog: list_files → Vec<DataFileEntry>
   │     (centroid pruning NOT applied — FTS search spans all files)
   │
-  └─► [for each file, in parallel]
+  └─► [for each file, sequentially — search_text() does not use the
+       try_join_all concurrency search()/search_multimodal() use]
         │
         ├─► CHECK: DataFileEntry.fts_offset.is_some()?
         │
@@ -332,7 +352,7 @@ Concurrent reads during compaction:
   - Old files remain readable until vacuum (typically 7 days retention)
 ```
 
-**Why rebuild HNSW instead of merging?** hnsw_rs does not provide a primitive for merging two indexes that preserves graph quality. Rebuilding from scratch is O(N log N) but only runs at compaction time (not on the hot write path). The merge produces a single high-quality HNSW with better search recall than the union of two smaller indexes.
+**Why rebuild HNSW instead of merging?** `ailake-index`'s custom HNSW implementation does not provide a primitive for merging two indexes that preserves graph quality. Rebuilding from scratch is O(N log N) but only runs at compaction time (not on the hot write path). The merge produces a single high-quality HNSW with better search recall than the union of two smaller indexes.
 
 ---
 
@@ -444,8 +464,8 @@ sequenceDiagram
     Q->>S: GET metadata/snap-N-1.avro (manifest list)
     Q->>S: GET metadata/{snap_id}-m0.avro (manifest)
     note over Q: decode DataFileEntry centroid/radius<br/>geometric pruning — zero I/O for pruned files
-    loop surviving files in parallel (Tokio)
-        Q->>S: GET [hnsw_offset, hnsw_offset+hnsw_len)
+    loop surviving files, via try_join_all (cooperative concurrency, not a thread pool)
+        Q->>S: range-GET index only (primary column, fast path eligible) or GET whole file
         Q->>Q: bincode::deserialize → index<br/>index.search(query, top_k)
     end
     Q-->>L: Vec&lt;SearchResult&gt; { row_id, distance, file_path }

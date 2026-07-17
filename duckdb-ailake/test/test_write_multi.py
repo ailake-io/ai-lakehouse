@@ -114,6 +114,10 @@ def test_write_batch_multi_searchable_via_multimodal():
 
 
 def test_write_batch_multi_rejects_mismatched_lengths():
+    # ids/embeddings length mismatch is caught in the C++ wrapper
+    # (ailake_write_batch_multi.cpp:139-144) before calling the C-ABI,
+    # returning -1. This is a DuckDB-level validation, not a backend
+    # ok:false response, so -1 is correct (not an exception).
     conn = setup_connection()
     table_dir, cleanup = make_table_dir("_mismatch")
     try:

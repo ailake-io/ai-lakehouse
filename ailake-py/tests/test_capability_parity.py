@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import random
 
+import pytest
+
 import ailake
 
 
@@ -266,3 +268,66 @@ def test_agent_assemble_context_returns_string(tmp_path):
 
     ctx = agent.assemble_context(_embed_fn(["some memory"])[0])
     assert isinstance(ctx, str)
+
+
+# ── top_k cap + non-finite embedding rejection (post-Fase-15 safety fixes) ──
+#
+# search()/write_batch() call ailake_query::scanner/writer directly (not through
+# ailake-jni's C-ABI, which had its own top_k cap) — these two behaviors used to
+# only be enforced for Spark/Trino/Flink, not for this binding. No prior test
+# coverage existed for either.
+
+def test_search_rejects_top_k_over_cap(tmp_path):
+    path = str(tmp_path / "t9")
+    w = ailake.TableWriter(path, dim=4)
+    w.write_batch(["a"], [[1.0, 0.0, 0.0, 0.0]])
+    w.commit()
+
+    # ailake.search() builds a lazy SearchQuery — the Rust call (and the top_k
+    # validation) only happens when the query is materialized.
+    with pytest.raises(ValueError, match="top_k"):
+        ailake.search(path, [1.0, 0.0, 0.0, 0.0], top_k=200_000).to_list()
+
+
+def test_write_batch_rejects_non_finite_embedding(tmp_path):
+    path = str(tmp_path / "t10")
+    w = ailake.TableWriter(path, dim=4)
+    with pytest.raises(ValueError, match="non-finite"):
+        w.write_batch(["a"], [[1.0, float("nan"), 0.0, 0.0]])
+
+
+# ── New: create_table (Fase 15+) ──────────────────────────────────────────────
+
+def test_create_empty_table_search_returns_zero_rows(tmp_path):
+    path = str(tmp_path / "empty_table")
+    ailake.create_table(path, dim=4)
+    results = ailake.search(path, [1.0, 0.0, 0.0, 0.0], top_k=10).to_list()
+    assert len(results) == 0
+
+
+def test_create_table_duplicate_raises(tmp_path):
+    path = str(tmp_path / "dup_table")
+    ailake.create_table(path, dim=4)
+    with pytest.raises((ValueError, RuntimeError)):
+        ailake.create_table(path, dim=4)
+
+
+def test_create_table_with_custom_params(tmp_path):
+    path = str(tmp_path / "custom_params")
+    ailake.create_table(
+        path, dim=768, vector_column="my_vec",
+        metric="euclidean", precision="f32",
+        format_version=2,
+    )
+    results = ailake.search(path, [1.0] * 768, top_k=5).to_list()
+    assert len(results) == 0
+
+
+def test_create_table_then_write_then_search(tmp_path):
+    path = str(tmp_path / "crt_write_search")
+    ailake.create_table(path, dim=4)
+    w = ailake.TableWriter(path, dim=4)
+    w.write_batch(["hello", "world"], [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
+    w.commit()
+    results = ailake.search(path, [1.0, 0.0, 0.0, 0.0], top_k=10).to_list()
+    assert len(results) == 2

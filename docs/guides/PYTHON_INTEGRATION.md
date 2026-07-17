@@ -128,6 +128,39 @@ writer.write_batch(
 Types inferred from the first element of each list: `bool → Boolean`, `float → Float32`,
 `int → Int64`, `str → Utf8`.
 
+A row with a `NaN`/`Infinity` embedding value is rejected at write time — every
+`write_batch*` method raises `ValueError` (`embedding contains non-finite value (...);
+NaN/Infinity embeddings are rejected at write time`) instead of silently accepting it.
+
+**Creating an empty table — `create_table()`:**
+
+`create_table()` creates the schema/policy (Iceberg `metadata.json`) for a table with no
+data files, without requiring a first `write_batch()`/`commit()` — useful when a
+DAG/pipeline needs the table to exist (and be searchable, returning zero rows) before
+any embeddings are ready:
+
+```python
+ailake.create_table(
+    "s3://my-lake/docs/",
+    dim=1536,
+    vector_column="embedding",     # default
+    metric="cosine",               # default
+    precision="f16",               # default
+    format_version=2,              # default; 2 or 3
+    hnsw_m=None,
+    hnsw_ef_construction=None,
+    pre_normalize=False,
+    modality="",                   # "text" | "image" | "audio" | "video" | ""
+    fts_columns="",                # comma-separated column names
+    fts_tokenizer="",
+    embedding_model="",
+    namespace="default",
+    table_name="table",
+    catalog_opts=None,             # e.g. {"catalog": "rest", "rest_uri": "..."}
+)
+# → True on success; raises ValueError if the table already exists or the args are invalid
+```
+
 **Timestamp columns — `ailake.TimestampNs`:**
 
 A plain Python `int` in `extra_columns` always becomes an `Int64` column — including
@@ -230,6 +263,12 @@ results = ailake.search("s3://my-lake/docs/", query_vec, top_k=10)
 # Via Table handle
 results = table.search(query_vec, top_k=10)
 ```
+
+`top_k` is capped at `ailake_core::MAX_TOP_K` (100,000) — a value above that raises
+`ValueError` rather than risking an unbounded-allocation crash (`search()` runs
+in-process, so this protects the embedding host process itself, not just a subprocess;
+same limit shared by every AI-Lake binding, including the JNI C-ABI boundary used by
+Spark/Trino/Flink). Applies to `search()`, `search_text()`, and `search_multimodal()`.
 
 **Materialisation methods:**
 
@@ -881,6 +920,7 @@ print(resp.choices[0].message.content)
 | Function | Description |
 |---|---|
 | `open_table(path, **kwargs)` | Open/create table; returns `Table` |
+| `create_table(path, dim, ...)` | Create an empty table (schema/policy only, no data files) — see [§2](#2-writing-data--tablewriter) |
 | `search(path, query, top_k, ...)` | Returns lazy `SearchQuery`; full param parity in both pointer and `fetch_data=True` modes |
 | `search_text(path, query_text, top_k, ...)` | BM25 FTS (O(N)) |
 | `search_multimodal(path, queries, top_k, ...)` | Cross-modal RRF; supports `rerank_factor` |
@@ -936,4 +976,9 @@ print(resp.choices[0].message.content)
 - [C++ Integration](CPP_INTEGRATION.md) — C++17 header-only client
 - [DBT Integration](DBT_INTEGRATION.md) — dbt pipelines with Spark / Trino / DuckDB
 - [Demo Notebooks](DEMO_NOTEBOOKS.md) — live Jupyter examples
+- [REST Catalog](REST_CATALOG.md) — alternative `catalog_opts={"catalog": "rest", ...}`
+  backend accepted by every function/class in this guide (default, when omitted, is
+  unchanged `HadoopCatalog` behavior)
+- [DuckLake Catalog](DUCKLAKE_CATALOG.md) — alternative catalog backend, CLI-only today
+  (no `ailake-py` `catalog_opts` wiring)
 - [ailake-py source](../../ailake-py/) — PyO3 bindings and tests

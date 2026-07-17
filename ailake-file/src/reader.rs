@@ -524,4 +524,97 @@ mod tests {
         // Still correctly absent for a column that really was never written.
         assert!(!reader.has_column_footer("embedding_v3"));
     }
+
+    #[test]
+    fn corrupt_ailk_magic_returns_err_no_panic() {
+        let file = write_file(3, 4);
+        let ailk_start = {
+            let reader = AilakeFileReader::new(file.clone(), "embedding", 4);
+            reader.ailk_offset().unwrap() as usize
+        };
+        let mut corrupted = file.to_vec();
+        corrupted[ailk_start..ailk_start + 4].copy_from_slice(b"BADC");
+        let corrupted = Bytes::from(corrupted);
+        let reader = AilakeFileReader::new(corrupted, "embedding", 4);
+        assert!(reader.load_index_for_column("embedding").is_err());
+    }
+
+    #[test]
+    fn corrupt_hnsw_bincode_returns_err_no_panic() {
+        let file = write_file(3, 4);
+        let ailk_start = {
+            let reader = AilakeFileReader::new(file.clone(), "embedding", 4);
+            reader.ailk_offset().unwrap() as usize
+        };
+        // hnsw_offset lives at header offset [40..48] len, [48..56] offset
+        // Write the bincode blob with garbage
+        let mut corrupted = file.to_vec();
+        // Start at 64 bytes into header section where centroid ends, find where
+        // HNSW blob starts by reading hnsw_offset and hnsw_len from header
+        let header_bytes = &corrupted[ailk_start..];
+        let hnsw_offset = u64::from_le_bytes(header_bytes[48..56].try_into().unwrap()) as usize;
+        let hnsw_len = u64::from_le_bytes(header_bytes[40..48].try_into().unwrap()) as usize;
+        let blob_start = ailk_start + hnsw_offset;
+        let garbage = vec![0xABu8; hnsw_len];
+        corrupted[blob_start..blob_start + hnsw_len].copy_from_slice(&garbage);
+        let corrupted = Bytes::from(corrupted);
+
+        let reader = AilakeFileReader::new(corrupted, "embedding", 4);
+        let result = reader.load_index_for_column("embedding");
+        assert!(
+            result.is_err(),
+            "corrupted HNSW bincode must return Err, got Ok"
+        );
+    }
+
+    #[test]
+    fn truncated_parquet_fails_gracefully() {
+        let file = write_file(3, 4);
+        let half = file.len() / 2;
+        let truncated = file.slice(..half);
+        let reader = AilakeFileReader::new(truncated, "embedding", 4);
+        assert!(!reader.is_ailake_file());
+        let result = reader.load_index_for_column("embedding");
+        assert!(result.is_err());
+        let result = reader.load_any_index_for_column("embedding");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_file_fails_gracefully() {
+        let empty = Bytes::new();
+        let reader = AilakeFileReader::new(empty, "embedding", 4);
+        let result = reader.load_index_for_column("embedding");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_parquet_footer_fails_gracefully() {
+        let file = write_file(3, 4);
+        let parquet_footer = "PAR1";
+        if let Some(pos) = file
+            .windows(4)
+            .rposition(|w| w == parquet_footer.as_bytes())
+        {
+            let truncated = file.slice(..pos);
+            let reader = AilakeFileReader::new(truncated, "embedding", 4);
+            assert!(!reader.is_ailake_file());
+            let result = reader.load_index_for_column("embedding");
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn zero_vector_query_returns_sane_distances() {
+        let dim = 4u32;
+        let file = write_file(3, dim);
+        let reader = AilakeFileReader::new(file, "embedding", dim);
+        let query = vec![0.0f32; dim as usize];
+        let index = reader.load_index().unwrap();
+        let results = index.search(&query, 3, 50);
+        for (_, d) in &results {
+            assert!(d.is_finite(), "distance must be finite");
+            assert!(*d <= 2.0, "cosine distance max is 2.0");
+        }
+    }
 }

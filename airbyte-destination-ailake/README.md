@@ -44,11 +44,16 @@ pip install "airbyte-destination-ailake[cohere]"  # + Cohere Embed API
 | `pq_only` | bool | `false` | Discard raw F16 vectors after index build — maximum compression, no reranking. |
 | `partition_by` | string | `` | Iceberg identity partition column (e.g. `"agent_id"`). When set, every write is tagged with the value of this field read from the Airbyte record. Enables per-agent/per-tenant manifest-level pruning at search time. |
 | `partition_fields` | array | `[]` | Multi-column Iceberg partition spec. JSON array of `{column, transform, column_type}` objects. Supports any Iceberg transform (identity, bucket[N], truncate[N], year, month, day, hour). Takes precedence over `partition_by` when both are set. |
-| `format_version` | int | `2` | Iceberg format version. Set to `3` to enable Iceberg v3 features (equality delete V3-native field encoding, variant type support). |
+| `format_version` | int | `2` | Iceberg format version. Set to `3` to enable Iceberg v3 features (row lineage, Deletion Vectors). Equality deletes are encoded identically on V2 and V3 — there is no V3-native equality-delete field encoding. |
 | `hnsw_m` | int | `null` | HNSW connections per node (M parameter). `null` = use table default (16). Higher M → better recall, more memory. |
 | `hnsw_ef_construction` | int | `null` | HNSW build pool size. `null` = use table default (150). Higher → better graph quality, slower build. |
 | `deferred` | bool | `false` | When `true`, write Parquet immediately (~200k vec/s) and build HNSW index in background; shard served via flat scan until index is ready. |
 | `fts_columns` | array | `[]` | Text columns to embed as a Tantivy FTS index alongside the HNSW index. Example: `["chunk_text", "document_title"]`. Enables `search_text()` fast path. |
+
+A record whose embedding comes back with a `NaN`/`Infinity` value (a malformed
+`embed_cmd` response, or an API edge case) is rejected at write time with a clear
+error instead of being silently written — the sync fails visibly rather than
+producing a table with a corrupted vector.
 
 ## Embedding modes
 

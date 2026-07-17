@@ -49,3 +49,4 @@ duckdb = { version = "1", features = ["bundled"], optional = true }
 tempfile    = { workspace = true }
 tokio       = { workspace = true }
 ailake-file = { path = "../ailake-file", version = "0.1.3" }
+proptest    = { workspace = true }
