@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-07-17
+
+### Fixed
+
+- **`release.yml` published a release in parallel with CI instead of gating on it** — the `Release` workflow triggered on every push to `main` independently of `ci.yml`/`ci-safety.yml`/`ci-duckdb.yml`/`ci-go.yml`/`ci-cpp.yml`/`secret-scan.yml`/`compat-heavy.yml`, all of which also trigger on the same push — nothing stopped a release from being tagged and published to crates.io/PyPI/GitHub Releases while those checks were still running, or had already failed, on the same commit. New `wait-for-ci` job polls the commit's check-runs via the GitHub API (excluding Release's own job names) until everything else completes, and fails fast if any required check reports failure/timeout/cancellation; the `release` job now depends on it (`needs: wait-for-ci`). The `sync-develop`/`publish-crates`/`publish-jvm`/`publish-airflow`/`pypi-*` chain off `release` is unchanged.
+
+## [0.1.7] — 2026-07-17
+
 ### Added
 
 - **Safety fuzzing phase — Miri tests, Loom concurrency models, `debug_assert` hardening, cargo-fuzz targets (PR #103)** — new `ci-safety.yml` workflow runs `cargo +nightly miri test` (UB detection on `ailake-vec`/`ailake-index`), Loom interleaving models for the compaction/scanner concurrency paths, and 7 `cargo-fuzz` targets (`fuzz/`, plus `.oss-fuzz` integration). Added `SECURITY.md` and `docs/architecture/THREAT_MODEL.md` (risk register). New `FailStore` fault-injection harness and proptest round-trips (Avro manifest, JNI/C-ABI string/IPC boundaries) exercise error paths that weren't previously covered. New `tests/tests/concurrent_search_compact.rs` stress-tests concurrent search + compaction.
