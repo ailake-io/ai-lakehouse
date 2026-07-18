@@ -20,13 +20,17 @@ FROM python:3.12-slim AS builder
 
 # cmake is required by the `duckdb` crate's bundled C++ build, pulled in by
 # ailake-cli's catalog-ducklake feature (docs/guides/DUCKLAKE_CATALOG.md) —
-# adds several minutes to a cold-cache build.
+# adds several minutes to a cold-cache build. git is required by duckdb-ailake's
+# CMakeLists.txt FetchContent_Populate(duckdb), which clones DuckDB's source —
+# python:3.12-slim doesn't include it; CI never caught this because
+# ubuntu-latest GitHub Actions runners ship git preinstalled.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         build-essential \
         cmake \
         pkg-config \
         libssl-dev \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust stable (cached in a separate layer)
@@ -102,8 +106,10 @@ FROM python:3.12-slim
 
 # Java is required by PySpark (notebook 03_spark.ipynb uses local[*] mode).
 # default-jre-headless installs OpenJDK 17 and creates /usr/lib/jvm/default-java.
+# curl is required below to download the Flink SQL Client distribution.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         default-jre-headless \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 ENV JAVA_HOME=/usr/lib/jvm/default-java
