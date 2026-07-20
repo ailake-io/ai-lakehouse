@@ -187,6 +187,7 @@ When the Jupyter container starts for the first time, `init_demo.py` writes fixt
 | `/data/ailake_pq` | 500 | PQ-only (vectors discarded, codes only) |
 | `/data/ailake_residual_pq` | 500 | IVF-PQ with residual encoding |
 | `/data/ailake_deferred` | 200 | `write_batch_auto_deferred` — Parquet immediate, index async |
+| `/data/ailake_model_tracked` | 100 | `embedding_model="synthetic-embed-v1"@1.0` — used/appended to by notebook 01 §18 |
 | `/data/ailake_multimodal` | 200 | Text (dim=32) + image (dim=16) dual embeddings |
 | `/data/ailake_agent` | 100 | Two agents (agent-A / agent-B), partition isolation |
 | `/data/ailake_bm25` | 200 | BM25 stats written at ingest time (legacy hybrid) |
