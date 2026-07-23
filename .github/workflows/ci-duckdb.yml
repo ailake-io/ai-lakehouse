@@ -19,7 +19,12 @@ jobs:
   build-and-test:
     name: build + test (Linux x86_64)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # ailake-jni is now linked statically into the extension via corrosion, and
+    # `cmake --build` builds a real duckdb_static from source at DUCKDB_VERSION
+    # instead of headers-only (see duckdb-ailake/README.md "Design") — a from-scratch
+    # build of duckdb_static alone takes several minutes; 20 was sized for the old
+    # headers-only setup and left this job getting killed mid-build.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v6
@@ -30,8 +35,23 @@ jobs:
         with:
           cmake-version: "3.28"
 
+      # ailake-jni's staticlib is built by corrosion as part of "Build DuckDB
+      # extension" below — this cdylib build is only for write_fixture.py,
+      # which dlopens libailake_jni.so directly via ctypes (a standalone
+      # fixture generator, unrelated to how the extension itself links it).
       - name: Build libailake_jni.so
         run: cargo build --release -p ailake-jni
+
+      # Caches the FetchContent'd DuckDB source/build tree (the expensive part —
+      # duckdb_static built from scratch) and corrosion's cargo build output.
+      # Keyed on DUCKDB_VERSION + Cargo.lock so a DuckDB bump or ailake-jni
+      # dependency change invalidates it instead of silently reusing a stale build.
+      - uses: actions/cache@v4
+        with:
+          path: duckdb-ailake/build
+          key: duckdb-ailake-build-${{ runner.os }}-${{ env.DUCKDB_VERSION }}-${{ hashFiles('Cargo.lock', 'ailake-jni/**', 'duckdb-ailake/CMakeLists.txt') }}
+          restore-keys: |
+            duckdb-ailake-build-${{ runner.os }}-${{ env.DUCKDB_VERSION }}-
 
       - name: Configure DuckDB extension
         run: |
@@ -63,76 +83,65 @@ jobs:
       - name: Run write tests
         run: python duckdb-ailake/test/test_write.py
         env:
-          AILAKE_LIB:    target/release/libailake_jni.so
           AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_TMPDIR: /tmp/ailake_duck_write
 
       - name: Run search tests
         run: python duckdb-ailake/test/test_search.py
         env:
-          AILAKE_LIB:     target/release/libailake_jni.so
           AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_FIXTURE: ./compat-fixture
 
       - name: Run scan tests
         run: python duckdb-ailake/test/test_scan.py
         env:
-          AILAKE_LIB:     target/release/libailake_jni.so
           AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_FIXTURE: ./compat-fixture
 
       - name: Run multimodal search tests
         run: python duckdb-ailake/test/test_multimodal.py
         env:
-          AILAKE_LIB:     target/release/libailake_jni.so
           AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_FIXTURE: ./compat-fixture
 
       - name: Run delete_where tests
         run: python duckdb-ailake/test/test_delete.py
         env:
-          AILAKE_LIB:    target/release/libailake_jni.so
           AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_TMPDIR: /tmp/ailake_duck_delete
 
       - name: Run evolve_schema tests
         run: python duckdb-ailake/test/test_evolve.py
         env:
-          AILAKE_LIB:    target/release/libailake_jni.so
           AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_TMPDIR: /tmp/ailake_duck_evolve
 
       - name: Run write_batch_multi tests
         run: python duckdb-ailake/test/test_write_multi.py
         env:
-          AILAKE_LIB:    target/release/libailake_jni.so
           AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_TMPDIR: /tmp/ailake_duck_write_multi
 
       - name: Run compact tests
         run: python duckdb-ailake/test/test_compact.py
         env:
-          AILAKE_LIB:    target/release/libailake_jni.so
           AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_TMPDIR: /tmp/ailake_duck_compact
 
       - name: Run create_table tests
         run: python duckdb-ailake/test/test_create_table.py
         env:
-          AILAKE_LIB:    target/release/libailake_jni.so
           AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_TMPDIR: /tmp/ailake_duck_create_table
 
       - name: Phase T — Run FTS write tests
         run: python duckdb-ailake/test/test_write.py -k fts
         env:
-          AILAKE_LIB:    target/release/libailake_jni.so
           AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_TMPDIR: /tmp/ailake_duck_fts_write
 
       - name: Phase T — Run FTS search tests
         run: python duckdb-ailake/test/test_search.py -k fts
         env:
-          AILAKE_LIB:     target/release/libailake_jni.so
           AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_FIXTURE: ./compat-fixture
