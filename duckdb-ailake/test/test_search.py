@@ -4,12 +4,11 @@
 DuckDB ailake extension — search function tests.
 
 Prerequisites:
-  1. Build libailake_jni.so:  cargo build --release -p ailake-jni
-  2. Build DuckDB extension:  cmake --build duckdb-ailake/build
-  3. Generate fixture:        python tests/fixtures/write_fixture.py
+  1. Build DuckDB extension (also builds ailake-jni as a static lib via corrosion):
+       cmake --build duckdb-ailake/build
+  2. Generate fixture:  python tests/fixtures/write_fixture.py
 
 Usage:
-  AILAKE_LIB=./target/release/libailake_jni.so \
   AILAKE_EXT=./duckdb-ailake/build/ailake.duckdb_extension \
   AILAKE_FIXTURE=./compat-fixture \
   python duckdb-ailake/test/test_search.py
@@ -19,21 +18,12 @@ import sys
 import pathlib
 import struct
 import math
-import ctypes
 import tempfile
 
-# Force _duckdb.so to load with RTLD_GLOBAL so DuckDB extensions can resolve
-# its C++ typeinfo symbols (TableFunction → SimpleNamedParameterFunction).
-# Python's default dlopen flags are RTLD_LOCAL, which hides symbols from
-# subsequently loaded extensions at RTLD_NOW resolution time.
-_old_flags = sys.getdlopenflags()
-sys.setdlopenflags(_old_flags | os.RTLD_GLOBAL)
 import duckdb
-sys.setdlopenflags(_old_flags)
 
 FIXTURE_DIR = pathlib.Path(os.environ.get("AILAKE_FIXTURE", "./compat-fixture"))
 EXT_PATH    = os.environ.get("AILAKE_EXT",   "./duckdb-ailake/build/ailake.duckdb_extension")
-LIB_PATH    = os.environ.get("AILAKE_LIB",   "./target/release/libailake_jni.so")
 
 def require(cond, msg):
     if not cond:
@@ -45,7 +35,6 @@ def setup_connection():
         "allow_unsigned_extensions": True,
         "allow_extensions_metadata_mismatch": True,
     })
-    ctypes.CDLL(LIB_PATH, ctypes.RTLD_GLOBAL)
     conn.execute(f"LOAD '{EXT_PATH}'")
     return conn
 

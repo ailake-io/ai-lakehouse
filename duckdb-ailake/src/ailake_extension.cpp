@@ -18,6 +18,23 @@ void RegisterAilakeSearchMultimodal(duckdb::ExtensionLoader &loader);
 void RegisterAilakeWrite(duckdb::ExtensionLoader &loader);
 void RegisterAilakeCreateTable(duckdb::ExtensionLoader &loader);
 
+// ── ailake-jni C-ABI (linked statically — see CMakeLists.txt) ─────────────────
+// Same JSON-envelope symbols exported by ailake-jni for Spark/Trino/Flink (JNA);
+// here they're resolved at link time instead of via dlopen/dlsym.
+extern "C" {
+    char *ailake_search_json(const char *);
+    char *ailake_search_multimodal_json(const char *);
+    char *ailake_scan_json(const char *);
+    char *ailake_write_batch_json(const char *);
+    char *ailake_search_text_json(const char *);
+    char *ailake_delete_where_json(const char *);
+    char *ailake_evolve_schema_json(const char *);
+    char *ailake_write_batch_multi_json(const char *);
+    char *ailake_compact_json(const char *);
+    char *ailake_create_table_json(const char *);
+    void  ailake_free_string(char *);
+}
+
 // ── AilakeLib implementation ──────────────────────────────────────────────────
 
 namespace ailake {
@@ -27,52 +44,20 @@ AilakeLib &AilakeLib::get() {
     return instance;
 }
 
-bool AilakeLib::load(const std::string &lib_path) {
-    if (search_fn_) return true; // already resolved
+bool AilakeLib::load() {
+    if (search_fn_) return true; // already wired up
 
-    // Try path-based load first
-    const char *path = lib_path.empty() ? AILAKE_LIB_NAME : lib_path.c_str();
-    void *h = AILAKE_DLOPEN(path);
-
-    // If dlopen failed, symbols may already be in the global table (pre-loaded
-    // via ctypes.CDLL(..., RTLD_GLOBAL)). On POSIX, dlsym(RTLD_DEFAULT, ...)
-    // searches the global namespace.
-#ifndef _WIN32
-    void *sym_handle = h ? h : RTLD_DEFAULT;
-#else
-    if (!h) return false;
-    void *sym_handle = h;
-#endif
-
-    auto s   = reinterpret_cast<search_fn_t>       (AILAKE_DLSYM(sym_handle, "ailake_search_json"));
-    auto mm  = reinterpret_cast<multimodal_fn_t>   (AILAKE_DLSYM(sym_handle, "ailake_search_multimodal_json"));
-    auto sc  = reinterpret_cast<scan_fn_t>         (AILAKE_DLSYM(sym_handle, "ailake_scan_json"));
-    auto w   = reinterpret_cast<write_fn_t>        (AILAKE_DLSYM(sym_handle, "ailake_write_batch_json"));
-    auto st  = reinterpret_cast<search_text_fn_t>  (AILAKE_DLSYM(sym_handle, "ailake_search_text_json"));
-    auto del = reinterpret_cast<delete_where_fn_t> (AILAKE_DLSYM(sym_handle, "ailake_delete_where_json"));
-    auto ev  = reinterpret_cast<evolve_schema_fn_t>(AILAKE_DLSYM(sym_handle, "ailake_evolve_schema_json"));
-    auto wm  = reinterpret_cast<write_multi_fn_t>  (AILAKE_DLSYM(sym_handle, "ailake_write_batch_multi_json"));
-    auto cp  = reinterpret_cast<compact_fn_t>      (AILAKE_DLSYM(sym_handle, "ailake_compact_json"));
-    auto ct  = reinterpret_cast<create_table_fn_t> (AILAKE_DLSYM(sym_handle, "ailake_create_table_json"));
-    auto f   = reinterpret_cast<free_fn_t>         (AILAKE_DLSYM(sym_handle, "ailake_free_string"));
-
-    if (!s || !w || !f) {
-        if (h) AILAKE_DLCLOSE(h);
-        return false;
-    }
-
-    handle_           = h;
-    search_fn_        = s;
-    multimodal_fn_    = mm;  // may be nullptr for older builds
-    scan_fn_          = sc;  // may be nullptr for older builds
-    write_fn_         = w;
-    search_text_fn_   = st;  // may be nullptr for older builds
-    delete_where_fn_  = del; // may be nullptr for older builds
-    evolve_schema_fn_ = ev;  // may be nullptr for older builds
-    write_multi_fn_   = wm;  // may be nullptr for older builds
-    compact_fn_       = cp;  // may be nullptr for older builds
-    create_table_fn_  = ct;  // may be nullptr for older builds
-    free_fn_          = f;
+    search_fn_        = ailake_search_json;
+    multimodal_fn_     = ailake_search_multimodal_json;
+    scan_fn_           = ailake_scan_json;
+    write_fn_          = ailake_write_batch_json;
+    search_text_fn_    = ailake_search_text_json;
+    delete_where_fn_   = ailake_delete_where_json;
+    evolve_schema_fn_  = ailake_evolve_schema_json;
+    write_multi_fn_    = ailake_write_batch_multi_json;
+    compact_fn_        = ailake_compact_json;
+    create_table_fn_   = ailake_create_table_json;
+    free_fn_           = ailake_free_string;
     return true;
 }
 
@@ -826,8 +811,7 @@ void RegisterAilakeCompact(duckdb::ExtensionLoader &loader);
 extern "C" {
 
 DUCKDB_CPP_EXTENSION_ENTRY(ailake, loader) {
-    // Try to load libailake_jni.so from environment/library path.
-    // Non-fatal: functions still register and return clear errors at call time.
+    // ailake-jni is statically linked into this binary — always succeeds.
     ailake::AilakeLib::get().load();
 
     RegisterAilakeSearch(loader);

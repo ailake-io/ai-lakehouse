@@ -8,12 +8,11 @@ A single-column multimodal query is valid — it exercises the function's
 registration, JSON envelope, RRF accumulation, and result schema.
 
 Prerequisites:
-  1. Build libailake_jni.so:  cargo build --release -p ailake-jni
-  2. Build DuckDB extension:  cmake --build duckdb-ailake/build
-  3. Generate fixture:        python tests/fixtures/write_fixture.py
+  1. Build DuckDB extension (also builds ailake-jni as a static lib via corrosion):
+       cmake --build duckdb-ailake/build
+  2. Generate fixture:  python tests/fixtures/write_fixture.py
 
 Usage:
-  AILAKE_LIB=./target/release/libailake_jni.so \
   AILAKE_EXT=./duckdb-ailake/build/ailake.duckdb_extension \
   AILAKE_FIXTURE=./compat-fixture \
   python duckdb-ailake/test/test_multimodal.py
@@ -22,13 +21,9 @@ import os
 import sys
 import struct
 import math
-import ctypes
 import pathlib
 
-_old_flags = sys.getdlopenflags()
-sys.setdlopenflags(_old_flags | os.RTLD_GLOBAL)
 import duckdb
-sys.setdlopenflags(_old_flags)
 
 PASS = 0
 FAIL = 0
@@ -45,13 +40,11 @@ def require(cond, msg):
 
 
 def setup_connection():
-    lib_path = os.environ.get("AILAKE_LIB", "")
     ext_path = os.environ.get("AILAKE_EXT", "")
-    if not lib_path or not ext_path:
-        print("SKIP: AILAKE_LIB and AILAKE_EXT must be set")
+    if not ext_path:
+        print("SKIP: AILAKE_EXT must be set")
         sys.exit(0)
 
-    ctypes.CDLL(lib_path, ctypes.RTLD_GLOBAL)
     conn = duckdb.connect(config={
         "allow_unsigned_extensions": True,
         "allow_extensions_metadata_mismatch": True,

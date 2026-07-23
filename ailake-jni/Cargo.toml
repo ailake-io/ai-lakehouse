@@ -10,7 +10,7 @@ keywords    = ["jni", "spark", "trino", "vector-search", "lakehouse"]
 categories  = ["database", "api-bindings"]
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
 ailake-query   = { path = "../ailake-query", version = "0.1.8" }

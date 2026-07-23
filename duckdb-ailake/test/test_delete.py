@@ -4,11 +4,10 @@
 DuckDB ailake extension — ailake_delete_where function tests (Phase M).
 
 Prerequisites:
-  1. Build libailake_jni.so:  cargo build --release -p ailake-jni
-  2. Build DuckDB extension:  cmake --build duckdb-ailake/build
+  1. Build DuckDB extension (also builds ailake-jni as a static lib via corrosion):
+       cmake --build duckdb-ailake/build
 
 Usage:
-  AILAKE_LIB=./target/release/libailake_jni.so \
   AILAKE_EXT=./duckdb-ailake/build/ailake.duckdb_extension \
   AILAKE_TMPDIR=/tmp/ailake_duck_delete \
   python duckdb-ailake/test/test_delete.py
@@ -18,15 +17,10 @@ import sys
 import pathlib
 import tempfile
 import shutil
-import ctypes
 
-_old_flags = sys.getdlopenflags()
-sys.setdlopenflags(_old_flags | os.RTLD_GLOBAL)
 import duckdb
-sys.setdlopenflags(_old_flags)
 
 EXT_PATH = os.environ.get("AILAKE_EXT", "./duckdb-ailake/build/ailake.duckdb_extension")
-LIB_PATH = os.environ.get("AILAKE_LIB", "./target/release/libailake_jni.so")
 TMP_DIR  = os.environ.get("AILAKE_TMPDIR", "")
 
 
@@ -41,7 +35,6 @@ def setup_connection():
         "allow_unsigned_extensions": True,
         "allow_extensions_metadata_mismatch": True,
     })
-    ctypes.CDLL(LIB_PATH, ctypes.RTLD_GLOBAL)
     conn.execute(f"LOAD '{EXT_PATH}'")
     return conn
 
@@ -112,7 +105,10 @@ def test_delete_where_empty_values_is_noop():
         conn.close()
 
 
-def test_delete_where_missing_lib_returns_false():
+def test_delete_where_nonexistent_table_returns_false():
+    """ailake_delete_where documented behavior: unlike ailake_search/ailake_write_batch,
+    a backend rejection here still folds into FALSE, not an exception (see README
+    "Error handling")."""
     conn = duckdb.connect(config={
         "allow_unsigned_extensions": True,
         "allow_extensions_metadata_mismatch": True,
@@ -122,10 +118,9 @@ def test_delete_where_missing_lib_returns_false():
         row = conn.execute(
             "SELECT ailake_delete_where('/nonexistent', 'id', ARRAY['0'])"
         ).fetchone()
-        # With lib loaded via RTLD_GLOBAL earlier in process, call may error or return FALSE
-        print(f"PASS test_delete_where_missing_lib_returns_false: result={row[0] if row else None}")
+        print(f"PASS test_delete_where_nonexistent_table_returns_false: result={row[0] if row else None}")
     except Exception as e:
-        print(f"PASS test_delete_where_missing_lib_returns_false: raised {type(e).__name__} as expected")
+        print(f"PASS test_delete_where_nonexistent_table_returns_false: raised {type(e).__name__} as expected")
     finally:
         conn.close()
 
@@ -133,6 +128,6 @@ def test_delete_where_missing_lib_returns_false():
 if __name__ == "__main__":
     test_delete_where_returns_true()
     test_delete_where_empty_values_is_noop()
-    test_delete_where_missing_lib_returns_false()
+    test_delete_where_nonexistent_table_returns_false()
     print()
     print("PASS: ailake_delete_where — all tests passed")
