@@ -46,6 +46,7 @@ jobs:
       # duckdb_static built from scratch) and corrosion's cargo build output.
       # Keyed on DUCKDB_VERSION + Cargo.lock so a DuckDB bump or ailake-jni
       # dependency change invalidates it instead of silently reusing a stale build.
+      # On a full cache hit this makes "Build DuckDB extension" below a no-op.
       - uses: actions/cache@v4
         with:
           path: duckdb-ailake/build
@@ -53,10 +54,23 @@ jobs:
           restore-keys: |
             duckdb-ailake-build-${{ runner.os }}-${{ env.DUCKDB_VERSION }}-
 
+      # Belt-and-suspenders for the case above only *partially* hits (e.g. a
+      # duckdb-ailake/src/*.cpp change invalidates the whole-dir cache key but
+      # duckdb_static's own object files are unaffected): ccache keys per
+      # translation unit on compiler+flags+source content, so it still serves
+      # cache hits for the untouched bulk of the DuckDB source even when the
+      # directory-level cache above misses.
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: duckdb-ailake-ccache-${{ runner.os }}-${{ env.DUCKDB_VERSION }}
+          max-size: 2G
+
       - name: Configure DuckDB extension
         run: |
           cmake -S duckdb-ailake -B duckdb-ailake/build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DDUCKDB_VERSION=${{ env.DUCKDB_VERSION }}
 
       - name: Build DuckDB extension
