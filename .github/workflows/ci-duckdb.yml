@@ -64,6 +64,7 @@ jobs:
         with:
           key: duckdb-ailake-ccache-${{ runner.os }}-${{ env.DUCKDB_VERSION }}
           max-size: 2G
+          update-package-index: true
 
       - name: Configure DuckDB extension
         run: |
@@ -73,8 +74,18 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DDUCKDB_VERSION=${{ env.DUCKDB_VERSION }}
 
+      # Unbounded `--parallel` spawns one compile per vCPU (4 on ubuntu-latest);
+      # duckdb_static's unified-build translation units can each peak at 3-4GB
+      # RSS, so 4 concurrent compiles push close to the runner's 16GB RAM and
+      # trigger heavy swapping. That starves the runner agent's heartbeat to
+      # GitHub's server, which then force-kills the whole VM ("shutdown signal",
+      # not an OOM-killer message — confirmed via job logs showing no OOM/disk
+      # error, just a mass `Terminated` across in-flight compiles at ~5-6min in,
+      # varying wildly in build %). Capping at 2 trades some wall-clock for
+      # headroom so the job survives to completion instead of getting reclaimed
+      # mid-build.
       - name: Build DuckDB extension
-        run: cmake --build duckdb-ailake/build --parallel
+        run: cmake --build duckdb-ailake/build --parallel 2
 
       - name: Verify extension artifact
         run: |
