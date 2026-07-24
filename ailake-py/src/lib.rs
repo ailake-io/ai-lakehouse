@@ -33,7 +33,7 @@ use ailake_query::{
     EmbedFn, FusionMethod, MigrationJob, MigrationProgress, MigrationStrategy, ModalQuery,
     MultiVectorBatch, ProgressFn, SearchConfig, TableWriter as RsTableWriter,
 };
-use ailake_store::{store::Store, LocalStore};
+use ailake_store::{store::Store, store_from_url, LocalStore};
 
 fn rt() -> PyResult<tokio::runtime::Runtime> {
     tokio::runtime::Runtime::new().map_err(|e| {
@@ -170,13 +170,14 @@ fn build_batch_with_extra(
 }
 
 /// `catalog_opts` selects/configures the catalog *metadata* backend; `path`
-/// still always resolves to a local `Store` (ailake-py has no `store_from_url`
-/// equivalent yet — S3/GCS/Azure aren't reachable from any binding today, a
-/// separate, pre-existing gap not closed here). `catalog_opts["catalog"]`:
-/// `"hadoop"` (default, unchanged behavior for every caller that omits it) or
-/// `"rest"` — talks to any Iceberg REST Catalog spec server, keys mirror
-/// `ailake-cli`'s `--rest-*` flags (`rest_uri`, `rest_prefix`,
-/// `rest_warehouse`, `rest_auth`: `"none"`/`"bearer"`/`"oauth2"`, `rest_token`,
+/// resolves via `store_from_url` — `s3://`, `s3a://`, `gs://`, `az://` reach
+/// their respective cloud backend (env-based credentials, same resolution
+/// order as `ailake-cli`'s `--store`), anything else (bare path or `file://`)
+/// falls back to a local `Store`. `catalog_opts["catalog"]`: `"hadoop"`
+/// (default, unchanged behavior for every caller that omits it) or `"rest"` —
+/// talks to any Iceberg REST Catalog spec server, keys mirror `ailake-cli`'s
+/// `--rest-*` flags (`rest_uri`, `rest_prefix`, `rest_warehouse`,
+/// `rest_auth`: `"none"`/`"bearer"`/`"oauth2"`, `rest_token`,
 /// `rest_oauth_token_endpoint`, `rest_oauth_client_id`,
 /// `rest_oauth_client_secret`, `rest_oauth_scope`). See
 /// docs/guides/REST_CATALOG.md.
@@ -184,16 +185,27 @@ fn local_catalog_store(
     path: &str,
     catalog_opts: Option<&std::collections::HashMap<String, String>>,
 ) -> PyResult<(Arc<dyn CatalogProvider>, Arc<dyn Store>)> {
-    let store: Arc<dyn Store> = Arc::new(LocalStore::new(path));
-    // Use a file:// URI as warehouse so that Iceberg metadata.json and manifest
-    // files contain absolute file:// paths. Required for Trino's Iceberg
-    // connector and any reader that resolves location URIs strictly.
-    // LocalStore::full_path strips the file:// prefix before I/O.
-    //
-    // std::path::absolute resolves relative paths without requiring the directory
-    // to exist (unlike canonicalize, which fails on new table paths).
-    let absolute = std::path::absolute(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
-    let warehouse_uri = format!("file://{}", absolute.display());
+    let is_remote = path.starts_with("s3://")
+        || path.starts_with("s3a://")
+        || path.starts_with("gs://")
+        || path.starts_with("az://");
+
+    let (store, warehouse_uri): (Arc<dyn Store>, String) = if is_remote {
+        let store = store_from_url(path).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        (store, path.to_string())
+    } else {
+        // Use a file:// URI as warehouse so that Iceberg metadata.json and manifest
+        // files contain absolute file:// paths. Required for Trino's Iceberg
+        // connector and any reader that resolves location URIs strictly.
+        // LocalStore::full_path strips the file:// prefix before I/O.
+        //
+        // std::path::absolute resolves relative paths without requiring the directory
+        // to exist (unlike canonicalize, which fails on new table paths).
+        let absolute =
+            std::path::absolute(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+        let uri = format!("file://{}", absolute.display());
+        (Arc::new(LocalStore::new(path)), uri)
+    };
 
     let backend = catalog_opts
         .and_then(|o| o.get("catalog"))

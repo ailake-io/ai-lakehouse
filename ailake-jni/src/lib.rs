@@ -126,10 +126,28 @@ struct CatalogOpts {
     rest_oauth_scope: Option<String>,
 }
 
+/// Resolves `warehouse` to a `Store` — `s3://`, `s3a://`, `gs://`, `az://`
+/// reach their respective cloud backend (env-based credentials, same
+/// resolution order as `ailake-cli`'s `--store`); anything else falls back to
+/// a local `Store`, unchanged from prior behavior. Every call site also
+/// passes `warehouse` as-is as the Hadoop catalog root, so a remote URI needs
+/// no extra wrapping (unlike `ailake-py`'s local `file://` case).
+fn store_for_warehouse(warehouse: &str) -> Result<Arc<dyn ailake_store::Store>, String> {
+    if warehouse.starts_with("s3://")
+        || warehouse.starts_with("s3a://")
+        || warehouse.starts_with("gs://")
+        || warehouse.starts_with("az://")
+    {
+        ailake_store::store_from_url(warehouse).map_err(|e| e.to_string())
+    } else {
+        Ok(Arc::new(LocalStore::new(warehouse)))
+    }
+}
+
 /// Builds the `CatalogProvider` a JSON request asked for. `warehouse` is
-/// always used for `Store` resolution and as the Hadoop catalog root (see
-/// `LocalStore::new(&warehouse)` at each call site) — unrelated to `opts`,
-/// which only selects/configures the catalog *metadata* backend.
+/// always used for `Store` resolution (see `store_for_warehouse` above) and
+/// as the Hadoop catalog root — unrelated to `opts`, which only
+/// selects/configures the catalog *metadata* backend.
 fn resolve_catalog(
     warehouse: &str,
     store: Arc<dyn ailake_store::Store>,
@@ -223,7 +241,8 @@ fn do_search(
     pruning_threshold: f32,
     catalog_opts: &CatalogOpts,
 ) -> ailake_core::AilakeResult<Vec<SearchResult>> {
-    let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&warehouse));
+    let store: Arc<dyn ailake_store::Store> = store_for_warehouse(&warehouse)
+        .map_err(ailake_core::AilakeError::InvalidArgument)?;
     let catalog = resolve_catalog(&warehouse, store.clone(), catalog_opts)
         .map_err(ailake_core::AilakeError::InvalidArgument)?;
     let table = TableIdent::new(namespace, table_name);
@@ -772,7 +791,10 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         let format_version = req.format_version;
         let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
         let store: std::sync::Arc<dyn ailake_store::Store> =
-            std::sync::Arc::new(LocalStore::new(&req.warehouse));
+            match store_for_warehouse(&req.warehouse) {
+                Ok(s) => s,
+                Err(e) => return cstr_err_json(e),
+            };
         let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
             Ok(c) => c,
             Err(e) => return cstr_err_json(e),
@@ -1150,7 +1172,10 @@ pub unsafe extern "C" fn ailake_write_batch_ipc(
         let format_version = opts.format_version;
         let table = ailake_catalog::TableIdent::new(&opts.namespace, &opts.table);
         let store: std::sync::Arc<dyn ailake_store::Store> =
-            std::sync::Arc::new(LocalStore::new(&opts.warehouse));
+            match store_for_warehouse(&opts.warehouse) {
+                Ok(s) => s,
+                Err(e) => return cstr_err_json(e),
+            };
         let catalog = match resolve_catalog(&opts.warehouse, store.clone(), &opts.catalog_opts) {
             Ok(c) => c,
             Err(e) => return cstr_err_json(e),
@@ -1393,7 +1418,10 @@ pub unsafe extern "C" fn ailake_write_batch_multi_json(request_json: *const c_ch
         let format_version = req.format_version;
         let table = ailake_catalog::TableIdent::new(&req.namespace, &req.table);
         let store: std::sync::Arc<dyn ailake_store::Store> =
-            std::sync::Arc::new(LocalStore::new(&req.warehouse));
+            match store_for_warehouse(&req.warehouse) {
+                Ok(s) => s,
+                Err(e) => return cstr_err_json(e),
+            };
         let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
             Ok(c) => c,
             Err(e) => return cstr_err_json(e),
@@ -1573,7 +1601,10 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
             req.top_k
         );
 
-        let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+        let store: Arc<dyn ailake_store::Store> = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
         let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
             Ok(c) => c,
             Err(e) => return cstr_err_json(e),
@@ -1715,7 +1746,10 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
         }
 
         let table = TableIdent::new(&req.namespace, &req.table);
-        let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+        let store: Arc<dyn ailake_store::Store> = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
         let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
             Ok(c) => c,
             Err(e) => return cstr_err_json(e),
@@ -2124,7 +2158,10 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         };
 
         // Separate store for fetching row data (do_search owns its own store internally).
-        let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+        let store: Arc<dyn ailake_store::Store> = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
 
         // Current Iceberg schema — so a file written before a metadata-only
         // evolve_schema/add_column still gets the new column projected in as null
@@ -2236,7 +2273,10 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
             req.values.len()
         );
 
-        let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+        let store: Arc<dyn ailake_store::Store> = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
         let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
             Ok(c) => c,
             Err(e) => return cstr_err_json(e),
@@ -2384,7 +2424,10 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
             });
         }
 
-        let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+        let store: Arc<dyn ailake_store::Store> = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
         let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
             Ok(c) => c,
             Err(e) => return cstr_err_json(e),
@@ -2485,7 +2528,10 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
             req.warehouse, req.namespace, req.table, req.deferred
         );
 
-        let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+        let store: Arc<dyn ailake_store::Store> = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
         let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
             Ok(c) => c,
             Err(e) => return cstr_err_json(e),
@@ -2700,7 +2746,10 @@ pub unsafe extern "C" fn ailake_create_table_json(request_json: *const c_char) -
             req.warehouse, req.namespace, req.table, req.vector_column, req.dim, req.format_version
         );
 
-        let store: Arc<dyn ailake_store::Store> = Arc::new(LocalStore::new(&req.warehouse));
+        let store: Arc<dyn ailake_store::Store> = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
         let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
             Ok(c) => c,
             Err(e) => return cstr_err_json(e),
@@ -2811,6 +2860,71 @@ fn parse_precision(s: &str) -> Option<VectorPrecision> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── store_for_warehouse ───────────────────────────────────────────────────
+    //
+    // Regression: every JSON-envelope entry point used to hardcode
+    // `LocalStore::new(&warehouse)`, so an `s3://`/`gs://`/`az://` warehouse
+    // silently got treated as a local filesystem path instead of reaching the
+    // cloud backend. These are offline (no network I/O happens until the first
+    // actual GET/PUT — `S3Builder`/`GoogleCloudStorageBuilder`/etc. just
+    // validate and store config at construction time), so they can assert the
+    // scheme correctly dispatches without needing real cloud credentials.
+
+    #[test]
+    fn store_for_warehouse_local_path_unchanged() {
+        let store = store_for_warehouse("/tmp/some/warehouse").expect("local path must succeed");
+        // LocalStore's Display/Debug isn't exposed for a direct type check here,
+        // so the real assertion is just that it didn't route through
+        // store_from_url's cloud branches (which would fail without env vars
+        // for gs:// or a bucket name mismatch for a genuinely bad URL).
+        drop(store);
+    }
+
+    #[test]
+    fn store_for_warehouse_s3_dispatches_to_cloud_backend() {
+        // No AWS credentials needed: AmazonS3Builder::from_env() only reads env
+        // vars and validates locally, it doesn't make a network call.
+        let result = store_for_warehouse("s3://test-bucket/warehouse");
+        assert!(
+            result.is_ok(),
+            "s3:// warehouse must resolve via store_from_url, not fall through to LocalStore: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn store_for_warehouse_s3a_dispatches_to_cloud_backend() {
+        let result = store_for_warehouse("s3a://test-bucket/warehouse");
+        assert!(result.is_ok(), "s3a:// must also dispatch to the S3 backend");
+    }
+
+    #[test]
+    fn store_for_warehouse_gs_dispatches_to_cloud_backend() {
+        let result = store_for_warehouse("gs://test-bucket/warehouse");
+        assert!(result.is_ok(), "gs:// must dispatch to the GCS backend");
+    }
+
+    #[test]
+    fn store_for_warehouse_az_without_account_env_returns_clear_error() {
+        // az:// requires AZURE_STORAGE_ACCOUNT_NAME — asserting the specific
+        // error (not just "any Err") proves this reached azure_from_rest inside
+        // store_from_url rather than failing for some unrelated reason.
+        // SAFETY: test-only env var manipulation, no other test in this module
+        // reads/writes AZURE_STORAGE_ACCOUNT_NAME.
+        unsafe {
+            std::env::remove_var("AZURE_STORAGE_ACCOUNT_NAME");
+        }
+        let result = store_for_warehouse("az://test-container/warehouse");
+        let err = match result {
+            Ok(_) => panic!("az:// without account env must fail, not silently succeed"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("AZURE_STORAGE_ACCOUNT_NAME"),
+            "expected the azure_from_rest env-var error, got: {err}"
+        );
+    }
 
     // ── catch_ffi_panic ────────────────────────────────────────────────────────
     //
