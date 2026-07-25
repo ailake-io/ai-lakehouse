@@ -201,8 +201,7 @@ fn local_catalog_store(
         //
         // std::path::absolute resolves relative paths without requiring the directory
         // to exist (unlike canonicalize, which fails on new table paths).
-        let absolute =
-            std::path::absolute(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+        let absolute = std::path::absolute(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
         let uri = format!("file://{}", absolute.display());
         (Arc::new(LocalStore::new(path)), uri)
     };

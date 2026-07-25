@@ -241,8 +241,8 @@ fn do_search(
     pruning_threshold: f32,
     catalog_opts: &CatalogOpts,
 ) -> ailake_core::AilakeResult<Vec<SearchResult>> {
-    let store: Arc<dyn ailake_store::Store> = store_for_warehouse(&warehouse)
-        .map_err(ailake_core::AilakeError::InvalidArgument)?;
+    let store: Arc<dyn ailake_store::Store> =
+        store_for_warehouse(&warehouse).map_err(ailake_core::AilakeError::InvalidArgument)?;
     let catalog = resolve_catalog(&warehouse, store.clone(), catalog_opts)
         .map_err(ailake_core::AilakeError::InvalidArgument)?;
     let table = TableIdent::new(namespace, table_name);
@@ -2896,7 +2896,10 @@ mod tests {
     #[test]
     fn store_for_warehouse_s3a_dispatches_to_cloud_backend() {
         let result = store_for_warehouse("s3a://test-bucket/warehouse");
-        assert!(result.is_ok(), "s3a:// must also dispatch to the S3 backend");
+        assert!(
+            result.is_ok(),
+            "s3a:// must also dispatch to the S3 backend"
+        );
     }
 
     #[test]
