@@ -26,6 +26,38 @@ import (
 // ErrNoBinary is returned when no `ailake` CLI binary is available.
 var ErrNoBinary = errors.New("ailake: no CLI binary found (set AILAKE_BIN or add ailake to PATH)")
 
+// catalogOptFlagOrder maps CatalogOpts map keys to their `ailake` CLI flag
+// name (matching ailake-cli's global --catalog/--rest-* flags — see
+// docs/guides/REST_CATALOG.md), in a fixed order so the built command line is
+// deterministic (map iteration order in Go is randomized).
+var catalogOptFlagOrder = []struct{ key, flag string }{
+	{"catalog", "--catalog"},
+	{"rest-uri", "--rest-uri"},
+	{"rest-prefix", "--rest-prefix"},
+	{"rest-warehouse", "--rest-warehouse"},
+	{"rest-auth", "--rest-auth"},
+	{"rest-token", "--rest-token"},
+	{"rest-oauth-token-endpoint", "--rest-oauth-token-endpoint"},
+	{"rest-oauth-client-id", "--rest-oauth-client-id"},
+	{"rest-oauth-client-secret", "--rest-oauth-client-secret"},
+	{"rest-oauth-scope", "--rest-oauth-scope"},
+}
+
+// appendCatalogArgs appends --catalog/--rest-* CLI flags built from a
+// CatalogOpts map (e.g. WriteBatchOptions.CatalogOpts). Nil/empty map = no
+// flags added, unchanged default Hadoop-catalog behavior. Unrecognized keys
+// are ignored rather than erroring, so a typo degrades silently to "flag not
+// passed" instead of crashing a write — same tradeoff CatalogOpts callers on
+// the JSON-envelope side (ailake-jni) already accept for unknown fields.
+func appendCatalogArgs(args []string, opts map[string]string) []string {
+	for _, kf := range catalogOptFlagOrder {
+		if v, ok := opts[kf.key]; ok && v != "" {
+			args = append(args, kf.flag, v)
+		}
+	}
+	return args
+}
+
 // AddColumnReq describes a column addition for EvolveSchema.
 type AddColumnReq struct {
 	Name           string // Iceberg column name
@@ -176,6 +208,13 @@ type WriteBatchOptions struct {
 	// --vector-cols spec carries per-column metric, and multi-column mode
 	// always writes F16).
 	VectorCols []VectorColSpec
+	// CatalogOpts selects/configures a non-Hadoop catalog backend (e.g. REST
+	// Catalog — Polaris, Unity Catalog, BigLake, S3 Tables, Nessie, Gravitino).
+	// Nil/empty = default Hadoop-style catalog, unchanged behavior. Keys:
+	// "catalog", "rest-uri", "rest-prefix", "rest-warehouse", "rest-auth",
+	// "rest-token", "rest-oauth-token-endpoint", "rest-oauth-client-id",
+	// "rest-oauth-client-secret", "rest-oauth-scope". See docs/guides/REST_CATALOG.md.
+	CatalogOpts map[string]string
 }
 
 // VectorColSpec describes one vector column in a multi-column (Phase 8
@@ -277,6 +316,7 @@ func WriteBatch(
 	if opts.Deferred {
 		args = append(args, "--deferred")
 	}
+	args = appendCatalogArgs(args, opts.CatalogOpts)
 
 	// Capture stderr instead of piping straight to os.Stderr (as this used to do) so a
 	// CLI-side rejection — e.g. the new NaN/Infinity embedding validation — reaches the
@@ -304,6 +344,10 @@ type CompactOptions struct {
 	// Deferred writes the merged Parquet immediately and builds the HNSW index
 	// in the background instead of blocking until it's fully built.
 	Deferred bool
+	// CatalogOpts selects/configures a non-Hadoop catalog backend — see
+	// WriteBatchOptions.CatalogOpts for accepted keys and
+	// docs/guides/REST_CATALOG.md. Nil/empty = default Hadoop catalog.
+	CatalogOpts map[string]string
 }
 
 // compactResponse mirrors the JSON envelope `ailake compact --format json` emits.
@@ -351,6 +395,7 @@ func Compact(
 	if opts.Deferred {
 		args = append(args, "--deferred")
 	}
+	args = appendCatalogArgs(args, opts.CatalogOpts)
 
 	out, err := exec.Command(bin, args...).CombinedOutput()
 	if err != nil {

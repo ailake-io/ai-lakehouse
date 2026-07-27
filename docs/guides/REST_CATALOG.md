@@ -195,12 +195,35 @@ SELECT * FROM ailake_search(
 Malformed JSON (or a non-object value) raises `InvalidInputException` — never
 silently falls back to the Hadoop catalog.
 
+## Go usage
+
+`WriteBatch`/`Compact` accept `CatalogOpts map[string]string` in their
+`Options` struct — forwarded as `--catalog`/`--rest-*` flags to the `ailake`
+CLI binary these functions shell out to. Nil/empty = default Hadoop catalog:
+
+```go
+err := ailake.WriteBatch(catalog, "default", "docs", "batch.parquet", ailake.WriteBatchOptions{
+    VecCol: "embedding",
+    CatalogOpts: map[string]string{
+        "catalog":   "rest",
+        "rest-uri":  "https://catalog.example.com",
+        "rest-auth": "bearer",
+        "rest-token": "...",
+    },
+})
+```
+
+`DeleteWhere`/`EvolveSchema` don't accept it yet (see "Known limitations").
+
 ## Known limitations
 
-- **`ailake-go` and `ailake-cpp` have no REST catalog wiring on their write
-  path** (CLI shell-out never emits `--catalog`/`--rest-*`), and no native
-  read-path support at all (no HTTP client in either — would need a new
-  dependency, unlike the mechanical CLI-flag-forwarding fix elsewhere).
+- **`ailake-go`'s write path is wired (`WriteBatchOptions.CatalogOpts`/
+  `CompactOptions.CatalogOpts`), `ailake-cpp`'s isn't yet.** Neither has native
+  read-path support (no HTTP client in either — would need a new dependency,
+  unlike the mechanical CLI-flag-forwarding fix). `ailake-go`'s `DeleteWhere`/
+  `EvolveSchema` also don't take `CatalogOpts` — they predate an `Options`
+  struct parameter, and adding one now would be a breaking API change; left
+  as a follow-up (new sibling functions, not a signature change).
 - **Trino only wires REST catalog into `CALL ailake.system.compact()`** — see
   "JNI usage → Trino" above for why search/scan/multimodal/INSERT are deferred
   (JSON-serialized Trino handle classes with a documented prior serialization

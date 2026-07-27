@@ -285,6 +285,8 @@ type WriteBatchOptions struct {
     HnswEfConstruction int      // 0 = table default
     PreNormalize       bool
     Deferred           bool
+    VectorCols         []VectorColSpec   // multi-column (Phase 8 multimodal) write
+    CatalogOpts        map[string]string // REST catalog config — see docs/guides/REST_CATALOG.md
 }
 ```
 

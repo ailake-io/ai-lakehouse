@@ -134,6 +134,47 @@ func TestCompactOptions_Fields(t *testing.T) {
 	}
 }
 
+func TestAppendCatalogArgs_EmptyIsNoop(t *testing.T) {
+	args := appendCatalogArgs([]string{"--store", "/tmp/wh"}, nil)
+	if len(args) != 2 {
+		t.Errorf("expected no flags appended for nil opts, got %v", args)
+	}
+	args = appendCatalogArgs([]string{"--store", "/tmp/wh"}, map[string]string{})
+	if len(args) != 2 {
+		t.Errorf("expected no flags appended for empty opts, got %v", args)
+	}
+}
+
+func TestAppendCatalogArgs_Rest(t *testing.T) {
+	args := appendCatalogArgs(nil, map[string]string{
+		"catalog":    "rest",
+		"rest-uri":   "https://catalog.example.com",
+		"rest-auth":  "bearer",
+		"rest-token": "tok123",
+	})
+	want := []string{
+		"--catalog", "rest",
+		"--rest-uri", "https://catalog.example.com",
+		"--rest-auth", "bearer",
+		"--rest-token", "tok123",
+	}
+	if len(args) != len(want) {
+		t.Fatalf("expected %v, got %v", want, args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("expected %v, got %v", want, args)
+		}
+	}
+}
+
+func TestAppendCatalogArgs_UnknownKeyIgnored(t *testing.T) {
+	args := appendCatalogArgs(nil, map[string]string{"not-a-real-key": "x"})
+	if len(args) != 0 {
+		t.Errorf("expected unrecognized key to be ignored, got %v", args)
+	}
+}
+
 // ── Integration tests: multi-column write + compact (own temp warehouse,
 // require only AILAKE_BIN — no shared AILAKE_FIXTURE needed since these
 // write their own data via testdata/multimodal_fixture.parquet) ────────────
