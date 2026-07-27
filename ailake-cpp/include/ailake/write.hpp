@@ -204,7 +204,20 @@ struct WriteBatchOptions {
     int         hnsw_m = 0;           // HNSW M (0 = use table default)
     int         hnsw_ef_construction = 0; // HNSW ef_construction (0 = use table default)
     bool        pre_normalize = false;// normalize vectors to unit L2 at write time
-    bool        deferred = false;     // build index asynchronously
+    bool        deferred = false;     // build index asynchronously; not combinable
+                                       // with batch_id (deferred writes don't yet
+                                       // carry an idempotency tag — the CLI rejects
+                                       // both set, same as ailake insert itself)
+    // Idempotency key — a retry with the same batch_id is a no-op if already
+    // committed (safe for at-least-once callers, e.g. Airflow retries). Empty
+    // = no idempotency check, every call writes a new batch.
+    std::string batch_id;
+    // Multi-column Iceberg partition spec as a JSON array, e.g.
+    // '[{"column":"topic_id","transform":"identity","column_type":"int"}]' —
+    // this header has no JSON dependency, so build the string yourself (same
+    // convention as fts_columns' comma-joining below). Takes precedence over
+    // partition_by/partition_value when set.
+    std::string partition_fields_json;
     // Selects/configures a non-Hadoop catalog backend (e.g. REST Catalog —
     // Polaris, Unity Catalog, BigLake, S3 Tables, Nessie, Gravitino). Empty =
     // default Hadoop-style catalog, unchanged behavior. Keys: "catalog",
@@ -246,6 +259,8 @@ inline void write_batch(
         cmd += " --partition-by " + detail::shell_quote(opts.partition_by);
     if (!opts.partition_value.empty())
         cmd += " --partition-value " + detail::shell_quote(opts.partition_value);
+    if (!opts.partition_fields_json.empty())
+        cmd += " --partition-fields " + detail::shell_quote(opts.partition_fields_json);
     if (opts.format_version != 0 && opts.format_version != 2)
         cmd += " --format-version " + std::to_string(opts.format_version);
     if (!opts.fts_columns.empty()) {
@@ -258,6 +273,8 @@ inline void write_batch(
         if (!opts.fts_tokenizer.empty() && opts.fts_tokenizer != "default")
             cmd += " --fts-tokenizer " + detail::shell_quote(opts.fts_tokenizer);
     }
+    if (!opts.batch_id.empty())
+        cmd += " --batch-id " + detail::shell_quote(opts.batch_id);
     if (opts.hnsw_m > 0)
         cmd += " --hnsw-m " + std::to_string(opts.hnsw_m);
     if (opts.hnsw_ef_construction > 0)
@@ -320,6 +337,8 @@ inline void write_batch_multi(
         cmd += " --partition-by " + detail::shell_quote(opts.partition_by);
     if (!opts.partition_value.empty())
         cmd += " --partition-value " + detail::shell_quote(opts.partition_value);
+    if (!opts.partition_fields_json.empty())
+        cmd += " --partition-fields " + detail::shell_quote(opts.partition_fields_json);
     if (opts.format_version != 0 && opts.format_version != 2)
         cmd += " --format-version " + std::to_string(opts.format_version);
     if (!opts.fts_columns.empty()) {
@@ -332,6 +351,8 @@ inline void write_batch_multi(
         if (!opts.fts_tokenizer.empty() && opts.fts_tokenizer != "default")
             cmd += " --fts-tokenizer " + detail::shell_quote(opts.fts_tokenizer);
     }
+    if (!opts.batch_id.empty())
+        cmd += " --batch-id " + detail::shell_quote(opts.batch_id);
     if (opts.deferred)
         cmd += " --deferred";
     detail::append_catalog_args(cmd, opts.catalog_opts);

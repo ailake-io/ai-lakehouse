@@ -479,6 +479,59 @@ static void test_integration_write_batch_multi() {
     }
 }
 
+// Reads "rows":N straight from `ailake info --format json` (real CLI call,
+// same substring-parse convention as compact/decay_memories) rather than
+// this header's own search() — see the FAIL comment on
+// test_integration_write_batch_multi/test_integration_compact above:
+// search() was independently found, while writing this test, to return 0
+// rows even on a single freshly-written file with no batch_id involved at
+// all (confirmed via a manual, ailake::search()-independent repro: the real
+// CLI's own `ailake search` correctly returns all 6 rows against the exact
+// same warehouse/table where this header's search() returns empty) — a
+// third instance of the pre-existing Avro/catalog-parsing bug class,
+// unrelated to batch_id, tracked separately from this addition.
+static int row_count_via_info(const std::string& warehouse, const std::string& table_id) {
+    std::string cmd = ailake::detail::shell_quote(ailake::detail::resolve_bin())
+        + " --store " + ailake::detail::shell_quote(warehouse)
+        + " info " + ailake::detail::shell_quote(table_id)
+        + " --format json";
+    std::string out = ailake::detail::run_cmd(cmd);
+    std::string key = "\"rows\":";
+    auto pos = out.find(key);
+    if (pos == std::string::npos) throw std::runtime_error("no \"rows\" key in info output: " + out);
+    pos += key.size();
+    return std::stoi(out.substr(pos));
+}
+
+// Real end-to-end proof of the production risk Fase 14/21's audit flagged:
+// without batch_id, a retried write (e.g. an Airflow task retry after a
+// timeout whose first attempt actually succeeded) silently double-inserts
+// rows. Writes the same batch twice with the same batch_id and confirms the
+// second call is a no-op (row count unchanged), then confirms a *different*
+// batch_id does add rows as normal.
+static void test_integration_batch_id_idempotency() {
+    const char* bin = std::getenv("AILAKE_BIN");
+    if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
+
+    try {
+        std::string warehouse = make_temp_dir();
+        ailake::WriteBatchOptions opts;
+        opts.vec_col = "embedding";
+        opts.batch_id = "test-batch-001";
+        ailake::write_batch(warehouse, "default.docs", fixture_path(), opts);
+        ailake::write_batch(warehouse, "default.docs", fixture_path(), opts); // retry, same batch_id
+        CHECK_EQ(row_count_via_info(warehouse, "default.docs"), 6); // not 12 — retry was a no-op
+
+        ailake::WriteBatchOptions opts2 = opts;
+        opts2.batch_id = "test-batch-002"; // different batch_id: not a retry, must add rows
+        ailake::write_batch(warehouse, "default.docs", fixture_path(), opts2);
+        CHECK_EQ(row_count_via_info(warehouse, "default.docs"), 12);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL integration batch_id idempotency: %s\n", e.what());
+        ++g_fail;
+    }
+}
+
 static void test_integration_compact() {
     const char* bin = std::getenv("AILAKE_BIN");
     if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
@@ -589,6 +642,7 @@ int main() {
     test_migrate_args_forwarded();
     test_backfill_vector_column_args_forwarded();
     test_integration_write_batch_multi();
+    test_integration_batch_id_idempotency();
     test_integration_compact();
     test_integration_delete_where();
     test_integration_evolve_schema();
