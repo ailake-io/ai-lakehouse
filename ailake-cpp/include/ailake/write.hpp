@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -84,6 +85,34 @@ inline std::string shell_quote(const std::string& s) {
     return out;
 }
 
+// Appends --catalog/--rest-* CLI flags built from a catalog_opts map (see
+// WriteBatchOptions::catalog_opts / CompactOptions::catalog_opts) to `cmd`.
+// Empty map = no flags added, unchanged default Hadoop-catalog behavior.
+// Recognized keys: "catalog", "rest-uri", "rest-prefix", "rest-warehouse",
+// "rest-auth", "rest-token", "rest-oauth-token-endpoint",
+// "rest-oauth-client-id", "rest-oauth-client-secret", "rest-oauth-scope" —
+// unrecognized keys are ignored. See docs/guides/REST_CATALOG.md.
+inline void append_catalog_args(std::string& cmd, const std::map<std::string, std::string>& opts) {
+    static const std::vector<std::pair<std::string, std::string>> flag_order = {
+        {"catalog", "--catalog"},
+        {"rest-uri", "--rest-uri"},
+        {"rest-prefix", "--rest-prefix"},
+        {"rest-warehouse", "--rest-warehouse"},
+        {"rest-auth", "--rest-auth"},
+        {"rest-token", "--rest-token"},
+        {"rest-oauth-token-endpoint", "--rest-oauth-token-endpoint"},
+        {"rest-oauth-client-id", "--rest-oauth-client-id"},
+        {"rest-oauth-client-secret", "--rest-oauth-client-secret"},
+        {"rest-oauth-scope", "--rest-oauth-scope"},
+    };
+    for (const auto& kf : flag_order) {
+        auto it = opts.find(kf.first);
+        if (it != opts.end() && !it->second.empty()) {
+            cmd += " " + kf.second + " " + shell_quote(it->second);
+        }
+    }
+}
+
 } // namespace detail
 
 // WriteBatchOptions controls optional parameters for write_batch.
@@ -101,6 +130,13 @@ struct WriteBatchOptions {
     int         hnsw_ef_construction = 0; // HNSW ef_construction (0 = use table default)
     bool        pre_normalize = false;// normalize vectors to unit L2 at write time
     bool        deferred = false;     // build index asynchronously
+    // Selects/configures a non-Hadoop catalog backend (e.g. REST Catalog —
+    // Polaris, Unity Catalog, BigLake, S3 Tables, Nessie, Gravitino). Empty =
+    // default Hadoop-style catalog, unchanged behavior. Keys: "catalog",
+    // "rest-uri", "rest-prefix", "rest-warehouse", "rest-auth", "rest-token",
+    // "rest-oauth-token-endpoint", "rest-oauth-client-id",
+    // "rest-oauth-client-secret", "rest-oauth-scope". See docs/guides/REST_CATALOG.md.
+    std::map<std::string, std::string> catalog_opts;
 };
 
 // write_batch inserts a Parquet file into an AI-Lake table via the `ailake` CLI.
@@ -155,6 +191,7 @@ inline void write_batch(
         cmd += " --pre-normalize";
     if (opts.deferred)
         cmd += " --deferred";
+    detail::append_catalog_args(cmd, opts.catalog_opts);
 
     detail::run_cmd(cmd);
 }
@@ -222,6 +259,7 @@ inline void write_batch_multi(
     }
     if (opts.deferred)
         cmd += " --deferred";
+    detail::append_catalog_args(cmd, opts.catalog_opts);
 
     detail::run_cmd(cmd);
 }
@@ -302,6 +340,10 @@ struct CompactOptions {
     int     min_files = 0;          // 0 = CLI default (4)
     int     max_files_per_pass = 0; // 0 = CLI default (20)
     bool    deferred = false;
+    // Selects/configures a non-Hadoop catalog backend — see
+    // WriteBatchOptions::catalog_opts for accepted keys and
+    // docs/guides/REST_CATALOG.md. Empty = default Hadoop catalog.
+    std::map<std::string, std::string> catalog_opts;
 };
 
 // compact merges small files in an AI-Lake table via `ailake compact`.
@@ -325,6 +367,7 @@ inline int compact(
         cmd += " --max-files-per-pass " + std::to_string(opts.max_files_per_pass);
     if (opts.deferred)
         cmd += " --deferred";
+    detail::append_catalog_args(cmd, opts.catalog_opts);
 
     std::string out = detail::run_cmd(cmd);
 

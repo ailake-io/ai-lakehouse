@@ -215,13 +215,34 @@ err := ailake.WriteBatch(catalog, "default", "docs", "batch.parquet", ailake.Wri
 
 `DeleteWhere`/`EvolveSchema` don't accept it yet (see "Known limitations").
 
+## C++ usage
+
+`write_batch`/`write_batch_multi`/`compact` accept a `catalog_opts:
+std::map<std::string, std::string>` field on `WriteBatchOptions`/
+`CompactOptions` — forwarded as `--catalog`/`--rest-*` flags to the `ailake`
+CLI binary these functions shell out to. Empty = default Hadoop catalog:
+
+```cpp
+ailake::WriteBatchOptions opts;
+opts.vec_col = "embedding";
+opts.catalog_opts["catalog"]    = "rest";
+opts.catalog_opts["rest-uri"]   = "https://catalog.example.com";
+opts.catalog_opts["rest-auth"]  = "bearer";
+opts.catalog_opts["rest-token"] = "...";
+ailake::write_batch(warehouse, "default.docs", "batch.parquet", opts);
+```
+
+`delete_where`/`evolve_schema` don't accept it yet (see "Known limitations").
+
 ## Known limitations
 
-- **`ailake-go`'s write path is wired (`WriteBatchOptions.CatalogOpts`/
-  `CompactOptions.CatalogOpts`), `ailake-cpp`'s isn't yet.** Neither has native
-  read-path support (no HTTP client in either — would need a new dependency,
-  unlike the mechanical CLI-flag-forwarding fix). `ailake-go`'s `DeleteWhere`/
-  `EvolveSchema` also don't take `CatalogOpts` — they predate an `Options`
+- **`ailake-go` and `ailake-cpp`'s write paths are both wired now**
+  (`WriteBatchOptions.CatalogOpts`/`CompactOptions.CatalogOpts` in Go,
+  `catalog_opts` in C++). Neither has native read-path support (no HTTP
+  client in either — would need a new dependency, unlike the mechanical
+  CLI-flag-forwarding fix). Both SDKs' `DeleteWhere`/`EvolveSchema`
+  (`delete_where`/`evolve_schema` in C++) don't take catalog config yet —
+  they predate an `Options`
   struct parameter, and adding one now would be a breaking API change; left
   as a follow-up (new sibling functions, not a signature change).
 - **Trino only wires REST catalog into `CALL ailake.system.compact()`** — see
