@@ -409,6 +409,22 @@ Compacts small files in an AI-Lake table into a larger merged file. Backed by `a
 SELECT ailake_compact('file:///data/my_table', min_files := 2);
 ```
 
+### `ailake_version` — linked library version
+
+```sql
+SELECT ailake_version() → VARCHAR
+```
+
+Returns the `ailake-jni` crate version statically linked into this extension binary
+(`CARGO_PKG_VERSION`) — useful to confirm which native build a DuckDB session is
+actually running against, independent of the extension's own version.
+
+**Example:**
+
+```sql
+SELECT ailake_version();  -- e.g. '0.1.9'
+```
+
 ## Build
 
 ```bash

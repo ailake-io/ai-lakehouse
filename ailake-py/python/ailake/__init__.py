@@ -1293,6 +1293,7 @@ def evolve_schema(
     *,
     add_columns: "list[dict] | None" = None,
     rename_columns: "list[dict] | None" = None,
+    catalog_opts: "dict[str, str] | None" = None,
 ) -> int:
     """Apply schema evolution to an AI-Lake table without rewriting data files.
 
@@ -1308,6 +1309,8 @@ def evolve_schema(
             ``0``, ``0.0``, ``"unknown"``), ``"doc"`` (string).
         rename_columns: Columns to rename.  Each entry must have ``"from"``
             and ``"to"`` keys.
+        catalog_opts: Catalog backend selection/config (e.g. REST catalog).
+            Omit for the default local Hadoop-style catalog.
 
     Returns:
         New schema-id (int), or ``0`` when both lists are empty (no-op).
@@ -1331,9 +1334,10 @@ def evolve_schema(
             ac.get("initial_default"),
             ac.get("write_default"),
             ac.get("doc"),
+            catalog_opts,
         )
     for rc in (rename_columns or []):
-        schema_id = rename_column(path, rc["from"], rc["to"])
+        schema_id = rename_column(path, rc["from"], rc["to"], catalog_opts)
     return schema_id
 
 
@@ -1350,6 +1354,7 @@ def search(
     pruning_threshold: "float | None" = None,
     ef_search: "int | None" = None,
     rerank_factor: "int | None" = None,
+    catalog_opts: "dict[str, str] | None" = None,
 ) -> SearchQuery:
     """Module-level search returning a chainable :class:`SearchQuery`.
 
@@ -1376,6 +1381,8 @@ def search(
                            this distance from the query are skipped entirely. ``None`` (default)
                            disables pruning (scans all files). Set to a small value (e.g. ``0.5``)
                            to skip distant shards for a significant latency win on large tables.
+        catalog_opts: Catalog backend selection/config (e.g. REST catalog).
+                      Omit for the default local Hadoop-style catalog.
 
     Example::
 
@@ -1422,6 +1429,7 @@ def search(
         pruning_threshold=pruning_threshold,
         ef_search=ef_search,
         rerank_factor=rerank_factor,
+        catalog_opts=catalog_opts,
     )
 
 
@@ -1432,6 +1440,7 @@ def compact(
     target_size_bytes: int = 536_870_912,
     max_files_per_pass: int = 20,
     deferred: bool = False,
+    catalog_opts: "dict[str, str] | None" = None,
 ) -> dict:
     """Compact small files in an AI-Lake table into a larger merged file.
 
@@ -1453,6 +1462,8 @@ def compact(
                   builds the HNSW index in the background (~200k vec/s write
                   throughput). When ``False`` (default), blocks until the
                   index is fully built.
+        catalog_opts: Catalog backend selection/config (e.g. REST catalog).
+                      Omit for the default local Hadoop-style catalog.
 
     Returns:
         ``{"ok": True, "files_compacted": N, "output_path": "..."}`` or
@@ -1469,4 +1480,5 @@ def compact(
         target_size_bytes=target_size_bytes,
         max_files_per_pass=max_files_per_pass,
         deferred=deferred,
+        catalog_opts=catalog_opts,
     )

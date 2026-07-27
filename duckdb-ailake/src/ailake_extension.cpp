@@ -807,6 +807,7 @@ void RegisterAilakeDeleteWhere(duckdb::ExtensionLoader &loader);
 void RegisterAilakeEvolveSchema(duckdb::ExtensionLoader &loader);
 void RegisterAilakeWriteBatchMulti(duckdb::ExtensionLoader &loader);
 void RegisterAilakeCompact(duckdb::ExtensionLoader &loader);
+void RegisterAilakeVersion(duckdb::ExtensionLoader &loader);
 
 extern "C" {
 
@@ -824,6 +825,7 @@ DUCKDB_CPP_EXTENSION_ENTRY(ailake, loader) {
     RegisterAilakeCompact(loader);
     RegisterAilakeDeleteWhere(loader);
     RegisterAilakeEvolveSchema(loader);
+    RegisterAilakeVersion(loader);
 }
 
 } // extern "C"

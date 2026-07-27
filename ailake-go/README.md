@@ -392,7 +392,7 @@ go test ./...
 AILAKE_FIXTURE=/path/to/fixture go test ./... -run Integration
 ```
 
-33 unit tests pass without a fixture. 7 integration tests require `AILAKE_FIXTURE` (includes `TestListFilesIntegration` for `EmbeddingModel` and `TestSearchDimMismatchIntegration` for dim validation).
+86 tests total. 67 unit tests pass without a fixture. 19 integration tests (`Test*Integration`) require `AILAKE_FIXTURE` (includes `TestListFilesIntegration` for `EmbeddingModel` and `TestSearchDimMismatchIntegration` for dim validation).
 
 ## License
 
