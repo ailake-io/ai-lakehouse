@@ -519,6 +519,374 @@ func Compact(
 	return resp.FilesCompacted, nil
 }
 
+// decayMemoriesResponse mirrors the JSON envelope `ailake decay-memories --format json` emits.
+type decayMemoriesResponse struct {
+	OK           bool `json:"ok"`
+	FilesUpdated int  `json:"files_updated"`
+}
+
+// DecayMemories recomputes recency weights (exp(-λ×days_since_access)) across
+// all memory files in the table by delegating to the `ailake decay-memories`
+// CLI. Returns the number of files updated (0 = nothing changed).
+func DecayMemories(
+	catalog *HadoopCatalog,
+	namespace, table string,
+	lambda float32,
+	catalogOpts map[string]string,
+) (int, error) {
+	bin, err := resolveBin()
+	if err != nil {
+		return 0, err
+	}
+
+	warehouse := catalog.Warehouse
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
+	tableID := namespace + "." + table
+
+	args := []string{
+		"--store", warehouse,
+		"decay-memories", tableID,
+		"--lambda", fmt.Sprintf("%g", lambda),
+		"--format", "json",
+	}
+	args = appendCatalogArgs(args, catalogOpts)
+
+	out, err := exec.Command(bin, args...).CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("ailake decay-memories: %w\n%s", err, out)
+	}
+
+	var resp decayMemoriesResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return 0, fmt.Errorf("ailake decay-memories: parsing JSON output: %w\n%s", err, out)
+	}
+	return resp.FilesUpdated, nil
+}
+
+// MigrateOptions controls optional parameters for Migrate.
+type MigrateOptions struct {
+	// OldColumn is the name of the existing embedding column (default "embedding").
+	OldColumn string
+	// NewColumn is the name for the migrated column — may equal OldColumn for
+	// an in-place upgrade (default "embedding_v2").
+	NewColumn string
+	// TextColumn is the Parquet column holding raw text to re-embed (default "chunk_text").
+	TextColumn string
+	// Strategy is "atomic-replace" (lower storage) or "dual-write-then-cutover"
+	// (zero downtime, default).
+	Strategy string
+	// BatchSize is the number of texts per embed-cmd call (default 512).
+	BatchSize int
+	// ModelName is stored in ailake.embedding-model after migration.
+	ModelName string
+	// ModelVersion is an optional version tag appended to ModelName (stored as "<name>@<version>").
+	ModelVersion string
+	// CatalogOpts selects/configures a non-Hadoop catalog backend — see
+	// WriteBatchOptions.CatalogOpts for accepted keys and docs/guides/REST_CATALOG.md.
+	CatalogOpts map[string]string
+}
+
+// Migrate re-embeds a table's vector column via an external embed command, by
+// delegating to the `ailake migrate` CLI. embedCmd is a shell command that
+// reads a JSON array of strings from stdin and writes a JSON array of float
+// arrays to stdout.
+func Migrate(
+	catalog *HadoopCatalog,
+	namespace, table, embedCmd string,
+	opts MigrateOptions,
+) error {
+	bin, err := resolveBin()
+	if err != nil {
+		return err
+	}
+
+	warehouse := catalog.Warehouse
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
+	tableID := namespace + "." + table
+
+	args := []string{
+		"--store", warehouse,
+		"migrate", tableID,
+		"--embed-cmd", embedCmd,
+	}
+	if opts.OldColumn != "" {
+		args = append(args, "--old-column", opts.OldColumn)
+	}
+	if opts.NewColumn != "" {
+		args = append(args, "--new-column", opts.NewColumn)
+	}
+	if opts.TextColumn != "" {
+		args = append(args, "--text-column", opts.TextColumn)
+	}
+	if opts.Strategy != "" {
+		args = append(args, "--strategy", opts.Strategy)
+	}
+	if opts.BatchSize > 0 {
+		args = append(args, "--batch-size", fmt.Sprintf("%d", opts.BatchSize))
+	}
+	if opts.ModelName != "" {
+		args = append(args, "--model-name", opts.ModelName)
+	}
+	if opts.ModelVersion != "" {
+		args = append(args, "--model-version", opts.ModelVersion)
+	}
+	args = appendCatalogArgs(args, opts.CatalogOpts)
+
+	if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("ailake migrate: %w\n%s", err, out)
+	}
+	return nil
+}
+
+// DeleteRows marks rows as deleted in a V3 table using Iceberg Deletion
+// Vectors, by delegating to the `ailake delete-rows` CLI. file is the Parquet
+// data file path as reported by LoadTable (e.g. "data/part-00001.parquet").
+// No-op when rowPositions is empty. Requires the table to have been created
+// with format_version=3 — the CLI raises a clear error on a V2 table rather
+// than corrupting it; use DeleteWhere (equality predicate) for V2 tables.
+func DeleteRows(
+	catalog *HadoopCatalog,
+	namespace, table, file string,
+	rowPositions []int,
+	catalogOpts map[string]string,
+) error {
+	if len(rowPositions) == 0 {
+		return nil
+	}
+	bin, err := resolveBin()
+	if err != nil {
+		return err
+	}
+
+	warehouse := catalog.Warehouse
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
+	tableID := namespace + "." + table
+
+	rows := make([]string, len(rowPositions))
+	for i, r := range rowPositions {
+		rows[i] = fmt.Sprintf("%d", r)
+	}
+
+	args := []string{
+		"--store", warehouse,
+		"delete-rows", tableID,
+		"--file", file,
+		"--rows", strings.Join(rows, ","),
+	}
+	args = appendCatalogArgs(args, catalogOpts)
+
+	if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("ailake delete-rows: %w\n%s", err, out)
+	}
+	return nil
+}
+
+// AddVectorColumnOptions controls optional parameters for AddVectorColumn.
+type AddVectorColumnOptions struct {
+	// Metric is the distance metric for the new column (default "cosine").
+	Metric string
+	// Precision is the storage precision for the new column (default "f16").
+	Precision string
+	// PreNormalize normalizes vectors to unit L2 at write time.
+	PreNormalize bool
+	// HnswM is the HNSW M parameter (0 = CLI default, 16).
+	HnswM int
+	// HnswEfConstruction is the HNSW ef_construction (0 = CLI default, 150).
+	HnswEfConstruction int
+	// CatalogOpts selects/configures a non-Hadoop catalog backend — see
+	// WriteBatchOptions.CatalogOpts for accepted keys and docs/guides/REST_CATALOG.md.
+	CatalogOpts map[string]string
+}
+
+// AddVectorColumn adds a new vector column to an existing table schema
+// (no data files rewritten) by delegating to the `ailake add-vector-column`
+// CLI. Old files return null for the new column until BackfillVectorColumn
+// is run.
+func AddVectorColumn(
+	catalog *HadoopCatalog,
+	namespace, table, column string,
+	dim int,
+	opts AddVectorColumnOptions,
+) error {
+	bin, err := resolveBin()
+	if err != nil {
+		return err
+	}
+
+	warehouse := catalog.Warehouse
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
+	tableID := namespace + "." + table
+
+	args := []string{
+		"--store", warehouse,
+		"add-vector-column", tableID,
+		"--column", column,
+		"--dim", fmt.Sprintf("%d", dim),
+	}
+	if opts.Metric != "" {
+		args = append(args, "--metric", opts.Metric)
+	}
+	if opts.Precision != "" {
+		args = append(args, "--precision", opts.Precision)
+	}
+	if opts.PreNormalize {
+		args = append(args, "--pre-normalize")
+	}
+	if opts.HnswM > 0 {
+		args = append(args, "--hnsw-m", fmt.Sprintf("%d", opts.HnswM))
+	}
+	if opts.HnswEfConstruction > 0 {
+		args = append(args, "--hnsw-ef", fmt.Sprintf("%d", opts.HnswEfConstruction))
+	}
+	args = appendCatalogArgs(args, opts.CatalogOpts)
+
+	if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("ailake add-vector-column: %w\n%s", err, out)
+	}
+	return nil
+}
+
+// BackfillVectorColumnOptions controls optional parameters for BackfillVectorColumn.
+type BackfillVectorColumnOptions struct {
+	// TextColumn is the Parquet column holding raw text to embed (default "chunk_text").
+	TextColumn string
+	// BatchSize is the number of texts per embed-cmd call (default 512).
+	BatchSize int
+	// CatalogOpts selects/configures a non-Hadoop catalog backend — see
+	// WriteBatchOptions.CatalogOpts for accepted keys and docs/guides/REST_CATALOG.md.
+	CatalogOpts map[string]string
+}
+
+// BackfillVectorColumn backfills a new vector column in all existing files
+// (rewriting each file with new embeddings) by delegating to the `ailake
+// backfill-vector-column` CLI. column must already exist via AddVectorColumn.
+// Idempotent: files already containing the column are skipped.
+func BackfillVectorColumn(
+	catalog *HadoopCatalog,
+	namespace, table, column, embedCmd string,
+	opts BackfillVectorColumnOptions,
+) error {
+	bin, err := resolveBin()
+	if err != nil {
+		return err
+	}
+
+	warehouse := catalog.Warehouse
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
+	tableID := namespace + "." + table
+
+	args := []string{
+		"--store", warehouse,
+		"backfill-vector-column", tableID,
+		"--column", column,
+		"--embed-cmd", embedCmd,
+	}
+	if opts.TextColumn != "" {
+		args = append(args, "--text-column", opts.TextColumn)
+	}
+	if opts.BatchSize > 0 {
+		args = append(args, "--batch-size", fmt.Sprintf("%d", opts.BatchSize))
+	}
+	args = appendCatalogArgs(args, opts.CatalogOpts)
+
+	if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("ailake backfill-vector-column: %w\n%s", err, out)
+	}
+	return nil
+}
+
+// EstimateOptions controls optional parameters for Estimate.
+type EstimateOptions struct {
+	// HnswM is the HNSW M parameter (0 = CLI default, 16).
+	HnswM int
+	// PqM is the PQ sub-vectors M, used for PQ-only/IVF-PQ estimates
+	// (0 = CLI default, dim/32 clamped to [8, dim]).
+	PqM int
+}
+
+// EstimateResult is the parsed output of `ailake estimate --format json`.
+type EstimateResult struct {
+	Rows      int64
+	Dim       int
+	HnswM     int
+	PqM       int
+	// Estimates holds one entry per storage mode (F32, F16, I8, IVF-PQ
+	// variants, PQ-only), each a raw map with keys: mode, vectors_bytes,
+	// index_bytes, total_bytes, reduction_factor, recall_at_10, note.
+	Estimates []map[string]any
+}
+
+// Estimate computes storage-usage estimates before writing (pure math, no
+// I/O, no warehouse/catalog involved) by delegating to the `ailake estimate`
+// CLI. rows supports K/M/B suffixes (e.g. "1M", "500K").
+func Estimate(rows string, dim int, opts EstimateOptions) (*EstimateResult, error) {
+	bin, err := resolveBin()
+	if err != nil {
+		return nil, err
+	}
+
+	args := []string{
+		"estimate",
+		"--rows", rows,
+		"--dim", fmt.Sprintf("%d", dim),
+		"--format", "json",
+	}
+	if opts.HnswM > 0 {
+		args = append(args, "--hnsw-m", fmt.Sprintf("%d", opts.HnswM))
+	}
+	if opts.PqM > 0 {
+		args = append(args, "--pq-m", fmt.Sprintf("%d", opts.PqM))
+	}
+
+	out, err := exec.Command(bin, args...).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("ailake estimate: %w\n%s", err, out)
+	}
+
+	var raw struct {
+		Rows      int64            `json:"rows"`
+		Dim       int              `json:"dim"`
+		HnswM     int              `json:"hnsw_m"`
+		PqM       int              `json:"pq_m"`
+		Estimates []map[string]any `json:"estimates"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("ailake estimate: parsing JSON output: %w\n%s", err, out)
+	}
+	return &EstimateResult{
+		Rows:      raw.Rows,
+		Dim:       raw.Dim,
+		HnswM:     raw.HnswM,
+		PqM:       raw.PqM,
+		Estimates: raw.Estimates,
+	}, nil
+}
+
 // SearchHybridResult is a single hit from SearchHybrid (BM25+vector RRF fusion).
 type SearchHybridResult struct {
 	RowID    int64

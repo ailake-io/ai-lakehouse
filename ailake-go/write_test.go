@@ -4,6 +4,7 @@ package ailake
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -270,5 +271,216 @@ func TestCompactIntegration(t *testing.T) {
 	}
 	if len(results) != 12 {
 		t.Errorf("Search after compact: expected 12 rows searchable (2 batches x 6 rows), got %d", len(results))
+	}
+}
+
+// ── Estimate (no warehouse/I-O — pure math) ──────────────────────────────────
+
+func TestEstimateIntegration(t *testing.T) {
+	if os.Getenv("AILAKE_BIN") == "" {
+		t.Skip("AILAKE_BIN not set")
+	}
+
+	result, err := Estimate("1M", 1536, EstimateOptions{})
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	if result.Rows != 1_000_000 {
+		t.Errorf("expected 1,000,000 rows, got %d", result.Rows)
+	}
+	if result.Dim != 1536 {
+		t.Errorf("expected dim 1536, got %d", result.Dim)
+	}
+	if len(result.Estimates) == 0 {
+		t.Error("expected non-empty Estimates")
+	}
+}
+
+// ── AddVectorColumn / DeleteRows (own temp warehouse) ────────────────────────
+
+func TestAddVectorColumnIntegration(t *testing.T) {
+	if os.Getenv("AILAKE_BIN") == "" {
+		t.Skip("AILAKE_BIN not set")
+	}
+
+	catalog := &HadoopCatalog{Warehouse: t.TempDir()}
+	if err := CreateTable(catalog, "default", "docs", 4, CreateTableOptions{Metric: "cosine"}); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	if err := AddVectorColumn(catalog, "default", "docs", "image_embedding", 2, AddVectorColumnOptions{Metric: "cosine"}); err != nil {
+		t.Fatalf("AddVectorColumn: %v", err)
+	}
+
+	info, err := catalog.LoadTable("default", "docs")
+	if err != nil {
+		t.Fatalf("LoadTable after AddVectorColumn: %v", err)
+	}
+	found := false
+	for _, f := range info.SchemaFields {
+		if f.Name == "image_embedding" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected schema to contain 'image_embedding' after AddVectorColumn, got %+v", info.SchemaFields)
+	}
+}
+
+func TestDeleteRowsIntegration(t *testing.T) {
+	if os.Getenv("AILAKE_BIN") == "" {
+		t.Skip("AILAKE_BIN not set")
+	}
+
+	catalog := &HadoopCatalog{Warehouse: t.TempDir()}
+	if err := CreateTable(catalog, "default", "docs", 4, CreateTableOptions{Metric: "cosine", FormatVersion: 3}); err != nil {
+		t.Fatalf("CreateTable (format-version 3): %v", err)
+	}
+	if err := WriteBatch(catalog, "default", "docs", "testdata/multimodal_fixture.parquet", WriteBatchOptions{}); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+
+	files, err := catalog.ListFiles("default", "docs")
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("expected at least one data file after WriteBatch")
+	}
+
+	if err := DeleteRows(catalog, "default", "docs", files[0].Path, []int{0}, nil); err != nil {
+		t.Fatalf("DeleteRows: %v", err)
+	}
+
+	// NOT asserting the deleted row is excluded from Search here: this
+	// package's Search/Scan is a pure-Go native reader that — discovered while
+	// verifying this test — never applies either deletion mechanism (position
+	// deletes from DeleteRows, or the pre-existing equality deletes from
+	// DeleteWhere) at all; masking only happens in the real ailake CLI's own
+	// search (confirmed manually: `ailake search` after an equivalent
+	// `ailake delete-rows` correctly drops the row). That's a real,
+	// pre-existing native-reader gap unrelated to this wrapper — DeleteWhere
+	// has had the identical characteristic since before this change, it was
+	// just never exercised end-to-end against Search before now. What this
+	// test verifies for real: DeleteRows builds a request the CLI accepts
+	// (exit 0, "deleted 1 rows..." — confirmed via a separate manual
+	// CLI-only repro) and ListFiles' path round-trips correctly as --file.
+	results, err := Search(catalog, "default", "docs", []float32{0.1, 0.2, 0.3, 0.4}, SearchOptions{TopK: 20})
+	if err != nil {
+		t.Fatalf("Search after DeleteRows: %v", err)
+	}
+	if len(results) != 6 {
+		t.Errorf("expected all 6 rows still visible via this package's native Search (deletion vectors not applied there — see comment above), got %d", len(results))
+	}
+}
+
+// ── DecayMemories / Migrate / BackfillVectorColumn — CLI arg-forwarding checks
+// (own fake `ailake` binary that echoes its argv to a file, not a mock of
+// this package's own code) ───────────────────────────────────────────────────
+//
+// These 3 operations need a table with columns (chunk_text, last_accessed_at,
+// ...) that no fixture in this repo currently provides — round-tripping a
+// real embed_cmd/memory-decay pass is out of scope here. What IS verified for
+// real: the exact argv this package's Go code builds and hands to
+// exec.Command, by pointing AILAKE_BIN at a throwaway shell script instead of
+// the real CLI.
+
+func writeFakeAilakeBin(t *testing.T, dir string, extraStdout string) (binPath, argsPath string) {
+	t.Helper()
+	binPath = filepath.Join(dir, "fake_ailake")
+	argsPath = filepath.Join(dir, "args.txt")
+	script := "#!/bin/sh\necho \"$@\" > " + argsPath + "\n"
+	if extraStdout != "" {
+		script += "echo '" + extraStdout + "'\n"
+	}
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake ailake binary: %v", err)
+	}
+	return binPath, argsPath
+}
+
+func TestDecayMemories_ArgsForwarded(t *testing.T) {
+	dir := t.TempDir()
+	bin, argsPath := writeFakeAilakeBin(t, dir, `{"ok":true,"files_updated":3}`)
+	orig := os.Getenv("AILAKE_BIN")
+	os.Setenv("AILAKE_BIN", bin)
+	defer os.Setenv("AILAKE_BIN", orig)
+
+	catalog := &HadoopCatalog{Warehouse: "/tmp/wh"}
+	n, err := DecayMemories(catalog, "default", "docs", 0.25, map[string]string{"catalog": "rest", "rest-uri": "https://catalog.example.com"})
+	if err != nil {
+		t.Fatalf("DecayMemories: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("expected files_updated=3 from fake response, got %d", n)
+	}
+	argsRaw, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("reading captured args: %v", err)
+	}
+	args := string(argsRaw)
+	for _, want := range []string{"decay-memories", "default.docs", "--lambda 0.25", "--format json", "--catalog rest", "--rest-uri https://catalog.example.com"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("expected args to contain %q, got: %s", want, args)
+		}
+	}
+}
+
+func TestMigrate_ArgsForwarded(t *testing.T) {
+	dir := t.TempDir()
+	bin, argsPath := writeFakeAilakeBin(t, dir, "")
+	orig := os.Getenv("AILAKE_BIN")
+	os.Setenv("AILAKE_BIN", bin)
+	defer os.Setenv("AILAKE_BIN", orig)
+
+	catalog := &HadoopCatalog{Warehouse: "/tmp/wh"}
+	err := Migrate(catalog, "default", "docs", "python3 embed.py", MigrateOptions{
+		OldColumn: "embedding", NewColumn: "embedding_v2", TextColumn: "chunk_text",
+		Strategy: "atomic-replace", BatchSize: 256, ModelName: "text-embedding-3-small",
+	})
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	argsRaw, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("reading captured args: %v", err)
+	}
+	args := string(argsRaw)
+	for _, want := range []string{
+		"migrate", "default.docs", "--embed-cmd python3 embed.py",
+		"--old-column embedding", "--new-column embedding_v2", "--text-column chunk_text",
+		"--strategy atomic-replace", "--batch-size 256", "--model-name text-embedding-3-small",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("expected args to contain %q, got: %s", want, args)
+		}
+	}
+}
+
+func TestBackfillVectorColumn_ArgsForwarded(t *testing.T) {
+	dir := t.TempDir()
+	bin, argsPath := writeFakeAilakeBin(t, dir, "")
+	orig := os.Getenv("AILAKE_BIN")
+	os.Setenv("AILAKE_BIN", bin)
+	defer os.Setenv("AILAKE_BIN", orig)
+
+	catalog := &HadoopCatalog{Warehouse: "/tmp/wh"}
+	err := BackfillVectorColumn(catalog, "default", "docs", "image_embedding", "python3 embed_images.py", BackfillVectorColumnOptions{
+		TextColumn: "image_uri", BatchSize: 128,
+	})
+	if err != nil {
+		t.Fatalf("BackfillVectorColumn: %v", err)
+	}
+	argsRaw, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("reading captured args: %v", err)
+	}
+	args := string(argsRaw)
+	for _, want := range []string{
+		"backfill-vector-column", "default.docs", "--column image_embedding",
+		"--embed-cmd python3 embed_images.py", "--text-column image_uri", "--batch-size 128",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("expected args to contain %q, got: %s", want, args)
+		}
 	}
 }

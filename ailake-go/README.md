@@ -331,7 +331,7 @@ func DeleteWhere(
 ) error
 ```
 
-Commits an Iceberg equality delete (`ailake delete-where` CLI). No data files are rewritten; deleted rows masked at scan time. Empty `values` is a no-op.
+Commits an Iceberg equality delete (`ailake delete-where` CLI). No data files are rewritten; deleted rows are masked at scan time **by the real `ailake` CLI's own search** (confirmed manually) — **this package's own `Search`/`Scan` (pure-Go native reader) does not apply equality deletes or position deletes (`DeleteRows`) at all**, so a row logically deleted via `DeleteWhere`/`DeleteRows` still comes back from this package's `Search`/`Scan` until a real fix lands here. Mixing `DeleteWhere`/`DeleteRows` with this package's native reads on the same table currently gives inconsistent results depending on which reader you use. Empty `values` is a no-op.
 
 ### `EvolveSchema`
 
@@ -355,6 +355,84 @@ type AddColumnReq struct {
 }
 type RenameColumnReq struct{ From, To string }
 ```
+
+### `DeleteRows`
+
+```go
+func DeleteRows(
+    catalog      *HadoopCatalog,
+    namespace, table, file string, // file: Parquet data file path, as reported by ListFiles
+    rowPositions []int,
+    catalogOpts  map[string]string,
+) error
+```
+
+Marks rows as deleted in a V3 table using Iceberg Deletion Vectors (`ailake delete-rows` CLI). Requires the table to have been created with `format_version: 3` (`CreateTableOptions.FormatVersion = 3`) — the CLI raises a clear error on a V2 table. Use `DeleteWhere` (equality predicate) for V2 tables. Same native-reader caveat as `DeleteWhere` above: this package's own `Search`/`Scan` does not apply the deletion. No-op when `rowPositions` is empty.
+
+### `DecayMemories`
+
+```go
+func DecayMemories(
+    catalog     *HadoopCatalog,
+    namespace, table string,
+    lambda      float32,
+    catalogOpts map[string]string,
+) (int, error)  // returns number of files updated
+```
+
+Recomputes recency weights (`exp(-λ×days_since_access)`) across all memory files in the table (`ailake decay-memories` CLI, Phase 9 agent-memory schema).
+
+### `Migrate`
+
+```go
+func Migrate(
+    catalog  *HadoopCatalog,
+    namespace, table, embedCmd string,
+    opts     MigrateOptions,
+) error
+```
+
+Re-embeds a table's vector column via an external embed command (`ailake migrate` CLI). `embedCmd` is a shell command reading a JSON array of strings from stdin and writing a JSON array of float arrays to stdout.
+
+```go
+type MigrateOptions struct {
+    OldColumn    string            // existing embedding column (default "embedding")
+    NewColumn    string            // migrated column name (default "embedding_v2")
+    TextColumn   string            // raw-text column to re-embed (default "chunk_text")
+    Strategy     string            // "atomic-replace" | "dual-write-then-cutover" (default)
+    BatchSize    int               // texts per embed-cmd call (default 512)
+    ModelName    string            // stored in ailake.embedding-model after migration
+    ModelVersion string            // appended to ModelName as "<name>@<version>"
+    CatalogOpts  map[string]string
+}
+```
+
+### `AddVectorColumn` / `BackfillVectorColumn`
+
+```go
+func AddVectorColumn(
+    catalog *HadoopCatalog,
+    namespace, table, column string,
+    dim     int,
+    opts    AddVectorColumnOptions,
+) error
+
+func BackfillVectorColumn(
+    catalog  *HadoopCatalog,
+    namespace, table, column, embedCmd string,
+    opts     BackfillVectorColumnOptions,
+) error
+```
+
+`AddVectorColumn` adds a new vector column to the schema (no data rewritten, `ailake add-vector-column` CLI) — old files return null until `BackfillVectorColumn` (`ailake backfill-vector-column` CLI) rewrites each file with the new embeddings. Idempotent: files already containing the column are skipped.
+
+### `Estimate`
+
+```go
+func Estimate(rows string, dim int, opts EstimateOptions) (*EstimateResult, error)
+```
+
+Computes storage-usage estimates before writing — pure math, no I/O, no warehouse/catalog (`ailake estimate` CLI). `rows` supports `K`/`M`/`B` suffixes (e.g. `"1M"`, `"500K"`). `EstimateResult.Estimates` holds one entry per storage mode (F32/F16/I8/IVF-PQ variants/PQ-only) as a raw `map[string]any` (`mode`, `vectors_bytes`, `index_bytes`, `total_bytes`, `reduction_factor`, `recall_at_10`, `note`).
 
 ### `SearchHybrid`
 
