@@ -5,6 +5,16 @@ TABLE_PATH="${DEMO_TABLE_PATH:-/data/ailake_demo}"
 VERSION_HINT="${TABLE_PATH}/default/table/metadata/version-hint.text"
 STAMP_FILE="$(dirname "${TABLE_PATH}")/.fixture-version"
 
+# The demo-data named volume is first populated by this container (root), which
+# leaves the mountpoint root:root 755 — fine for jupyter, but the flink service
+# (--profile flink) runs its TaskManager as the non-root `flink` user (uid 9999,
+# official Flink image default) and needs to create new warehouse directories
+# under /data for notebook 14's write section. Without this, every write from
+# Flink fails with "ailake_write_batch_json error: I/O error: Permission denied
+# (os error 13)" — confirmed live, not theoretical. Demo-only, no real security
+# boundary intended for this volume.
+chmod -R 777 /data 2>/dev/null || true
+
 # The `demo-data` named volume outlives `docker compose build` — an image
 # rebuild that changes init_demo.py (new table, new property, new arg)
 # does NOT touch fixtures already on disk. Without this check the container

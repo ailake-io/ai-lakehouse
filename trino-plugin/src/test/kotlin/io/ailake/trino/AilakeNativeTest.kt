@@ -10,6 +10,15 @@ class AilakeNativeTest {
     private fun base64Of(vararg floats: Float): String =
         VectorScanSplitManager.csvFloatsToBase64(floats.joinToString(","))
 
+    // Fresh local scratch dir per call, real (not fake s3://) — ailake-jni now
+    // routes s3:// through store_from_url and genuinely attempts cloud
+    // credential resolution instead of silently falling back to a local
+    // directory, so a fake bucket URI here would throw for real in CI
+    // (no AWS access) rather than exercising the "does it throw" behavior
+    // these tests are actually about.
+    private fun tempWarehouse(): String =
+        java.nio.file.Files.createTempDirectory("ailake-native-test").toString()
+
     @Test
     fun searchReturnsEmptyWhenNativeLibAbsent() {
         // Native lib is not available in test environment — graceful degradation.
@@ -60,12 +69,10 @@ class AilakeNativeTest {
 
     @Test
     fun writeBatchMultiDoesNotThrowWhenNativeLibAbsent() {
-        // Result is null (lib absent) or a snapshot_id (lib present, local fallback since
-        // "s3://..." with no AWS creds/network resolves via LocalStore's relative-path
-        // fallback in CI) — same caveat as writeBatchWithFtsColumnsDoesNotThrow below.
+        // Result is null (lib absent) or a snapshot_id (lib present, real local write).
         val spec = AilakeNative.VectorColSpec("embedding", 4)
         val result = AilakeNative.writeBatchMulti(
-            tableUri = "s3://bucket/t/", namespace = "default", tableName = "docs",
+            tableUri = tempWarehouse(), namespace = "default", tableName = "docs",
             ids = listOf(1L, 2L),
             vectorColumns = listOf(spec to listOf(listOf(0.1f, 0.2f, 0.3f, 0.4f), listOf(0.5f, 0.6f, 0.7f, 0.8f))),
         )
@@ -262,9 +269,9 @@ class AilakeNativeTest {
     @Test
     fun writeBatchWithFtsColumnsDoesNotThrow() {
         // Verifies writeBatch accepts ftsColumns without crashing.
-        // Result is null (lib absent) or a snapshot_id (lib present, local fallback) — both are valid.
+        // Result is null (lib absent) or a snapshot_id (lib present, real local write) — both are valid.
         val result = AilakeNative.writeBatch(
-            tableUri = "s3://bucket/t/", namespace = "default", tableName = "t",
+            tableUri = tempWarehouse(), namespace = "default", tableName = "t",
             vectorColumn = "embedding", dim = 4, metric = "cosine", precision = "f16",
             ids = listOf(1L), embeddings = listOf(listOf(0.1f, 0.2f, 0.3f, 0.4f)),
             ftsColumns = listOf("chunk_text", "title"),

@@ -65,6 +65,29 @@ class TestAilakeDestinationConfig:
         errors = cfg.validate()
         assert any("http_url" in e for e in errors)
 
+    def test_fastembed_mode_from_dict(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {"table_base_path": "/tmp", "embed_mode": "fastembed"}
+        )
+        assert cfg.embed_mode == "fastembed"
+        assert cfg.fastembed_model == "BAAI/bge-small-en-v1.5"
+        # local mode — no secret required, validate() must not flag it
+        assert cfg.validate() == []
+
+    def test_sentence_transformers_mode_from_dict(self):
+        cfg = AilakeDestinationConfig.from_dict(
+            {
+                "table_base_path": "/tmp",
+                "embed_mode": "sentence_transformers",
+                "sentence_transformers_model": "BAAI/bge-base-en-v1.5",
+                "sentence_transformers_device": "cuda",
+            }
+        )
+        assert cfg.embed_mode == "sentence_transformers"
+        assert cfg.sentence_transformers_model == "BAAI/bge-base-en-v1.5"
+        assert cfg.sentence_transformers_device == "cuda"
+        assert cfg.validate() == []
+
     def test_validate_missing_embed_cmd(self):
         cfg = AilakeDestinationConfig.from_dict(
             {"table_base_path": "/tmp", "embed_mode": "cmd"}

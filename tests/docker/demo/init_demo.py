@@ -6,6 +6,7 @@ Writes multiple AI-Lake tables to demonstrate all SDK features:
   - PQ-only table     — 500 rows, dim=32, no raw vectors stored
   - Deferred table    — 200 rows, write_batch_auto_deferred
   - Residual-PQ       — 500 rows, ivf_residual=True
+  - Model-tracked     — 100 rows, embedding_model="synthetic-embed-v1"@1.0 (notebook 01 §18)
   - Multimodal        — 200 rows, text embedding (dim=32) + image embedding (dim=16)
   - Agent memory      — 100 rows across 2 agents (Phase 9 partition isolation demo)
   - Partitioned v3    — 200 rows, partition_fields=[topic_id:identity:int], format_version=3

@@ -187,6 +187,7 @@ When the Jupyter container starts for the first time, `init_demo.py` writes fixt
 | `/data/ailake_pq` | 500 | PQ-only (vectors discarded, codes only) |
 | `/data/ailake_residual_pq` | 500 | IVF-PQ with residual encoding |
 | `/data/ailake_deferred` | 200 | `write_batch_auto_deferred` — Parquet immediate, index async |
+| `/data/ailake_model_tracked` | 100 | `embedding_model="synthetic-embed-v1"@1.0` — used/appended to by notebook 01 §18 |
 | `/data/ailake_multimodal` | 200 | Text (dim=32) + image (dim=16) dual embeddings |
 | `/data/ailake_agent` | 100 | Two agents (agent-A / agent-B), partition isolation |
 | `/data/ailake_bm25` | 200 | BM25 stats written at ingest time (legacy hybrid) |
@@ -226,7 +227,7 @@ The main SDK reference notebook. 32 sections covering:
 | 8–10 | Iceberg compat (PyArrow + PyIceberg), DuckDB SQL, `assemble_context()` |
 | 11–14 | MinIO upload, IVF-PQ `pq_only` + `rerank_factor`, Residual-PQ, `write_batch_auto_deferred` |
 | 15–17 | HNSW tuning (`ef_search`, `pruning_threshold`), async API, storage estimator |
-| 18–20 | Embedding model tracking, `embed_fn` pattern B, `migrate_embeddings()` |
+| 18–20 | Embedding model tracking, `embed_fn` pattern B (synthetic + real `fastembed`, §19B), `migrate_embeddings()` |
 | 21–23 | `VectorColSpec`, `write_batch_multi`, `search_multimodal` RRF, `MultimodalContextSchema` |
 | 24–28 | `ailake.Agent`, partition isolation, hybrid `ScoreFn`, `ToolCallSchema`, `EpisodicMemorySchema` |
 | 29–31 | `delete_where`, schema evolution (`add_column`/`rename_column`/`evolve_schema`), `compact()` |

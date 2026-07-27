@@ -2,15 +2,14 @@
 
 DuckDB community extension that exposes AI-Lake vector search and write via SQL table/scalar functions.
 
-Bridges DuckDB to [`libailake_jni.so`](../ailake-jni) using the same C-ABI as the Spark and Trino plugins — zero additional Rust code required.
+Bridges DuckDB to [`ailake-jni`](../ailake-jni) using the same C-ABI as the Spark and Trino plugins — zero additional Rust code required. `ailake-jni` is linked **statically** into `ailake.duckdb_extension` (via [corrosion](https://github.com/corrosion-rs/corrosion), see "Design" below) — no separate `.so` to build or load at runtime.
 
 > **Error handling**: a genuine backend rejection (`ok:false` in the JSON response — e.g. a
 > nonexistent table path, `NaN`/`Infinity` embeddings, mismatched `ids`/`embeddings` lengths,
 > `top_k` above `ailake_core::MAX_TOP_K` (100,000)) is now raised as a `duckdb::InvalidInputException`
 > with the real error message, for every function below except `ailake_delete_where` (which still
 > returns `FALSE`, unchanged). This used to be silently folded into an empty result / `-1` / `FALSE`,
-> indistinguishable from a genuine zero-match search or no-op. `libailake_jni.so` not being loaded
-> (or not exporting a given symbol) is a separate, still-silent case — see "Design" below.
+> indistinguishable from a genuine zero-match search or no-op.
 
 ## Functions
 
@@ -137,7 +136,7 @@ SELECT * FROM ailake_search_multimodal(
 ) ORDER BY rrf_score DESC;
 ```
 
-Returns 0 rows (no error) if `libailake_jni.so` is not loaded or does not export `ailake_search_multimodal_json`. A backend rejection (e.g. nonexistent table path) raises `InvalidInputException` instead — see "Error handling" above.
+A backend rejection (e.g. nonexistent table path) raises `InvalidInputException` — see "Error handling" above.
 
 ---
 
@@ -174,7 +173,7 @@ SELECT * FROM ailake_search_text(
 ) ORDER BY distance;
 ```
 
-Returns 0 rows (graceful degradation) when `libailake_jni.so` is not loaded. A backend rejection raises `InvalidInputException` instead — see "Error handling" above. Backed by `ailake_search_text_json` C-ABI.
+A backend rejection raises `InvalidInputException` — see "Error handling" above. Backed by `ailake_search_text_json` C-ABI.
 
 ---
 
@@ -188,7 +187,6 @@ SELECT ailake_write_batch(
     embeddings      FLOAT[][]        -- one embedding per id
 ) → BIGINT  -- snapshot_id; a backend rejection (e.g. NaN/Infinity embeddings) raises
             -- InvalidInputException, not a silent -1 — see "Error handling" above.
-            -- -1 is still returned if libailake_jni.so isn't loaded.
 
 -- 6-arg form (explicit options)
 SELECT ailake_write_batch(
@@ -414,15 +412,18 @@ SELECT ailake_compact('file:///data/my_table', min_files := 2);
 ## Build
 
 ```bash
-# 1. Build the native library (Rust)
-cargo build --release -p ailake-jni
-
-# 2. Configure and build the extension
 cmake -S duckdb-ailake -B duckdb-ailake/build -DCMAKE_BUILD_TYPE=Release
 cmake --build duckdb-ailake/build --parallel
 
 # Output: duckdb-ailake/build/ailake.duckdb_extension
 ```
+
+A single `cmake --build` does everything: builds `ailake-jni` as a static lib (via
+[corrosion](https://github.com/corrosion-rs/corrosion), no separate `cargo build` step needed),
+builds a real `duckdb_static` from source at the pinned `DUCKDB_VERSION`, and links both plus this
+extension's own C++ sources into `ailake.duckdb_extension`. Building `duckdb_static` from source
+takes noticeably longer than the old headers-only setup (several minutes) — that's the cost of no
+longer depending on the host process to supply DuckDB's symbols at `LOAD` time.
 
 ### DuckDB version
 
@@ -435,31 +436,16 @@ cmake -S duckdb-ailake -B duckdb-ailake/build \
 ```
 
 Match the pip package: `pip install duckdb==1.5.0` (see `.github/workflows/ci-duckdb.yml` for the
-version this project's CI actually tests against — keep this section in sync with it).
+version this project's CI actually tests against — keep this section in sync with it). Now that
+the extension links a real `duckdb_static` at this exact version/commit (see "Design" below)
+instead of resolving symbols from whatever DuckDB happens to be hosting it, a version mismatch
+between this setting and the client fails more informatively (ABI/struct-layout mismatch at
+`LOAD`) rather than the old silent "works with Python, not CLI" split.
 
 ## Load in Python
 
-**`sys.setdlopenflags(os.RTLD_GLOBAL)` before `import duckdb` is required**, not optional — without
-it, `LOAD '...duckdb_extension'` fails with a misleading `undefined symbol:
-_ZTIN6duckdb28SimpleNamedParameterFunctionE` (or similar) IO error. Root cause: Python's import
-machinery loads C-extension modules (`_duckdb...so`) with `RTLD_LOCAL` by default, which hides its
-symbols from any library `dlopen`'d afterwards — including this extension, which resolves DuckDB
-internal symbols from the host process at load time (see "Design" above). This is unrelated to
-`ailake`'s own native lib (which is already loaded `RTLD_GLOBAL` below) — both libraries need
-global symbol visibility. All of `duckdb-ailake/test/*.py` already do this; it was previously
-undocumented here.
-
 ```python
-import os, sys
-_old_flags = sys.getdlopenflags()
-sys.setdlopenflags(_old_flags | os.RTLD_GLOBAL)
 import duckdb
-sys.setdlopenflags(_old_flags)   # restore — don't leak RTLD_GLOBAL to unrelated imports
-
-import ctypes
-
-# Pre-load native lib so DuckDB extension resolves symbols
-ctypes.CDLL("./target/release/libailake_jni.so", ctypes.RTLD_GLOBAL)
 
 conn = duckdb.connect(config={"allow_unsigned_extensions": True})
 conn.execute("LOAD './duckdb-ailake/build/ailake.duckdb_extension'")
@@ -471,29 +457,41 @@ rows = conn.execute("""
 """).fetchall()
 ```
 
+`ailake-jni` is statically linked into `ailake.duckdb_extension` (see "Design" below) — no
+`ctypes.CDLL(...)` pre-load, no `RTLD_GLOBAL`/`sys.setdlopenflags` dance, no `LD_LIBRARY_PATH`.
+
 ## Load in DuckDB CLI
 
 ```bash
-# Set LD_LIBRARY_PATH so the extension finds libailake_jni.so
-LD_LIBRARY_PATH=./target/release duckdb -unsigned
+duckdb -unsigned
 
 D LOAD './duckdb-ailake/build/ailake.duckdb_extension';
 D SELECT * FROM ailake_search('file:///data/docs', [0.1, 0.2]::FLOAT[], 5);
 ```
 
-> **Known limitation**: verified against the official `duckdb.org`-distributed CLI binary
-> (v1.5.4) — `LOAD` fails with `undefined symbol:
-> _ZTIN6duckdb28SimpleNamedParameterFunctionE`. `nm -D` on that binary confirms the symbol
-> is genuinely not exported (unlike the Python wheel's `_duckdb...so`, which does export it —
-> see the `RTLD_GLOBAL` note above). Not yet root-caused or fixed; the Python path above is
-> the verified-working one and what this project's own tests and demo notebooks use.
+Works against the official `duckdb.org`-distributed CLI binary, not just the Python path — the
+extension links against a real `duckdb_static` built from the same DuckDB source/version (see
+"Design" below) instead of resolving DuckDB's own symbols from the host process at `LOAD` time,
+which is what previously failed here with `undefined symbol:
+_ZTIN6duckdb28SimpleNamedParameterFunctionE` against the official CLI binary specifically (the
+Python wheel's `_duckdb...so` happened to export that symbol; the CLI binary doesn't).
 
 ## Design
 
-- C-ABI bridge: `dlopen("libailake_jni.so")` → `ailake_search_json` / `ailake_scan_json` / `ailake_search_multimodal_json` / `ailake_search_text_json` / `ailake_write_batch_json` / `ailake_write_batch_multi_json` / `ailake_delete_where_json` / `ailake_evolve_schema_json` / `ailake_compact_json` / `ailake_create_table_json`
+- `ailake-jni` is linked **statically** into `ailake.duckdb_extension` via
+  [corrosion](https://github.com/corrosion-rs/corrosion) (`ailake-jni`'s `staticlib` crate-type,
+  imported and linked at CMake configure/build time — see `CMakeLists.txt`) — no `dlopen`, no
+  separate `.so` to ship or find at runtime. `AilakeLib` (`include/ailake_extension.hpp`) declares
+  the same 11 C-ABI symbols `extern "C"` and resolves them at **link** time instead of via
+  `dlsym`: `ailake_search_json` / `ailake_scan_json` / `ailake_search_multimodal_json` /
+  `ailake_search_text_json` / `ailake_write_batch_json` / `ailake_write_batch_multi_json` /
+  `ailake_delete_where_json` / `ailake_evolve_schema_json` / `ailake_compact_json` /
+  `ailake_create_table_json` / `ailake_free_string`.
 - Same JSON-envelope protocol as Spark (`AilakeNative.scala`) and Trino (`AilakeNative.kt`)
 - `ailake_search` executes the full search (pruning + HNSW) inside Rust; DuckDB sees a virtual table
-- Graceful degradation: if `libailake_jni.so` is not found, search returns 0 rows instead of aborting
+- The extension also links against a real `duckdb_static` (built from source at the pinned
+  `DUCKDB_VERSION`, not headers-only) instead of resolving `duckdb::*` symbols from the host
+  process — this is what makes `LOAD` work against the official CLI binary (see above).
 - **Error surfacing**: a real backend rejection (e.g. `top_k` above `ailake_core::MAX_TOP_K`
   (100,000), or a `NaN`/`Infinity` embedding value passed to `ailake_write_batch*`) throws
   `duckdb::InvalidInputException` with the real error message — `ailake_search`/`ailake_scan`/
@@ -511,17 +509,15 @@ D SELECT * FROM ailake_search('file:///data/docs', [0.1, 0.2]::FLOAT[], 5);
 | Multi-column (multimodal) write | `ailakeWriteMulti()` | `ailake.vector-columns` catalog property | `ailake_write_batch_multi()` scalar fn |
 | Compact | `spark.ailakeCompact(...)` | `CALL ailake.system.compact()` | `ailake_compact()` scalar fn |
 | Catalog integration | `AilakeCatalog` | — | — (use `parquet_scan` for joins) |
-| Native lib loading | JNA | JNA | `dlopen` |
+| Native lib loading | JNA | JNA | static link (corrosion) |
 
 ## Tests
 
 ```bash
-AILAKE_LIB=./target/release/libailake_jni.so \
 AILAKE_EXT=./duckdb-ailake/build/ailake.duckdb_extension \
 AILAKE_FIXTURE=./compat-fixture \
 python duckdb-ailake/test/test_search.py
 
-AILAKE_LIB=./target/release/libailake_jni.so \
 AILAKE_EXT=./duckdb-ailake/build/ailake.duckdb_extension \
 python duckdb-ailake/test/test_write.py
 ```

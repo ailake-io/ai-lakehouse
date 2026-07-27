@@ -90,6 +90,49 @@ class CohereEmbedder:
         return np.array(response.embeddings, dtype=np.float32)
 
 
+class FastEmbedEmbedder:
+    """Local ONNX embeddings via fastembed — no PyTorch, no API key.
+
+    Lightweight (no torch dependency), CPU-friendly, good default for demos
+    and CI. Model runs entirely in-process, downloaded once and cached.
+    """
+
+    def __init__(self, model: str = "BAAI/bge-small-en-v1.5") -> None:
+        try:
+            from fastembed import TextEmbedding
+        except ImportError:
+            raise ImportError(
+                "fastembed package required: pip install airbyte-destination-ailake[fastembed]"
+            )
+        self._model = TextEmbedding(model_name=model)
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        return np.array(list(self._model.embed(texts)), dtype=np.float32)
+
+
+class SentenceTransformersEmbedder:
+    """Local embeddings via sentence-transformers — no API key.
+
+    Widest model selection (any Hugging Face sentence-embedding model),
+    PyTorch-based, supports GPU via `device`.
+    """
+
+    def __init__(self, model: str = "BAAI/bge-small-en-v1.5", device: str = "") -> None:
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            raise ImportError(
+                "sentence-transformers package required: "
+                "pip install airbyte-destination-ailake[sentence-transformers]"
+            )
+        kwargs: dict = {"device": device} if device else {}
+        self._model = SentenceTransformer(model, **kwargs)
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        vecs = self._model.encode(texts, convert_to_numpy=True, normalize_embeddings=False)
+        return vecs.astype(np.float32)
+
+
 class HttpEmbedder:
     """OpenAI-compatible HTTP embedding endpoint.
 
@@ -169,5 +212,12 @@ def build_embedder(cfg: "AilakeDestinationConfig") -> Embedder:  # noqa: F821 �
             model=cfg.http_model,
             auth_header=cfg.http_auth_header,
             timeout=cfg.http_timeout,
+        )
+    if cfg.embed_mode == "fastembed":
+        return FastEmbedEmbedder(model=cfg.fastembed_model)
+    if cfg.embed_mode == "sentence_transformers":
+        return SentenceTransformersEmbedder(
+            model=cfg.sentence_transformers_model,
+            device=cfg.sentence_transformers_device,
         )
     raise ValueError(f"Unknown embed_mode: {cfg.embed_mode}")

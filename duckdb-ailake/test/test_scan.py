@@ -4,32 +4,26 @@
 DuckDB ailake extension — ailake_scan() full-row table function tests.
 
 Prerequisites:
-  1. Build libailake_jni.so:  cargo build --release -p ailake-jni
-  2. Build DuckDB extension:  cmake --build duckdb-ailake/build
-  3. Generate fixture:        python tests/fixtures/write_fixture.py
+  1. Build DuckDB extension (also builds ailake-jni as a static lib via corrosion):
+       cmake --build duckdb-ailake/build
+  2. Generate fixture:  python tests/fixtures/write_fixture.py
 
 Usage:
-  AILAKE_LIB=./target/release/libailake_jni.so \
   AILAKE_EXT=./duckdb-ailake/build/ailake.duckdb_extension \
   AILAKE_FIXTURE=./compat-fixture \
   python duckdb-ailake/test/test_scan.py
 """
-import ctypes
 import math
 import os
 import pathlib
 import struct
 import sys
 
-_old_flags = sys.getdlopenflags()
-sys.setdlopenflags(_old_flags | os.RTLD_GLOBAL)
 import duckdb
-sys.setdlopenflags(_old_flags)
 
 # ── Config from environment ────────────────────────────────────────────────────
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
-LIB_PATH  = pathlib.Path(os.environ.get("AILAKE_LIB",  str(REPO_ROOT / "target/release/libailake_jni.so")))
 EXT_PATH  = pathlib.Path(os.environ.get("AILAKE_EXT",  str(REPO_ROOT / "duckdb-ailake/build/ailake.duckdb_extension")))
 FIXTURE   = pathlib.Path(os.environ.get("AILAKE_FIXTURE", str(REPO_ROOT / "compat-fixture")))
 
@@ -50,8 +44,6 @@ def require(cond, msg):
         FAIL += 1
 
 def setup_connection():
-    if LIB_PATH.exists():
-        ctypes.CDLL(str(LIB_PATH), ctypes.RTLD_GLOBAL)
     conn = duckdb.connect(config={
         "allow_unsigned_extensions": True,
         "allow_extensions_metadata_mismatch": True,
@@ -80,9 +72,6 @@ def test_extension_loads():
 
 def test_scan_returns_full_rows():
     print("\ntest_scan_returns_full_rows")
-    if not LIB_PATH.exists():
-        print("  SKIP  libailake_jni.so not built")
-        return
     if not EXT_PATH.exists():
         print("  SKIP  extension not built")
         return
@@ -110,7 +99,7 @@ def test_scan_returns_full_rows():
 
 def test_scan_distance_ordered():
     print("\ntest_scan_distance_ordered")
-    if not (LIB_PATH.exists() and EXT_PATH.exists() and FIXTURE.exists()):
+    if not (EXT_PATH.exists() and FIXTURE.exists()):
         print("  SKIP  prerequisites missing")
         return
 
@@ -132,7 +121,7 @@ def test_scan_distance_ordered():
 def test_scan_vs_search_consistency():
     """ailake_scan and ailake_search must agree on top-k distance ordering."""
     print("\ntest_scan_vs_search_consistency")
-    if not (LIB_PATH.exists() and EXT_PATH.exists() and FIXTURE.exists()):
+    if not (EXT_PATH.exists() and FIXTURE.exists()):
         print("  SKIP  prerequisites missing")
         return
 
@@ -161,21 +150,22 @@ def test_scan_vs_search_consistency():
         require(max_diff < 1e-4, f"distances agree within 1e-4 (max_diff={max_diff:.2e})")
 
 
-def test_scan_no_lib_returns_empty():
-    """Without the native lib, ailake_scan returns zero rows (no crash)."""
-    print("\ntest_scan_no_lib_returns_empty")
-    if LIB_PATH.exists():
-        print("  SKIP  native lib present — degradation path not active")
-        return
+def test_scan_nonexistent_table_raises():
+    """A genuine backend rejection (nonexistent table path) raises InvalidInputException,
+    not a silent empty result — see README "Error handling"."""
+    print("\ntest_scan_nonexistent_table_raises")
     if not EXT_PATH.exists():
         print("  SKIP  extension not built")
         return
 
     conn = setup_connection()
-    rows = conn.execute(
-        "SELECT * FROM ailake_scan('/nonexistent', [0.1, 0.2]::FLOAT[], 5)"
-    ).fetchall()
-    require(rows == [], f"empty result without native lib (got {len(rows)} rows)")
+    try:
+        conn.execute(
+            "SELECT * FROM ailake_scan('/nonexistent', [0.1, 0.2]::FLOAT[], 5)"
+        ).fetchall()
+        require(False, "expected an exception for a nonexistent table path, got a result")
+    except duckdb.Error as e:
+        require("ailake_scan failed" in str(e) or "failed" in str(e), f"unexpected error message: {e}")
 
 
 # ── Runner ─────────────────────────────────────────────────────────────────────
@@ -185,7 +175,7 @@ if __name__ == "__main__":
     test_scan_returns_full_rows()
     test_scan_distance_ordered()
     test_scan_vs_search_consistency()
-    test_scan_no_lib_returns_empty()
+    test_scan_nonexistent_table_raises()
 
     total = PASS + FAIL
     print(f"\n{PASS}/{total} tests passed")

@@ -22,7 +22,7 @@
         "type": "string",
         "title": "Embedding Mode",
         "description": "How to produce embeddings from record text.",
-        "enum": ["cmd", "openai", "cohere", "http"],
+        "enum": ["cmd", "openai", "cohere", "http", "fastembed", "sentence_transformers"],
         "default": "openai",
         "order": 1
       },
@@ -242,6 +242,27 @@
         "items": { "type": "string" },
         "default": [],
         "order": 29
+      },
+      "fastembed_model": {
+        "type": "string",
+        "title": "fastembed Model",
+        "description": "Local ONNX embedding model (fastembed mode). Runs in-process, no API key, no PyTorch dependency.",
+        "default": "BAAI/bge-small-en-v1.5",
+        "order": 30
+      },
+      "sentence_transformers_model": {
+        "type": "string",
+        "title": "sentence-transformers Model",
+        "description": "Local embedding model (sentence_transformers mode). Any Hugging Face sentence-embedding model name.",
+        "default": "BAAI/bge-small-en-v1.5",
+        "order": 31
+      },
+      "sentence_transformers_device": {
+        "type": "string",
+        "title": "sentence-transformers Device",
+        "description": "cpu/cuda/etc. Leave empty to auto-detect.",
+        "default": "",
+        "order": 32
       }
     }
   }

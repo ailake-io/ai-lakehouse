@@ -8,20 +8,6 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
-    #include <windows.h>
-    #define AILAKE_DLOPEN(path)         LoadLibrary(path)
-    #define AILAKE_DLSYM(h, sym)        GetProcAddress((HMODULE)(h), sym)
-    #define AILAKE_DLCLOSE(h)           FreeLibrary((HMODULE)(h))
-    #define AILAKE_LIB_NAME             "ailake_jni.dll"
-#else
-    #include <dlfcn.h>
-    #define AILAKE_DLOPEN(path)         dlopen(path, RTLD_LAZY | RTLD_GLOBAL)
-    #define AILAKE_DLSYM(h, sym)        dlsym(h, sym)
-    #define AILAKE_DLCLOSE(h)           dlclose(h)
-    #define AILAKE_LIB_NAME             "libailake_jni.so"
-#endif
-
 namespace ailake {
 
 struct SearchRow {
@@ -84,7 +70,10 @@ struct ScanResult {
 
 // ── AilakeLib singleton ───────────────────────────────────────────────────────
 
-// Singleton holding dlopen handle and resolved C-ABI function pointers.
+// Singleton holding resolved C-ABI function pointers. `ailake-jni` is linked
+// statically into this extension binary (see CMakeLists.txt — corrosion +
+// ailake-jni's `staticlib` crate-type), so these always point at real symbols
+// resolved at link time — no dlopen, no runtime library search.
 // Thread-safe after Load() completes.
 class AilakeLib {
 public:
@@ -102,9 +91,10 @@ public:
 
     static AilakeLib &get();
 
-    // Load libailake_jni.so. If lib_path is empty, searches LD_LIBRARY_PATH.
-    // Safe to call multiple times — no-ops after first successful load.
-    bool load(const std::string &lib_path = "");
+    // Wire up the function pointers to the statically-linked ailake-jni
+    // symbols. Always succeeds — safe to call multiple times (no-op after
+    // the first call).
+    bool load();
 
     bool is_ready()              const { return search_fn_        != nullptr; }
     bool is_multimodal_ready()   const { return multimodal_fn_    != nullptr; }
@@ -286,7 +276,6 @@ public:
 private:
     AilakeLib() = default;
 
-    void              *handle_           = nullptr;
     search_fn_t        search_fn_        = nullptr;
     multimodal_fn_t    multimodal_fn_    = nullptr;
     scan_fn_t          scan_fn_          = nullptr;

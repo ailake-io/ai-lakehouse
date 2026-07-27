@@ -4,11 +4,10 @@
 DuckDB ailake extension — ailake_evolve_schema function tests (Phase M).
 
 Prerequisites:
-  1. Build libailake_jni.so:  cargo build --release -p ailake-jni
-  2. Build DuckDB extension:  cmake --build duckdb-ailake/build
+  1. Build DuckDB extension (also builds ailake-jni as a static lib via corrosion):
+       cmake --build duckdb-ailake/build
 
 Usage:
-  AILAKE_LIB=./target/release/libailake_jni.so \
   AILAKE_EXT=./duckdb-ailake/build/ailake.duckdb_extension \
   AILAKE_TMPDIR=/tmp/ailake_duck_evolve \
   python duckdb-ailake/test/test_evolve.py
@@ -18,16 +17,11 @@ import sys
 import pathlib
 import tempfile
 import shutil
-import ctypes
 import json
 
-_old_flags = sys.getdlopenflags()
-sys.setdlopenflags(_old_flags | os.RTLD_GLOBAL)
 import duckdb
-sys.setdlopenflags(_old_flags)
 
 EXT_PATH = os.environ.get("AILAKE_EXT", "./duckdb-ailake/build/ailake.duckdb_extension")
-LIB_PATH = os.environ.get("AILAKE_LIB", "./target/release/libailake_jni.so")
 TMP_DIR  = os.environ.get("AILAKE_TMPDIR", "")
 
 
@@ -42,7 +36,6 @@ def setup_connection():
         "allow_unsigned_extensions": True,
         "allow_extensions_metadata_mismatch": True,
     })
-    ctypes.CDLL(LIB_PATH, ctypes.RTLD_GLOBAL)
     conn.execute(f"LOAD '{EXT_PATH}'")
     return conn
 

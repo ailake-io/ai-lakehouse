@@ -19,8 +19,9 @@ class AilakeDestinationConfig:
     """Base path for all tables. Each stream lands at ``{table_base_path}/{stream_name}/``."""
 
     # --- Embedding ---
-    embed_mode: Literal["cmd", "openai", "cohere", "http"]
-    """How to produce embeddings from text. One of: ``cmd``, ``openai``, ``cohere``, ``http``."""
+    embed_mode: Literal["cmd", "openai", "cohere", "http", "fastembed", "sentence_transformers"]
+    """How to produce embeddings from text. One of: ``cmd``, ``openai``, ``cohere``, ``http``,
+    ``fastembed``, ``sentence_transformers``."""
 
     embedding_dim: int = 1536
     """Vector dimensionality — must match the model output."""
@@ -73,6 +74,17 @@ class AilakeDestinationConfig:
     http_timeout: int = 60
     """Request timeout in seconds."""
 
+    # --- fastembed mode (local ONNX, no API key) ---
+    fastembed_model: str = "BAAI/bge-small-en-v1.5"
+    """fastembed model name. Runs in-process, no API key, no PyTorch dependency."""
+
+    # --- sentence_transformers mode (local PyTorch, no API key) ---
+    sentence_transformers_model: str = "BAAI/bge-small-en-v1.5"
+    """Any Hugging Face sentence-embedding model name."""
+
+    sentence_transformers_device: str = ""
+    """``"cpu"``/``"cuda"``/etc. Empty = sentence-transformers auto-detects."""
+
     # --- Write behaviour ---
     batch_size: int = 512
     """Records per embed call and per ``TableWriter.write_batch()`` call."""
@@ -120,9 +132,10 @@ class AilakeDestinationConfig:
     @classmethod
     def from_dict(cls, raw: dict) -> "AilakeDestinationConfig":
         embed_mode = raw.get("embed_mode", "cmd")
-        if embed_mode not in ("cmd", "openai", "cohere", "http"):
+        valid_modes = ("cmd", "openai", "cohere", "http", "fastembed", "sentence_transformers")
+        if embed_mode not in valid_modes:
             raise ValueError(
-                f"embed_mode must be one of cmd/openai/cohere/http, got '{embed_mode}'"
+                f"embed_mode must be one of {'/'.join(valid_modes)}, got '{embed_mode}'"
             )
         return cls(
             table_base_path=raw["table_base_path"].rstrip("/"),
@@ -144,6 +157,9 @@ class AilakeDestinationConfig:
             http_model=raw.get("http_model", ""),
             http_auth_header=raw.get("http_auth_header", ""),
             http_timeout=int(raw.get("http_timeout", 60)),
+            fastembed_model=raw.get("fastembed_model", "BAAI/bge-small-en-v1.5"),
+            sentence_transformers_model=raw.get("sentence_transformers_model", "BAAI/bge-small-en-v1.5"),
+            sentence_transformers_device=raw.get("sentence_transformers_device", ""),
             batch_size=int(raw.get("batch_size", 512)),
             pre_normalize=bool(raw.get("pre_normalize", False)),
             pq_only=bool(raw.get("pq_only", False)),
