@@ -214,6 +214,31 @@ static std::string fixture_path() {
     return here.substr(0, slash) + "/../testdata/multimodal_fixture.parquet";
 }
 
+static void test_integration_create_table() {
+    const char* bin = std::getenv("AILAKE_BIN");
+    if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
+
+    try {
+        std::string warehouse = make_temp_dir();
+        ailake::CreateTableOptions copts;
+        copts.metric = "cosine";
+        copts.precision = "f16";
+        ailake::create_table(warehouse, "default.docs", 4, copts);
+
+        ailake::HadoopCatalog cat(warehouse);
+        auto info = cat.load_table("default", "docs");
+        CHECK_EQ(info.vector_dim, "4");
+        CHECK_EQ(info.vector_metric, "cosine");
+
+        // Writing into the pre-created table must succeed without re-creating it.
+        ailake::WriteBatchOptions wopts; wopts.vec_col = "embedding";
+        ailake::write_batch(warehouse, "default.docs", fixture_path(), wopts);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL integration create_table: %s\n", e.what());
+        ++g_fail;
+    }
+}
+
 static void test_integration_write_batch_multi() {
     const char* bin = std::getenv("AILAKE_BIN");
     if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
@@ -341,6 +366,7 @@ int main() {
     test_write_batch_multi_empty_cols_throws();
 
     test_integration_load_table();
+    test_integration_create_table();
     test_integration_write_batch_multi();
     test_integration_compact();
     test_integration_delete_where();

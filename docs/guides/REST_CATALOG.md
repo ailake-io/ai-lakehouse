@@ -217,10 +217,11 @@ err := ailake.WriteBatch(catalog, "default", "docs", "batch.parquet", ailake.Wri
 
 ## C++ usage
 
-`write_batch`/`write_batch_multi`/`compact` accept a `catalog_opts:
-std::map<std::string, std::string>` field on `WriteBatchOptions`/
-`CompactOptions` — forwarded as `--catalog`/`--rest-*` flags to the `ailake`
-CLI binary these functions shell out to. Empty = default Hadoop catalog:
+`create_table`/`write_batch`/`write_batch_multi`/`compact` accept a
+`catalog_opts: std::map<std::string, std::string>` field on
+`CreateTableOptions`/`WriteBatchOptions`/`CompactOptions` — forwarded as
+`--catalog`/`--rest-*` flags to the `ailake` CLI binary these functions shell
+out to. Empty = default Hadoop catalog:
 
 ```cpp
 ailake::WriteBatchOptions opts;

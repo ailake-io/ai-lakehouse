@@ -115,6 +115,81 @@ inline void append_catalog_args(std::string& cmd, const std::map<std::string, st
 
 } // namespace detail
 
+// CreateTableOptions controls optional parameters for create_table.
+struct CreateTableOptions {
+    std::string metric;                    // cosine | euclidean | dot (default "cosine")
+    std::string precision;                  // f32 | f16 | i8 (default "f16")
+    std::string column;                     // vector column name (default "embedding")
+    bool        pre_normalize = false;      // normalize vectors to unit L2 at write time
+    int         hnsw_m = 0;                 // HNSW M (0 = CLI default, 16)
+    int         hnsw_ef_construction = 0;   // HNSW ef_construction (0 = CLI default, 150)
+    bool        pq_only = false;            // omit raw vector column from Parquet files
+    bool        ivf_residual = false;       // encode (vec - coarse_centroid) per IVF cell
+    std::string modality;                   // text | image | audio | video; empty = unset
+    int         format_version = 2;         // Iceberg format version (2 or 3)
+    std::vector<std::string> fts_columns;   // text columns for Tantivy FTS
+    std::string fts_tokenizer;              // Tantivy tokenizer (default "default")
+    // Selects/configures a non-Hadoop catalog backend — see
+    // WriteBatchOptions::catalog_opts for accepted keys and
+    // docs/guides/REST_CATALOG.md. Empty = default Hadoop catalog.
+    std::map<std::string, std::string> catalog_opts;
+};
+
+// create_table creates an empty AI-Lake table with the given vector schema
+// and policy via the `ailake create` CLI. Unlike write_batch (which
+// auto-creates a table on first insert with default policy), this is the
+// only way to set pq_only/ivf_residual/modality or HNSW tuning before any
+// data is written.
+//
+// Throws std::runtime_error if the CLI binary is not found or exits non-zero.
+inline void create_table(
+    const std::string&       warehouse,
+    const std::string&       table_id,      // "namespace.table"
+    int                       dim,
+    const CreateTableOptions& opts = {})
+{
+    std::string bin = detail::resolve_bin();
+
+    std::string cmd = detail::shell_quote(bin)
+        + " --store " + detail::shell_quote(warehouse)
+        + " create " + detail::shell_quote(table_id)
+        + " --dim " + std::to_string(dim);
+
+    if (!opts.metric.empty())
+        cmd += " --metric " + detail::shell_quote(opts.metric);
+    if (!opts.precision.empty())
+        cmd += " --precision " + detail::shell_quote(opts.precision);
+    if (!opts.column.empty())
+        cmd += " --column " + detail::shell_quote(opts.column);
+    if (opts.pre_normalize)
+        cmd += " --pre-normalize";
+    if (opts.hnsw_m > 0)
+        cmd += " --hnsw-m " + std::to_string(opts.hnsw_m);
+    if (opts.hnsw_ef_construction > 0)
+        cmd += " --hnsw-ef " + std::to_string(opts.hnsw_ef_construction);
+    if (opts.pq_only)
+        cmd += " --pq-only";
+    if (opts.ivf_residual)
+        cmd += " --ivf-residual";
+    if (!opts.modality.empty())
+        cmd += " --modality " + detail::shell_quote(opts.modality);
+    if (opts.format_version != 0 && opts.format_version != 2)
+        cmd += " --format-version " + std::to_string(opts.format_version);
+    if (!opts.fts_columns.empty()) {
+        std::string cols;
+        for (size_t i = 0; i < opts.fts_columns.size(); ++i) {
+            if (i > 0) cols += ',';
+            cols += opts.fts_columns[i];
+        }
+        cmd += " --fts-columns " + detail::shell_quote(cols);
+        if (!opts.fts_tokenizer.empty() && opts.fts_tokenizer != "default")
+            cmd += " --fts-tokenizer " + detail::shell_quote(opts.fts_tokenizer);
+    }
+    detail::append_catalog_args(cmd, opts.catalog_opts);
+
+    detail::run_cmd(cmd);
+}
+
 // WriteBatchOptions controls optional parameters for write_batch.
 struct WriteBatchOptions {
     std::string vec_col;              // embedding column name (default "embedding")
