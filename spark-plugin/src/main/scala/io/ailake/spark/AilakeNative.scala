@@ -259,6 +259,7 @@ object AilakeNative {
     preNormalize:       Boolean = false,
     deferred:           Boolean = false,
     columns:            Map[String, Seq[String]] = Map.empty,
+    catalogOpts:        Map[String, String] = Map.empty,
   ): Option[Long] = {
     if (ids.isEmpty) return None
     lib match {
@@ -290,7 +291,7 @@ object AilakeNative {
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
           s""""table":${jsonStr(tableName)},"vec_col":${jsonStr(vectorColumn)},""" +
           s""""dim":$dim,"metric":${jsonStr(metric)},"precision":${jsonStr(precision)}""" +
-          s"""$modelJson$partByJson$partValJson$pfJson$fvJson$ftsJson$hnswMJson$hnswEfJson$preNormalizeJson$deferredJson}"""
+          s"""$modelJson$partByJson$partValJson$pfJson$fvJson$ftsJson$hnswMJson$hnswEfJson$preNormalizeJson$deferredJson${catalogOptsJsonFragment(catalogOpts)}}"""
         val ptr = native.ailake_write_batch_ipc(ipcBytes, ipcBytes.length.toLong, optsJson)
         if (ptr == null) {
           log.warn(s"[ailake] ailake_write_batch_ipc returned null for table=$tableName")
@@ -341,6 +342,7 @@ object AilakeNative {
     ftsTokenizer:   String = "default",
     deferred:       Boolean = false,
     columns:        Map[String, Seq[String]] = Map.empty,
+    catalogOpts:    Map[String, String] = Map.empty,
   ): Option[Long] = {
     if (ids.isEmpty || vectorColumns.isEmpty) return None
     lib match {
@@ -370,7 +372,7 @@ object AilakeNative {
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
           s""""table":${jsonStr(tableName)},"ids":$idsJson,"vector_columns":$vecColsJson""" +
-          s"""$modelJson$fvJson$ftsJson$deferredJson$colsJson}"""
+          s"""$modelJson$fvJson$ftsJson$deferredJson$colsJson${catalogOptsJsonFragment(catalogOpts)}}"""
         val ptr = native.ailake_write_batch_multi_json(requestJson)
         if (ptr == null) {
           log.warn(s"[ailake] ailake_write_batch_multi_json returned null for table=$tableName")
@@ -407,6 +409,7 @@ object AilakeNative {
     tableName: String,
     column:    String,
     values:    Seq[String],
+    catalogOpts: Map[String, String] = Map.empty,
   ): Boolean = {
     if (values.isEmpty) return false
     lib match {
@@ -415,7 +418,8 @@ object AilakeNative {
         val valsJson = values.map(v => jsonStr(v)).mkString("[", ",", "]")
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
-          s""""table":${jsonStr(tableName)},"column":${jsonStr(column)},"values":$valsJson}"""
+          s""""table":${jsonStr(tableName)},"column":${jsonStr(column)},"values":$valsJson""" +
+          s"""${catalogOptsJsonFragment(catalogOpts)}}"""
         val ptr = native.ailake_delete_where_json(requestJson)
         if (ptr == null) {
           log.warn(s"[ailake] ailake_delete_where_json returned null for table=$tableName")
@@ -455,6 +459,7 @@ object AilakeNative {
     tableName:  String,
     addCols:    Seq[AddColReq],
     renameCols: Seq[RenameColReq],
+    catalogOpts: Map[String, String] = Map.empty,
   ): Int = {
     if (addCols.isEmpty && renameCols.isEmpty) return 0
     lib match {
@@ -469,7 +474,8 @@ object AilakeNative {
         }.mkString("[", ",", "]")
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
-          s""""table":${jsonStr(tableName)},"add_columns":$addJson,"rename_columns":$renJson}"""
+          s""""table":${jsonStr(tableName)},"add_columns":$addJson,"rename_columns":$renJson""" +
+          s"""${catalogOptsJsonFragment(catalogOpts)}}"""
         val ptr = native.ailake_evolve_schema_json(requestJson)
         if (ptr == null) {
           log.warn(s"[ailake] ailake_evolve_schema_json returned null for table=$tableName")
@@ -518,6 +524,7 @@ object AilakeNative {
     bm25Weight:      Float = 0.5f,
     namespace:       String = "default",
     tableName:       String = "",
+    catalogOpts:     Map[String, String] = Map.empty,
   ): Seq[SearchRow] = {
     if (query.isEmpty) return Seq.empty
     lib match {
@@ -531,7 +538,7 @@ object AilakeNative {
         ).getOrElse("")
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},"table":${jsonStr(effectiveTable)},""" +
-          s""""query":$queryJson,"dim":${query.length},"top_k":$topK$partJson$hybridJson}"""
+          s""""query":$queryJson,"dim":${query.length},"top_k":$topK$partJson$hybridJson${catalogOptsJsonFragment(catalogOpts)}}"""
         val ptr = native.ailake_search_json(requestJson)
         if (ptr == null) {
           log.warn("[ailake] ailake_search_json returned null pointer for tableUri={}", tableUri)
@@ -574,6 +581,7 @@ object AilakeNative {
     partitionFilter: Option[String] = None,
     namespace:       String = "default",
     tableName:       String = "",
+    catalogOpts:     Map[String, String] = Map.empty,
   ): ScanResult = {
     if (query.isEmpty) return ScanResult(Seq.empty, 0, Map.empty)
     lib match {
@@ -584,7 +592,7 @@ object AilakeNative {
         val partJson = partitionFilter.map(v => s""","partition_filter":${jsonStr(v)}""").getOrElse("")
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},"table":${jsonStr(effectiveTable)},""" +
-          s""""vec_col":${jsonStr(vectorColumn)},"query":$queryJson,"dim":${query.length},"top_k":$topK$partJson}"""
+          s""""vec_col":${jsonStr(vectorColumn)},"query":$queryJson,"dim":${query.length},"top_k":$topK$partJson${catalogOptsJsonFragment(catalogOpts)}}"""
         val ptr = native.ailake_scan_json(requestJson)
         if (ptr == null) {
           log.warn("[ailake] ailake_scan_json returned null pointer for tableUri={}", tableUri)
@@ -619,6 +627,7 @@ object AilakeNative {
     textColumns:     Seq[String] = Seq("chunk_text"),
     topK:            Int = 10,
     partitionFilter: Option[String] = None,
+    catalogOpts:     Map[String, String] = Map.empty,
   ): Seq[SearchRow] = {
     if (queryText.isEmpty) return Seq.empty
     lib match {
@@ -629,7 +638,7 @@ object AilakeNative {
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
           s""""table":${jsonStr(tableName)},"query_text":${jsonStr(queryText)},""" +
-          s""""text_columns":$colsJson,"top_k":$topK$partJson}"""
+          s""""text_columns":$colsJson,"top_k":$topK$partJson${catalogOptsJsonFragment(catalogOpts)}}"""
         val ptr = native.ailake_search_text_json(requestJson)
         if (ptr == null) {
           log.warn("[ailake] ailake_search_text_json returned null for tableUri={}", tableUri)
@@ -664,6 +673,7 @@ object AilakeNative {
     partitionFilter: Option[String] = None,
     namespace:       String = "default",
     tableName:       String = "",
+    catalogOpts:     Map[String, String] = Map.empty,
   ): Seq[MultimodalSearchRow] = {
     if (queries.isEmpty) return Seq.empty
     lib match {
@@ -676,7 +686,7 @@ object AilakeNative {
         val partJson = partitionFilter.map(v => s""","partition_filter":${jsonStr(v)}""").getOrElse("")
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},"table":${jsonStr(effectiveTable)},""" +
-          s""""queries":$queriesJson,"top_k":$topK$partJson}"""
+          s""""queries":$queriesJson,"top_k":$topK$partJson${catalogOptsJsonFragment(catalogOpts)}}"""
         val ptr = native.ailake_search_multimodal_json(requestJson)
         if (ptr == null) {
           log.warn("[ailake] ailake_search_multimodal_json returned null for tableUri={}", tableUri)
@@ -735,6 +745,7 @@ object AilakeNative {
     targetSizeBytes: Long = 128L * 1024 * 1024,
     maxFilesPerPass: Int  = 20,
     deferred:        Boolean = false,
+    catalogOpts:     Map[String, String] = Map.empty,
   ): Option[Int] = {
     lib match {
       case None => None
@@ -744,7 +755,7 @@ object AilakeNative {
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},""" +
           s""""table":${jsonStr(tableName)},""" +
           s""""min_files":$minFiles,"target_size_bytes":$targetSizeBytes,""" +
-          s""""max_files_per_pass":$maxFilesPerPass$deferredJson}"""
+          s""""max_files_per_pass":$maxFilesPerPass$deferredJson${catalogOptsJsonFragment(catalogOpts)}}"""
         val ptr = native.ailake_compact_json(requestJson)
         if (ptr == null) {
           log.warn(s"[ailake] ailake_compact_json returned null for table=$tableName")
@@ -784,6 +795,7 @@ object AilakeNative {
     metric:         String = "cosine",
     precision:      String = "f16",
     formatVersion:  Int    = 2,
+    catalogOpts:    Map[String, String] = Map.empty,
   ): Option[Unit] = {
     lib match {
       case None => None
@@ -792,7 +804,7 @@ object AilakeNative {
           s"""{"warehouse":${jsonStr(warehouse)},"namespace":${jsonStr(namespace)},""" +
           s""""table":${jsonStr(table)},"vector_column":${jsonStr(vectorColumn)},""" +
           s""""dim":$dim,"metric":${jsonStr(metric)},"precision":${jsonStr(precision)},""" +
-          s""""format_version":$formatVersion}"""
+          s""""format_version":$formatVersion${catalogOptsJsonFragment(catalogOpts)}}"""
         val ptr = native.ailake_create_table_json(requestJson)
         if (ptr == null) {
           log.warn(s"[ailake] ailake_create_table_json returned null for table=$namespace.$table")
@@ -819,6 +831,20 @@ object AilakeNative {
   }
 
   private def jsonStr(s: String): String = mapper.writeValueAsString(s)
+
+  /**
+   * REST Catalog (Fase 17/19) config fragment, e.g. `Map("catalog" -> "rest",
+   * "rest_uri" -> "...", "rest_auth" -> "bearer", "rest_token" -> "...")`.
+   * Empty (default) = Hadoop catalog, unchanged behavior. Keys/values pass
+   * through as-is into the request JSON every method below builds — see
+   * `CatalogOpts` in `ailake-jni/src/lib.rs` for the accepted field names
+   * (`catalog`, `rest_uri`, `rest_prefix`, `rest_warehouse`, `rest_auth`,
+   * `rest_token`, `rest_oauth_token_endpoint`, `rest_oauth_client_id`,
+   * `rest_oauth_client_secret`, `rest_oauth_scope`). See
+   * docs/guides/REST_CATALOG.md.
+   */
+  private def catalogOptsJsonFragment(opts: Map[String, String]): String =
+    opts.map { case (k, v) => s""",${jsonStr(k)}:${jsonStr(v)}""" }.mkString
 
   private def parseScanResponse(json: String, tableUri: String): ScanResult = {
     val root = mapper.readTree(json)

@@ -84,6 +84,31 @@ flattened into its JSON request body, alongside the existing `warehouse` field:
 `ailake_vector_search_json`/`do_search`'s raw-pointer legacy entry point (no JSON
 body) stays Hadoop-only — there's nowhere to carry the config.
 
+### Spark
+
+All 10 `AilakeNative.scala` methods take a trailing `catalogOpts: Map[String, String]`
+(default empty = Hadoop catalog), which `AilakeCatalog`/`AilakeDataSource` also
+populate automatically from catalog/writer options:
+
+```scala
+// spark.sql.catalog.<name>.catalog / .rest-uri / .rest-auth / .rest-token / ...
+spark.conf.set("spark.sql.catalog.ailake.catalog", "rest")
+spark.conf.set("spark.sql.catalog.ailake.rest-uri", "https://catalog.example.com")
+
+// or the DataFrame/SQL API directly:
+import io.ailake.spark.implicits._
+spark.ailakeSearch(tableUri, queryVec, topK = 10,
+  catalogOpts = Map("catalog" -> "rest", "rest_uri" -> "https://catalog.example.com"))
+
+df.write.format("io.ailake.spark.AilakeDataSource")
+  .option("tableUri", tableUri)
+  .option("catalog", "rest")
+  .option("rest-uri", "https://catalog.example.com")
+  .save()
+```
+
+Trino and Flink don't have this wiring yet (see "Known limitations" below).
+
 ## Airflow usage
 
 Set catalog config in the Airflow Connection's `extra` JSON (alongside cloud
@@ -132,10 +157,11 @@ silently falls back to the Hadoop catalog.
   path** (CLI shell-out never emits `--catalog`/`--rest-*`), and no native
   read-path support at all (no HTTP client in either — would need a new
   dependency, unlike the mechanical CLI-flag-forwarding fix elsewhere).
-- **Spark/Trino/Flink have no REST catalog wiring.** None of the JSON request
-  builders in `AilakeNative.{scala,kt}` / `AilakeNativeLoader.kt` set a
-  `catalog`/`rest_*` field, and no catalog/session property surfaces it either
-  — every JVM-plugin call implicitly targets the Hadoop catalog today.
+- **Trino/Flink have no REST catalog wiring yet** (Spark now does — see "JVM
+  usage" below). None of the JSON request builders in `AilakeNative.kt` /
+  `AilakeNativeLoader.kt` set a `catalog`/`rest_*` field, and no catalog/session
+  property surfaces it either — every Trino/Flink call implicitly targets the
+  Hadoop catalog today.
 
 - **`Store` root vs. `RestCatalogConfig.warehouse` must be kept in sync manually**
   for local-filesystem storage. The catalog computes each table's `location` from
