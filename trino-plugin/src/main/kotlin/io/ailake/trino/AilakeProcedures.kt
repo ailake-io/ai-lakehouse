@@ -34,12 +34,23 @@ class AilakeProcedures(
     // Safe to thread here (unlike search/scan/insert): this class isn't a
     // JSON-serialized Trino handle, just a plain coordinator-side object.
     private val catalogOpts: Map<String, String> = emptyMap(),
+    // create_table (Fase 23) config — same catalog-level properties
+    // VectorScanConnectorFactory already parses for search/insert
+    // (ailake.vector-column/vector-dim/metric/precision/format-version).
+    private val vectorColumn: String = "embedding",
+    private val dim: Int = 1536,
+    private val metric: String = "cosine",
+    private val precision: String = "f16",
+    private val formatVersion: Int = 2,
 ) {
     private val log = LoggerFactory.getLogger(AilakeProcedures::class.java)
 
     companion object {
         private val COMPACT = MethodHandles.lookup().unreflect(
             AilakeProcedures::class.java.getMethod("compact", ConnectorSession::class.java)
+        )
+        private val CREATE_TABLE = MethodHandles.lookup().unreflect(
+            AilakeProcedures::class.java.getMethod("createTable", ConnectorSession::class.java)
         )
     }
 
@@ -49,6 +60,12 @@ class AilakeProcedures(
             "compact",
             emptyList(),
             COMPACT.bindTo(this),
+        ),
+        Procedure(
+            "system",
+            "create_table",
+            emptyList(),
+            CREATE_TABLE.bindTo(this),
         )
     )
 
@@ -61,5 +78,30 @@ class AilakeProcedures(
                 "failed; check the coordinator/worker logs for [ailake] compact ok=false",
             )
         log.info("[ailake] CALL compact() table={}.{} files_compacted={}", namespace, tableName, filesCompacted)
+    }
+
+    /**
+     * `CALL ailake.system.create_table()` — creates the catalog's configured
+     * ingest table (empty, schema only) via `AilakeNative.createTable`, which
+     * was already fully implemented and tested but had no SQL surface
+     * reachable from Trino at all (same "dead capability" gap `compact` had
+     * before it) — closes it the same way, via `Connector.getProcedures()`.
+     * No arguments, same reasoning as `compact`: table-uri/namespace/
+     * table-name/vector-column/dim/metric/precision/format-version are all
+     * catalog-level properties (`ailake.*`), not per-statement.
+     */
+    fun createTable(session: ConnectorSession) {
+        val ok = AilakeNative.createTable(
+            tableUri, namespace, tableName, vectorColumn, dim, metric, precision, formatVersion,
+            catalogOpts = catalogOpts,
+        )
+        if (!ok) {
+            throw TrinoException(
+                StandardErrorCode.GENERIC_USER_ERROR,
+                "ailake create_table failed for table=$namespace.$tableName — native library absent or the " +
+                "call failed; check the coordinator/worker logs for [ailake] create_table ok=false",
+            )
+        }
+        log.info("[ailake] CALL create_table() table={}.{}", namespace, tableName)
     }
 }

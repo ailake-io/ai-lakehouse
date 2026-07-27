@@ -50,7 +50,10 @@ class VectorScanConnector(
     private val splitManager = VectorScanSplitManager()
     private val recordSetProvider = VectorScanRecordSetProvider()
     private val pageSinkProvider = AilakePageSinkProvider()
-    private val procedures = AilakeProcedures(tableUri, namespace, tableName, catalogOpts)
+    private val procedures = AilakeProcedures(
+        tableUri, namespace, tableName, catalogOpts,
+        vectorColumn, dim, metric, precision, formatVersion,
+    )
 
     override fun beginTransaction(
         isolationLevel: IsolationLevel,

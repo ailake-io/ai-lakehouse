@@ -60,12 +60,38 @@ class AilakeCatalog extends CatalogPlugin with TableCatalog {
 
   override def listTables(namespace: Array[String]): Array[Identifier] = Array.empty
 
+  /**
+   * `AilakeNative.createTable` was already fully implemented and tested but had no SQL
+   * surface — same "dead capability" gap `alterTable` had before it (see doc comment
+   * below), closed the same way. `CREATE TABLE ailake.ns.tbl (...)` now actually creates
+   * the on-disk AI-Lake table (Iceberg metadata.json + manifest) via the native call,
+   * instead of only building an in-memory `Table` wrapper that assumed the table already
+   * existed. Failure surfaces as a `RuntimeException` — matches `alterTable`'s error
+   * handling, and avoids silently returning a `Table` handle for a table that was never
+   * actually created on disk.
+   */
   override def createTable(
     ident: Identifier,
     schema: StructType,
     partitions: Array[Transform],
     properties: util.Map[String, String],
-  ): Table = buildTable(ident, schema)
+  ): Table = {
+    val tableUri     = requireOpt("table-uri")
+    val vectorColumn = opts.getOrDefault("vector-column", "embedding")
+    val dim          = opts.getOrDefault("vector-dim", "1536").toInt
+    val metric       = opts.getOrDefault("metric", "cosine")
+    val precision    = opts.getOrDefault("precision", "f16")
+    val namespace    = if (ident.namespace().nonEmpty) ident.namespace()(0) else "default"
+    val tableName    = ident.name()
+
+    AilakeNative.createTable(
+      tableUri, namespace, tableName, vectorColumn, dim, metric, precision,
+      catalogOpts = catalogOptsFromConfig(),
+    ).getOrElse(
+      throw new RuntimeException(s"ailake CREATE TABLE failed for $namespace.$tableName — see logs"))
+
+    buildTable(ident, schema)
+  }
 
   /**
    * `AilakeNative.evolveSchema` was already fully implemented and tested but had no SQL
