@@ -385,6 +385,69 @@ int files_compacted = ailake::compact(
 
 All four functions invoke the `ailake` binary via `resolve_bin()` (respects `AILAKE_BIN` env var). An empty `values` list in `delete_where` is a no-op; an empty add/rename list in `evolve_schema` is a no-op returning 0.
 
+### `ailake::decay_memories`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Recompute recency weights (exp(-λ×days_since_access)) across all memory
+// files in the table (Phase 9 agent-memory schema).
+int files_updated = ailake::decay_memories("/path/to/warehouse", "default.memories", 0.1f);
+```
+
+### `ailake::migrate`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Re-embed a table's vector column via an external embed command. embed_cmd
+// reads a JSON array of strings from stdin, writes a JSON array of float
+// arrays to stdout.
+ailake::MigrateOptions opts;
+opts.old_column = "embedding";
+opts.new_column = "embedding_v2";
+opts.strategy   = "dual-write-then-cutover";
+ailake::migrate("/path/to/warehouse", "default.docs", "python3 embed.py", opts);
+```
+
+### `ailake::delete_rows`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Mark rows as deleted using Iceberg Deletion Vectors (V3 tables only —
+// requires CreateTableOptions::format_version = 3). file is the Parquet
+// data file path; no data-file-listing API exists in this header, so find it
+// on disk directly, or track it from your own write.
+ailake::delete_rows("/path/to/warehouse", "default.docs", "data/part-00001.parquet", {0, 5, 42});
+```
+
+### `ailake::add_vector_column` / `ailake::backfill_vector_column`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Add a new vector column to the schema (no data files rewritten) — old
+// files return null for it until backfill_vector_column rewrites them.
+ailake::AddVectorColumnOptions avopts;
+avopts.metric = "cosine";
+ailake::add_vector_column("/path/to/warehouse", "default.docs", "image_embedding", 512, avopts);
+
+ailake::BackfillVectorColumnOptions bopts;
+bopts.text_column = "image_uri";
+ailake::backfill_vector_column("/path/to/warehouse", "default.docs", "image_embedding", "python3 embed_images.py", bopts);
+```
+
+### `ailake::estimate`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Storage-usage estimate before writing — pure math, no I/O, no warehouse.
+// Returns the raw JSON response string (this header has no JSON dependency).
+std::string json = ailake::estimate("1M", 1536);
+```
+
 ### `ailake::search_text`
 
 ```cpp

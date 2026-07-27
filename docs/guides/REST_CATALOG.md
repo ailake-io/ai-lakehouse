@@ -197,9 +197,11 @@ silently falls back to the Hadoop catalog.
 
 ## Go usage
 
-`WriteBatch`/`Compact` accept `CatalogOpts map[string]string` in their
-`Options` struct — forwarded as `--catalog`/`--rest-*` flags to the `ailake`
-CLI binary these functions shell out to. Nil/empty = default Hadoop catalog:
+`CreateTable`/`WriteBatch`/`Compact`/`DecayMemories`/`Migrate`/`DeleteRows`/
+`AddVectorColumn`/`BackfillVectorColumn` accept `CatalogOpts
+map[string]string` (either directly, or via their `Options` struct) —
+forwarded as `--catalog`/`--rest-*` flags to the `ailake` CLI binary these
+functions shell out to. Nil/empty = default Hadoop catalog:
 
 ```go
 err := ailake.WriteBatch(catalog, "default", "docs", "batch.parquet", ailake.WriteBatchOptions{
@@ -214,14 +216,18 @@ err := ailake.WriteBatch(catalog, "default", "docs", "batch.parquet", ailake.Wri
 ```
 
 `DeleteWhere`/`EvolveSchema` don't accept it yet (see "Known limitations").
+`Estimate` needs no catalog config at all — pure math, no warehouse.
 
 ## C++ usage
 
-`create_table`/`write_batch`/`write_batch_multi`/`compact` accept a
-`catalog_opts: std::map<std::string, std::string>` field on
-`CreateTableOptions`/`WriteBatchOptions`/`CompactOptions` — forwarded as
-`--catalog`/`--rest-*` flags to the `ailake` CLI binary these functions shell
-out to. Empty = default Hadoop catalog:
+`create_table`/`write_batch`/`write_batch_multi`/`compact`/`decay_memories`/
+`migrate`/`delete_rows`/`add_vector_column`/`backfill_vector_column` accept a
+`catalog_opts: std::map<std::string, std::string>` field (either directly, or
+via their `Options` struct — `CreateTableOptions`/`WriteBatchOptions`/
+`CompactOptions`/`MigrateOptions`/`AddVectorColumnOptions`/
+`BackfillVectorColumnOptions`) — forwarded as `--catalog`/`--rest-*` flags to
+the `ailake` CLI binary these functions shell out to. Empty = default Hadoop
+catalog:
 
 ```cpp
 ailake::WriteBatchOptions opts;
@@ -234,6 +240,7 @@ ailake::write_batch(warehouse, "default.docs", "batch.parquet", opts);
 ```
 
 `delete_where`/`evolve_schema` don't accept it yet (see "Known limitations").
+`estimate` needs no catalog config at all — pure math, no warehouse.
 
 ## Known limitations
 

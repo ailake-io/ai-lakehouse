@@ -459,4 +459,226 @@ inline int compact(
     return files_compacted;
 }
 
+// decay_memories recomputes recency weights (exp(-λ×days_since_access)) across
+// all memory files in the table via `ailake decay-memories` (Phase 9
+// agent-memory schema). Returns the number of files updated (0 = nothing changed).
+inline int decay_memories(
+    const std::string& warehouse,
+    const std::string& table_id,
+    float               lambda,
+    const std::map<std::string, std::string>& catalog_opts = {})
+{
+    std::string bin = detail::resolve_bin();
+    std::string cmd = detail::shell_quote(bin)
+        + " --store " + detail::shell_quote(warehouse)
+        + " decay-memories " + detail::shell_quote(table_id)
+        + " --lambda " + std::to_string(lambda)
+        + " --format json";
+    detail::append_catalog_args(cmd, catalog_opts);
+
+    std::string out = detail::run_cmd(cmd);
+
+    // Parse "files_updated":N from JSON output (no JSON dependency in this
+    // header — same substring-parse style as compact's files_compacted).
+    int files_updated = 0;
+    std::string key = "\"files_updated\":";
+    auto pos = out.find(key);
+    if (pos != std::string::npos) {
+        pos += key.size();
+        while (pos < out.size() && out[pos] == ' ') ++pos;
+        try { files_updated = std::stoi(out.substr(pos)); } catch (...) {}
+    }
+    return files_updated;
+}
+
+// MigrateOptions controls optional parameters for migrate.
+struct MigrateOptions {
+    std::string old_column;     // existing embedding column (default "embedding")
+    std::string new_column;     // migrated column name (default "embedding_v2")
+    std::string text_column;    // raw-text column to re-embed (default "chunk_text")
+    std::string strategy;       // "atomic-replace" | "dual-write-then-cutover" (default)
+    int         batch_size = 0; // texts per embed-cmd call (0 = CLI default, 512)
+    std::string model_name;     // stored in ailake.embedding-model after migration
+    std::string model_version;  // appended to model_name as "<name>@<version>"
+    std::map<std::string, std::string> catalog_opts;
+};
+
+// migrate re-embeds a table's vector column via an external embed command
+// (`ailake migrate` CLI). embed_cmd is a shell command that reads a JSON
+// array of strings from stdin and writes a JSON array of float arrays to
+// stdout. Throws std::runtime_error if the CLI binary is not found or exits
+// non-zero.
+inline void migrate(
+    const std::string&   warehouse,
+    const std::string&   table_id,
+    const std::string&   embed_cmd,
+    const MigrateOptions& opts = {})
+{
+    std::string bin = detail::resolve_bin();
+    std::string cmd = detail::shell_quote(bin)
+        + " --store " + detail::shell_quote(warehouse)
+        + " migrate " + detail::shell_quote(table_id)
+        + " --embed-cmd " + detail::shell_quote(embed_cmd);
+
+    if (!opts.old_column.empty())
+        cmd += " --old-column " + detail::shell_quote(opts.old_column);
+    if (!opts.new_column.empty())
+        cmd += " --new-column " + detail::shell_quote(opts.new_column);
+    if (!opts.text_column.empty())
+        cmd += " --text-column " + detail::shell_quote(opts.text_column);
+    if (!opts.strategy.empty())
+        cmd += " --strategy " + detail::shell_quote(opts.strategy);
+    if (opts.batch_size > 0)
+        cmd += " --batch-size " + std::to_string(opts.batch_size);
+    if (!opts.model_name.empty())
+        cmd += " --model-name " + detail::shell_quote(opts.model_name);
+    if (!opts.model_version.empty())
+        cmd += " --model-version " + detail::shell_quote(opts.model_version);
+    detail::append_catalog_args(cmd, opts.catalog_opts);
+
+    detail::run_cmd(cmd);
+}
+
+// delete_rows marks rows as deleted in a V3 table using Iceberg Deletion
+// Vectors via `ailake delete-rows`. `file` is the Parquet data file path as
+// reported by list_files (e.g. "data/part-00001.parquet"). Requires the
+// table to have been created with format_version=3 — the CLI raises a clear
+// error on a V2 table rather than corrupting it; use delete_where (equality
+// predicate) for V2 tables. No-op when row_positions is empty.
+inline void delete_rows(
+    const std::string&        warehouse,
+    const std::string&        table_id,
+    const std::string&        file,
+    const std::vector<int>&   row_positions,
+    const std::map<std::string, std::string>& catalog_opts = {})
+{
+    if (row_positions.empty()) return;
+
+    std::string bin = detail::resolve_bin();
+    std::string rows;
+    for (size_t i = 0; i < row_positions.size(); ++i) {
+        if (i > 0) rows += ',';
+        rows += std::to_string(row_positions[i]);
+    }
+
+    std::string cmd = detail::shell_quote(bin)
+        + " --store " + detail::shell_quote(warehouse)
+        + " delete-rows " + detail::shell_quote(table_id)
+        + " --file " + detail::shell_quote(file)
+        + " --rows " + detail::shell_quote(rows);
+    detail::append_catalog_args(cmd, catalog_opts);
+
+    detail::run_cmd(cmd);
+}
+
+// AddVectorColumnOptions controls optional parameters for add_vector_column.
+struct AddVectorColumnOptions {
+    std::string metric;                  // cosine | euclidean | dot (default "cosine")
+    std::string precision;                // f32 | f16 | i8 (default "f16")
+    bool        pre_normalize = false;
+    int         hnsw_m = 0;               // 0 = CLI default (16)
+    int         hnsw_ef_construction = 0; // 0 = CLI default (150)
+    std::map<std::string, std::string> catalog_opts;
+};
+
+// add_vector_column adds a new vector column to an existing table schema (no
+// data files rewritten) via `ailake add-vector-column`. Old files return
+// null for the new column until backfill_vector_column is run.
+inline void add_vector_column(
+    const std::string&             warehouse,
+    const std::string&             table_id,
+    const std::string&             column,
+    int                             dim,
+    const AddVectorColumnOptions&   opts = {})
+{
+    std::string bin = detail::resolve_bin();
+    std::string cmd = detail::shell_quote(bin)
+        + " --store " + detail::shell_quote(warehouse)
+        + " add-vector-column " + detail::shell_quote(table_id)
+        + " --column " + detail::shell_quote(column)
+        + " --dim " + std::to_string(dim);
+
+    if (!opts.metric.empty())
+        cmd += " --metric " + detail::shell_quote(opts.metric);
+    if (!opts.precision.empty())
+        cmd += " --precision " + detail::shell_quote(opts.precision);
+    if (opts.pre_normalize)
+        cmd += " --pre-normalize";
+    if (opts.hnsw_m > 0)
+        cmd += " --hnsw-m " + std::to_string(opts.hnsw_m);
+    if (opts.hnsw_ef_construction > 0)
+        cmd += " --hnsw-ef " + std::to_string(opts.hnsw_ef_construction);
+    detail::append_catalog_args(cmd, opts.catalog_opts);
+
+    detail::run_cmd(cmd);
+}
+
+// BackfillVectorColumnOptions controls optional parameters for backfill_vector_column.
+struct BackfillVectorColumnOptions {
+    std::string text_column;  // raw-text column to embed (default "chunk_text")
+    int         batch_size = 0; // texts per embed-cmd call (0 = CLI default, 512)
+    std::map<std::string, std::string> catalog_opts;
+};
+
+// backfill_vector_column backfills a new vector column in all existing files
+// (rewriting each file with new embeddings) via `ailake
+// backfill-vector-column`. `column` must already exist via
+// add_vector_column. Idempotent: files already containing the column are
+// skipped.
+inline void backfill_vector_column(
+    const std::string&                  warehouse,
+    const std::string&                  table_id,
+    const std::string&                  column,
+    const std::string&                  embed_cmd,
+    const BackfillVectorColumnOptions&   opts = {})
+{
+    std::string bin = detail::resolve_bin();
+    std::string cmd = detail::shell_quote(bin)
+        + " --store " + detail::shell_quote(warehouse)
+        + " backfill-vector-column " + detail::shell_quote(table_id)
+        + " --column " + detail::shell_quote(column)
+        + " --embed-cmd " + detail::shell_quote(embed_cmd);
+
+    if (!opts.text_column.empty())
+        cmd += " --text-column " + detail::shell_quote(opts.text_column);
+    if (opts.batch_size > 0)
+        cmd += " --batch-size " + std::to_string(opts.batch_size);
+    detail::append_catalog_args(cmd, opts.catalog_opts);
+
+    detail::run_cmd(cmd);
+}
+
+// EstimateOptions controls optional parameters for estimate.
+struct EstimateOptions {
+    int hnsw_m = 0; // 0 = CLI default (16)
+    int pq_m = 0;   // 0 = CLI default (dim/32, clamped to [8, dim])
+};
+
+// estimate computes storage-usage estimates before writing (pure math, no
+// I/O, no warehouse/catalog involved) via `ailake estimate`. `rows` supports
+// K/M/B suffixes (e.g. "1M", "500K"). Returns the raw JSON response string —
+// this header has no JSON dependency (same convention as compact/
+// decay_memories' own substring parsing); parse with whatever JSON library
+// your application already uses if you need structured access to the
+// per-mode estimates.
+inline std::string estimate(
+    const std::string&      rows,
+    int                      dim,
+    const EstimateOptions&   opts = {})
+{
+    std::string bin = detail::resolve_bin();
+    std::string cmd = detail::shell_quote(bin)
+        + " estimate"
+        + " --rows " + detail::shell_quote(rows)
+        + " --dim " + std::to_string(dim)
+        + " --format json";
+
+    if (opts.hnsw_m > 0)
+        cmd += " --hnsw-m " + std::to_string(opts.hnsw_m);
+    if (opts.pq_m > 0)
+        cmd += " --pq-m " + std::to_string(opts.pq_m);
+
+    return detail::run_cmd(cmd);
+}
+
 } // namespace ailake

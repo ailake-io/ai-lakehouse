@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -214,6 +216,66 @@ static std::string fixture_path() {
     return here.substr(0, slash) + "/../testdata/multimodal_fixture.parquet";
 }
 
+// Finds the first *.parquet under `dir` (recursively) and returns its path
+// relative to `dir` — mirrors how ailake-go's ListFiles resolves data-file
+// paths, but this header has no manifest-listing API of its own, so tests
+// that need a real on-disk data file path (e.g. delete_rows) glob for it
+// directly instead.
+static std::string find_first_parquet_relative(const std::string& dir) {
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(dir)) {
+        if (entry.path().extension() == ".parquet") {
+            return std::filesystem::relative(entry.path(), dir).string();
+        }
+    }
+    throw std::runtime_error("no .parquet file found under " + dir);
+}
+
+// Writes a throwaway shell script standing in for the `ailake` binary: it
+// captures its argv to `args_path` (for the test to assert on) and echoes
+// `stdout_json` (if non-empty) so JSON-parsing callers (decay_memories) see
+// a well-formed response. Used for delete_rows/decay_memories/migrate/
+// backfill_vector_column call sites that need a real embed_cmd/memory-schema
+// fixture this repo doesn't have — the fake binary lets these tests verify
+// this header's own argv-building code for real, independent of whatever the
+// real CLI would do with those args.
+static std::string write_fake_ailake_bin(const std::string& dir, const std::string& args_path, const std::string& stdout_json) {
+    std::string bin_path = dir + "/fake_ailake";
+    std::ofstream f(bin_path);
+    f << "#!/bin/sh\necho \"$@\" > " << args_path << "\n";
+    if (!stdout_json.empty()) {
+        f << "echo '" << stdout_json << "'\n";
+    }
+    f.close();
+    std::filesystem::permissions(bin_path, std::filesystem::perms::owner_all, std::filesystem::perm_options::add);
+    return bin_path;
+}
+
+static std::string read_file(const std::string& path) {
+    std::ifstream f(path);
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return content;
+}
+
+// Saves AILAKE_BIN on construction, restores it (or removes it, if it was
+// never set) on destruction — a bare unsetenv() at the end of a test would
+// permanently drop a real AILAKE_BIN the test binary was invoked with,
+// silently SKIP-ing every later integration test in the same run (this bit
+// the first version of the args-forwarded tests below).
+struct ScopedAilakeBin {
+    std::string saved;
+    bool had_value;
+    explicit ScopedAilakeBin(const std::string& fake_bin) {
+        const char* orig = std::getenv("AILAKE_BIN");
+        had_value = orig != nullptr;
+        if (had_value) saved = orig;
+        setenv("AILAKE_BIN", fake_bin.c_str(), 1);
+    }
+    ~ScopedAilakeBin() {
+        if (had_value) setenv("AILAKE_BIN", saved.c_str(), 1);
+        else           unsetenv("AILAKE_BIN");
+    }
+};
+
 static void test_integration_create_table() {
     const char* bin = std::getenv("AILAKE_BIN");
     if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
@@ -235,6 +297,159 @@ static void test_integration_create_table() {
         ailake::write_batch(warehouse, "default.docs", fixture_path(), wopts);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FAIL integration create_table: %s\n", e.what());
+        ++g_fail;
+    }
+}
+
+static void test_integration_estimate() {
+    const char* bin = std::getenv("AILAKE_BIN");
+    if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
+
+    try {
+        std::string out = ailake::estimate("1M", 1536);
+        // to_string_pretty (server side) inserts a space after ':' — match
+        // loosely rather than assuming compact JSON formatting.
+        CHECK(out.find("\"rows\"") != std::string::npos && out.find("1000000") != std::string::npos);
+        CHECK(out.find("\"dim\"") != std::string::npos && out.find("1536") != std::string::npos);
+        CHECK(out.find("\"estimates\"") != std::string::npos);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL integration estimate: %s\n", e.what());
+        ++g_fail;
+    }
+}
+
+static void test_integration_add_vector_column() {
+    const char* bin = std::getenv("AILAKE_BIN");
+    if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
+
+    try {
+        std::string warehouse = make_temp_dir();
+        ailake::CreateTableOptions copts; copts.metric = "cosine";
+        ailake::create_table(warehouse, "default.docs", 4, copts);
+
+        ailake::AddVectorColumnOptions avopts; avopts.metric = "cosine";
+        ailake::add_vector_column(warehouse, "default.docs", "image_embedding", 2, avopts);
+
+        ailake::HadoopCatalog cat(warehouse);
+        auto info = cat.load_table("default", "docs");
+        bool found = false;
+        for (const auto& f : info.schema_fields) {
+            if (f.name == "image_embedding") found = true;
+        }
+        CHECK(found);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL integration add_vector_column: %s\n", e.what());
+        ++g_fail;
+    }
+}
+
+static void test_integration_delete_rows() {
+    const char* bin = std::getenv("AILAKE_BIN");
+    if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
+
+    try {
+        std::string warehouse = make_temp_dir();
+        ailake::CreateTableOptions copts; copts.metric = "cosine"; copts.format_version = 3;
+        ailake::create_table(warehouse, "default.docs", 4, copts);
+
+        ailake::WriteBatchOptions wopts; wopts.vec_col = "embedding";
+        ailake::write_batch(warehouse, "default.docs", fixture_path(), wopts);
+
+        std::string file = find_first_parquet_relative(warehouse);
+        // delete_rows itself must not throw — confirms this header's argv is
+        // accepted by the real CLI (which really does drop the row from its
+        // own search, confirmed via a separate manual CLI-only repro).
+        // NOT asserting the effect via ailake::search here: this header, like
+        // ailake-go's native reader, has no deletion-vector/equality-delete
+        // masking in its own search path — see docs/guides/REST_CATALOG.md
+        // and ailake-go's identical, separately-documented finding.
+        ailake::delete_rows(warehouse, "default.docs", file, {0});
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL integration delete_rows: %s\n", e.what());
+        ++g_fail;
+    }
+}
+
+// ── decay_memories / migrate / backfill_vector_column — argv-forwarding
+// checks (fake `ailake` binary, not a mock of this header's own code) ───────
+//
+// These need a table with columns (chunk_text, last_accessed_at, ...) no
+// fixture in this repo provides — a full embed_cmd/memory-decay round trip
+// is out of scope here. What's verified for real: the exact argv this
+// header's code builds and hands to run_cmd/popen.
+
+static void test_decay_memories_args_forwarded() {
+    try {
+        std::string dir = make_temp_dir();
+        std::string args_path = dir + "/args.txt";
+        std::string bin = write_fake_ailake_bin(dir, args_path, "{\"ok\":true,\"files_updated\":3}");
+        ScopedAilakeBin guard(bin);
+
+        int n = ailake::decay_memories("/tmp/wh", "default.docs", 0.25f,
+            {{"catalog", "rest"}, {"rest-uri", "https://catalog.example.com"}});
+        CHECK_EQ(n, 3);
+
+        std::string args = read_file(args_path);
+        for (const std::string& want : {std::string("decay-memories"), std::string("default.docs"),
+                                          std::string("--lambda"), std::string("--format"), std::string("json"),
+                                          std::string("--catalog"), std::string("rest"), std::string("--rest-uri")}) {
+            CHECK(args.find(want) != std::string::npos);
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL decay_memories args-forwarded: %s\n", e.what());
+        ++g_fail;
+    }
+}
+
+static void test_migrate_args_forwarded() {
+    try {
+        std::string dir = make_temp_dir();
+        std::string args_path = dir + "/args.txt";
+        std::string bin = write_fake_ailake_bin(dir, args_path, "");
+        ScopedAilakeBin guard(bin);
+
+        ailake::MigrateOptions mopts;
+        mopts.old_column = "embedding"; mopts.new_column = "embedding_v2";
+        mopts.text_column = "chunk_text"; mopts.strategy = "atomic-replace";
+        mopts.batch_size = 256; mopts.model_name = "text-embedding-3-small";
+        ailake::migrate("/tmp/wh", "default.docs", "python3 embed.py", mopts);
+
+        std::string args = read_file(args_path);
+        for (const std::string& want : {std::string("migrate"), std::string("default.docs"),
+                                          std::string("--embed-cmd"), std::string("python3 embed.py"),
+                                          std::string("--old-column"), std::string("embedding"),
+                                          std::string("--new-column"), std::string("embedding_v2"),
+                                          std::string("--strategy"), std::string("atomic-replace"),
+                                          std::string("--batch-size"), std::string("256")}) {
+            CHECK(args.find(want) != std::string::npos);
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL migrate args-forwarded: %s\n", e.what());
+        ++g_fail;
+    }
+}
+
+static void test_backfill_vector_column_args_forwarded() {
+    try {
+        std::string dir = make_temp_dir();
+        std::string args_path = dir + "/args.txt";
+        std::string bin = write_fake_ailake_bin(dir, args_path, "");
+        ScopedAilakeBin guard(bin);
+
+        ailake::BackfillVectorColumnOptions bopts;
+        bopts.text_column = "image_uri"; bopts.batch_size = 128;
+        ailake::backfill_vector_column("/tmp/wh", "default.docs", "image_embedding", "python3 embed_images.py", bopts);
+
+        std::string args = read_file(args_path);
+        for (const std::string& want : {std::string("backfill-vector-column"), std::string("default.docs"),
+                                          std::string("--column"), std::string("image_embedding"),
+                                          std::string("--embed-cmd"), std::string("python3 embed_images.py"),
+                                          std::string("--text-column"), std::string("image_uri"),
+                                          std::string("--batch-size"), std::string("128")}) {
+            CHECK(args.find(want) != std::string::npos);
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL backfill_vector_column args-forwarded: %s\n", e.what());
         ++g_fail;
     }
 }
@@ -367,6 +582,12 @@ int main() {
 
     test_integration_load_table();
     test_integration_create_table();
+    test_integration_estimate();
+    test_integration_add_vector_column();
+    test_integration_delete_rows();
+    test_decay_memories_args_forwarded();
+    test_migrate_args_forwarded();
+    test_backfill_vector_column_args_forwarded();
     test_integration_write_batch_multi();
     test_integration_compact();
     test_integration_delete_where();
