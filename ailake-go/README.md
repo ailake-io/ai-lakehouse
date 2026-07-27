@@ -254,6 +254,37 @@ type ScanRow struct {
 
 CLI-delegated operations — require the `ailake` binary on `PATH` or `AILAKE_BIN` env. Return `ErrNoBinary` when neither is available.
 
+### `CreateTable`
+
+```go
+func CreateTable(
+    catalog   *HadoopCatalog,
+    namespace, table string,
+    dim       int,
+    opts      CreateTableOptions,
+) error
+```
+
+Creates an empty AI-Lake table with the given vector schema and policy (`ailake create` CLI). Unlike `WriteBatch` (which auto-creates a table on first insert with default policy), this is the only way to set `PQOnly`/`IVFResidual`/`Modality` or HNSW tuning before any data is written.
+
+```go
+type CreateTableOptions struct {
+    Metric              string // "cosine" | "euclidean" | "dot"
+    Precision           string // "f32" | "f16" | "i8"
+    Column              string // vector column name (default "embedding")
+    PreNormalize        bool
+    HnswM               int      // 0 = CLI default (16)
+    HnswEfConstruction  int      // 0 = CLI default (150)
+    PQOnly              bool
+    IVFResidual         bool
+    Modality            string   // "text" | "image" | "audio" | "video"
+    FormatVersion       int      // 0 | 2 | 3; 0 means omit (uses CLI default 2)
+    FtsColumns          []string
+    FtsTokenizer        string
+    CatalogOpts         map[string]string // REST catalog config — see docs/guides/REST_CATALOG.md
+}
+```
+
 ### `WriteBatch`
 
 ```go

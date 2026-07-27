@@ -71,6 +71,116 @@ type RenameColumnReq struct {
 	To   string
 }
 
+// CreateTableOptions controls optional parameters for CreateTable.
+type CreateTableOptions struct {
+	// Metric is the distance metric: cosine | euclidean | dot (default "cosine").
+	Metric string
+	// Precision is the storage precision: f32 | f16 | i8 (default "f16").
+	Precision string
+	// Column is the vector column name (default "embedding").
+	Column string
+	// PreNormalize normalizes vectors to unit L2 at write time (recommended for cosine).
+	PreNormalize bool
+	// HnswM is the HNSW M parameter (0 = CLI default, 16).
+	HnswM int
+	// HnswEfConstruction is the HNSW ef_construction (0 = CLI default, 150).
+	HnswEfConstruction int
+	// PQOnly omits the raw vector column from Parquet files (index BLOB only).
+	PQOnly bool
+	// IVFResidual encodes (vec - coarse_centroid) per IVF cell instead of raw vec.
+	IVFResidual bool
+	// Modality tags the primary vector column: "text" | "image" | "audio" | "video".
+	// Empty = unset.
+	Modality string
+	// FormatVersion is the Iceberg format version: 0 | 2 | 3; 0 means omit (CLI default 2).
+	FormatVersion int
+	// FtsColumns are text columns to embed as a Tantivy FTS index at write time.
+	FtsColumns []string
+	// FtsTokenizer is the Tantivy tokenizer name (default "default").
+	FtsTokenizer string
+	// CatalogOpts selects/configures a non-Hadoop catalog backend — see
+	// WriteBatchOptions.CatalogOpts for accepted keys and docs/guides/REST_CATALOG.md.
+	CatalogOpts map[string]string
+}
+
+// CreateTable creates an empty AI-Lake table with the given vector schema and
+// policy, by delegating to the `ailake create` CLI. Unlike WriteBatch (which
+// auto-creates a table on first insert with default policy), CreateTable is
+// the only way to set PQOnly/IVFResidual/Modality or HNSW tuning before any
+// data is written.
+func CreateTable(
+	catalog *HadoopCatalog,
+	namespace, table string,
+	dim int,
+	opts CreateTableOptions,
+) error {
+	bin, err := resolveBin()
+	if err != nil {
+		return err
+	}
+
+	warehouse := catalog.Warehouse
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
+	tableID := namespace + "." + table
+
+	args := []string{
+		"--store", warehouse,
+		"create", tableID,
+		"--dim", fmt.Sprintf("%d", dim),
+	}
+	if opts.Metric != "" {
+		args = append(args, "--metric", opts.Metric)
+	}
+	if opts.Precision != "" {
+		args = append(args, "--precision", opts.Precision)
+	}
+	if opts.Column != "" {
+		args = append(args, "--column", opts.Column)
+	}
+	if opts.PreNormalize {
+		args = append(args, "--pre-normalize")
+	}
+	if opts.HnswM > 0 {
+		args = append(args, "--hnsw-m", fmt.Sprintf("%d", opts.HnswM))
+	}
+	if opts.HnswEfConstruction > 0 {
+		args = append(args, "--hnsw-ef", fmt.Sprintf("%d", opts.HnswEfConstruction))
+	}
+	if opts.PQOnly {
+		args = append(args, "--pq-only")
+	}
+	if opts.IVFResidual {
+		args = append(args, "--ivf-residual")
+	}
+	if opts.Modality != "" {
+		args = append(args, "--modality", opts.Modality)
+	}
+	if opts.FormatVersion != 0 && opts.FormatVersion != 2 {
+		args = append(args, "--format-version", fmt.Sprintf("%d", opts.FormatVersion))
+	}
+	if len(opts.FtsColumns) > 0 {
+		args = append(args, "--fts-columns", strings.Join(opts.FtsColumns, ","))
+		if opts.FtsTokenizer != "" && opts.FtsTokenizer != "default" {
+			args = append(args, "--fts-tokenizer", opts.FtsTokenizer)
+		}
+	}
+	args = appendCatalogArgs(args, opts.CatalogOpts)
+
+	if _, err := exec.Command(bin, args...).Output(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return fmt.Errorf("ailake create: %w\nstderr: %s", err, exitErr.Stderr)
+		}
+		return fmt.Errorf("ailake create: %w", err)
+	}
+	return nil
+}
+
 // DeleteWhere logically deletes all rows where `column` equals any value in
 // `values`. Writes an Iceberg equality delete file via the `ailake` CLI.
 //

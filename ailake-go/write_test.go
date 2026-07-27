@@ -208,6 +208,39 @@ func TestWriteBatchMultiColumnIntegration(t *testing.T) {
 	}
 }
 
+func TestCreateTableIntegration(t *testing.T) {
+	bin := os.Getenv("AILAKE_BIN")
+	if bin == "" {
+		t.Skip("AILAKE_BIN not set")
+	}
+
+	catalog := &HadoopCatalog{Warehouse: t.TempDir()}
+	err := CreateTable(catalog, "default", "docs", 4, CreateTableOptions{
+		Metric:    "cosine",
+		Precision: "f16",
+		PQOnly:    false,
+	})
+	if err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	info, err := catalog.LoadTable("default", "docs")
+	if err != nil {
+		t.Fatalf("LoadTable after CreateTable: %v", err)
+	}
+	if info.VectorDim != "4" {
+		t.Errorf("expected vector dim '4', got %q", info.VectorDim)
+	}
+	if info.VectorMetric != "cosine" {
+		t.Errorf("expected metric 'cosine', got %q", info.VectorMetric)
+	}
+
+	// Writing into the pre-created table must succeed without re-creating it.
+	if err := WriteBatch(catalog, "default", "docs", "testdata/multimodal_fixture.parquet", WriteBatchOptions{}); err != nil {
+		t.Fatalf("WriteBatch into pre-created table: %v", err)
+	}
+}
+
 func TestCompactIntegration(t *testing.T) {
 	bin := os.Getenv("AILAKE_BIN")
 	if bin == "" {
