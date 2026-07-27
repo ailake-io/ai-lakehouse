@@ -35,6 +35,7 @@ struct AilakeScanBindData : public TableFunctionData {
     std::vector<float> query;
     int                top_k      = 10;
     int                ef_search  = 50;
+    std::string        catalog_opts_json;
 
     // Pre-fetched result (populated at bind time).
     ailake::ScanResult result;
@@ -90,6 +91,9 @@ static unique_ptr<FunctionData> AilakeScanBind(
             data->table_name = StringValue::Get(named.second);
         } else if (named.first == "namespace") {
             data->ns = StringValue::Get(named.second);
+        } else if (named.first == "catalog_opts_json") {
+            if (!named.second.IsNull())
+                data->catalog_opts_json = StringValue::Get(named.second);
         }
     }
 
@@ -109,7 +113,8 @@ static unique_ptr<FunctionData> AilakeScanBind(
         data->query,
         data->top_k,
         data->ef_search,
-        data->ns
+        data->ns,
+        data->catalog_opts_json
     );
 
     if (!data->result.ok) {
@@ -311,6 +316,7 @@ void RegisterAilakeScan(duckdb::ExtensionLoader &loader) {
     func.named_parameters["ef_search"]  = LogicalType::INTEGER;
     func.named_parameters["table_name"] = LogicalType::VARCHAR;
     func.named_parameters["namespace"]  = LogicalType::VARCHAR;
+    func.named_parameters["catalog_opts_json"] = LogicalType::VARCHAR;
 
     loader.RegisterFunction( func);
 }

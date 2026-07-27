@@ -13,6 +13,15 @@ Bridges DuckDB to [`ailake-jni`](../ailake-jni) using the same C-ABI as the Spar
 
 ## Functions
 
+> **REST Catalog**: every function below (except `ailake_version`) takes a trailing optional
+> `catalog_opts_json VARCHAR` — a JSON object like
+> `'{"catalog":"rest","rest_uri":"https://catalog.example.com","rest_auth":"bearer","rest_token":"..."}'`,
+> targeting a Polaris/Unity Catalog/BigLake/Nessie/Gravitino server instead of the default
+> Hadoop-style catalog. Table functions (`ailake_search`, `ailake_search_multimodal`,
+> `ailake_search_text`, `ailake_scan`) take it as a named parameter
+> (`catalog_opts_json := '...'`); scalar functions take it as the last positional argument in
+> their highest arity overload. See `docs/guides/REST_CATALOG.md`.
+
 ### `ailake_search` — vector similarity search
 
 ```sql

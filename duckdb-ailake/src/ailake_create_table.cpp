@@ -120,12 +120,18 @@ static void AilakeCreateTableExec(
         ns                  = StringValue::Get(args.data[17].GetValue(0));
     if ((idx_t)args.data.size() > 18 && !args.data[18].GetValue(0).IsNull())
         table_name          = StringValue::Get(args.data[18].GetValue(0));
+    // arity 20: catalog_opts_json VARCHAR — REST catalog config, see
+    // docs/guides/REST_CATALOG.md. Empty/omitted = default Hadoop catalog.
+    std::string catalog_opts_json;
+    if ((idx_t)args.data.size() > 19 && !args.data[19].GetValue(0).IsNull())
+        catalog_opts_json   = StringValue::Get(args.data[19].GetValue(0));
 
     bool ok = lib.create_table(
         warehouse, ns, table_name, vector_column, dim, metric, precision,
         format_version, hnsw_m, hnsw_ef_construction, pre_normalize,
         modality, partition_by, partition_value, partition_column_type,
-        partition_fields_json, fts_columns, fts_tokenizer, embedding_model
+        partition_fields_json, fts_columns, fts_tokenizer, embedding_model,
+        catalog_opts_json
     );
     result.SetValue(0, Value::BOOLEAN(ok));
 }
@@ -276,6 +282,19 @@ void RegisterAilakeCreateTable(duckdb::ExtensionLoader &loader) {
          LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
          LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
          LogicalType::VARCHAR},
+        LogicalType::BOOLEAN,
+        AilakeCreateTableExec
+    ));
+    // Arity 20: + catalog_opts_json VARCHAR — REST catalog config, see
+    // docs/guides/REST_CATALOG.md.
+    fn_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::VARCHAR,
+         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER,
+         LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::BOOLEAN,
+         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+         LogicalType::VARCHAR, LogicalType::VARCHAR},
         LogicalType::BOOLEAN,
         AilakeCreateTableExec
     ));

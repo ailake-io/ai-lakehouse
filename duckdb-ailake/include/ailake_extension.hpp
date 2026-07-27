@@ -96,6 +96,18 @@ public:
     // the first call).
     bool load();
 
+    // Every AilakeLib method below takes a trailing `catalog_opts_json`
+    // (default "" = unset). When non-empty it must be a JSON object literal
+    // whose fields are flattened straight into the ailake-jni request body —
+    // the same "catalog"/"rest_*" fields the CLI's `--catalog rest --rest-*`
+    // flags and ailake-py's `catalog_opts` dict populate (see
+    // docs/guides/REST_CATALOG.md). Example:
+    //   '{"catalog":"rest","rest_uri":"https://catalog.example.com",
+    //     "rest_auth":"bearer","rest_token":"..."}'
+    // Absent/"" = default Hadoop-style catalog, unchanged behavior. Malformed
+    // JSON or a non-object value throws duckdb::InvalidInputException — never
+    // silently falls back to Hadoop.
+
     bool is_ready()              const { return search_fn_        != nullptr; }
     bool is_multimodal_ready()   const { return multimodal_fn_    != nullptr; }
     bool is_scan_ready()         const { return scan_fn_          != nullptr; }
@@ -121,7 +133,8 @@ public:
         const std::string        &hybrid_text      = "",
         const std::string        &text_column      = "chunk_text",
         float                     bm25_weight      = 0.5f,
-        const std::string        &ns               = "default"
+        const std::string        &ns               = "default",
+        const std::string        &catalog_opts_json = ""
     ) const;
 
     // Execute ailake_search_text_json. Tantivy O(log N) fast path when FTS blob
@@ -134,7 +147,8 @@ public:
         int                             top_k,
         const std::vector<std::string> &text_columns    = {"chunk_text"},
         const std::string              &partition_filter = "",
-        const std::string              &ns               = "default"
+        const std::string              &ns               = "default",
+        const std::string              &catalog_opts_json = ""
     ) const;
 
     // Execute ailake_scan_json. Returns pre-parsed columnar data.
@@ -145,7 +159,8 @@ public:
         const std::vector<float> &query,
         int                       top_k,
         int                       ef_search = 50,
-        const std::string        &ns        = "default"
+        const std::string        &ns        = "default",
+        const std::string        &catalog_opts_json = ""
     ) const;
 
     // Execute ailake_search_multimodal_json. Returns empty on any error.
@@ -155,7 +170,8 @@ public:
         const std::vector<ModalQueryArg>  &queries,
         int                                top_k,
         const std::string                 &partition_filter = "",
-        const std::string                 &ns               = "default"
+        const std::string                 &ns               = "default",
+        const std::string                 &catalog_opts_json = ""
     ) const;
 
     // Execute ailake_write_batch_json. Returns snapshot_id or -1 on error.
@@ -185,7 +201,8 @@ public:
         int                             hnsw_m                = -1,
         int                             hnsw_ef_construction  = -1,
         bool                            pre_normalize         = false,
-        bool                            deferred              = false
+        bool                            deferred              = false,
+        const std::string              &catalog_opts_json     = ""
     ) const;
 
     // Execute ailake_delete_where_json. Returns true on success.
@@ -194,7 +211,8 @@ public:
         const std::string              &table_name,
         const std::string              &column,
         const std::vector<std::string> &values,
-        const std::string              &ns = "default"
+        const std::string              &ns = "default",
+        const std::string              &catalog_opts_json = ""
     ) const;
 
     // Execute ailake_evolve_schema_json. Returns new schema_id or -1 on error.
@@ -205,7 +223,8 @@ public:
         const std::string &table_name,
         const std::string &add_columns_json,
         const std::string &rename_columns_json,
-        const std::string &ns = "default"
+        const std::string &ns = "default",
+        const std::string &catalog_opts_json = ""
     ) const;
 
     // Execute ailake_write_batch_multi_json (Phase 8 multimodal write — N
@@ -218,7 +237,8 @@ public:
         const std::vector<int64_t>          &ids,
         const std::vector<VectorColSpecArg> &vector_columns,
         int                                   format_version = 2,
-        bool                                  deferred       = false
+        bool                                  deferred       = false,
+        const std::string                    &catalog_opts_json = ""
     ) const;
 
     // Execute ailake_create_table_json. Returns true on success.
@@ -257,7 +277,8 @@ public:
         const std::string &partition_fields_json  = "",
         const std::string &fts_columns        = "",
         const std::string &fts_tokenizer      = "",
-        const std::string &embedding_model    = ""
+        const std::string &embedding_model    = "",
+        const std::string &catalog_opts_json  = ""
     ) const;
 
     // Execute ailake_compact_json. Returns files_compacted count, or -1 on
@@ -270,7 +291,8 @@ public:
         int64_t             target_size_bytes  = -1,
         int64_t             max_files_per_pass = -1,
         bool                deferred           = false,
-        const std::string  &ns                 = "default"
+        const std::string  &ns                 = "default",
+        const std::string  &catalog_opts_json  = ""
     ) const;
 
 private:
@@ -288,6 +310,20 @@ private:
     compact_fn_t       compact_fn_       = nullptr;
     free_fn_t          free_fn_          = nullptr;
 };
+
+// Parse `catalog_opts_json` (a JSON object literal, e.g.
+// '{"catalog":"rest","rest_uri":"..."}') and return its fields re-serialized
+// and ready to splice into a request string being hand-built via
+// concatenation — a leading comma plus each "key":value pair. Returns "" for
+// an empty input string (no catalog override — defaults to the Hadoop
+// catalog, unchanged behavior).
+//
+// Throws std::invalid_argument on malformed JSON or a non-object value —
+// callers (the AilakeLib::* methods, in ailake_extension.cpp) let this
+// propagate; DuckDB's function dispatcher surfaces it as a normal SQL error,
+// so a typo in catalog_opts_json fails visibly instead of silently falling
+// back to Hadoop.
+std::string catalog_opts_json_fields(const std::string &catalog_opts_json);
 
 // Escape a string value for embedding in a JSON literal.
 inline std::string json_escape(const std::string &s) {

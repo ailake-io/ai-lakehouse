@@ -45,6 +45,7 @@ struct AilakeSearchTextBindData : public TableFunctionData {
     int                      top_k           = 10;
     std::vector<std::string> text_columns    = {"chunk_text"};
     std::string              partition_filter;
+    std::string              catalog_opts_json;
 };
 
 // ── Global state ──────────────────────────────────────────────────────────────
@@ -108,6 +109,9 @@ static unique_ptr<FunctionData> AilakeSearchTextBind(
             data->table_name = StringValue::Get(named.second);
         } else if (named.first == "namespace") {
             data->ns = StringValue::Get(named.second);
+        } else if (named.first == "catalog_opts_json") {
+            if (!named.second.IsNull())
+                data->catalog_opts_json = StringValue::Get(named.second);
         }
     }
 
@@ -139,7 +143,8 @@ static unique_ptr<GlobalTableFunctionState> AilakeSearchTextInit(
         bind.top_k,
         bind.text_columns,
         bind.partition_filter,
-        bind.ns
+        bind.ns,
+        bind.catalog_opts_json
     );
 
     return std::move(state);
@@ -195,6 +200,7 @@ void RegisterAilakeSearchText(duckdb::ExtensionLoader &loader) {
     func.named_parameters["partition_filter"] = LogicalType::VARCHAR;
     func.named_parameters["table_name"]       = LogicalType::VARCHAR;
     func.named_parameters["namespace"]        = LogicalType::VARCHAR;
+    func.named_parameters["catalog_opts_json"] = LogicalType::VARCHAR;
 
     loader.RegisterFunction( func);
 }

@@ -61,13 +61,39 @@ bool AilakeLib::load() {
     return true;
 }
 
+std::string catalog_opts_json_fields(const std::string &catalog_opts_json) {
+    if (catalog_opts_json.empty()) return "";
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(catalog_opts_json);
+    } catch (const std::exception &ex) {
+        throw std::invalid_argument(
+            std::string("catalog_opts_json is not valid JSON: ") + ex.what()
+        );
+    }
+    if (!j.is_object()) {
+        throw std::invalid_argument(
+            "catalog_opts_json must be a JSON object, e.g. "
+            "'{\"catalog\":\"rest\",\"rest_uri\":\"...\"}'"
+        );
+    }
+
+    std::string out;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        out += "," + nlohmann::json(it.key()).dump() + ":" + it.value().dump();
+    }
+    return out;
+}
+
 std::vector<MultimodalRow> AilakeLib::search_multimodal(
     const std::string                 &warehouse,
     const std::string                 &table_name,
     const std::vector<ModalQueryArg>  &queries,
     int                                top_k,
     const std::string                 &partition_filter,
-    const std::string                 &ns
+    const std::string                 &ns,
+    const std::string                 &catalog_opts_json
 ) const {
     if (!multimodal_fn_ || !free_fn_ || queries.empty()) return {};
 
@@ -96,6 +122,7 @@ std::vector<MultimodalRow> AilakeLib::search_multimodal(
         ",\"top_k\":"      + std::to_string(top_k);
     if (!partition_filter.empty())
         req += ",\"partition_filter\":" + json_escape(partition_filter);
+    req += catalog_opts_json_fields(catalog_opts_json);
     req += "}";
 
     char *raw = multimodal_fn_(req.c_str());
@@ -143,7 +170,8 @@ std::vector<SearchRow> AilakeLib::search(
     const std::string        &hybrid_text,
     const std::string        &text_column,
     float                     bm25_weight,
-    const std::string        &ns
+    const std::string        &ns,
+    const std::string        &catalog_opts_json
 ) const {
     if (!search_fn_ || !free_fn_ || query.empty()) return {};
 
@@ -171,6 +199,7 @@ std::vector<SearchRow> AilakeLib::search(
         req += ",\"text_column\":"  + json_escape(text_column);
         req += ",\"bm25_weight\":"  + std::to_string(bm25_weight);
     }
+    req += catalog_opts_json_fields(catalog_opts_json);
     req += "}";
 
     char *raw = search_fn_(req.c_str());
@@ -212,7 +241,8 @@ std::vector<SearchRow> AilakeLib::search_text(
     int                             top_k,
     const std::vector<std::string> &text_columns,
     const std::string              &partition_filter,
-    const std::string              &ns
+    const std::string              &ns,
+    const std::string              &catalog_opts_json
 ) const {
     if (!search_text_fn_ || !free_fn_ || query_text.empty()) return {};
 
@@ -236,6 +266,7 @@ std::vector<SearchRow> AilakeLib::search_text(
         ",\"text_columns\":" + cols_json;
     if (!partition_filter.empty())
         req += ",\"partition_filter\":" + json_escape(partition_filter);
+    req += catalog_opts_json_fields(catalog_opts_json);
     req += "}";
 
     char *raw = search_text_fn_(req.c_str());
@@ -293,7 +324,8 @@ int64_t AilakeLib::write_batch(
     int                             hnsw_m,
     int                             hnsw_ef_construction,
     bool                            pre_normalize,
-    bool                            deferred
+    bool                            deferred,
+    const std::string              &catalog_opts_json
 ) const {
     if (!write_fn_ || !free_fn_ || ids.empty()) return -1;
 
@@ -347,6 +379,7 @@ int64_t AilakeLib::write_batch(
         req += ",\"pre_normalize\":true";
     if (deferred)
         req += ",\"deferred\":true";
+    req += catalog_opts_json_fields(catalog_opts_json);
     req += "}";
 
     char *raw = write_fn_(req.c_str());
@@ -377,7 +410,8 @@ bool AilakeLib::delete_where(
     const std::string              &table_name,
     const std::string              &column,
     const std::vector<std::string> &values,
-    const std::string              &ns
+    const std::string              &ns,
+    const std::string              &catalog_opts_json
 ) const {
     if (!delete_where_fn_ || !free_fn_ || values.empty()) return false;
 
@@ -394,6 +428,7 @@ bool AilakeLib::delete_where(
         ",\"table\":"      + json_escape(table_name)  +
         ",\"column\":"     + json_escape(column)      +
         ",\"values\":"     + vals_json +
+        catalog_opts_json_fields(catalog_opts_json) +
         "}";
 
     char *raw = delete_where_fn_(req.c_str());
@@ -414,7 +449,8 @@ int32_t AilakeLib::evolve_schema(
     const std::string &table_name,
     const std::string &add_columns_json,
     const std::string &rename_columns_json,
-    const std::string &ns
+    const std::string &ns,
+    const std::string &catalog_opts_json
 ) const {
     if (!evolve_schema_fn_ || !free_fn_) return -1;
 
@@ -424,6 +460,7 @@ int32_t AilakeLib::evolve_schema(
         ",\"table\":"             + json_escape(table_name)     +
         ",\"add_columns\":"       + (add_columns_json.empty()    ? "[]" : add_columns_json) +
         ",\"rename_columns\":"    + (rename_columns_json.empty() ? "[]" : rename_columns_json) +
+        catalog_opts_json_fields(catalog_opts_json) +
         "}";
 
     char *raw = evolve_schema_fn_(req.c_str());
@@ -453,7 +490,8 @@ int64_t AilakeLib::write_batch_multi(
     const std::vector<int64_t>          &ids,
     const std::vector<VectorColSpecArg> &vector_columns,
     int                                   format_version,
-    bool                                  deferred
+    bool                                  deferred,
+    const std::string                    &catalog_opts_json
 ) const {
     if (!write_multi_fn_ || !free_fn_ || ids.empty() || vector_columns.empty()) return -1;
 
@@ -501,6 +539,7 @@ int64_t AilakeLib::write_batch_multi(
         ",\"format_version\":"  + std::to_string(format_version);
     if (deferred)
         req += ",\"deferred\":true";
+    req += catalog_opts_json_fields(catalog_opts_json);
     req += "}";
 
     char *raw = write_multi_fn_(req.c_str());
@@ -530,7 +569,8 @@ int64_t AilakeLib::compact(
     int64_t             target_size_bytes,
     int64_t             max_files_per_pass,
     bool                deferred,
-    const std::string  &ns
+    const std::string  &ns,
+    const std::string  &catalog_opts_json
 ) const {
     if (!compact_fn_ || !free_fn_) return -1;
 
@@ -546,6 +586,7 @@ int64_t AilakeLib::compact(
         req += ",\"max_files_per_pass\":" + std::to_string(max_files_per_pass);
     if (deferred)
         req += ",\"deferred\":true";
+    req += catalog_opts_json_fields(catalog_opts_json);
     req += "}";
 
     char *raw = compact_fn_(req.c_str());
@@ -587,7 +628,8 @@ bool AilakeLib::create_table(
     const std::string &partition_fields_json,
     const std::string &fts_columns,
     const std::string &fts_tokenizer,
-    const std::string &embedding_model
+    const std::string &embedding_model,
+    const std::string &catalog_opts_json
 ) const {
     if (!create_table_fn_ || !free_fn_) return false;
 
@@ -623,6 +665,7 @@ bool AilakeLib::create_table(
         req += ",\"fts_tokenizer\":" + json_escape(fts_tokenizer);
     if (!embedding_model.empty())
         req += ",\"embedding_model\":" + json_escape(embedding_model);
+    req += catalog_opts_json_fields(catalog_opts_json);
     req += "}";
 
     char *raw = create_table_fn_(req.c_str());
@@ -652,7 +695,8 @@ ScanResult AilakeLib::scan(
     const std::vector<float> &query,
     int                       top_k,
     int                       ef_search,
-    const std::string        &ns
+    const std::string        &ns,
+    const std::string        &catalog_opts_json
 ) const {
     ScanResult result;
     if (!scan_fn_ || !free_fn_ || query.empty()) {
@@ -677,6 +721,7 @@ ScanResult AilakeLib::scan(
         ",\"query\":"      + q_json                   +
         ",\"top_k\":"      + std::to_string(top_k)    +
         ",\"ef_search\":"  + std::to_string(ef_search) +
+        catalog_opts_json_fields(catalog_opts_json) +
         "}";
 
     char *raw = scan_fn_(req.c_str());

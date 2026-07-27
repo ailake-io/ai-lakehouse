@@ -181,6 +181,11 @@ static void AilakeWriteExecFull(
     std::string tbl_name = "table";
     if ((idx_t)args.data.size() > 17 && !args.data[17].GetValue(0).IsNull())
         tbl_name              = StringValue::Get(args.data[17].GetValue(0));
+    // arity 19: catalog_opts_json VARCHAR — REST catalog config, see
+    // docs/guides/REST_CATALOG.md. Empty/omitted = default Hadoop catalog.
+    std::string catalog_opts_json;
+    if ((idx_t)args.data.size() > 18 && !args.data[18].GetValue(0).IsNull())
+        catalog_opts_json     = StringValue::Get(args.data[18].GetValue(0));
 
     auto ids        = extract_bigint_list(ids_v);
     auto embeddings = extract_float_list_list(emb_v);
@@ -216,7 +221,8 @@ static void AilakeWriteExecFull(
         hnsw_m,
         hnsw_ef_construction,
         pre_normalize,
-        deferred
+        deferred,
+        catalog_opts_json
     );
     result.SetValue(0, Value::BIGINT(snap));
 }
@@ -467,6 +473,33 @@ void RegisterAilakeWrite(duckdb::ExtensionLoader &loader) {
          LogicalType::INTEGER,
          LogicalType::BOOLEAN,
          LogicalType::BOOLEAN,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
+        LogicalType::BIGINT,
+        AilakeWriteExecFull
+    ));
+
+    // Arity 19: + catalog_opts_json VARCHAR — REST catalog config, e.g.
+    // '{"catalog":"rest","rest_uri":"...","rest_auth":"bearer","rest_token":"..."}'
+    // (see docs/guides/REST_CATALOG.md). Empty/omitted = default Hadoop catalog.
+    write_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(LogicalType::LIST(LogicalType::FLOAT)),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::INTEGER,
+         LogicalType::BOOLEAN,
+         LogicalType::BOOLEAN,
+         LogicalType::VARCHAR,
          LogicalType::VARCHAR,
          LogicalType::VARCHAR},
         LogicalType::BIGINT,

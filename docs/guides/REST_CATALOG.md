@@ -104,14 +104,30 @@ flags automatically, single choke point for every hook method and operator:
 Omit `catalog` (or set it to `"hadoop"`) for the default local/S3-prefix
 metadata-dir catalog — unchanged behavior, no flags added.
 
+## DuckDB usage
+
+Every `ailake_*` SQL function (table and scalar) takes a trailing optional
+`catalog_opts_json VARCHAR` parameter — a JSON object with the same
+`catalog`/`rest_*` fields, merged into the request sent to the
+statically-linked `ailake-jni` binary. Table functions (`ailake_search`,
+`ailake_search_multimodal`, `ailake_search_text`, `ailake_scan`) expose it as
+a named parameter; scalar functions (`ailake_write_batch`,
+`ailake_write_batch_multi`, `ailake_delete_where`, `ailake_evolve_schema`,
+`ailake_compact`, `ailake_create_table`) expose it as the last positional
+argument in their highest arity overload:
+
+```sql
+SELECT * FROM ailake_search(
+    'file:///data/my_table', [0.1, 0.2, 0.3]::FLOAT[], 10,
+    catalog_opts_json := '{"catalog":"rest","rest_uri":"https://catalog.example.com","rest_auth":"bearer","rest_token":"..."}'
+);
+```
+
+Malformed JSON (or a non-object value) raises `InvalidInputException` — never
+silently falls back to the Hadoop catalog.
+
 ## Known limitations
 
-- **`duckdb-ailake` has no REST catalog wiring yet.** The 9 `AilakeLib::*`
-  methods (`search`, `write_batch`, `compact`, etc.) don't forward a
-  `catalog`/`rest_*` field into their hand-built request JSON — even though
-  the statically-linked `ailake-jni` binary already has `rest-catalog` support
-  compiled in. Needs C++-side plumbing (new named parameters or a shared
-  config struct threaded through each method), not a Rust change.
 - **`ailake-go` and `ailake-cpp` have no REST catalog wiring on their write
   path** (CLI shell-out never emits `--catalog`/`--rest-*`), and no native
   read-path support at all (no HTTP client in either — would need a new
