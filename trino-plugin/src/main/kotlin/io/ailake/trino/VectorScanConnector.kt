@@ -32,6 +32,13 @@ class VectorScanConnector(
     private val ftsColumns: List<String> = emptyList(),
     private val ftsTokenizer: String = "default",
     private val vectorColumns: List<AilakeNative.VectorColSpec> = emptyList(),
+    // REST Catalog (Fase 17/19) config from ailake.catalog/ailake.rest-* properties
+    // (VectorScanConnectorFactory). Only threaded to `procedures` (CALL ailake.system.compact())
+    // today — search/scan/multimodal/insert go through JSON-serialized Trino handle classes
+    // (VectorScanHandles.kt) that this project has a documented history of subtle Jackson
+    // serialization bugs in (see that file's NB comment); extending them needs live-server
+    // verification this sandbox can't do, so it's deferred — see docs/guides/REST_CATALOG.md.
+    private val catalogOpts: Map<String, String> = emptyMap(),
 ) : Connector {
 
     private val metadata = VectorScanMetadata(
@@ -43,7 +50,7 @@ class VectorScanConnector(
     private val splitManager = VectorScanSplitManager()
     private val recordSetProvider = VectorScanRecordSetProvider()
     private val pageSinkProvider = AilakePageSinkProvider()
-    private val procedures = AilakeProcedures(tableUri, namespace, tableName)
+    private val procedures = AilakeProcedures(tableUri, namespace, tableName, catalogOpts)
 
     override fun beginTransaction(
         isolationLevel: IsolationLevel,

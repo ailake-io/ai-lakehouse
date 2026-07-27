@@ -107,7 +107,31 @@ df.write.format("io.ailake.spark.AilakeDataSource")
   .save()
 ```
 
-Trino and Flink don't have this wiring yet (see "Known limitations" below).
+### Trino
+
+Only `CALL ailake.system.compact()` supports REST catalog today, via new
+`ailake.catalog`/`ailake.rest-*` catalog properties:
+
+```properties
+# etc/catalog/ailake.properties
+connector.name=ailake
+ailake.table-uri=s3://my-lake/docs/
+ailake.catalog=rest
+ailake.rest-uri=https://catalog.example.com
+ailake.rest-auth=bearer
+ailake.rest-token=...
+```
+
+`search`/`search_full`/`search_multimodal`/`INSERT` do **not** support it yet —
+those go through `VectorScanHandles.kt`'s JSON-serialized Trino table/split
+handle classes (`VectorScanTableHandle`, `ScanTableHandle`,
+`AilakeIngestTableHandle`, etc), which that file's own doc comments flag as
+having a real prior history of subtle Jackson serialization bugs (a handle
+field silently not round-tripping coordinator→worker, only caught via a live
+Trino server test) — extending them needs the same live verification, out of
+reach in an offline sandbox. Tracked as a follow-up.
+
+Flink doesn't have this wiring at all yet (see "Known limitations" below).
 
 ## Airflow usage
 
@@ -157,10 +181,13 @@ silently falls back to the Hadoop catalog.
   path** (CLI shell-out never emits `--catalog`/`--rest-*`), and no native
   read-path support at all (no HTTP client in either — would need a new
   dependency, unlike the mechanical CLI-flag-forwarding fix elsewhere).
-- **Trino/Flink have no REST catalog wiring yet** (Spark now does — see "JVM
-  usage" below). None of the JSON request builders in `AilakeNative.kt` /
-  `AilakeNativeLoader.kt` set a `catalog`/`rest_*` field, and no catalog/session
-  property surfaces it either — every Trino/Flink call implicitly targets the
+- **Trino only wires REST catalog into `CALL ailake.system.compact()`** — see
+  "JNI usage → Trino" above for why search/scan/multimodal/INSERT are deferred
+  (JSON-serialized Trino handle classes with a documented prior serialization
+  bug history, needs live-server verification).
+- **Flink has no REST catalog wiring at all yet.** None of the JSON request
+  builders in `AilakeNativeLoader.kt` set a `catalog`/`rest_*` field, and no
+  DDL option surfaces it either — every Flink call implicitly targets the
   Hadoop catalog today.
 
 - **`Store` root vs. `RestCatalogConfig.warehouse` must be kept in sync manually**

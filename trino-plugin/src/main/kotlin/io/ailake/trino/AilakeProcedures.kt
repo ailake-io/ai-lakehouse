@@ -29,6 +29,11 @@ class AilakeProcedures(
     private val tableUri: String,
     private val namespace: String,
     private val tableName: String,
+    // REST Catalog (Fase 17/19) config — see VectorScanConnectorFactory's
+    // ailake.catalog/ailake.rest-* properties and docs/guides/REST_CATALOG.md.
+    // Safe to thread here (unlike search/scan/insert): this class isn't a
+    // JSON-serialized Trino handle, just a plain coordinator-side object.
+    private val catalogOpts: Map<String, String> = emptyMap(),
 ) {
     private val log = LoggerFactory.getLogger(AilakeProcedures::class.java)
 
@@ -49,7 +54,7 @@ class AilakeProcedures(
 
     /** Invoked by the Trino engine as `CALL ailake.system.compact()`. */
     fun compact(session: ConnectorSession) {
-        val filesCompacted = AilakeNative.compact(tableUri, namespace, tableName)
+        val filesCompacted = AilakeNative.compact(tableUri, namespace, tableName, catalogOpts = catalogOpts)
             ?: throw TrinoException(
                 StandardErrorCode.GENERIC_USER_ERROR,
                 "ailake compact failed for table=$namespace.$tableName — native library absent or the call " +
