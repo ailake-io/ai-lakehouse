@@ -624,10 +624,40 @@ private:
                 e.record_count    = (uint64_t)detail::read_zigzag(s);
                 e.file_size_bytes = (uint64_t)detail::read_zigzag(s);
 
-                // Skip map fields (column_sizes, value_counts, null_value_counts, nan_value_counts,
-                // lower_bounds, upper_bounds) — each is union null/array-of-map-records
-                // union tag 0 = null; tag 1 = array follows
+                // Skip map fields, in Iceberg manifest_entry schema order:
+                //   0 column_sizes        map<int, long>
+                //   1 value_counts        map<int, long>
+                //   2 null_value_counts   map<int, long>
+                //   3 nan_value_counts    map<int, long>
+                //   4 lower_bounds        map<int, bytes>
+                //   5 upper_bounds        map<int, bytes>
+                // each field itself is union null/array-of-map-records — union
+                // tag 0 = null; tag 1 = array follows.
+                //
+                // Bug found verifying batch_id/create_table against a real
+                // freshly-built ailake-cli (Column Statistics — value_counts/
+                // lower_bounds/upper_bounds/etc, real per-file data since a
+                // prior phase — see CHANGELOG's "Column Statistics" entry):
+                // fields 4/5's value is `bytes` (zigzag length prefix + N raw
+                // bytes, the truncated min/max value), not `long`. Reading only
+                // the zigzag length and never seeking past the N payload bytes
+                // left every subsequent field (key_metadata, split_offsets,
+                // equality_ids, sort_order_id, first_row_id) misaligned by
+                // however many payload bytes were left unconsumed — silently
+                // making key_metadata's own union tag read as garbage, most
+                // often landing on "null" (tag 0), so hnsw_offset/hnsw_len/
+                // centroid/etc were never actually parsed for ANY table with
+                // real column stats (i.e. any table written since Column
+                // Statistics shipped) — search_file() then saw
+                // !entry.hnsw_offset and silently returned empty, no error,
+                // no exception. Confirmed against fastavro reading the exact
+                // same manifest bytes as ground truth: key_metadata was always
+                // present and well-formed on the Rust side: the bug was 100%
+                // in this reader, not the writer. Was masked in earlier manual
+                // testing by only ever exercising tables with zero live rows
+                // to bound (empty maps → union tag 0 → loop body never runs).
                 for (int field = 0; field < 6; ++field) {
+                    bool value_is_bytes = (field == 4 || field == 5); // lower_bounds/upper_bounds
                     int64_t t = detail::read_zigzag(s);
                     if (t != 0) {
                         // array of records; read blocks until count=0
@@ -637,12 +667,12 @@ private:
                             if (bc < 0) { detail::read_zigzag(s); bc = -bc; }
                             for (int64_t r = 0; r < bc; ++r) {
                                 detail::read_zigzag(s); // key (int)
-                                detail::read_zigzag(s); // value (long or bytes len)
-                                // For lower/upper_bounds, value is bytes
-                                // For column_sizes etc., value is long — already read above
-                                // We skip by just reading zigzag; works for int/long fields.
-                                // For bytes fields (bounds), zigzag gave length, skip that many.
-                                // This is fragile but sufficient for AI-Lake's manifest structure.
+                                if (value_is_bytes) {
+                                    int64_t len = detail::read_zigzag(s); // byte-string length
+                                    if (len > 0) s.seekg(len, std::ios::cur); // skip payload
+                                } else {
+                                    detail::read_zigzag(s); // value (long)
+                                }
                             }
                         }
                     }

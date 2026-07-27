@@ -480,16 +480,17 @@ static void test_integration_write_batch_multi() {
 }
 
 // Reads "rows":N straight from `ailake info --format json` (real CLI call,
-// same substring-parse convention as compact/decay_memories) rather than
-// this header's own search() — see the FAIL comment on
-// test_integration_write_batch_multi/test_integration_compact above:
-// search() was independently found, while writing this test, to return 0
-// rows even on a single freshly-written file with no batch_id involved at
-// all (confirmed via a manual, ailake::search()-independent repro: the real
-// CLI's own `ailake search` correctly returns all 6 rows against the exact
-// same warehouse/table where this header's search() returns empty) — a
-// third instance of the pre-existing Avro/catalog-parsing bug class,
-// unrelated to batch_id, tracked separately from this addition.
+// same substring-parse convention as compact/decay_memories). Originally
+// added as a workaround for a real bug this test surfaced (this header's own
+// search() returned 0 rows on any table with real column stats — root cause:
+// list_files()'s manifest-entry reader treated lower_bounds/upper_bounds
+// (map<int,bytes>) as map<int,long>, never consuming the actual bytes
+// payload after their zigzag length prefix, misaligning every field read
+// after them including key_metadata's own union tag — since fixed, see
+// HadoopCatalog::list_files' comment on the field-skip loop in catalog.hpp).
+// Kept as the row-count check anyway: it's a real, independent CLI round
+// trip (not this header's own read path), a stronger signal than asserting
+// against the same code under test.
 static int row_count_via_info(const std::string& warehouse, const std::string& table_id) {
     std::string cmd = ailake::detail::shell_quote(ailake::detail::resolve_bin())
         + " --store " + ailake::detail::shell_quote(warehouse)
@@ -526,6 +527,16 @@ static void test_integration_batch_id_idempotency() {
         opts2.batch_id = "test-batch-002"; // different batch_id: not a retry, must add rows
         ailake::write_batch(warehouse, "default.docs", fixture_path(), opts2);
         CHECK_EQ(row_count_via_info(warehouse, "default.docs"), 12);
+
+        // Belt-and-suspenders: this header's own search() independently
+        // agrees with `info`'s row count (exercises the manifest-parsing fix
+        // above through the actual read path applications use, not just the
+        // CLI round trip).
+        ailake::HadoopCatalog cat(warehouse);
+        float q[4] = {0.1f, 0.2f, 0.3f, 0.4f};
+        ailake::SearchOptions sopts; sopts.top_k = 20;
+        auto results = ailake::search(cat, "default", "docs", q, 4, sopts);
+        CHECK_EQ(results.size(), (size_t)12);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FAIL integration batch_id idempotency: %s\n", e.what());
         ++g_fail;
