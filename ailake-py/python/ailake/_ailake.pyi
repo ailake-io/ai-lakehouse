@@ -66,7 +66,17 @@ class VectorColSpec:
     ) -> None: ...
 
 class TableWriter:
-    """Python-facing table writer.  Wraps ``ailake_query::TableWriter``."""
+    """Python-facing table writer.  Wraps ``ailake_query::TableWriter``.
+
+    Single-commit lifecycle: call ``write_batch()``/``write_batch_multi()``/etc.
+    any number of times to accumulate rows, then ``commit()`` exactly once to
+    flush everything as one Iceberg snapshot. ``commit()`` consumes the writer
+    -- every method call after that raises ``ValueError: "TableWriter already
+    committed"``. For a multi-chunk write (e.g. a migration script), either
+    keep one writer and call ``commit()`` once at the end (one snapshot for
+    the whole job), or open a **new** ``TableWriter`` per chunk (incremental
+    snapshots -- safer for a long-running/resumable job).
+    """
 
     def __init__(
         self,
