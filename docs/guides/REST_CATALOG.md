@@ -131,7 +131,27 @@ field silently not round-tripping coordinator→worker, only caught via a live
 Trino server test) — extending them needs the same live verification, out of
 reach in an offline sandbox. Tracked as a follow-up.
 
-Flink doesn't have this wiring at all yet (see "Known limitations" below).
+### Flink
+
+Add `'catalog' = 'rest'` + `'rest-*'` options to either `CREATE TABLE`'s `WITH
+(...)` clause (source/sink both — unlike Trino, this reaches search/scan/
+insert/DELETE, since Flink's DynamicTableSource/Sink objects use plain Java
+serialization, not the JSON-handle round-trip that makes Trino's case risky):
+
+```sql
+CREATE TABLE docs_ingest (
+  id BIGINT, embedding ARRAY<FLOAT>
+) WITH (
+  'connector' = 'ailake',
+  'warehouse' = 's3://my-lake/',
+  'table-name' = 'docs',
+  'vector.dim' = '1536',
+  'catalog' = 'rest',
+  'rest-uri' = 'https://catalog.example.com',
+  'rest-auth' = 'bearer',
+  'rest-token' = '...'
+);
+```
 
 ## Airflow usage
 
@@ -185,11 +205,6 @@ silently falls back to the Hadoop catalog.
   "JNI usage → Trino" above for why search/scan/multimodal/INSERT are deferred
   (JSON-serialized Trino handle classes with a documented prior serialization
   bug history, needs live-server verification).
-- **Flink has no REST catalog wiring at all yet.** None of the JSON request
-  builders in `AilakeNativeLoader.kt` set a `catalog`/`rest_*` field, and no
-  DDL option surfaces it either — every Flink call implicitly targets the
-  Hadoop catalog today.
-
 - **`Store` root vs. `RestCatalogConfig.warehouse` must be kept in sync manually**
   for local-filesystem storage. The catalog computes each table's `location` from
   `warehouse`; the `Store` resolves `DataFileEntry.path` against its own root
