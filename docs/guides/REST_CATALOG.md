@@ -84,7 +84,42 @@ flattened into its JSON request body, alongside the existing `warehouse` field:
 `ailake_vector_search_json`/`do_search`'s raw-pointer legacy entry point (no JSON
 body) stays Hadoop-only — there's nowhere to carry the config.
 
+## Airflow usage
+
+Set catalog config in the Airflow Connection's `extra` JSON (alongside cloud
+credentials) — `AilakeHook.run_cli()` forwards it as `--catalog`/`--rest-*` CLI
+flags automatically, single choke point for every hook method and operator:
+
+```json
+{
+    "catalog": "rest",
+    "rest_uri": "https://catalog.example.com",
+    "rest_prefix": "my_catalog",
+    "rest_warehouse": "s3://my-bucket/warehouse",
+    "rest_auth": "bearer",
+    "rest_token": "..."
+}
+```
+
+Omit `catalog` (or set it to `"hadoop"`) for the default local/S3-prefix
+metadata-dir catalog — unchanged behavior, no flags added.
+
 ## Known limitations
+
+- **`duckdb-ailake` has no REST catalog wiring yet.** The 9 `AilakeLib::*`
+  methods (`search`, `write_batch`, `compact`, etc.) don't forward a
+  `catalog`/`rest_*` field into their hand-built request JSON — even though
+  the statically-linked `ailake-jni` binary already has `rest-catalog` support
+  compiled in. Needs C++-side plumbing (new named parameters or a shared
+  config struct threaded through each method), not a Rust change.
+- **`ailake-go` and `ailake-cpp` have no REST catalog wiring on their write
+  path** (CLI shell-out never emits `--catalog`/`--rest-*`), and no native
+  read-path support at all (no HTTP client in either — would need a new
+  dependency, unlike the mechanical CLI-flag-forwarding fix elsewhere).
+- **Spark/Trino/Flink have no REST catalog wiring.** None of the JSON request
+  builders in `AilakeNative.{scala,kt}` / `AilakeNativeLoader.kt` set a
+  `catalog`/`rest_*` field, and no catalog/session property surfaces it either
+  — every JVM-plugin call implicitly targets the Hadoop catalog today.
 
 - **`Store` root vs. `RestCatalogConfig.warehouse` must be kept in sync manually**
   for local-filesystem storage. The catalog computes each table's `location` from
