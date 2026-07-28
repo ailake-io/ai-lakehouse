@@ -56,6 +56,7 @@ struct AilakeSearchBindData : public TableFunctionData {
     std::string        hybrid_text;        // non-empty = hybrid BM25+vector mode
     std::string        text_column     = "chunk_text";
     float              bm25_weight     = 0.5f;
+    std::string        catalog_opts_json; // REST catalog config JSON — see docs/guides/REST_CATALOG.md
 };
 
 // ── Global state (search executed once in Init, results cached) ───────────────
@@ -121,6 +122,9 @@ static unique_ptr<FunctionData> AilakeSearchBind(
                 data->text_column = StringValue::Get(named.second);
         } else if (named.first == "bm25_weight") {
             data->bm25_weight = FloatValue::Get(named.second);
+        } else if (named.first == "catalog_opts_json") {
+            if (!named.second.IsNull())
+                data->catalog_opts_json = StringValue::Get(named.second);
         }
     }
 
@@ -157,7 +161,8 @@ static unique_ptr<GlobalTableFunctionState> AilakeSearchInit(
         bind.hybrid_text,
         bind.text_column,
         bind.bm25_weight,
-        bind.ns
+        bind.ns,
+        bind.catalog_opts_json
     );
 
     return std::move(state);
@@ -216,6 +221,7 @@ void RegisterAilakeSearch(duckdb::ExtensionLoader &loader) {
     func.named_parameters["hybrid_text"]      = LogicalType::VARCHAR;
     func.named_parameters["text_column"]      = LogicalType::VARCHAR;
     func.named_parameters["bm25_weight"]      = LogicalType::FLOAT;
+    func.named_parameters["catalog_opts_json"] = LogicalType::VARCHAR;
 
     loader.RegisterFunction( func);
 }

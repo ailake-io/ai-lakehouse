@@ -106,6 +106,42 @@ class TestAilakeHook:
             with pytest.raises(RuntimeError, match="ailake CLI failed"):
                 hook.run_cli("search", "default.docs")
 
+    def test_catalog_args_empty_by_default(self):
+        hook = _make_hook()
+        assert hook._catalog_args() == []
+
+    def test_catalog_args_hadoop_explicit_is_empty(self):
+        hook = _make_hook(extra={"catalog": "hadoop"})
+        assert hook._catalog_args() == []
+
+    def test_catalog_args_rest_full(self):
+        hook = _make_hook(extra={
+            "catalog": "rest",
+            "rest_uri": "https://catalog.example.com",
+            "rest_prefix": "my_catalog",
+            "rest_warehouse": "s3://my-bucket/warehouse",
+            "rest_auth": "bearer",
+            "rest_token": "tok123",
+        })
+        args = hook._catalog_args()
+        assert args[:2] == ["--catalog", "rest"]
+        assert "--rest-uri" in args and "https://catalog.example.com" in args
+        assert "--rest-prefix" in args and "my_catalog" in args
+        assert "--rest-warehouse" in args and "s3://my-bucket/warehouse" in args
+        assert "--rest-auth" in args and "bearer" in args
+        assert "--rest-token" in args and "tok123" in args
+        # oauth2 fields absent from extra must not appear
+        assert "--rest-oauth-client-secret" not in args
+
+    def test_run_cli_forwards_catalog_args(self):
+        hook = _make_hook(extra={"catalog": "rest", "rest_uri": "https://catalog.example.com"})
+        with patch("subprocess.run", return_value=_completed()) as mock_run:
+            hook.run_cli("search", "default.docs")
+        cmd = mock_run.call_args[0][0]
+        assert "--catalog" in cmd
+        assert cmd[cmd.index("--catalog") + 1] == "rest"
+        assert "--rest-uri" in cmd
+
     def test_get_table_info_parses_json(self):
         payload = json.dumps({"table": "docs", "snapshot_id": 999, "rows": 100})
         hook = _make_hook()

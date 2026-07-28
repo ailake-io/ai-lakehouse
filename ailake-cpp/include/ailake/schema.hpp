@@ -53,7 +53,8 @@ struct ToolCallSchema {
 
 /// Column layout for episodic agent memory tables (Phase 9).
 /// recency_weight decays over time: exp(-λ * days_since_access).
-/// Use ailake::Agent.recall() for hybrid scoring (distance × recency × importance).
+/// Hybrid scoring (distance × recency × importance) is a Python-only helper
+/// today — see ailake.Agent.recall() in ailake-py; no C++ equivalent exists.
 struct EpisodicMemorySchema {
     // Recency and importance signals
     float    recency_weight    = 1.0f; // starts at 1.0, decays via exp(-λ*t)

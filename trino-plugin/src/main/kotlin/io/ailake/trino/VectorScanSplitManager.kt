@@ -44,6 +44,10 @@ class VectorScanSplitManager : ConnectorSplitManager {
         val queryVectorCsv = session.getProperty("query_vector", String::class.java) ?: ""
         val queryText = session.getProperty("query_text", String::class.java) ?: ""
         val hybridWeight = session.getProperty("hybrid_weight", Double::class.javaObjectType)?.toFloat() ?: 0.5f
+        // Same javaObjectType note as topK above — boxed types required for
+        // PropertyMetadata.integerProperty/doubleProperty lookups.
+        val efSearch = session.getProperty("ef_search", Int::class.javaObjectType) ?: 0
+        val pruningThreshold = session.getProperty("pruning_threshold", Double::class.javaObjectType)?.toFloat() ?: -1f
         // Parse CSV→bytes once at planning; split carries compact Base64 binary.
         val queryBytes = csvFloatsToBase64(queryVectorCsv)
         // ScanTableHandle (ailake.default.search_full, Fase 11) reuses VectorScanSplit as-is —
@@ -52,28 +56,32 @@ class VectorScanSplitManager : ConnectorSplitManager {
         if (table is ScanTableHandle) {
             return FixedSplitSource(
                 VectorScanSplit(
-                    tableUri     = table.tableUri,
-                    queryBytes   = queryBytes,
-                    topK         = topK,
-                    namespace    = table.namespace,
-                    tableName    = table.tableName,
-                    vectorColumn = table.vectorColumn,
-                    queryText    = queryText,
-                    hybridWeight = hybridWeight,
+                    tableUri         = table.tableUri,
+                    queryBytes       = queryBytes,
+                    topK             = topK,
+                    namespace        = table.namespace,
+                    tableName        = table.tableName,
+                    vectorColumn     = table.vectorColumn,
+                    queryText        = queryText,
+                    hybridWeight     = hybridWeight,
+                    efSearch         = efSearch,
+                    pruningThreshold = pruningThreshold,
                 )
             )
         }
         val handle = table as VectorScanTableHandle
         return FixedSplitSource(
             VectorScanSplit(
-                tableUri     = handle.tableUri,
-                queryBytes   = queryBytes,
-                topK         = topK,
-                namespace    = handle.namespace,
-                tableName    = handle.tableName,
-                vectorColumn = handle.vectorColumn,
-                queryText    = queryText,
-                hybridWeight = hybridWeight,
+                tableUri         = handle.tableUri,
+                queryBytes       = queryBytes,
+                topK             = topK,
+                namespace        = handle.namespace,
+                tableName        = handle.tableName,
+                vectorColumn     = handle.vectorColumn,
+                queryText        = queryText,
+                hybridWeight     = hybridWeight,
+                efSearch         = efSearch,
+                pruningThreshold = pruningThreshold,
             )
         )
     }

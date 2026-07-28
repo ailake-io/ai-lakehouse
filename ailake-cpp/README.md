@@ -149,10 +149,15 @@ struct FileSearchResult {
 struct HadoopCatalog {
     explicit HadoopCatalog(std::string warehouse_root);
 
-    TableInfo            load_table(const std::string& ns, const std::string& tbl);
-    std::vector<DataFileEntry> list_files(const std::string& ns, const std::string& tbl);
+    TableInfo            load_table(const std::string& ns, const std::string& tbl) const;
+    std::vector<DataFileEntry> list_files(const std::string& ns, const std::string& tbl) const;
+    // Equality delete files for the current snapshot (Phase H) — see
+    // "Reading back equality deletes" under ailake::delete_where below.
+    std::vector<EqualityDeleteFile> list_equality_deletes(const std::string& ns, const std::string& tbl) const;
+    static std::vector<std::pair<std::string, std::string>>
+                          read_equality_delete_values(const std::string& resolved_path);
     std::string          resolve_path(const std::string& ns, const std::string& tbl,
-                                      const std::string& rel_path);
+                                      const std::string& rel_path) const;
 };
 ```
 
@@ -226,10 +231,13 @@ struct DataFileEntry {
     std::string batch_id;
     std::string embedding_model; // "<name>" or "<name>@<version>"; empty if not set
     std::string partition_value; // agent_id or other partition value (Phase 9)
+    std::optional<DeletionVectorRef> deletion_vector; // Iceberg V3 Deletion Vector (Phase H)
 };
 ```
 
 `extra_vector_indexes` is populated from the `extra_vector_indexes` JSON array in Avro `key_metadata`; used by `search_multimodal` to locate secondary column HNSW indexes.
+
+`deletion_vector` points to a Roaring Bitmap blob in a Puffin `.dvd` file (path/offset/length/cardinality) — parsed from `key_metadata`, but not yet decoded/applied by `search()`. See "Known limitations" under `ailake::delete_where` above.
 
 ### Dim validation in `search()`
 
@@ -293,9 +301,55 @@ Uses geometric pruning on the primary column centroid, dispatches HNSW search pe
 
 ## Write operations
 
-The C++ header-only SDK delegates write operations (write_batch, write_batch_multi, delete_where, evolve_schema, compact) to the `ailake` CLI binary via subprocess. No Rust FFI required at the C++ layer.
+The C++ header-only SDK delegates write operations (create_table, write_batch, write_batch_multi, delete_where, evolve_schema, compact) to the `ailake` CLI binary via subprocess. No Rust FFI required at the C++ layer.
 
 A row with a `NaN`/`Infinity` embedding value is rejected by the CLI; `run_cmd` captures the CLI's combined stdout+stderr and throws `std::runtime_error` with the full output, so the actual reason reaches the caller. `search`/`search_text`'s `top_k` is capped at 100,000 by the underlying `ailake_query` core (same limit enforced at the JNI C-ABI boundary used by Spark/Trino/Flink).
+
+### `ailake::create_table`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Creates an empty table with the given vector schema/policy before any data
+// is written. Unlike write_batch (which auto-creates with default policy),
+// this is the only way to set pq_only/ivf_residual/modality or HNSW tuning
+// up front.
+ailake::CreateTableOptions opts;
+opts.metric = "cosine";
+opts.precision = "f16";
+opts.pq_only = true;          // omit raw vector column, index-only
+opts.hnsw_m = 32;
+ailake::create_table(
+    "/path/to/warehouse",  // warehouse root
+    "default.docs",        // "namespace.table"
+    1536,                  // vector dimension
+    opts
+);
+// throws std::runtime_error if the CLI binary is not found or exits non-zero
+```
+
+### `ailake::write_batch`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Inserts a Parquet file into an AI-Lake table. `opts.vec_col` (default
+// "embedding") identifies which Parquet column holds the embedding vectors.
+// The table is created on first write with default policy if it doesn't
+// already exist — use create_table above for pq_only/ivf_residual/modality
+// or HNSW tuning set up front instead.
+ailake::WriteBatchOptions opts;
+opts.vec_col = "embedding";
+opts.metric = "cosine";
+opts.precision = "f16";
+ailake::write_batch(
+    "/path/to/warehouse",   // warehouse root
+    "default.docs",         // "namespace.table"
+    "/local/batch.parquet", // source Parquet file (must have opts.vec_col column)
+    opts
+);
+// throws std::runtime_error if the CLI binary is not found or exits non-zero
+```
 
 ### `ailake::write_batch_multi`
 
@@ -326,10 +380,26 @@ ailake::delete_where(
     "/path/to/warehouse",  // warehouse root
     "default.my_table",    // "namespace.table"
     "id",                  // equality delete column
-    {"doc-1", "doc-2"}     // values to delete
+    {"doc-1", "doc-2"},    // values to delete
+    {}                     // optional catalog_opts (REST catalog) — {} = default Hadoop catalog
 );
 // throws std::runtime_error on failure
 ```
+
+**Reading back equality deletes** — `HadoopCatalog::list_equality_deletes` + `read_equality_delete_values` (Phase H) let a caller verify or apply a delete predicate against rows it decodes itself (this header has no native Parquet-row reader — see "Known limitations" below):
+
+```cpp
+ailake::HadoopCatalog cat("/path/to/warehouse");
+auto deletes = cat.list_equality_deletes("default", "my_table");
+for (auto& d : deletes) {
+    std::string path = cat.resolve_path("default", "my_table", d.path);
+    auto values = ailake::HadoopCatalog::read_equality_delete_values(path); // {(col, value), ...}
+}
+```
+
+**Known limitations (Phase H, position/equality deletes)** — `ailake::search()` does **not** mask deleted rows, for both mechanisms, unlike the real `ailake` CLI's own search:
+- Equality deletes (`delete_where`): this header has no native Parquet-row reader (see `ailake-go`'s `Scan`/`FetchRows` for the equivalent — a new C++ Parquet dependency would be needed to decode a predicate column here).
+- Deletion Vectors (`delete_rows`, V3): `DataFileEntry::deletion_vector` **is** now correctly parsed (was previously dropped entirely — every other `key_metadata` field like centroid/hnsw_offset was parsed, this one silently wasn't) and exposed for callers, but `search()` doesn't decode the Puffin `.dvd` blob's Roaring Bitmap itself yet — unlike `ailake-go` (which added `github.com/RoaringBitmap/roaring`), this header has zero external dependencies today, and hand-rolling a correctness-critical binary bitmap format carries real risk (see the Avro parsing bug history in `catalog.hpp`'s own comments). Left as a deliberate follow-up pending a decision on how to decode it.
 
 ### `ailake::evolve_schema`
 
@@ -341,7 +411,8 @@ ailake::evolve_schema(
     "/path/to/warehouse",
     "default.my_table",                        // "namespace.table"
     {{"source_url", "string", ""}},             // add_columns: {name, type, initial_default}
-    {}                                           // rename_columns: {} empty = no renames
+    {},                                          // rename_columns: {} empty = no renames
+    {}                                           // optional catalog_opts (REST catalog)
 );
 // returns the new schema_id (-1 if not parseable from CLI output)
 ```
@@ -361,6 +432,69 @@ int files_compacted = ailake::compact(
 ```
 
 All four functions invoke the `ailake` binary via `resolve_bin()` (respects `AILAKE_BIN` env var). An empty `values` list in `delete_where` is a no-op; an empty add/rename list in `evolve_schema` is a no-op returning 0.
+
+### `ailake::decay_memories`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Recompute recency weights (exp(-λ×days_since_access)) across all memory
+// files in the table (Phase 9 agent-memory schema).
+int files_updated = ailake::decay_memories("/path/to/warehouse", "default.memories", 0.1f);
+```
+
+### `ailake::migrate`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Re-embed a table's vector column via an external embed command. embed_cmd
+// reads a JSON array of strings from stdin, writes a JSON array of float
+// arrays to stdout.
+ailake::MigrateOptions opts;
+opts.old_column = "embedding";
+opts.new_column = "embedding_v2";
+opts.strategy   = "dual-write-then-cutover";
+ailake::migrate("/path/to/warehouse", "default.docs", "python3 embed.py", opts);
+```
+
+### `ailake::delete_rows`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Mark rows as deleted using Iceberg Deletion Vectors (V3 tables only —
+// requires CreateTableOptions::format_version = 3). file is the Parquet
+// data file path; no data-file-listing API exists in this header, so find it
+// on disk directly, or track it from your own write.
+ailake::delete_rows("/path/to/warehouse", "default.docs", "data/part-00001.parquet", {0, 5, 42});
+```
+
+### `ailake::add_vector_column` / `ailake::backfill_vector_column`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Add a new vector column to the schema (no data files rewritten) — old
+// files return null for it until backfill_vector_column rewrites them.
+ailake::AddVectorColumnOptions avopts;
+avopts.metric = "cosine";
+ailake::add_vector_column("/path/to/warehouse", "default.docs", "image_embedding", 512, avopts);
+
+ailake::BackfillVectorColumnOptions bopts;
+bopts.text_column = "image_uri";
+ailake::backfill_vector_column("/path/to/warehouse", "default.docs", "image_embedding", "python3 embed_images.py", bopts);
+```
+
+### `ailake::estimate`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Storage-usage estimate before writing — pure math, no I/O, no warehouse.
+// Returns the raw JSON response string (this header has no JSON dependency).
+std::string json = ailake::estimate("1M", 1536);
+```
 
 ### `ailake::search_text`
 
@@ -429,6 +563,18 @@ When `detect_hardware().has_rocm` is true, flat-scan delegates to `hipBLAS` SGEM
 cmake -B build && cmake --build build
 ./build/ailake_search -w /data/warehouse -t default.docs -d 1536 -k 10
 ```
+
+## Test
+
+```bash
+cmake -B build && cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+6 test binaries (`test_footer`, `test_hnsw`, `test_ivfpq`, `test_write`, `test_fts`,
+`test_catalog_paths`). `test_write`'s integration tests are gated by env vars and skip
+cleanly when absent: `AILAKE_BIN` (a real `ailake` CLI binary) enables round-trip tests
+against a live table; `AILAKE_FIXTURE` additionally enables tests against a pre-built table.
 
 ## License
 

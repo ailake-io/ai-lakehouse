@@ -72,7 +72,9 @@ class AilakeTable(val handle: AilakeWriteHandle, tableSchema: StructType = Ailak
           "equality deletes, no row-level scan-and-delete is available for this table",
         )
     }
-    val ok = AilakeNative.deleteWhere(handle.tableUri, handle.namespace, handle.tableName, column, values)
+    val ok = AilakeNative.deleteWhere(
+      handle.tableUri, handle.namespace, handle.tableName, column, values, handle.catalogOpts
+    )
     if (!ok) {
       throw new RuntimeException(
         s"ailake DELETE WHERE $column IN (...) failed for ${handle.namespace}.${handle.tableName} — see logs")

@@ -42,6 +42,31 @@ type DataFileEntry struct {
 	BatchID            string
 	EmbeddingModel     string // "<name>" or "<name>@<version>"; empty if not set
 	PartitionValue     string // agent_id or other partition value (Phase 9)
+	// DeletionVector points to a Roaring Bitmap of deleted row positions
+	// (Iceberg V3 Deletion Vectors, Phase H) for this file. Nil when the file
+	// has no deletion vector. See LoadDeletionVector.
+	DeletionVector *DeletionVectorRef
+}
+
+// DeletionVectorRef mirrors ailake_catalog::provider::DeletionVector — a
+// pointer to a Roaring Bitmap blob inside a Puffin ".dvd" file. offset/length
+// address the bitmap bytes directly within the file (after the 4-byte "PFAc"
+// Puffin magic header); no full Puffin footer parse is needed to read it.
+type DeletionVectorRef struct {
+	Path        string `json:"path"`
+	Offset      uint64 `json:"offset"`
+	Length      uint64 `json:"length"`
+	Cardinality int64  `json:"cardinality"`
+}
+
+// EqualityDeleteFile mirrors ailake_catalog::provider::EqualityDeleteFile —
+// a reference to an Iceberg equality delete Avro file (Phase H). Read via
+// LoadEqualityDeleteFilter to build an in-memory predicate filter.
+type EqualityDeleteFile struct {
+	Path          string
+	EqualityIDs   []int32
+	RecordCount   uint64
+	FileSizeBytes uint64
 }
 
 // PartitionDef mirrors ailake_core::PartitionDef.
@@ -255,16 +280,23 @@ func (c *HadoopCatalog) ListFiles(namespace, name string) ([]DataFileEntry, erro
 	// table directory, which would double-prefix namespace/table).
 	manifestListPath := c.resolveAvroPath(manifestList)
 
-	// Read manifest list → list of manifest file paths
-	manifestPaths, err := readManifestList(manifestListPath)
+	// Read manifest list → list of manifest files, each tagged with content
+	// (0=data, 1=deletes — see manifest_commit.rs::list_equality_deletes_from_metadata,
+	// the same manifest-list "content" field this mirrors).
+	manifestEntries, err := readManifestList(manifestListPath)
 	if err != nil {
 		return nil, fmt.Errorf("catalog: read manifest list: %w", err)
 	}
 
-	// Read each manifest file
+	// Read each data manifest (content=0). Delete manifests (content=1) are
+	// skipped here — their entries describe equality-delete files, not data
+	// files; see ListEqualityDeletes.
 	var entries []DataFileEntry
-	for _, mp := range manifestPaths {
-		mp = c.resolveAvroPath(mp)
+	for _, me := range manifestEntries {
+		if me.Content != 0 {
+			continue
+		}
+		mp := c.resolveAvroPath(me.Path)
 		fileEntries, err := readManifestFile(mp)
 		if err != nil {
 			return nil, fmt.Errorf("catalog: read manifest %s: %w", mp, err)
@@ -272,6 +304,54 @@ func (c *HadoopCatalog) ListFiles(namespace, name string) ([]DataFileEntry, erro
 		entries = append(entries, fileEntries...)
 	}
 	return entries, nil
+}
+
+// ListEqualityDeletes returns all Iceberg equality delete file references for
+// the current snapshot (Phase H — see EqualityDeleteFilter). Mirrors
+// ailake_catalog's list_equality_deletes_from_metadata: walks the same
+// manifest list as ListFiles, but reads only content=1 (delete) manifests.
+func (c *HadoopCatalog) ListEqualityDeletes(namespace, name string) ([]EqualityDeleteFile, error) {
+	dir := c.tableDir(namespace, name)
+	meta, err := c.readMetadata(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	currentSnapID, _ := meta["current-snapshot-id"].(float64)
+	snapshots, _ := meta["snapshots"].([]any)
+	manifestList := ""
+	for _, s := range snapshots {
+		snap, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		if sid, _ := snap["snapshot-id"].(float64); sid == currentSnapID {
+			manifestList, _ = snap["manifest-list"].(string)
+			break
+		}
+	}
+	if manifestList == "" {
+		return nil, nil // no snapshot yet — no deletes possible
+	}
+
+	manifestEntries, err := readManifestList(c.resolveAvroPath(manifestList))
+	if err != nil {
+		return nil, fmt.Errorf("catalog: read manifest list: %w", err)
+	}
+
+	var deletes []EqualityDeleteFile
+	for _, me := range manifestEntries {
+		if me.Content != 1 {
+			continue
+		}
+		mp := c.resolveAvroPath(me.Path)
+		fileEntries, err := readEqualityDeleteManifest(mp)
+		if err != nil {
+			return nil, fmt.Errorf("catalog: read delete manifest %s: %w", mp, err)
+		}
+		deletes = append(deletes, fileEntries...)
+	}
+	return deletes, nil
 }
 
 func (c *HadoopCatalog) readMetadata(tableDir string) (map[string]any, error) {
@@ -328,8 +408,16 @@ func resolveWarehousePath(warehouse, path string) string {
 	return filepath.Join(warehouse, path)
 }
 
-// readManifestList reads an Iceberg manifest list (Avro OCF) and returns manifest file paths.
-func readManifestList(path string) ([]string, error) {
+// manifestListEntry is one row of an Iceberg manifest list — a manifest file
+// path tagged with its content type (0=data, 1=deletes; manifest_file.content,
+// field-id 517 — see avro_manifest.rs::MANIFEST_LIST_SCHEMA_STR).
+type manifestListEntry struct {
+	Path    string
+	Content int
+}
+
+// readManifestList reads an Iceberg manifest list (Avro OCF) and returns manifest file entries.
+func readManifestList(path string) ([]manifestListEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -340,7 +428,7 @@ func readManifestList(path string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("avro: %w", err)
 	}
-	var paths []string
+	var entries []manifestListEntry
 	for ocf.Scan() {
 		raw, err := ocf.Read()
 		if err != nil {
@@ -350,11 +438,20 @@ func readManifestList(path string) ([]string, error) {
 		if !ok {
 			continue
 		}
-		if p, ok := rec["manifest_path"].(string); ok {
-			paths = append(paths, p)
+		p, ok := rec["manifest_path"].(string)
+		if !ok {
+			continue
 		}
+		// content defaults to 0 (data) for manifests written before this field
+		// existed — matches the schema's own field-level default of unset=DATA.
+		// asInt64 (not a strict type assertion) since goavro's decoded Go type
+		// for a plain Avro "int" varies by version/path (int32 in practice, but
+		// asInt64 already handles the full int32/int64/float64/string spread
+		// used elsewhere in this file for the same reason).
+		content := int(asInt64(rec["content"]))
+		entries = append(entries, manifestListEntry{Path: p, Content: content})
 	}
-	return paths, ocf.Err()
+	return entries, ocf.Err()
 }
 
 // ExtraVectorIndex mirrors ailake_catalog::provider::ExtraVectorIndex.
@@ -382,6 +479,7 @@ type ailakeEntryExt struct {
 	EmbeddingModel     *string            `json:"embedding_model"`
 	ExtraVectorIndexes []ExtraVectorIndex `json:"extra_vector_indexes"`
 	PartitionValue     *string            `json:"partition_value"`
+	DeletionVector     *DeletionVectorRef `json:"deletion_vector"`
 }
 
 // readManifestFile reads an Iceberg manifest file (Avro OCF) and returns DataFileEntry list.
@@ -474,6 +572,76 @@ func readManifestFile(path string) ([]DataFileEntry, error) {
 		entry.ExtraVectorIndexes = ext.ExtraVectorIndexes
 		if ext.PartitionValue != nil {
 			entry.PartitionValue = *ext.PartitionValue
+		}
+		entry.DeletionVector = ext.DeletionVector
+		entries = append(entries, entry)
+	}
+	return entries, ocf.Err()
+}
+
+// readEqualityDeleteManifest reads an Iceberg delete manifest (Avro OCF,
+// content=1 in the manifest list) and returns its equality delete file
+// references — entries where data_file.content=2 (EQUALITY_DELETES). Mirrors
+// ailake_catalog::avro_manifest::read_equality_delete_manifest; uses the same
+// manifest_entry schema/writer as readManifestFile (write_avro_container with
+// MANIFEST_ENTRY_SCHEMA_STR), so it's structurally the same file shape.
+func readEqualityDeleteManifest(path string) ([]EqualityDeleteFile, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	ocf, err := goavro.NewOCFReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("avro: %w", err)
+	}
+
+	var entries []EqualityDeleteFile
+	for ocf.Scan() {
+		raw, err := ocf.Read()
+		if err != nil {
+			return nil, err
+		}
+		rec, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		df, ok := rec["data_file"]
+		if !ok {
+			continue
+		}
+		dfRec, ok := df.(map[string]any)
+		if !ok {
+			continue
+		}
+		if content := asInt64(dfRec["content"]); content != 2 {
+			continue // not an equality-delete entry
+		}
+		filePath, _ := dfRec["file_path"].(string)
+		if filePath == "" {
+			continue
+		}
+		entry := EqualityDeleteFile{
+			Path:          filePath,
+			RecordCount:   uint64(asInt64(dfRec["record_count"])),
+			FileSizeBytes: uint64(asInt64(dfRec["file_size_in_bytes"])),
+		}
+		// equality_ids: Avro union ["null", {"type":"array","items":"int"}] —
+		// goavro returns a non-null union as map[string]interface{}{"array": []interface{}{...}}.
+		if eqIDs := dfRec["equality_ids"]; eqIDs != nil {
+			var rawIDs []any
+			switch v := eqIDs.(type) {
+			case []any:
+				rawIDs = v
+			case map[string]any:
+				if arr, ok := v["array"].([]any); ok {
+					rawIDs = arr
+				}
+			}
+			for _, id := range rawIDs {
+				entry.EqualityIDs = append(entry.EqualityIDs, int32(asInt64(id)))
+			}
 		}
 		entries = append(entries, entry)
 	}

@@ -39,6 +39,12 @@ class AilakeSparkExtensions extends (SparkSessionExtensions => Unit) {
  *
  * Cross-modal search: `spark.ailakeSearchMultimodal(tableUri, queries, topK)` returns
  * columns: row_id (Long), rrf_score (Double), file_path (String).
+ *
+ * REST Catalog: every method below takes a `catalogOpts: Map[String, String]` (default
+ * empty = Hadoop catalog), e.g. `Map("catalog" -> "rest", "rest_uri" -> "...", "rest_auth"
+ * -> "bearer", "rest_token" -> "...")` — see docs/guides/REST_CATALOG.md. `ailakeWrite`
+ * (the DataSourceV2 path) instead takes `.option("catalog", "rest").option("rest-uri", ...)`
+ * on the DataFrameWriter, same options `spark.sql.catalog.<name>.rest-*` uses.
  */
 object implicits {
   implicit class AilakeSession(private val spark: SparkSession) extends AnyVal {
@@ -54,21 +60,27 @@ object implicits {
      *                    and `ailakeSearchWithData` had before being wired.
      * @param textColumn  Parquet column for BM25 scoring when `hybridText` is set (default "chunk_text")
      * @param bm25Weight  BM25 weight in RRF fusion when `hybridText` is set (0.0 = pure vector, 1.0 = pure BM25)
+     * @param efSearch    HNSW ef_search — higher recall at the cost of latency (server default: 50)
+     * @param pruningThreshold geometric pruning cutoff (server default: no pruning)
      */
     def ailakeSearch(
-      tableUri:    String,
-      queryVector: Array[Float],
-      topK:        Int,
-      namespace:   String = "default",
-      tableName:   String = "",
-      hybridText:  Option[String] = None,
-      textColumn:  String = "chunk_text",
-      bm25Weight:  Float = 0.5f,
+      tableUri:         String,
+      queryVector:      Array[Float],
+      topK:             Int,
+      namespace:        String = "default",
+      tableName:        String = "",
+      hybridText:       Option[String] = None,
+      textColumn:       String = "chunk_text",
+      bm25Weight:       Float = 0.5f,
+      catalogOpts:      Map[String, String] = Map.empty,
+      efSearch:         Option[Int] = None,
+      pruningThreshold: Option[Float] = None,
     ): DataFrame = {
       val plan = VectorSearchPlan(tableUri, queryVector, topK)
       val rows = AilakeNative.search(
         tableUri, queryVector, topK, namespace = namespace, tableName = tableName,
-        hybridText = hybridText, textColumn = textColumn, bm25Weight = bm25Weight)
+        hybridText = hybridText, textColumn = textColumn, bm25Weight = bm25Weight,
+        catalogOpts = catalogOpts, efSearch = efSearch, pruningThreshold = pruningThreshold)
       val sparkRows = rows.map(r => Row(r.rowId, r.distance.toDouble, r.filePath))
       spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), plan.schema)
     }
@@ -88,13 +100,15 @@ object implicits {
       textColumns:     Seq[String] = Seq("chunk_text"),
       topK:            Int = 10,
       partitionFilter: Option[String] = None,
+      catalogOpts:     Map[String, String] = Map.empty,
     ): DataFrame = {
       val schema = StructType(Seq(
         StructField("row_id", LongType, nullable = false),
         StructField("distance", DoubleType, nullable = false),
         StructField("file_path", StringType, nullable = false),
       ))
-      val rows = AilakeNative.searchText(tableUri, namespace, tableName, queryText, textColumns, topK, partitionFilter)
+      val rows = AilakeNative.searchText(
+        tableUri, namespace, tableName, queryText, textColumns, topK, partitionFilter, catalogOpts)
       val sparkRows = rows.map(r => Row(r.rowId, r.distance.toDouble, r.filePath))
       spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), schema)
     }
@@ -115,6 +129,7 @@ object implicits {
       namespace:       String = "default",
       tableName:       String = "",
       partitionFilter: Option[String] = None,
+      catalogOpts:     Map[String, String] = Map.empty,
     ): DataFrame = {
       val schema = StructType(Seq(
         StructField("row_id", LongType, nullable = false),
@@ -122,7 +137,7 @@ object implicits {
         StructField("file_path", StringType, nullable = false),
       ))
       val rows = AilakeNative.searchMultimodal(
-        tableUri, queries, topK, partitionFilter, namespace, tableName)
+        tableUri, queries, topK, partitionFilter, namespace, tableName, catalogOpts)
       val sparkRows = rows.map(r => Row(r.rowId, r.rrfScore.toDouble, r.filePath))
       spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), schema)
     }
@@ -147,9 +162,10 @@ object implicits {
       namespace:       String = "default",
       tableName:       String = "",
       partitionFilter: Option[String] = None,
+      catalogOpts:     Map[String, String] = Map.empty,
     ): DataFrame = {
       val scanResult = AilakeNative.scan(
-        tableUri, queryVector, topK, vectorColumn, partitionFilter, namespace, tableName)
+        tableUri, queryVector, topK, vectorColumn, partitionFilter, namespace, tableName, catalogOpts)
       val fields = scanResult.schema.map { col =>
         val sparkType = col.dataType match {
           case "int64"       => LongType
@@ -187,11 +203,106 @@ object implicits {
       targetSizeBytes: Long = 128L * 1024 * 1024,
       maxFilesPerPass: Int = 20,
       deferred:        Boolean = false,
+      catalogOpts:     Map[String, String] = Map.empty,
     ): Option[Int] = {
       val resolvedName = if (tableName.nonEmpty) tableName
                          else tableUri.stripSuffix("/").split("/").last
-      AilakeNative.compact(tableUri, namespace, resolvedName, minFiles, targetSizeBytes, maxFilesPerPass, deferred)
+      AilakeNative.compact(
+        tableUri, namespace, resolvedName, minFiles, targetSizeBytes, maxFilesPerPass, deferred, catalogOpts)
     }
+
+    // ── decay_memories / migrate / delete_rows / add_vector_column /
+    // backfill_vector_column / estimate — same reasoning as ailakeCompact
+    // above (Spark has no CALL-procedure syntax outside a full catalog
+    // stored-procedure API): plain SparkSession methods. Closes a gap found
+    // auditing trino-plugin — these 6 had zero C-ABI path at all in
+    // ailake-jni until now (unlike create_table, which existed but was
+    // simply unwired), so all three JVM plugins were equally affected.
+
+    /** Recomputes recency_weight for every row (Phase 9 agent memory). Returns files_updated, or None on failure. */
+    def ailakeDecayMemories(
+      tableUri:    String,
+      lambda:      Float,
+      namespace:   String = "default",
+      tableName:   String = "",
+      catalogOpts: Map[String, String] = Map.empty,
+    ): Option[Int] = {
+      val resolvedName = if (tableName.nonEmpty) tableName else tableUri.stripSuffix("/").split("/").last
+      AilakeNative.decayMemories(tableUri, namespace, resolvedName, lambda, catalogOpts)
+    }
+
+    /** Re-embeds oldColumn → newColumn via an external embed command. Throws on failure. */
+    def ailakeMigrate(
+      tableUri:     String,
+      oldColumn:    String,
+      newColumn:    String,
+      textColumn:   String,
+      embedCmd:     String,
+      namespace:    String = "default",
+      tableName:    String = "",
+      strategy:     String = "atomic-replace",
+      batchSize:    Int = 10000,
+      modelName:    Option[String] = None,
+      modelVersion: Option[String] = None,
+      catalogOpts:  Map[String, String] = Map.empty,
+    ): Unit = {
+      val resolvedName = if (tableName.nonEmpty) tableName else tableUri.stripSuffix("/").split("/").last
+      AilakeNative.migrate(
+        tableUri, namespace, resolvedName, oldColumn, newColumn, textColumn, embedCmd,
+        strategy, batchSize, modelName, modelVersion, catalogOpts)
+    }
+
+    /** Deletes row positions via Iceberg V3 Deletion Vectors — different from `DELETE FROM` (equality predicate). Throws on failure. */
+    def ailakeDeleteRows(
+      tableUri:    String,
+      file:        String,
+      rowIds:      Seq[Int],
+      namespace:   String = "default",
+      tableName:   String = "",
+      catalogOpts: Map[String, String] = Map.empty,
+    ): Unit = {
+      val resolvedName = if (tableName.nonEmpty) tableName else tableUri.stripSuffix("/").split("/").last
+      AilakeNative.deleteRows(tableUri, namespace, resolvedName, file, rowIds, catalogOpts)
+    }
+
+    /** Adds a new vector column to the schema (metadata-only, no backfill). Returns the new schema_id, or None on failure. */
+    def ailakeAddVectorColumn(
+      tableUri:           String,
+      column:             String,
+      dim:                Int,
+      namespace:          String = "default",
+      tableName:          String = "",
+      metric:             String = "cosine",
+      precision:          String = "f16",
+      preNormalize:       Boolean = false,
+      hnswM:              Option[Int] = None,
+      hnswEfConstruction: Option[Int] = None,
+      catalogOpts:        Map[String, String] = Map.empty,
+    ): Option[Int] = {
+      val resolvedName = if (tableName.nonEmpty) tableName else tableUri.stripSuffix("/").split("/").last
+      AilakeNative.addVectorColumn(
+        tableUri, namespace, resolvedName, column, dim, metric, precision,
+        preNormalize, hnswM, hnswEfConstruction, catalogOpts)
+    }
+
+    /** Backfills embeddings for a column added via `ailakeAddVectorColumn`. Throws on failure. */
+    def ailakeBackfillVectorColumn(
+      tableUri:    String,
+      column:      String,
+      textColumn:  String,
+      embedCmd:    String,
+      namespace:   String = "default",
+      tableName:   String = "",
+      batchSize:   Int = 512,
+      catalogOpts: Map[String, String] = Map.empty,
+    ): Unit = {
+      val resolvedName = if (tableName.nonEmpty) tableName else tableUri.stripSuffix("/").split("/").last
+      AilakeNative.backfillVectorColumn(tableUri, namespace, resolvedName, column, textColumn, embedCmd, batchSize, catalogOpts)
+    }
+
+    /** Storage/index size estimates for a hypothetical table — pure math, no table needed. Returns the raw JSON response text, or None on failure. */
+    def ailakeEstimate(rows: Long, dim: Int, hnswM: Int = 16, pqM: Option[Int] = None): Option[String] =
+      AilakeNative.estimate(rows, dim, hnswM, pqM)
 
     /**
      * Write a DataFrame to an AI-Lake table via the native library.
@@ -295,6 +406,7 @@ object implicits {
       ftsColumns:     Seq[String] = Seq.empty,
       ftsTokenizer:   String = "default",
       deferred:       Boolean = false,
+      catalogOpts:    Map[String, String] = Map.empty,
     ): Option[Long] = {
       import org.apache.spark.sql.types.{ArrayType, LongType, StringType}
       require(vectorColumns.nonEmpty, "ailakeWriteMulti requires at least one VectorColSpec")
@@ -363,6 +475,7 @@ object implicits {
         ftsTokenizer   = ftsTokenizer,
         deferred       = deferred,
         columns        = extraColumnData,
+        catalogOpts    = catalogOpts,
       )
     }
   }

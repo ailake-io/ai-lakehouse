@@ -61,6 +61,10 @@ class AilakeVectorTableSink(
     // (by name) is expected instead of the single vecCol, and writes go through
     // ailake_write_batch_multi_json. Configured via the `vector.columns` DDL option.
     private val vectorColumns: List<AilakeNativeLoader.VectorColSpec> = emptyList(),
+    // REST Catalog (Fase 17/19) config, e.g. mapOf("catalog" to "rest", "rest_uri" to "...").
+    // Empty (default) = Hadoop catalog. See AilakeVectorConnectorFactory's catalog.*/rest-*
+    // DDL options and docs/guides/REST_CATALOG.md.
+    private val catalogOpts: Map<String, String> = emptyMap(),
 ) : DynamicTableSink, SupportsDeletePushDown {
 
     private val log = LoggerFactory.getLogger(AilakeVectorTableSink::class.java)
@@ -173,6 +177,7 @@ class AilakeVectorTableSink(
                         deferred           = deferred,
                         vectorColumns      = vectorColumns,
                         vecIndices         = vecIndices,
+                        catalogOpts        = catalogOpts,
                     )
                 )
             }
@@ -182,7 +187,7 @@ class AilakeVectorTableSink(
     override fun copy(): DynamicTableSink = AilakeVectorTableSink(
         warehouse, namespace, tableName, vecCol, dim, metric, precision, schema,
         embeddingModel, partitionFields, formatVersion, ftsColumns, ftsTokenizer,
-        hnswM, hnswEfConstruction, preNormalize, deferred, vectorColumns,
+        hnswM, hnswEfConstruction, preNormalize, deferred, vectorColumns, catalogOpts,
     )
 
     override fun asSummaryString(): String = "AI-Lake-Sink[$namespace.$tableName]"
@@ -215,7 +220,7 @@ class AilakeVectorTableSink(
 
     override fun executeDeletion(): Optional<Long> {
         val col = deleteColumn ?: return Optional.empty()
-        AilakeNativeLoader.deleteWhere(warehouse, namespace, tableName, col, deleteValues.orEmpty())
+        AilakeNativeLoader.deleteWhere(warehouse, namespace, tableName, col, deleteValues.orEmpty(), catalogOpts)
         log.info("[ailake] DELETE WHERE {} IN (...) executed for {}.{}", col, namespace, tableName)
         return Optional.empty() // native side doesn't report an exact row count
     }
@@ -246,6 +251,7 @@ class AilakeSinkFunction(
     // before this existed.
     private val vectorColumns: List<AilakeNativeLoader.VectorColSpec> = emptyList(),
     private val vecIndices: List<Int> = emptyList(),
+    private val catalogOpts: Map<String, String> = emptyMap(),
 ) : RichSinkFunction<RowData>() {
 
     private val idsBuffer = mutableListOf<Long>()
@@ -301,6 +307,7 @@ class AilakeSinkFunction(
                     ftsTokenizer   = ftsTokenizer,
                     deferred       = deferred,
                     columns        = columnsSnapshot,
+                    catalogOpts    = catalogOpts,
                 )
             } else {
                 AilakeNativeLoader.writeBatch(
@@ -323,6 +330,7 @@ class AilakeSinkFunction(
                     preNormalize       = preNormalize,
                     deferred           = deferred,
                     columns         = columnsSnapshot,
+                    catalogOpts     = catalogOpts,
                 )
             }
         } finally {

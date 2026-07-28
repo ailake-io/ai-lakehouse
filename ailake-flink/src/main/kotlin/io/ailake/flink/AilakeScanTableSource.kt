@@ -52,6 +52,7 @@ class AilakeScanTableSource(
     private val topK: Int,
     private val columns: List<ScanColumnSpec>,
     private val partitionFilter: String? = null,
+    private val catalogOpts: Map<String, String> = emptyMap(),
 ) : ScanTableSource {
 
     override fun getChangelogMode(): ChangelogMode = ChangelogMode.insertOnly()
@@ -66,12 +67,13 @@ class AilakeScanTableSource(
             topK            = topK,
             columns         = columns,
             partitionFilter = partitionFilter,
+            catalogOpts     = catalogOpts,
         )
         return InputFormatProvider.of(format)
     }
 
     override fun copy(): DynamicTableSource = AilakeScanTableSource(
-        warehouse, namespace, tableName, vecCol, dim, topK, columns, partitionFilter
+        warehouse, namespace, tableName, vecCol, dim, topK, columns, partitionFilter, catalogOpts
     )
 
     override fun asSummaryString(): String = "AI-Lake-Scan[$namespace.$tableName]"
@@ -90,6 +92,7 @@ class AilakeScanInputFormat(
     private val topK: Int,
     private val columns: List<ScanColumnSpec>,
     private val partitionFilter: String? = null,
+    private val catalogOpts: Map<String, String> = emptyMap(),
 ) : GenericInputFormat<RowData>() {
 
     // Iterator over pre-built rows, not a manual position index into `response` — see [open].
@@ -110,6 +113,7 @@ class AilakeScanInputFormat(
             AilakeNativeLoader.scan(
                 warehouse = warehouse, namespace = namespace, table = tableName,
                 vecCol = vecCol, dim = dim, query = query, topK = topK, partitionFilter = effectivePartition,
+                catalogOpts = catalogOpts,
             )
         } catch (e: Throwable) {
             log.warn("[ailake] native library unavailable — table={}.{} scan returns no rows: {}",

@@ -47,6 +47,19 @@ class AilakeVectorTableSource(
     private val efSearch: Int,
     private val schema: ResolvedSchema,
     private val partitionFilter: String? = null,
+    // REST Catalog (Fase 17/19) config, e.g. mapOf("catalog" to "rest", "rest_uri" to "...").
+    // Empty (default) = Hadoop catalog. See AilakeVectorConnectorFactory's catalog.*/rest-*
+    // DDL options and docs/guides/REST_CATALOG.md.
+    private val catalogOpts: Map<String, String> = emptyMap(),
+    // ailake_search_json has always accepted pruning_threshold too — found
+    // missing here (unlike efSearch above) auditing this plugin against
+    // trino-plugin/spark-plugin, which both got this same fix moments
+    // earlier this session (Fase 21). null = server default (no pruning).
+    // Appended last (not grouped with efSearch above) so the existing
+    // positional call in copy() below only needs one value appended, not a
+    // full reorder — this class has no compiler available in this sandbox
+    // to catch a positional-arg mismatch.
+    private val pruningThreshold: Float? = null,
 ) : ScanTableSource {
 
     override fun getChangelogMode(): ChangelogMode = ChangelogMode.insertOnly()
@@ -60,13 +73,15 @@ class AilakeVectorTableSource(
             dim             = dim,
             topK            = topK,
             efSearch        = efSearch,
+            pruningThreshold = pruningThreshold,
             partitionFilter = partitionFilter,
+            catalogOpts     = catalogOpts,
         )
         return InputFormatProvider.of(format)
     }
 
     override fun copy(): DynamicTableSource = AilakeVectorTableSource(
-        warehouse, namespace, tableName, vecCol, dim, topK, efSearch, schema, partitionFilter
+        warehouse, namespace, tableName, vecCol, dim, topK, efSearch, schema, partitionFilter, catalogOpts, pruningThreshold
     )
 
     override fun asSummaryString(): String = "AI-Lake[$namespace.$tableName]"
@@ -87,6 +102,8 @@ class AilakeInputFormat(
     private val topK: Int,
     private val efSearch: Int,
     private val partitionFilter: String? = null,
+    private val catalogOpts: Map<String, String> = emptyMap(),
+    private val pruningThreshold: Float? = null,
 ) : GenericInputFormat<RowData>() {
 
     @Transient private var results: Iterator<AilakeNativeLoader.SearchResultItem>? = null
@@ -126,26 +143,30 @@ class AilakeInputFormat(
                 multimodalQueriesParam != null -> AilakeNativeLoader.searchMultimodal(
                     warehouse = warehouse, namespace = namespace, table = tableName,
                     queries = parseMultimodalQueries(multimodalQueriesParam),
-                    topK = topK, partitionFilter = effectivePartition,
+                    topK = topK, partitionFilter = effectivePartition, catalogOpts = catalogOpts,
                 ).map {
                     AilakeNativeLoader.SearchResultItem(it.row_id, it.rrf_score, it.file_path)
                 }.iterator()
                 queryVectorParam == null -> AilakeNativeLoader.searchText(
                     warehouse = warehouse, namespace = namespace, table = tableName,
                     queryText = queryTextParam!!, topK = topK, partitionFilter = effectivePartition,
+                    catalogOpts = catalogOpts,
                 ).iterator()
                 queryTextParam != null -> AilakeNativeLoader.search(
                     warehouse = warehouse, namespace = namespace, table = tableName,
                     vecCol = vecCol, dim = dim,
                     query = queryVectorParam.split(",").map { it.trim().toFloat() }.toFloatArray(),
-                    topK = topK, efSearch = efSearch, partitionFilter = effectivePartition,
-                    hybridText = queryTextParam, bm25Weight = hybridWeight,
+                    topK = topK, efSearch = efSearch, pruningThreshold = pruningThreshold,
+                    partitionFilter = effectivePartition,
+                    hybridText = queryTextParam, bm25Weight = hybridWeight, catalogOpts = catalogOpts,
                 ).iterator()
                 else -> AilakeNativeLoader.search(
                     warehouse = warehouse, namespace = namespace, table = tableName,
                     vecCol = vecCol, dim = dim,
                     query = queryVectorParam.split(",").map { it.trim().toFloat() }.toFloatArray(),
-                    topK = topK, efSearch = efSearch, partitionFilter = effectivePartition,
+                    topK = topK, efSearch = efSearch, pruningThreshold = pruningThreshold,
+                    partitionFilter = effectivePartition,
+                    catalogOpts = catalogOpts,
                 ).iterator()
             }
         } catch (e: Throwable) {

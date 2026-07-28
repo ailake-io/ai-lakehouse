@@ -20,6 +20,17 @@ import java.util
  *   spark.sql.catalog.ailake.vector-dim     = 1536          (default: 1536)
  *   spark.sql.catalog.ailake.metric         = cosine        (default: cosine)
  *   spark.sql.catalog.ailake.precision      = f16           (default: f16)
+ *   spark.sql.catalog.ailake.catalog        = rest          (default: hadoop — see REST Catalog below)
+ *   spark.sql.catalog.ailake.rest-uri       = https://catalog.example.com
+ *   spark.sql.catalog.ailake.rest-prefix    = my_catalog
+ *   spark.sql.catalog.ailake.rest-warehouse = s3://my-bucket/warehouse
+ *   spark.sql.catalog.ailake.rest-auth      = bearer        (none | bearer | oauth2)
+ *   spark.sql.catalog.ailake.rest-token     = ...           (when rest-auth=bearer)
+ *
+ * REST Catalog (Polaris, Unity Catalog, BigLake, S3 Tables, Nessie, Gravitino):
+ * set `catalog = rest` + the `rest-*` options above — see docs/guides/REST_CATALOG.md.
+ * Omit `catalog` (or set it to `hadoop`) for the default local/S3-prefix metadata-dir
+ * catalog, unchanged behavior.
  *
  * Usage:
  *   INSERT INTO ailake.default.docs VALUES (1, array(0.1, 0.2, ...))
@@ -49,12 +60,38 @@ class AilakeCatalog extends CatalogPlugin with TableCatalog {
 
   override def listTables(namespace: Array[String]): Array[Identifier] = Array.empty
 
+  /**
+   * `AilakeNative.createTable` was already fully implemented and tested but had no SQL
+   * surface — same "dead capability" gap `alterTable` had before it (see doc comment
+   * below), closed the same way. `CREATE TABLE ailake.ns.tbl (...)` now actually creates
+   * the on-disk AI-Lake table (Iceberg metadata.json + manifest) via the native call,
+   * instead of only building an in-memory `Table` wrapper that assumed the table already
+   * existed. Failure surfaces as a `RuntimeException` — matches `alterTable`'s error
+   * handling, and avoids silently returning a `Table` handle for a table that was never
+   * actually created on disk.
+   */
   override def createTable(
     ident: Identifier,
     schema: StructType,
     partitions: Array[Transform],
     properties: util.Map[String, String],
-  ): Table = buildTable(ident, schema)
+  ): Table = {
+    val tableUri     = requireOpt("table-uri")
+    val vectorColumn = opts.getOrDefault("vector-column", "embedding")
+    val dim          = opts.getOrDefault("vector-dim", "1536").toInt
+    val metric       = opts.getOrDefault("metric", "cosine")
+    val precision    = opts.getOrDefault("precision", "f16")
+    val namespace    = if (ident.namespace().nonEmpty) ident.namespace()(0) else "default"
+    val tableName    = ident.name()
+
+    AilakeNative.createTable(
+      tableUri, namespace, tableName, vectorColumn, dim, metric, precision,
+      catalogOpts = catalogOptsFromConfig(),
+    ).getOrElse(
+      throw new RuntimeException(s"ailake CREATE TABLE failed for $namespace.$tableName — see logs"))
+
+    buildTable(ident, schema)
+  }
 
   /**
    * `AilakeNative.evolveSchema` was already fully implemented and tested but had no SQL
@@ -95,7 +132,9 @@ class AilakeCatalog extends CatalogPlugin with TableCatalog {
           s"AI-Lake catalog only supports ADD COLUMN / RENAME COLUMN, got: ${other.getClass.getSimpleName}")
     }
 
-    val schemaId = AilakeNative.evolveSchema(tableUri, namespace, tableName, addCols.toSeq, renameCols.toSeq)
+    val schemaId = AilakeNative.evolveSchema(
+      tableUri, namespace, tableName, addCols.toSeq, renameCols.toSeq, catalogOptsFromConfig()
+    )
     if (schemaId < 0)
       throw new RuntimeException(s"ailake ALTER TABLE failed for $namespace.$tableName — see logs")
     log.warn(
@@ -159,7 +198,7 @@ class AilakeCatalog extends CatalogPlugin with TableCatalog {
     new AilakeTable(
       AilakeWriteHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision,
         idColIndex = idIdx, vecColIndex = vecIdx, textColIndices = textCols,
-        embeddingModel = embeddingModel),
+        embeddingModel = embeddingModel, catalogOpts = catalogOptsFromConfig()),
       tableSchema = schema,
     )
   }
@@ -168,4 +207,29 @@ class AilakeCatalog extends CatalogPlugin with TableCatalog {
     Option(opts.get(key)).getOrElse(
       throw new IllegalArgumentException(
         s"spark.sql.catalog.$catalogName_.$key is required"))
+
+  /**
+   * REST Catalog (Fase 17/19) config read from `spark.sql.catalog.<name>.rest-*`
+   * options (and `spark.sql.catalog.<name>.catalog`), translated to the
+   * snake_case field names `ailake-jni`'s `CatalogOpts` expects. Empty (no
+   * `catalog` option set) = default Hadoop catalog, unchanged behavior.
+   * See docs/guides/REST_CATALOG.md.
+   */
+  private def catalogOptsFromConfig(): Map[String, String] = {
+    val keys = Seq(
+      "catalog"                    -> "catalog",
+      "rest-uri"                   -> "rest_uri",
+      "rest-prefix"                -> "rest_prefix",
+      "rest-warehouse"             -> "rest_warehouse",
+      "rest-auth"                  -> "rest_auth",
+      "rest-token"                 -> "rest_token",
+      "rest-oauth-token-endpoint"  -> "rest_oauth_token_endpoint",
+      "rest-oauth-client-id"       -> "rest_oauth_client_id",
+      "rest-oauth-client-secret"   -> "rest_oauth_client_secret",
+      "rest-oauth-scope"           -> "rest_oauth_scope",
+    )
+    keys.flatMap { case (sparkKey, jniKey) =>
+      Option(opts.get(sparkKey)).filter(_.nonEmpty).map(jniKey -> _)
+    }.toMap
+  }
 }

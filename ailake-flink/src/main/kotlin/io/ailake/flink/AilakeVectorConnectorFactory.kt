@@ -7,6 +7,7 @@ import io.ailake.flink.internal.AilakeNativeLoader
 import io.ailake.flink.internal.AilakeNativeLoader.PartitionFieldDef
 import org.apache.flink.configuration.ConfigOption
 import org.apache.flink.configuration.ConfigOptions
+import org.apache.flink.configuration.ReadableConfig
 import org.apache.flink.table.api.ValidationException
 import org.apache.flink.table.connector.sink.DynamicTableSink
 import org.apache.flink.table.connector.source.DynamicTableSource
@@ -65,6 +66,12 @@ import org.apache.flink.table.types.logical.LogicalTypeRoot
  *   'search.ef'     = '50'
  * );
  * ```
+ *
+ * REST Catalog (Fase 17/19 — Polaris, Unity Catalog, BigLake, S3 Tables, Nessie,
+ * Gravitino): add `'catalog' = 'rest'` + `'rest-uri'`/`'rest-auth'`/`'rest-token'`/... to
+ * either DDL's `WITH (...)` clause — see [CATALOG]/[REST_URI]/etc and
+ * docs/guides/REST_CATALOG.md. Omit (or leave `'catalog' = 'hadoop'`) for the default
+ * local/S3-prefix metadata-dir catalog, unchanged behavior.
  */
 class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSinkFactory {
 
@@ -80,6 +87,12 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
         val VEC_PREC        = ConfigOptions.key("vector.precision").stringType().defaultValue("f16")
         val SEARCH_TOPK       = ConfigOptions.key("search.top-k").intType().defaultValue(10)
         val SEARCH_EF         = ConfigOptions.key("search.ef").intType().defaultValue(50)
+        /** Geometric pruning cutoff — files whose centroid is farther than this from the
+         * query are skipped entirely. No default (unset = server default: no pruning) —
+         * found missing entirely (unlike SEARCH_EF above) auditing this plugin against
+         * trino-plugin/spark-plugin, which both got this same fix moments earlier this
+         * session (Fase 21); ailake_search_json has always accepted it. */
+        val SEARCH_PRUNING_THRESHOLD = ConfigOptions.key("search.pruning-threshold").floatType().noDefaultValue()
         /** `"search"` (default, fixed 3-column shape) or `"full"` (Fase 11 — search + full-row fetch, dynamic columns from the DDL, no JOIN needed). */
         val SEARCH_MODE       = ConfigOptions.key("search.mode").stringType().defaultValue("search")
         val EMBEDDING_MODEL   = ConfigOptions.key("embedding.model").stringType().noDefaultValue()
@@ -104,6 +117,20 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
          * (`ailakeWriteMulti`) but had no DDL option here at all.
          */
         val VEC_COLUMNS           = ConfigOptions.key("vector.columns").stringType().defaultValue("[]")
+
+        // REST Catalog (Fase 17/19) — Polaris/Unity Catalog/BigLake/S3 Tables/Nessie/Gravitino.
+        // Omit `catalog` (or leave it "hadoop") for the default local/S3-prefix metadata-dir
+        // catalog, unchanged behavior. See docs/guides/REST_CATALOG.md.
+        val CATALOG                      = ConfigOptions.key("catalog").stringType().defaultValue("hadoop")
+        val REST_URI                     = ConfigOptions.key("rest-uri").stringType().noDefaultValue()
+        val REST_PREFIX                  = ConfigOptions.key("rest-prefix").stringType().noDefaultValue()
+        val REST_WAREHOUSE               = ConfigOptions.key("rest-warehouse").stringType().noDefaultValue()
+        val REST_AUTH                    = ConfigOptions.key("rest-auth").stringType().defaultValue("none")
+        val REST_TOKEN                   = ConfigOptions.key("rest-token").stringType().noDefaultValue()
+        val REST_OAUTH_TOKEN_ENDPOINT    = ConfigOptions.key("rest-oauth-token-endpoint").stringType().noDefaultValue()
+        val REST_OAUTH_CLIENT_ID         = ConfigOptions.key("rest-oauth-client-id").stringType().noDefaultValue()
+        val REST_OAUTH_CLIENT_SECRET     = ConfigOptions.key("rest-oauth-client-secret").stringType().noDefaultValue()
+        val REST_OAUTH_SCOPE             = ConfigOptions.key("rest-oauth-scope").stringType().noDefaultValue()
     }
 
     override fun factoryIdentifier(): String = IDENTIFIER
@@ -111,10 +138,36 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
     override fun requiredOptions(): Set<ConfigOption<*>> = setOf(WAREHOUSE, TABLE_NAME, VEC_DIM)
 
     override fun optionalOptions(): Set<ConfigOption<*>> = setOf(
-        NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF, SEARCH_MODE, EMBEDDING_MODEL,
+        NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF, SEARCH_PRUNING_THRESHOLD, SEARCH_MODE, EMBEDDING_MODEL,
         PARTITION_FIELDS, FORMAT_VERSION, FTS_COLUMNS, FTS_TOKENIZER,
         HNSW_M, HNSW_EF_CONSTRUCTION, PRE_NORMALIZE, DEFERRED, VEC_COLUMNS,
+        CATALOG, REST_URI, REST_PREFIX, REST_WAREHOUSE, REST_AUTH, REST_TOKEN,
+        REST_OAUTH_TOKEN_ENDPOINT, REST_OAUTH_CLIENT_ID, REST_OAUTH_CLIENT_SECRET, REST_OAUTH_SCOPE,
     )
+
+    /**
+     * REST Catalog (Fase 17/19) config read from the `catalog`/`rest-*` DDL
+     * options above, translated to the snake_case field names `ailake-jni`'s
+     * `CatalogOpts` expects. Empty (catalog left "hadoop") = default Hadoop
+     * catalog, unchanged behavior. See docs/guides/REST_CATALOG.md.
+     */
+    private fun catalogOptsFromConfig(opts: ReadableConfig): Map<String, String> {
+        val entries = mutableMapOf<String, String>()
+        val catalog = opts.get(CATALOG)
+        if (catalog.isNotEmpty() && catalog != "hadoop") {
+            entries["catalog"] = catalog
+            runCatching { opts.get(REST_URI) }.getOrNull()?.let { entries["rest_uri"] = it }
+            runCatching { opts.get(REST_PREFIX) }.getOrNull()?.let { entries["rest_prefix"] = it }
+            runCatching { opts.get(REST_WAREHOUSE) }.getOrNull()?.let { entries["rest_warehouse"] = it }
+            entries["rest_auth"] = opts.get(REST_AUTH)
+            runCatching { opts.get(REST_TOKEN) }.getOrNull()?.let { entries["rest_token"] = it }
+            runCatching { opts.get(REST_OAUTH_TOKEN_ENDPOINT) }.getOrNull()?.let { entries["rest_oauth_token_endpoint"] = it }
+            runCatching { opts.get(REST_OAUTH_CLIENT_ID) }.getOrNull()?.let { entries["rest_oauth_client_id"] = it }
+            runCatching { opts.get(REST_OAUTH_CLIENT_SECRET) }.getOrNull()?.let { entries["rest_oauth_client_secret"] = it }
+            runCatching { opts.get(REST_OAUTH_SCOPE) }.getOrNull()?.let { entries["rest_oauth_scope"] = it }
+        }
+        return entries
+    }
 
     /**
      * Regression: `AilakeInputFormat.nextRecord()` always emits a fixed
@@ -180,6 +233,7 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
                 columns   = context.catalogTable.resolvedSchema.columns.map {
                     ScanColumnSpec(it.name, it.dataType.logicalType.typeRoot)
                 },
+                catalogOpts = catalogOptsFromConfig(opts),
             )
         } else {
             validateSearchResultSchema(context.catalogTable.resolvedSchema)
@@ -191,7 +245,9 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
                 dim        = opts.get(VEC_DIM),
                 topK       = opts.get(SEARCH_TOPK),
                 efSearch   = opts.get(SEARCH_EF),
+                pruningThreshold = runCatching { opts.get(SEARCH_PRUNING_THRESHOLD) }.getOrNull(),
                 schema     = context.catalogTable.resolvedSchema,
+                catalogOpts = catalogOptsFromConfig(opts),
             )
         }
     }
@@ -246,6 +302,7 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
             preNormalize       = opts.get(PRE_NORMALIZE),
             deferred           = opts.get(DEFERRED),
             vectorColumns      = vectorColumns,
+            catalogOpts        = catalogOptsFromConfig(opts),
         )
     }
 }

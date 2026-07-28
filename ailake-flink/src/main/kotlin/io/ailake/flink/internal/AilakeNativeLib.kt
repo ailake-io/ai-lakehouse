@@ -206,6 +206,24 @@ interface AilakeNativeLib : Library {
      */
     fun ailake_create_table_json(requestJson: String): Pointer?
 
+    /** Recompute recency_weight (Phase 9 agent memory). Returns `{"ok":true,"files_updated":N}`. Caller must free. */
+    fun ailake_decay_memories_json(requestJson: String): Pointer?
+
+    /** Re-embed a column via an external embed command. Returns `{"ok":true}`. Caller must free. */
+    fun ailake_migrate_json(requestJson: String): Pointer?
+
+    /** Position-level delete via Iceberg V3 Deletion Vectors. Returns `{"ok":true}`. Caller must free. */
+    fun ailake_delete_rows_json(requestJson: String): Pointer?
+
+    /** Add a vector column to an existing table's schema (metadata-only). Returns `{"ok":true,"new_schema_id":N}`. Caller must free. */
+    fun ailake_add_vector_column_json(requestJson: String): Pointer?
+
+    /** Backfill embeddings for a column added via add_vector_column. Returns `{"ok":true}`. Caller must free. */
+    fun ailake_backfill_vector_column_json(requestJson: String): Pointer?
+
+    /** Storage/index size estimates — pure math, no I/O. Returns `{"ok":true,"estimates":[...]}`. Caller must free. */
+    fun ailake_estimate_json(requestJson: String): Pointer?
+
     /** Free a string pointer returned by any ailake_* function. */
     fun ailake_free_string(ptr: Pointer?)
 }

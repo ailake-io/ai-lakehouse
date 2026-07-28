@@ -86,10 +86,16 @@ object AilakeNativeLoader {
         query: FloatArray,
         topK: Int = 10,
         efSearch: Int = 50,
+        // ailake_search_json's Req struct (ailake-jni/src/lib.rs) has always
+        // accepted pruning_threshold too — found auditing this plugin against
+        // trino-plugin/spark-plugin, which both got this same fix moments
+        // earlier this session (Fase 21). null = server default (no pruning).
+        pruningThreshold: Float? = null,
         partitionFilter: String? = null,
         hybridText: String? = null,
         textColumn: String = "chunk_text",
         bm25Weight: Float = 0.5f,
+        catalogOpts: Map<String, String> = emptyMap(),
     ): List<SearchResultItem> {
         val payload = mutableMapOf<String, Any>(
             "warehouse" to warehouse,
@@ -101,12 +107,14 @@ object AilakeNativeLoader {
             "top_k" to topK,
             "ef_search" to efSearch,
         )
+        if (pruningThreshold != null) payload["pruning_threshold"] = pruningThreshold
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
         if (hybridText != null) {
             payload["hybrid_text"]  = hybridText
             payload["text_column"]  = textColumn
             payload["bm25_weight"]  = bm25Weight
         }
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_json(req)
             ?: throw RuntimeException("ailake_search_json returned null for table=$namespace.$table")
@@ -134,6 +142,7 @@ object AilakeNativeLoader {
         topK: Int = 10,
         textColumns: List<String> = listOf("chunk_text"),
         partitionFilter: String? = null,
+        catalogOpts: Map<String, String> = emptyMap(),
     ): List<SearchResultItem> {
         val payload = mutableMapOf<String, Any>(
             "warehouse"    to warehouse,
@@ -144,6 +153,7 @@ object AilakeNativeLoader {
             "text_columns" to textColumns,
         )
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_text_json(req)
             ?: throw RuntimeException("ailake_search_text_json returned null for table=$namespace.$table")
@@ -188,6 +198,7 @@ object AilakeNativeLoader {
         queries: List<Triple<String, FloatArray, Float>>,
         topK: Int = 10,
         partitionFilter: String? = null,
+        catalogOpts: Map<String, String> = emptyMap(),
     ): List<MultimodalSearchResultItem> {
         require(queries.isNotEmpty()) { "queries must not be empty" }
         val queriesArr = queries.map { (col, q, w) ->
@@ -201,6 +212,7 @@ object AilakeNativeLoader {
             "top_k"     to topK,
         )
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_search_multimodal_json(req)
             ?: throw RuntimeException("ailake_search_multimodal_json returned null for table=$namespace.$table")
@@ -247,6 +259,7 @@ object AilakeNativeLoader {
         query: FloatArray,
         topK: Int = 10,
         partitionFilter: String? = null,
+        catalogOpts: Map<String, String> = emptyMap(),
     ): ScanResponse {
         val payload = mutableMapOf<String, Any>(
             "warehouse" to warehouse,
@@ -258,6 +271,7 @@ object AilakeNativeLoader {
             "top_k" to topK,
         )
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_scan_json(req)
             ?: throw RuntimeException("ailake_scan_json returned null for table=$namespace.$table")
@@ -339,6 +353,7 @@ object AilakeNativeLoader {
         preNormalize: Boolean = false,
         deferred: Boolean = false,
         columns: Map<String, List<String>> = emptyMap(),
+        catalogOpts: Map<String, String> = emptyMap(),
     ): Long {
         require(ids.size == embeddings.size) { "ids.size != embeddings.size" }
         val payload = mutableMapOf<String, Any>(
@@ -370,6 +385,7 @@ object AilakeNativeLoader {
         if (preNormalize)               payload["pre_normalize"]        = true
         if (deferred)                   payload["deferred"]             = true
         if (columns.isNotEmpty())       payload["columns"]              = columns
+        if (catalogOpts.isNotEmpty())   payload.putAll(catalogOpts)
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_write_batch_json(req)
             ?: throw RuntimeException("ailake_write_batch_json returned null for table=$namespace.$table")
@@ -422,6 +438,7 @@ object AilakeNativeLoader {
         ftsTokenizer: String = "default",
         deferred: Boolean = false,
         columns: Map<String, List<String>> = emptyMap(),
+        catalogOpts: Map<String, String> = emptyMap(),
     ): Long {
         require(vectorColumns.isNotEmpty()) { "vectorColumns must not be empty" }
         vectorColumns.forEach { (spec, embeddings) ->
@@ -453,6 +470,7 @@ object AilakeNativeLoader {
         }
         if (deferred) payload["deferred"] = true
         if (columns.isNotEmpty()) payload["columns"] = columns
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_write_batch_multi_json(req)
             ?: throw RuntimeException("ailake_write_batch_multi_json returned null for table=$namespace.$table")
@@ -480,15 +498,17 @@ object AilakeNativeLoader {
         table: String,
         column: String,
         values: List<String>,
+        catalogOpts: Map<String, String> = emptyMap(),
     ) {
         require(values.isNotEmpty()) { "values must not be empty" }
-        val payload = mapOf(
+        val payload = mutableMapOf<String, Any>(
             "warehouse" to warehouse,
             "namespace" to namespace,
             "table"     to table,
             "column"    to column,
             "values"    to values,
         )
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_delete_where_json(req)
             ?: throw RuntimeException("ailake_delete_where_json returned null for table=$namespace.$table")
@@ -519,6 +539,7 @@ object AilakeNativeLoader {
         table: String,
         addCols: List<AddColReq>,
         renameCols: List<RenameColReq>,
+        catalogOpts: Map<String, String> = emptyMap(),
     ): Int {
         require(addCols.isNotEmpty() || renameCols.isNotEmpty()) {
             "at least one of addCols or renameCols must be non-empty"
@@ -549,6 +570,7 @@ object AilakeNativeLoader {
             renArray.add(renNode)
         }
         rootNode.set<JsonNode>("rename_columns", renArray)
+        for ((k, v) in catalogOpts) rootNode.put(k, v)
         val req = mapper.writeValueAsString(rootNode)
 
         val ptr = lib.ailake_evolve_schema_json(req)
@@ -581,8 +603,9 @@ object AilakeNativeLoader {
         metric: String = "cosine",
         precision: String = "f16",
         formatVersion: Int = 2,
+        catalogOpts: Map<String, String> = emptyMap(),
     ): Boolean {
-        val payload = mapOf(
+        val payload = mutableMapOf<String, Any>(
             "warehouse" to warehouse,
             "namespace" to namespace,
             "table" to table,
@@ -592,6 +615,7 @@ object AilakeNativeLoader {
             "precision" to precision,
             "format_version" to formatVersion,
         )
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
         val req = mapper.writeValueAsString(payload)
         val ptr = lib.ailake_create_table_json(req)
             ?: throw RuntimeException("ailake_create_table_json returned null for table=$namespace.$table")
@@ -604,6 +628,188 @@ object AilakeNativeLoader {
             }
             log.info("[ailake] createTable OK table={}.{}", namespace, table)
             true
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    // ── decayMemories / migrate / deleteRows / addVectorColumn /
+    // backfillVectorColumn / estimate — closes a gap found auditing
+    // trino-plugin (same for all 3 JVM plugins): none of these 6 had a
+    // C-ABI path at all in ailake-jni until now, unlike createTable (which
+    // existed but was simply unwired). ailake-go/ailake-cpp reach these only
+    // by shelling out to the ailake CLI binary.
+
+    /** Recomputes recency_weight for every row (Phase 9 agent memory). Returns files_updated. Throws on native error. */
+    fun decayMemories(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        lambda: Float,
+        catalogOpts: Map<String, String> = emptyMap(),
+    ): Int {
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse, "namespace" to namespace, "table" to table, "lambda" to lambda,
+        )
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
+        val ptr = lib.ailake_decay_memories_json(mapper.writeValueAsString(payload))
+            ?: throw RuntimeException("ailake_decay_memories_json returned null for table=$namespace.$table")
+        return try {
+            val resp = mapper.readValue<Map<String, Any>>(ptr.getString(0))
+            if (resp["ok"] != true) {
+                throw RuntimeException("ailake_decay_memories_json error: ${resp["error"]}")
+            }
+            val filesUpdated = (resp["files_updated"] as Number).toInt()
+            log.info("[ailake] decayMemories OK table={}.{} files_updated={}", namespace, table, filesUpdated)
+            filesUpdated
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    /** Re-embeds oldColumn → newColumn via an external embed command (spawned `sh -c embedCmd`, JSON stdin/stdout). Throws on failure. */
+    fun migrate(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        oldColumn: String,
+        newColumn: String,
+        textColumn: String,
+        embedCmd: String,
+        strategy: String = "atomic-replace",
+        batchSize: Int = 10_000,
+        modelName: String? = null,
+        modelVersion: String? = null,
+        catalogOpts: Map<String, String> = emptyMap(),
+    ) {
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse, "namespace" to namespace, "table" to table,
+            "old_column" to oldColumn, "new_column" to newColumn, "text_column" to textColumn,
+            "embed_cmd" to embedCmd, "strategy" to strategy, "batch_size" to batchSize,
+        )
+        if (modelName != null) payload["model_name"] = modelName
+        if (modelVersion != null) payload["model_version"] = modelVersion
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
+        val ptr = lib.ailake_migrate_json(mapper.writeValueAsString(payload))
+            ?: throw RuntimeException("ailake_migrate_json returned null for table=$namespace.$table")
+        try {
+            val resp = mapper.readValue<Map<String, Any>>(ptr.getString(0))
+            if (resp["ok"] != true) {
+                throw RuntimeException("ailake_migrate_json error: ${resp["error"]}")
+            }
+            log.info("[ailake] migrate OK table={}.{} {}→{}", namespace, table, oldColumn, newColumn)
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    /** Deletes row positions from `file` via Iceberg V3 Deletion Vectors — different from [deleteWhere]'s equality predicate. Throws on failure. */
+    fun deleteRows(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        file: String,
+        rowIds: List<Int>,
+        catalogOpts: Map<String, String> = emptyMap(),
+    ) {
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse, "namespace" to namespace, "table" to table,
+            "file" to file, "row_ids" to rowIds,
+        )
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
+        val ptr = lib.ailake_delete_rows_json(mapper.writeValueAsString(payload))
+            ?: throw RuntimeException("ailake_delete_rows_json returned null for table=$namespace.$table")
+        try {
+            val resp = mapper.readValue<Map<String, Any>>(ptr.getString(0))
+            if (resp["ok"] != true) {
+                throw RuntimeException("ailake_delete_rows_json error: ${resp["error"]}")
+            }
+            log.info("[ailake] deleteRows OK table={}.{} file={} rows={}", namespace, table, file, rowIds.size)
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    /** Adds a new vector column to the schema (metadata-only, no backfill). Returns the new schema_id. Throws on failure. */
+    fun addVectorColumn(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        column: String,
+        dim: Int,
+        metric: String = "cosine",
+        precision: String = "f16",
+        preNormalize: Boolean = false,
+        hnswM: Int? = null,
+        hnswEfConstruction: Int? = null,
+        catalogOpts: Map<String, String> = emptyMap(),
+    ): Int {
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse, "namespace" to namespace, "table" to table,
+            "column" to column, "dim" to dim, "metric" to metric, "precision" to precision,
+            "pre_normalize" to preNormalize,
+        )
+        if (hnswM != null) payload["hnsw_m"] = hnswM
+        if (hnswEfConstruction != null) payload["hnsw_ef_construction"] = hnswEfConstruction
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
+        val ptr = lib.ailake_add_vector_column_json(mapper.writeValueAsString(payload))
+            ?: throw RuntimeException("ailake_add_vector_column_json returned null for table=$namespace.$table")
+        return try {
+            val resp = mapper.readValue<Map<String, Any>>(ptr.getString(0))
+            if (resp["ok"] != true) {
+                throw RuntimeException("ailake_add_vector_column_json error: ${resp["error"]}")
+            }
+            val schemaId = (resp["new_schema_id"] as Number).toInt()
+            log.info("[ailake] addVectorColumn OK table={}.{} column={} new_schema_id={}", namespace, table, column, schemaId)
+            schemaId
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    /** Backfills embeddings for a column added via [addVectorColumn] — reads `textColumn`, embeds via `embedCmd`. Throws on failure. */
+    fun backfillVectorColumn(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        column: String,
+        textColumn: String,
+        embedCmd: String,
+        batchSize: Int = 512,
+        catalogOpts: Map<String, String> = emptyMap(),
+    ) {
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse, "namespace" to namespace, "table" to table,
+            "column" to column, "text_column" to textColumn, "embed_cmd" to embedCmd,
+            "batch_size" to batchSize,
+        )
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
+        val ptr = lib.ailake_backfill_vector_column_json(mapper.writeValueAsString(payload))
+            ?: throw RuntimeException("ailake_backfill_vector_column_json returned null for table=$namespace.$table")
+        try {
+            val resp = mapper.readValue<Map<String, Any>>(ptr.getString(0))
+            if (resp["ok"] != true) {
+                throw RuntimeException("ailake_backfill_vector_column_json error: ${resp["error"]}")
+            }
+            log.info("[ailake] backfillVectorColumn OK table={}.{} column={}", namespace, table, column)
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    /** Storage/index size estimates for a hypothetical table — pure math, no warehouse/catalog needed. Returns the raw JSON response as a Map. Throws on failure. */
+    fun estimate(
+        rows: Long,
+        dim: Int,
+        hnswM: Int = 16,
+        pqM: Int? = null,
+    ): Map<String, Any> {
+        val payload = mutableMapOf<String, Any>("rows" to rows, "dim" to dim, "hnsw_m" to hnswM)
+        if (pqM != null) payload["pq_m"] = pqM
+        val ptr = lib.ailake_estimate_json(mapper.writeValueAsString(payload))
+            ?: throw RuntimeException("ailake_estimate_json returned null")
+        return try {
+            mapper.readValue<Map<String, Any>>(ptr.getString(0))
         } finally {
             lib.ailake_free_string(ptr)
         }
@@ -626,6 +832,7 @@ object AilakeNativeLoader {
         targetSizeBytes: Long = 128L * 1024 * 1024,
         maxFilesPerPass: Int = 20,
         deferred: Boolean = false,
+        catalogOpts: Map<String, String> = emptyMap(),
     ): Int {
         val payload = mutableMapOf<String, Any>(
             "warehouse"    to warehouse,
@@ -636,6 +843,7 @@ object AilakeNativeLoader {
             "max_files_per_pass" to maxFilesPerPass,
         )
         if (deferred) payload["deferred"] = true
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
         val req = mapper.writeValueAsString(payload)
 
         val ptr = lib.ailake_compact_json(req)

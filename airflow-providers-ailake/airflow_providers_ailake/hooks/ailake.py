@@ -34,6 +34,21 @@ class AilakeHook(BaseHook):
             # CLI path override (default: "ailake" from PATH)
             "ailake_binary": "/opt/ailake/bin/ailake"
 
+            # Catalog backend (default: hadoop — local/S3-prefix metadata dir).
+            # Set "catalog": "rest" to talk to an Iceberg REST Catalog server
+            # (Polaris, Unity Catalog, BigLake, S3 Tables, Nessie, Gravitino)
+            # instead — see docs/guides/REST_CATALOG.md.
+            "catalog":                    "rest"
+            "rest_uri":                   "https://catalog.example.com"
+            "rest_prefix":                "my_catalog"
+            "rest_warehouse":             "s3://my-bucket/warehouse"
+            "rest_auth":                  "bearer"          # none | bearer | oauth2
+            "rest_token":                 "..."             # when rest_auth=bearer
+            "rest_oauth_token_endpoint":  "https://..."      # when rest_auth=oauth2
+            "rest_oauth_client_id":       "..."
+            "rest_oauth_client_secret":   "..."
+            "rest_oauth_scope":           "..."
+
     Usage::
 
         hook = AilakeHook(ailake_conn_id="ailake_prod")
@@ -105,9 +120,44 @@ class AilakeHook(BaseHook):
         binary = extra.get("ailake_binary") or shutil.which("ailake") or "ailake"
         return binary
 
+    def _catalog_args(self) -> list[str]:
+        """Build ``--catalog``/``--rest-*`` flags from the connection's ``extra``.
+
+        Absent ``catalog`` key = default Hadoop-style catalog, unchanged
+        behavior. Set ``"catalog": "rest"`` (+ ``rest_*`` keys) to target an
+        Iceberg REST Catalog server instead — see docs/guides/REST_CATALOG.md.
+        """
+        extra = self._extra()
+        catalog = extra.get("catalog")
+        if not catalog or catalog == "hadoop":
+            return []
+
+        args = ["--catalog", catalog]
+        rest_flags = {
+            "rest_uri": "--rest-uri",
+            "rest_prefix": "--rest-prefix",
+            "rest_warehouse": "--rest-warehouse",
+            "rest_auth": "--rest-auth",
+            "rest_token": "--rest-token",
+            "rest_oauth_token_endpoint": "--rest-oauth-token-endpoint",
+            "rest_oauth_client_id": "--rest-oauth-client-id",
+            "rest_oauth_client_secret": "--rest-oauth-client-secret",
+            "rest_oauth_scope": "--rest-oauth-scope",
+        }
+        for key, flag in rest_flags.items():
+            if extra.get(key):
+                args += [flag, str(extra[key])]
+        return args
+
     def run_cli(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-        """Run ``ailake --store <warehouse> <args...>`` and return the result."""
-        cmd = [self._binary(), "--store", self.get_warehouse_uri(), *args]
+        """Run ``ailake --store <warehouse> [--catalog ... --rest-*] <args...>``
+        and return the result."""
+        cmd = [
+            self._binary(),
+            "--store", self.get_warehouse_uri(),
+            *self._catalog_args(),
+            *args,
+        ]
         self.log.info("ailake cli: %s", " ".join(cmd))
         result = subprocess.run(
             cmd,

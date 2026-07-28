@@ -18,13 +18,22 @@ class AilakeProceduresTest {
     private val session = mock<ConnectorSession>()
 
     @Test
-    fun getProceduresReturnsExactlyOneCompactProcedure() {
+    fun getProceduresReturnsCompactAndCreateTableProcedures() {
         val procs = procedures.getProcedures()
-        assertEquals(1, procs.size)
-        val p = procs.first()
-        assertEquals("system", p.schema)
-        assertEquals("compact", p.name)
-        assertTrue(p.arguments.isEmpty())
+        // compact, create_table, decay_memories, migrate, delete_rows,
+        // add_vector_column, backfill_vector_column, estimate (Fase 21) — all
+        // no-arg, same reasoning as compact/create_table (parameters come
+        // from SET SESSION properties, not typed CALL arguments).
+        assertEquals(8, procs.size)
+        val byName = procs.associateBy { it.name }
+        for (name in listOf(
+            "compact", "create_table", "decay_memories", "migrate",
+            "delete_rows", "add_vector_column", "backfill_vector_column", "estimate",
+        )) {
+            val proc = byName.getValue(name)
+            assertEquals("system", proc.schema)
+            assertTrue(proc.arguments.isEmpty(), "expected $name to have no arguments")
+        }
     }
 
     @Test
@@ -33,6 +42,15 @@ class AilakeProceduresTest {
         // CALL ailake.system.compact() must surface this as a clear SQL error, not silently no-op.
         assume(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
         assertThrows(TrinoException::class.java) { procedures.compact(session) }
+    }
+
+    @Test
+    fun createTableThrowsTrinoExceptionWhenNativeLibraryAbsent() {
+        // Same reasoning as compactThrowsTrinoExceptionWhenNativeLibraryAbsent above —
+        // AilakeNative.createTable returns false (not an exception) when the native lib
+        // is absent; CALL ailake.system.create_table() must still surface a clear SQL error.
+        assume(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
+        assertThrows(TrinoException::class.java) { procedures.createTable(session) }
     }
 
     private fun assume(condition: Boolean, message: String) {

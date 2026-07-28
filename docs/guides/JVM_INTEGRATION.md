@@ -147,6 +147,16 @@ val hybridDf = spark.ailakeSearch(
   bm25Weight  = 0.4f,
 )
 
+// HNSW recall/latency tuning — efSearch/pruningThreshold (None = server
+// defaults: ef_search=50, no pruning).
+val tunedDf = spark.ailakeSearch(
+  tableUri         = "s3://my-lake/docs/",
+  queryVector      = query,
+  topK             = 20,
+  efSearch         = Some(100),
+  pruningThreshold = Some(0.8f),
+)
+
 // Join with Iceberg to get full row data — or skip the JOIN entirely with
 // spark.ailakeSearchWithData(...) (Fase 11, see §3D), which fetches real
 // columns in the same native call as the search itself.
@@ -695,8 +705,14 @@ LIMIT  10;
 | `query_text` | `varchar` | `""` | Query text. Alone → pure full-text search (Tantivy O(log N) if `ailake.fts-columns` indexed, else O(N) BM25). With `query_vector` → hybrid BM25+vector RRF fusion |
 | `hybrid_weight` | `double` | `0.5` | BM25 weight in RRF fusion when both `query_vector` and `query_text` are set (`0.0` = pure vector, `1.0` = pure BM25) |
 | `multimodal_queries` | `varchar` | `""` | JSON array of `{col, query (csv f32), weight}` for cross-modal RRF search of `ailake.default.search_multimodal` (see below) |
+| `ef_search` | `integer` | `0` | HNSW `ef_search` — higher recall at the cost of latency. `0` = server default (`50`) |
+| `pruning_threshold` | `double` | `-1.0` | Geometric pruning cutoff — files whose centroid is farther than this from the query are skipped entirely. `-1.0` = server default (no pruning) |
 
 ```sql
+-- Tune recall/latency and pruning aggressiveness
+SET SESSION ailake.ef_search = 100;
+SET SESSION ailake.pruning_threshold = 0.8;
+
 -- Pure full-text search
 SET SESSION ailake.query_text = 'rust programming';
 SELECT row_id, file_path FROM ailake.default.search ORDER BY distance LIMIT 10;
@@ -734,6 +750,12 @@ ALTER TABLE ailake.default.ingest RENAME COLUMN source TO doc_source;
 
 -- Compacts small files in the catalog's configured table
 CALL ailake.system.compact();
+
+-- Creates the catalog's configured table on disk (Iceberg metadata.json +
+-- manifest). No arguments — same reasoning as compact(): table-uri/namespace/
+-- table-name/vector-column/dim/metric/precision/format-version are all
+-- catalog-level properties (ailake.*), not per-statement.
+CALL ailake.system.create_table();
 ```
 
 ### 5D — Nessie catalog (demo stack)
@@ -770,7 +792,7 @@ cd trino-plugin
 #   VectorScanSplitManagerTest — split creation from session
 #   VectorScanRecordSetTest    — cursor iteration, column types
 #   AilakeNativeTest           — graceful degradation, CSV parsing
-#   AilakeProceduresTest       — CALL ailake.system.compact()
+#   AilakeProceduresTest       — CALL ailake.system.compact(), CALL ailake.system.create_table()
 ```
 
 ---
@@ -888,7 +910,8 @@ CREATE TABLE ailake_docs_search (
     'vector.column' = 'embedding',
     'vector.dim'    = '1536',
     'search.top-k'  = '10',
-    'search.ef'     = '50'
+    'search.ef'     = '50',
+    'search.pruning-threshold' = '0.8'  -- unset (default) = no pruning
 );
 
 -- Query vector passed via job parameters (Flink SQL has no per-query SET SESSION):
@@ -1040,6 +1063,7 @@ loader.evolveSchema(
 | `vector.precision` | `"f16"` | `f32` \| `f16` \| `i8` |
 | `search.top-k` | `10` | Nearest neighbors to return (source tables). Capped at 100,000 — a higher value fails the job with a clear error |
 | `search.ef` | `50` | HNSW `ef_search` (source tables) |
+| `search.pruning-threshold` | unset | Geometric pruning cutoff — files whose centroid is farther than this from the query are skipped entirely. Unset = no pruning |
 | `embedding.model` | unset | Stored in `ailake.embedding-model` Iceberg property |
 | `partition.fields` | `"[]"` | JSON array of `{column, transform, column_type}` |
 | `format.version` | `2` | Iceberg format version (`2` or `3`) |
@@ -1106,6 +1130,71 @@ delete, matching the native equality-delete-file mechanism.
 | Trino | `CALL ailake.system.compact()` | `AilakeNative.compact(...)` (Kotlin) |
 | Flink | `SELECT ailake_compact(warehouse, ns, table)` (scalar function — Flink has no `CALL`-equivalent for connectors) | `AilakeNativeLoader.compact(...)` |
 | Python | `ailake.compact(path, min_files=4, target_size_bytes=128*1024*1024)` |
+
+### Create table (Fase 23 — closed a "dead capability" gap in all three)
+
+`AilakeNative(Loader).createTable` was already fully implemented and tested in
+every plugin's native-call layer, but each catalog's own `createTable`
+override only built an in-memory/local `Table` handle — it never called it,
+so the on-disk Iceberg table (`metadata.json` + manifest) was never actually
+created through any of the three catalogs' SQL/DDL surface.
+
+| Engine | SQL surface | Underlying call |
+|---|---|---|
+| Spark | `CREATE TABLE ailake.default.docs (...)` (via catalog `AilakeCatalog.createTable`) | `AilakeNative.createTable(tableUri, ns, table, vectorColumn, dim, metric, precision)` |
+| Trino | `CALL ailake.system.create_table()` (no args — same reasoning as `compact()`, catalog is configured for exactly one table) | `AilakeNative.createTable(...)` (Kotlin) |
+| Flink | `CREATE TABLE ailake_docs (...) WITH (...)` (via catalog `AilakeCatalog.createTable`) | `AilakeNativeLoader.createTable(...)` |
+| Python | `ailake.TableWriter(path, ...)` creates the table implicitly on first `commit()` — no separate call needed |
+
+**Note (Spark/Flink)**: the native call runs *before* the in-memory catalog
+entry is registered — if it fails (e.g. table already exists on disk,
+warehouse unreachable), `CREATE TABLE` raises and no local entry is left
+behind.
+
+### `decay_memories` / `migrate` / `delete_rows` / `add_vector_column` / `backfill_vector_column` / `estimate`
+
+Found auditing trino-plugin: unlike `create_table` above (which existed in
+every plugin's native-call layer but was simply unwired), these 6 operations
+had **no C-ABI export in `ailake-jni` at all** — `ailake-go`/`ailake-cpp`
+could reach them only by shelling out to the `ailake` CLI binary;
+Spark/Trino/Flink bind exclusively to `ailake-jni` via JNA, so all three were
+equally unable to reach any of them until now. New `ailake_decay_memories_json`,
+`ailake_migrate_json`, `ailake_delete_rows_json`, `ailake_add_vector_column_json`,
+`ailake_backfill_vector_column_json`, `ailake_estimate_json` exports close
+that gap at the source; each plugin then got the same mechanical wiring
+`create_table` got.
+
+| Engine | SQL surface | Underlying call |
+|---|---|---|
+| Spark | `spark.ailakeDecayMemories/ailakeMigrate/ailakeDeleteRows/ailakeAddVectorColumn/ailakeBackfillVectorColumn/ailakeEstimate(...)` (plain session methods — same reasoning as `ailakeCompact`) | `AilakeNative.decayMemories/migrate/deleteRows/addVectorColumn/backfillVectorColumn/estimate(...)` |
+| Trino | `CALL ailake.system.decay_memories()` / `migrate()` / `delete_rows()` / `add_vector_column()` / `backfill_vector_column()` / `estimate()` — no-arg, parameters come from `SET SESSION ailake.decay_lambda`/`migrate_config`/`delete_rows_config`/`add_vector_column_config`/`backfill_vector_column_config`/`estimate_config` (JSON string for the multi-field ones, same carrier pattern `multimodal_queries` already uses) | `AilakeNative.decayMemories/migrate/deleteRows/addVectorColumn/backfillVectorColumn/estimate(...)` (Kotlin) |
+| Flink | `SELECT ailake_decay_memories(...)` / `ailake_migrate(...)` / `ailake_delete_rows(...)` / `ailake_add_vector_column(...)` / `ailake_backfill_vector_column(...)` / `ailake_estimate(...)` — scalar functions, same idiom as `ailake_compact` | `AilakeNativeLoader.decayMemories/migrate/deleteRows/addVectorColumn/backfillVectorColumn/estimate(...)` |
+| Go / C++ / Python / CLI | Already reachable (`DecayMemories`/`decay_memories`/`decay_memories()`/`ailake decay-memories`, and siblings) | — |
+
+```sql
+-- Trino
+SET SESSION ailake.decay_lambda = 0.1;
+CALL ailake.system.decay_memories();
+
+SET SESSION ailake.delete_rows_config = '{"file":"data/part-00000.parquet","row_ids":[0,5,42]}';
+CALL ailake.system.delete_rows();
+```
+
+```scala
+// Spark
+spark.ailakeDecayMemories("s3://my-lake/agent-memory/", lambda = 0.1f)
+spark.ailakeDeleteRows("s3://my-lake/docs/", file = "data/part-00000.parquet", rowIds = Seq(0, 5, 42))
+```
+
+```sql
+-- Flink
+CREATE TEMPORARY FUNCTION ailake_decay_memories AS 'io.ailake.flink.AilakeDecayMemoriesFunction';
+SELECT ailake_decay_memories('s3://my-lake/agent-memory/', 'default', 'memories', CAST(0.1 AS FLOAT));
+```
+
+`migrate`/`backfill_vector_column` spawn `embed_cmd` via `sh -c`, same
+stdin/stdout JSON protocol as `ailake-cli`'s own `--embed-cmd` — see
+`ailake_migrate_json`'s doc comment in `ailake-jni/src/lib.rs`.
 
 ---
 

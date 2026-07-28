@@ -16,13 +16,15 @@ use ailake_catalog::{
     TableProperties,
 };
 use ailake_core::{
-    EmbeddingModelInfo, PartitionDef, VectorMetric, VectorModality, VectorPrecision,
+    EmbeddingModelInfo, PartitionDef, VectorColSpec, VectorMetric, VectorModality, VectorPrecision,
     VectorStoragePolicy,
 };
 use ailake_query::{
-    fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
-    Chunk, CompactionConfig, CompactionExecutor, CompactionPlanner, ContextAssembler,
-    ContextAssemblerConfig, FusionMethod, ModalQuery, SearchConfig, SearchResult,
+    delete_rows as rs_delete_rows, fetch_rows as rs_fetch_rows, search as rs_search,
+    search_multimodal as rs_search_multimodal, BackfillJob, Chunk, CompactionConfig,
+    CompactionExecutor, CompactionPlanner, ContextAssembler, ContextAssemblerConfig, EmbedFn,
+    FusionMethod, MemoryDecayJob, MigrationJob, MigrationStrategy, ModalQuery, SearchConfig,
+    SearchResult,
 };
 use ailake_store::LocalStore;
 use serde::Serialize;
@@ -2855,6 +2857,779 @@ fn parse_precision(s: &str) -> Option<VectorPrecision> {
     }
 }
 
+// ── ailake_decay_memories_json / ailake_migrate_json / ailake_delete_rows_json /
+// ailake_add_vector_column_json / ailake_backfill_vector_column_json /
+// ailake_estimate_json — Spark/Trino/Flink never had a C-ABI path to any of
+// these 6 operations at all (not a per-plugin wiring gap like create_table
+// was — ailake-jni itself never exported them, even though ailake-cli and
+// ailake-py both have them). Found auditing trino-plugin; same gap affects
+// all three JVM plugins equally, since they all bind exclusively to this
+// library via JNA.
+
+/// Spawns `sh -c <cmd>`, feeding a JSON array of strings on stdin and
+/// expecting a JSON array of float arrays (one embedding per input string) on
+/// stdout — identical protocol to `ailake-cli`'s `--embed-cmd` (Migrate,
+/// BackfillVectorColumn). Shared by `ailake_migrate_json` and
+/// `ailake_backfill_vector_column_json` below.
+fn spawn_embed_cmd(cmd: String) -> EmbedFn {
+    Arc::new(move |texts: &[String]| {
+        use std::io::Write;
+        let input = serde_json::to_string(texts)
+            .map_err(|e| ailake_core::AilakeError::InvalidArgument(e.to_string()))?;
+        let output = std::process::Command::new("sh")
+            .args(["-c", &cmd])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .and_then(|mut child| {
+                let mut stdin = child.stdin.take().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "embed-cmd stdin unavailable",
+                    )
+                })?;
+                stdin.write_all(input.as_bytes())?;
+                drop(stdin); // close stdin so the child sees EOF
+                child.wait_with_output()
+            })
+            .map_err(|e| {
+                ailake_core::AilakeError::InvalidArgument(format!("embed-cmd spawn error: {e}"))
+            })?;
+        if !output.status.success() {
+            return Err(ailake_core::AilakeError::InvalidArgument(format!(
+                "embed-cmd exited with status {}",
+                output.status
+            )));
+        }
+        serde_json::from_slice::<Vec<Vec<f32>>>(&output.stdout).map_err(|e| {
+            ailake_core::AilakeError::InvalidArgument(format!("embed-cmd stdout parse error: {e}"))
+        })
+    })
+}
+
+/// Recomputes `recency_weight = exp(-lambda * days_since_access)` for every
+/// row in a table (`ailake_query::MemoryDecayJob`, Phase 9 agent memory).
+///
+/// `request_json`:
+/// ```json
+/// {"warehouse":"/data/agent_mem","namespace":"default","table":"memories","lambda":0.1}
+/// ```
+/// Returns `{"ok":true,"files_updated":N}` or `{"ok":false,"error":"..."}`.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_decay_memories_json(request_json: *const c_char) -> *mut c_char {
+    catch_ffi_panic("ailake_decay_memories_json", move || {
+        #[derive(serde::Deserialize)]
+        struct Req {
+            warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
+            #[serde(default = "dm_default_ns")]
+            namespace: String,
+            table: String,
+            lambda: f32,
+        }
+        fn dm_default_ns() -> String {
+            "default".into()
+        }
+
+        if request_json.is_null() {
+            return cstr_err_json("null request_json");
+        }
+        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let req: Req = match serde_json::from_str(json_str) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("ailake_decay_memories_json: JSON parse error: {}", e);
+                return cstr_err_json(e);
+            }
+        };
+
+        let store = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
+        let table = TableIdent::new(&req.namespace, &req.table);
+
+        let meta = match rt().block_on(catalog.load_table(&table)) {
+            Ok(m) => m,
+            Err(e) => return cstr_err_json(e),
+        };
+        let dim: u32 = match meta
+            .properties
+            .get("ailake.vector-dim")
+            .and_then(|v| v.parse().ok())
+        {
+            Some(d) => d,
+            None => return cstr_err_json("table missing ailake.vector-dim property"),
+        };
+        let column = meta
+            .properties
+            .get("ailake.vector-column")
+            .cloned()
+            .unwrap_or_else(|| "embedding".to_string());
+        let metric = parse_metric(
+            meta.properties
+                .get("ailake.vector-metric")
+                .map(String::as_str)
+                .unwrap_or("cosine"),
+        );
+        let policy = VectorStoragePolicy::default_f16(&column, dim, metric);
+
+        let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
+        let _commit_guard = _table_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let job = MemoryDecayJob::new(catalog, store, policy, req.lambda);
+        let result = rt().block_on(job.run(&table));
+
+        #[derive(serde::Serialize)]
+        struct Resp {
+            ok: bool,
+            files_updated: usize,
+        }
+        match result {
+            Ok(files_updated) => {
+                info!(
+                    "ailake_decay_memories_json: {}.{} files_updated={}",
+                    req.namespace, req.table, files_updated
+                );
+                serde_json::to_string(&Resp {
+                    ok: true,
+                    files_updated,
+                })
+                .map(cstr_json)
+                .unwrap_or_else(cstr_err_json)
+            }
+            Err(e) => {
+                warn!("ailake_decay_memories_json: failed: {}", e);
+                cstr_err_json(e)
+            }
+        }
+    })
+}
+
+/// Re-embeds a column into a new one via an external embed command
+/// (`ailake_query::MigrationJob`).
+///
+/// `request_json`:
+/// ```json
+/// {
+///   "warehouse": "/data/docs", "namespace": "default", "table": "docs",
+///   "old_column": "embedding", "new_column": "embedding_v2",
+///   "text_column": "chunk_text", "embed_cmd": "python3 embed.py",
+///   "strategy": "atomic-replace", "batch_size": 512,
+///   "model_name": "text-embedding-3-small", "model_version": "v1"
+/// }
+/// ```
+/// `strategy` is `"atomic-replace"` (default) or `"dual-write-then-cutover"`.
+/// `embed_cmd` is spawned via `sh -c`, same stdin/stdout JSON protocol as
+/// `ailake-cli`'s `--embed-cmd` — see `spawn_embed_cmd` above.
+///
+/// Returns `{"ok":true}` or `{"ok":false,"error":"..."}`.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_migrate_json(request_json: *const c_char) -> *mut c_char {
+    catch_ffi_panic("ailake_migrate_json", move || {
+        #[derive(serde::Deserialize)]
+        struct Req {
+            warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
+            #[serde(default = "mg_default_ns")]
+            namespace: String,
+            table: String,
+            old_column: String,
+            new_column: String,
+            #[serde(default = "mg_default_text_col")]
+            text_column: String,
+            embed_cmd: String,
+            #[serde(default = "mg_default_strategy")]
+            strategy: String,
+            #[serde(default = "mg_default_batch_size")]
+            batch_size: usize,
+            #[serde(default)]
+            model_name: Option<String>,
+            #[serde(default)]
+            model_version: Option<String>,
+        }
+        fn mg_default_ns() -> String {
+            "default".into()
+        }
+        fn mg_default_text_col() -> String {
+            "chunk_text".into()
+        }
+        fn mg_default_strategy() -> String {
+            "atomic-replace".into()
+        }
+        fn mg_default_batch_size() -> usize {
+            10_000
+        }
+
+        if request_json.is_null() {
+            return cstr_err_json("null request_json");
+        }
+        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let req: Req = match serde_json::from_str(json_str) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("ailake_migrate_json: JSON parse error: {}", e);
+                return cstr_err_json(e);
+            }
+        };
+
+        let store = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
+        let table = TableIdent::new(&req.namespace, &req.table);
+        let strategy = match req.strategy.as_str() {
+            "dual-write-then-cutover" => MigrationStrategy::DualWriteThenCutover,
+            _ => MigrationStrategy::AtomicReplace,
+        };
+        let new_model = req.model_name.map(|name| {
+            let mut info = EmbeddingModelInfo::new(name);
+            if let Some(v) = req.model_version {
+                info = info.with_version(v);
+            }
+            info
+        });
+
+        let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
+        let _commit_guard = _table_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let job = MigrationJob {
+            table,
+            old_column: req.old_column,
+            new_column: req.new_column,
+            text_column: req.text_column,
+            embed_fn: spawn_embed_cmd(req.embed_cmd),
+            strategy,
+            batch_size: req.batch_size,
+            new_model,
+            on_progress: None,
+        };
+        let result = rt().block_on(job.run(catalog, store));
+
+        #[derive(serde::Serialize)]
+        struct Resp {
+            ok: bool,
+        }
+        match result {
+            Ok(()) => {
+                info!(
+                    "ailake_migrate_json: {}.{} migration complete",
+                    req.namespace, req.table
+                );
+                serde_json::to_string(&Resp { ok: true })
+                    .map(cstr_json)
+                    .unwrap_or_else(cstr_err_json)
+            }
+            Err(e) => {
+                warn!("ailake_migrate_json: failed: {}", e);
+                cstr_err_json(e)
+            }
+        }
+    })
+}
+
+/// Deletes specific row positions from a V3 table via Iceberg Deletion
+/// Vectors (`ailake_query::delete_rows`). Different from
+/// `ailake_delete_where_json`'s equality predicate — this masks exact
+/// `(file_path, row_position)` pairs.
+///
+/// `request_json`:
+/// ```json
+/// {"warehouse":"/data/docs","namespace":"default","table":"docs",
+///  "file":"data/part-00000.parquet","row_ids":[0,5,42]}
+/// ```
+/// Returns `{"ok":true}` or `{"ok":false,"error":"..."}`. Requires
+/// `format-version=3` — fails clearly on V2 tables (see `delete_rows`'s own
+/// error message).
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_delete_rows_json(request_json: *const c_char) -> *mut c_char {
+    catch_ffi_panic("ailake_delete_rows_json", move || {
+        #[derive(serde::Deserialize)]
+        struct Req {
+            warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
+            #[serde(default = "dr_default_ns")]
+            namespace: String,
+            table: String,
+            file: String,
+            row_ids: Vec<u32>,
+        }
+        fn dr_default_ns() -> String {
+            "default".into()
+        }
+
+        if request_json.is_null() {
+            return cstr_err_json("null request_json");
+        }
+        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let req: Req = match serde_json::from_str(json_str) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("ailake_delete_rows_json: JSON parse error: {}", e);
+                return cstr_err_json(e);
+            }
+        };
+
+        let store = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
+        let table = TableIdent::new(&req.namespace, &req.table);
+
+        let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
+        let _commit_guard = _table_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let result = rt().block_on(rs_delete_rows(
+            catalog,
+            store,
+            &table,
+            &req.file,
+            &req.row_ids,
+        ));
+
+        #[derive(serde::Serialize)]
+        struct Resp {
+            ok: bool,
+        }
+        match result {
+            Ok(()) => {
+                info!(
+                    "ailake_delete_rows_json: {}.{} deleted {} row(s) from {}",
+                    req.namespace,
+                    req.table,
+                    req.row_ids.len(),
+                    req.file
+                );
+                serde_json::to_string(&Resp { ok: true })
+                    .map(cstr_json)
+                    .unwrap_or_else(cstr_err_json)
+            }
+            Err(e) => {
+                warn!("ailake_delete_rows_json: failed: {}", e);
+                cstr_err_json(e)
+            }
+        }
+    })
+}
+
+/// Adds a new vector column to an existing table's schema (metadata-only —
+/// no data files rewritten, no embeddings backfilled; use
+/// `ailake_backfill_vector_column_json` for that).
+///
+/// `request_json`:
+/// ```json
+/// {"warehouse":"/data/docs","namespace":"default","table":"docs",
+///  "column":"image_embedding","dim":512,"metric":"cosine","precision":"f16",
+///  "pre_normalize":false,"hnsw_m":16,"hnsw_ef_construction":200}
+/// ```
+/// Returns `{"ok":true,"new_schema_id":N}` or `{"ok":false,"error":"..."}`.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_add_vector_column_json(request_json: *const c_char) -> *mut c_char {
+    catch_ffi_panic("ailake_add_vector_column_json", move || {
+        #[derive(serde::Deserialize)]
+        struct Req {
+            warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
+            #[serde(default = "avc_default_ns")]
+            namespace: String,
+            table: String,
+            column: String,
+            dim: u32,
+            #[serde(default = "avc_default_metric")]
+            metric: String,
+            #[serde(default = "avc_default_precision")]
+            precision: String,
+            #[serde(default)]
+            pre_normalize: bool,
+            #[serde(default)]
+            hnsw_m: Option<u32>,
+            #[serde(default)]
+            hnsw_ef_construction: Option<u32>,
+        }
+        fn avc_default_ns() -> String {
+            "default".into()
+        }
+        fn avc_default_metric() -> String {
+            "cosine".into()
+        }
+        fn avc_default_precision() -> String {
+            "f16".into()
+        }
+
+        if request_json.is_null() {
+            return cstr_err_json("null request_json");
+        }
+        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let req: Req = match serde_json::from_str(json_str) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("ailake_add_vector_column_json: JSON parse error: {}", e);
+                return cstr_err_json(e);
+            }
+        };
+
+        let store = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let catalog = match resolve_catalog(&req.warehouse, store, &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
+        let table = TableIdent::new(&req.namespace, &req.table);
+        let precision = match parse_precision(&req.precision) {
+            Some(p) => p,
+            None => return cstr_err_json(format!("unknown precision: {}", req.precision)),
+        };
+        let spec = VectorColSpec {
+            column_name: req.column.clone(),
+            dim: req.dim,
+            metric: parse_metric(&req.metric),
+            precision,
+            pre_normalize: req.pre_normalize,
+            hnsw_m: req.hnsw_m,
+            hnsw_ef_construction: req.hnsw_ef_construction,
+        };
+
+        let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
+        let _commit_guard = _table_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let result = rt().block_on(catalog.add_vector_column(&table, &spec));
+
+        #[derive(serde::Serialize)]
+        struct Resp {
+            ok: bool,
+            new_schema_id: i32,
+        }
+        match result {
+            Ok(new_schema_id) => {
+                info!(
+                    "ailake_add_vector_column_json: {}.{} added column '{}' new_schema_id={}",
+                    req.namespace, req.table, req.column, new_schema_id
+                );
+                serde_json::to_string(&Resp {
+                    ok: true,
+                    new_schema_id,
+                })
+                .map(cstr_json)
+                .unwrap_or_else(cstr_err_json)
+            }
+            Err(e) => {
+                warn!("ailake_add_vector_column_json: failed: {}", e);
+                cstr_err_json(e)
+            }
+        }
+    })
+}
+
+/// Backfills embeddings for a vector column added via
+/// `ailake_add_vector_column_json` — reads `text_column` from every existing
+/// file missing the new column, embeds via `embed_cmd`, writes new files with
+/// the column populated. Idempotent (files that already have the column, or
+/// were written after `add_vector_column`, are skipped).
+///
+/// `request_json`:
+/// ```json
+/// {"warehouse":"/data/docs","namespace":"default","table":"docs",
+///  "column":"image_embedding","text_column":"image_uri",
+///  "embed_cmd":"python3 embed_images.py","batch_size":256}
+/// ```
+/// Column spec (dim/metric/precision) is read back from the table's own
+/// `ailake.dim-<col>`/`ailake.metric-<col>`/`ailake.precision-<col>`
+/// properties (set by `add_vector_column`) — not re-specified here.
+///
+/// Returns `{"ok":true}` or `{"ok":false,"error":"..."}`.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_backfill_vector_column_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    catch_ffi_panic("ailake_backfill_vector_column_json", move || {
+        #[derive(serde::Deserialize)]
+        struct Req {
+            warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
+            #[serde(default = "bvc_default_ns")]
+            namespace: String,
+            table: String,
+            column: String,
+            text_column: String,
+            embed_cmd: String,
+            #[serde(default = "bvc_default_batch_size")]
+            batch_size: usize,
+        }
+        fn bvc_default_ns() -> String {
+            "default".into()
+        }
+        fn bvc_default_batch_size() -> usize {
+            512
+        }
+
+        if request_json.is_null() {
+            return cstr_err_json("null request_json");
+        }
+        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let req: Req = match serde_json::from_str(json_str) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    "ailake_backfill_vector_column_json: JSON parse error: {}",
+                    e
+                );
+                return cstr_err_json(e);
+            }
+        };
+
+        let store = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let catalog = match resolve_catalog(&req.warehouse, store.clone(), &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
+        let table = TableIdent::new(&req.namespace, &req.table);
+
+        let meta = match rt().block_on(catalog.load_table(&table)) {
+            Ok(m) => m,
+            Err(e) => return cstr_err_json(e),
+        };
+        let dim_key = format!("ailake.dim-{}", req.column);
+        let dim: u32 = match meta.properties.get(&dim_key).and_then(|s| s.parse().ok()) {
+            Some(d) => d,
+            None => {
+                return cstr_err_json(format!(
+                    "column '{}' not found — call ailake_add_vector_column_json first",
+                    req.column
+                ))
+            }
+        };
+        let metric = parse_metric(
+            meta.properties
+                .get(&format!("ailake.metric-{}", req.column))
+                .map(String::as_str)
+                .unwrap_or("cosine"),
+        );
+        let precision = meta
+            .properties
+            .get(&format!("ailake.precision-{}", req.column))
+            .and_then(|s| parse_precision(s))
+            .unwrap_or(VectorPrecision::F16);
+        let new_col = VectorColSpec {
+            column_name: req.column.clone(),
+            dim,
+            metric,
+            precision,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+        };
+
+        let _table_lock = jni_table_lock(&req.warehouse, &req.namespace, &req.table);
+        let _commit_guard = _table_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let job = BackfillJob {
+            table,
+            text_column: req.text_column,
+            new_col,
+            embed_fn: spawn_embed_cmd(req.embed_cmd),
+            batch_size: req.batch_size,
+            on_progress: None,
+        };
+        let result = rt().block_on(job.run(catalog, store));
+
+        #[derive(serde::Serialize)]
+        struct Resp {
+            ok: bool,
+        }
+        match result {
+            Ok(()) => {
+                info!(
+                    "ailake_backfill_vector_column_json: {}.{} backfill complete for '{}'",
+                    req.namespace, req.table, req.column
+                );
+                serde_json::to_string(&Resp { ok: true })
+                    .map(cstr_json)
+                    .unwrap_or_else(cstr_err_json)
+            }
+            Err(e) => {
+                warn!("ailake_backfill_vector_column_json: failed: {}", e);
+                cstr_err_json(e)
+            }
+        }
+    })
+}
+
+/// Storage/index size estimates for a hypothetical table — pure math, no I/O,
+/// no warehouse/catalog needed. Mirrors `ailake-cli`'s `estimate` subcommand
+/// and `ailake-py`'s `estimate()` exactly (same formulas, same JSON shape).
+///
+/// `request_json`: `{"rows":1000000,"dim":1536,"hnsw_m":16,"pq_m":48}`
+/// (`hnsw_m` defaults to 16; `pq_m` defaults to `clamp(dim/32, 8, dim)`).
+///
+/// Returns `{"ok":true,"estimates":[{"mode","vectors_bytes","index_bytes",
+/// "total_bytes","reduction_vs_f32_hnsw","recall","note"}, ...]}`.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_estimate_json(request_json: *const c_char) -> *mut c_char {
+    catch_ffi_panic("ailake_estimate_json", move || {
+        #[derive(serde::Deserialize)]
+        struct Req {
+            rows: u64,
+            dim: u32,
+            #[serde(default = "est_default_hnsw_m")]
+            hnsw_m: u32,
+            #[serde(default)]
+            pq_m: Option<u32>,
+        }
+        fn est_default_hnsw_m() -> u32 {
+            16
+        }
+
+        if request_json.is_null() {
+            return cstr_err_json("null request_json");
+        }
+        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let req: Req = match serde_json::from_str(json_str) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("ailake_estimate_json: JSON parse error: {}", e);
+                return cstr_err_json(e);
+            }
+        };
+
+        let dim = req.dim as u64;
+        let rows = req.rows;
+        let pq_m = req
+            .pq_m
+            .map(|m| m as u64)
+            .unwrap_or_else(|| (dim / 32).max(8).min(dim));
+
+        let vec_f32 = rows.saturating_mul(dim).saturating_mul(4);
+        let vec_f16 = rows.saturating_mul(dim).saturating_mul(2);
+        let vec_i8 = rows.saturating_mul(dim);
+        // HNSW index: ~M×2 neighbors × 9 bytes avg (bincode overhead-adjusted).
+        let hnsw_bytes = rows
+            .saturating_mul(req.hnsw_m as u64)
+            .saturating_mul(2)
+            .saturating_mul(9);
+        // IVF-PQ codes: 1 byte per sub-quantizer code per row.
+        let pq_bytes = rows.saturating_mul(pq_m);
+        let baseline_total = vec_f32 + hnsw_bytes;
+
+        #[derive(serde::Serialize)]
+        struct Estimate {
+            mode: &'static str,
+            vectors_bytes: u64,
+            index_bytes: u64,
+            total_bytes: u64,
+            reduction_vs_f32_hnsw: f64,
+            recall: &'static str,
+            note: &'static str,
+        }
+        let rows_table: [(&str, u64, u64, &str, &str); 6] = [
+            ("F32 (baseline)", vec_f32, hnsw_bytes, "~99%", ""),
+            ("F16 (default)", vec_f16, hnsw_bytes, "~99%", ""),
+            ("I8", vec_i8, hnsw_bytes, "~97%", ""),
+            (
+                "F16 + IVF-PQ index",
+                vec_f16,
+                pq_bytes,
+                "~99%",
+                "reranks with raw F16",
+            ),
+            (
+                "I8  + IVF-PQ index",
+                vec_i8,
+                pq_bytes,
+                "~97%",
+                "reranks with raw I8",
+            ),
+            (
+                "PQ-only (pq_only=True)",
+                0,
+                pq_bytes,
+                "~94%",
+                "no reranking",
+            ),
+        ];
+        let estimates: Vec<Estimate> = rows_table
+            .into_iter()
+            .map(|(mode, vectors_bytes, index_bytes, recall, note)| {
+                let total = vectors_bytes + index_bytes;
+                Estimate {
+                    mode,
+                    vectors_bytes,
+                    index_bytes,
+                    total_bytes: total,
+                    reduction_vs_f32_hnsw: baseline_total as f64 / total.max(1) as f64,
+                    recall,
+                    note,
+                }
+            })
+            .collect();
+
+        #[derive(serde::Serialize)]
+        struct Resp {
+            ok: bool,
+            estimates: Vec<Estimate>,
+        }
+        serde_json::to_string(&Resp {
+            ok: true,
+            estimates,
+        })
+        .map(cstr_json)
+        .unwrap_or_else(cstr_err_json)
+    })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -3710,6 +4485,318 @@ mod tests {
                 "expected {num_rows} results, got: {search_json}"
             );
         }
+    }
+
+    // ── ailake_decay_memories_json / ailake_migrate_json / ailake_delete_rows_json /
+    // ailake_add_vector_column_json / ailake_backfill_vector_column_json /
+    // ailake_estimate_json — real round-trip tests, not just compiled. Uses a
+    // python3 one-liner as `embed_cmd` (same stdin/stdout JSON protocol as
+    // ailake-cli's own --embed-cmd) rather than a mock of this crate's code.
+
+    fn call_json(ptr: *mut c_char) -> serde_json::Value {
+        assert!(!ptr.is_null());
+        let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+        unsafe { ailake_free_string(ptr) };
+        serde_json::from_str(&s).unwrap_or_else(|e| panic!("non-JSON response: {s} ({e})"))
+    }
+
+    /// Fixed embed_cmd: returns the same 2-dim vector for every input text.
+    /// Not testing embedding quality — proving the JNI plumbing (spawn, stdin/
+    /// stdout JSON protocol, job execution, snapshot commit) actually works.
+    const FIXED_EMBED_CMD: &str = "python3 -c \"import sys,json; texts=json.load(sys.stdin); print(json.dumps([[1.0,2.0] for _ in texts]))\"";
+
+    #[test]
+    fn estimate_json_pure_math_no_warehouse() {
+        let req = serde_json::json!({"rows": 1_000_000, "dim": 1536}).to_string();
+        let c = CString::new(req).unwrap();
+        let resp = call_json(unsafe { ailake_estimate_json(c.as_ptr()) });
+        assert_eq!(resp["ok"], serde_json::Value::Bool(true));
+        let estimates = resp["estimates"].as_array().expect("estimates array");
+        assert_eq!(estimates.len(), 6);
+        let f32_row = estimates
+            .iter()
+            .find(|e| e["mode"] == "F32 (baseline)")
+            .unwrap();
+        assert_eq!(f32_row["vectors_bytes"], 1_000_000u64 * 1536 * 4);
+        assert_eq!(f32_row["reduction_vs_f32_hnsw"], 1.0);
+    }
+
+    #[test]
+    fn estimate_json_null_guard() {
+        let ptr = unsafe { ailake_estimate_json(std::ptr::null()) };
+        let resp = call_json(ptr);
+        assert_eq!(resp["ok"], serde_json::Value::Bool(false));
+    }
+
+    #[test]
+    fn add_vector_column_then_backfill_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let warehouse = dir.path().to_str().unwrap().to_string();
+
+        // create_table
+        let create_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "dim": 4, "vector_column": "embedding", "metric": "cosine", "precision": "f16",
+            "format_version": 2,
+        })
+        .to_string();
+        let c = CString::new(create_req).unwrap();
+        let resp = call_json(unsafe { ailake_create_table_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "create_table: {resp}"
+        );
+
+        // write_batch — 2 rows, with an "image_uri" text column for backfill to read.
+        let write_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "vec_col": "embedding", "dim": 4, "metric": "cosine",
+            "ids": [1, 2],
+            "embeddings": [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]],
+            "columns": {"image_uri": ["img1.png", "img2.png"]},
+        })
+        .to_string();
+        let c = CString::new(write_req).unwrap();
+        let resp = call_json(unsafe { ailake_write_batch_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "write_batch: {resp}"
+        );
+
+        // add_vector_column
+        let avc_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "column": "image_embedding", "dim": 2, "metric": "cosine", "precision": "f16",
+        })
+        .to_string();
+        let c = CString::new(avc_req).unwrap();
+        let resp = call_json(unsafe { ailake_add_vector_column_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "add_vector_column: {resp}"
+        );
+        assert!(resp["new_schema_id"].as_i64().unwrap() >= 0);
+
+        // backfill_vector_column
+        let bvc_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "column": "image_embedding", "text_column": "image_uri",
+            "embed_cmd": FIXED_EMBED_CMD, "batch_size": 512,
+        })
+        .to_string();
+        let c = CString::new(bvc_req).unwrap();
+        let resp = call_json(unsafe { ailake_backfill_vector_column_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "backfill_vector_column: {resp}"
+        );
+
+        // Verify: search the new column and get real hits back — proves the
+        // backfill actually wrote physical data + a working HNSW index for it,
+        // not just "didn't throw".
+        let search_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "vec_col": "image_embedding", "dim": 2, "query": [1.0, 2.0], "top_k": 10,
+        })
+        .to_string();
+        let c = CString::new(search_req).unwrap();
+        let resp = call_json(unsafe { ailake_search_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "search image_embedding: {resp}"
+        );
+        let results = resp["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 2, "expected 2 backfilled rows, got: {resp}");
+    }
+
+    #[test]
+    fn delete_rows_json_masks_row_in_subsequent_search() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let warehouse = dir.path().to_str().unwrap().to_string();
+
+        let create_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "dim": 4, "vector_column": "embedding", "metric": "cosine", "precision": "f16",
+            "format_version": 3,
+        })
+        .to_string();
+        let c = CString::new(create_req).unwrap();
+        let resp = call_json(unsafe { ailake_create_table_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "create_table: {resp}"
+        );
+
+        let write_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "vec_col": "embedding", "dim": 4, "metric": "cosine",
+            "ids": [1, 2, 3],
+            "embeddings": [[0.1, 0.2, 0.3, 0.4], [0.2, 0.3, 0.4, 0.5], [0.3, 0.4, 0.5, 0.6]],
+        })
+        .to_string();
+        let c = CString::new(write_req).unwrap();
+        let resp = call_json(unsafe { ailake_write_batch_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "write_batch: {resp}"
+        );
+
+        // Find the written file's path via a full-recall search.
+        let search_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "vec_col": "embedding", "dim": 4, "query": [0.1, 0.2, 0.3, 0.4], "top_k": 10,
+        })
+        .to_string();
+        let c = CString::new(search_req.clone()).unwrap();
+        let resp = call_json(unsafe { ailake_search_json(c.as_ptr()) });
+        let results = resp["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 3, "expected 3 rows before delete: {resp}");
+        let file_path = results[0]["file_path"].as_str().unwrap().to_string();
+
+        let delete_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "file": file_path, "row_ids": [0],
+        })
+        .to_string();
+        let c = CString::new(delete_req).unwrap();
+        let resp = call_json(unsafe { ailake_delete_rows_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "delete_rows: {resp}"
+        );
+
+        let c = CString::new(search_req).unwrap();
+        let resp = call_json(unsafe { ailake_search_json(c.as_ptr()) });
+        let results = resp["results"].as_array().expect("results array");
+        assert_eq!(
+            results.len(),
+            2,
+            "expected 2 rows after deleting row 0, got: {resp}"
+        );
+    }
+
+    #[test]
+    fn decay_memories_json_roundtrip_with_last_accessed_at() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let warehouse = dir.path().to_str().unwrap().to_string();
+
+        let create_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "mem",
+            "dim": 4, "vector_column": "embedding", "metric": "cosine", "precision": "f16",
+        })
+        .to_string();
+        let c = CString::new(create_req).unwrap();
+        let resp = call_json(unsafe { ailake_create_table_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "create_table: {resp}"
+        );
+
+        // last_accessed_at accepted as a legacy ISO-8601 string column (see
+        // memory_decay.rs's own doc comment).
+        let write_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "mem",
+            "vec_col": "embedding", "dim": 4, "metric": "cosine",
+            "ids": [1],
+            "embeddings": [[0.1, 0.2, 0.3, 0.4]],
+            "columns": {"last_accessed_at": ["2026-01-01T00:00:00Z"]},
+        })
+        .to_string();
+        let c = CString::new(write_req).unwrap();
+        let resp = call_json(unsafe { ailake_write_batch_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "write_batch: {resp}"
+        );
+
+        let decay_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "mem", "lambda": 0.1,
+        })
+        .to_string();
+        let c = CString::new(decay_req).unwrap();
+        let resp = call_json(unsafe { ailake_decay_memories_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "decay_memories: {resp}"
+        );
+        assert_eq!(
+            resp["files_updated"], 1,
+            "expected 1 file rewritten: {resp}"
+        );
+    }
+
+    #[test]
+    fn migrate_json_roundtrip_atomic_replace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let warehouse = dir.path().to_str().unwrap().to_string();
+
+        let create_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "dim": 2, "vector_column": "embedding", "metric": "cosine", "precision": "f16",
+        })
+        .to_string();
+        let c = CString::new(create_req).unwrap();
+        let resp = call_json(unsafe { ailake_create_table_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "create_table: {resp}"
+        );
+
+        let write_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "vec_col": "embedding", "dim": 2, "metric": "cosine",
+            "ids": [1, 2],
+            "embeddings": [[0.1, 0.2], [0.3, 0.4]],
+            "columns": {"chunk_text": ["hello world", "goodbye world"]},
+        })
+        .to_string();
+        let c = CString::new(write_req).unwrap();
+        let resp = call_json(unsafe { ailake_write_batch_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "write_batch: {resp}"
+        );
+
+        let migrate_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "old_column": "embedding", "new_column": "embedding_v2",
+            "text_column": "chunk_text", "embed_cmd": FIXED_EMBED_CMD,
+            "strategy": "atomic-replace", "batch_size": 512,
+            "model_name": "test-model", "model_version": "v1",
+        })
+        .to_string();
+        let c = CString::new(migrate_req).unwrap();
+        let resp = call_json(unsafe { ailake_migrate_json(c.as_ptr()) });
+        assert_eq!(resp["ok"], serde_json::Value::Bool(true), "migrate: {resp}");
+
+        // Verify the new column is searchable with real data.
+        let search_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "vec_col": "embedding_v2", "dim": 2, "query": [1.0, 2.0], "top_k": 10,
+        })
+        .to_string();
+        let c = CString::new(search_req).unwrap();
+        let resp = call_json(unsafe { ailake_search_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "search embedding_v2: {resp}"
+        );
+        let results = resp["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 2, "expected 2 migrated rows, got: {resp}");
     }
 
     #[cfg(miri)]

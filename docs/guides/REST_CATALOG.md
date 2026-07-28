@@ -84,8 +84,183 @@ flattened into its JSON request body, alongside the existing `warehouse` field:
 `ailake_vector_search_json`/`do_search`'s raw-pointer legacy entry point (no JSON
 body) stays Hadoop-only — there's nowhere to carry the config.
 
+### Spark
+
+All 10 `AilakeNative.scala` methods take a trailing `catalogOpts: Map[String, String]`
+(default empty = Hadoop catalog), which `AilakeCatalog`/`AilakeDataSource` also
+populate automatically from catalog/writer options:
+
+```scala
+// spark.sql.catalog.<name>.catalog / .rest-uri / .rest-auth / .rest-token / ...
+spark.conf.set("spark.sql.catalog.ailake.catalog", "rest")
+spark.conf.set("spark.sql.catalog.ailake.rest-uri", "https://catalog.example.com")
+
+// or the DataFrame/SQL API directly:
+import io.ailake.spark.implicits._
+spark.ailakeSearch(tableUri, queryVec, topK = 10,
+  catalogOpts = Map("catalog" -> "rest", "rest_uri" -> "https://catalog.example.com"))
+
+df.write.format("io.ailake.spark.AilakeDataSource")
+  .option("tableUri", tableUri)
+  .option("catalog", "rest")
+  .option("rest-uri", "https://catalog.example.com")
+  .save()
+```
+
+### Trino
+
+Only `CALL ailake.system.compact()` supports REST catalog today, via new
+`ailake.catalog`/`ailake.rest-*` catalog properties:
+
+```properties
+# etc/catalog/ailake.properties
+connector.name=ailake
+ailake.table-uri=s3://my-lake/docs/
+ailake.catalog=rest
+ailake.rest-uri=https://catalog.example.com
+ailake.rest-auth=bearer
+ailake.rest-token=...
+```
+
+`search`/`search_full`/`search_multimodal`/`INSERT` do **not** support it yet —
+those go through `VectorScanHandles.kt`'s JSON-serialized Trino table/split
+handle classes (`VectorScanTableHandle`, `ScanTableHandle`,
+`AilakeIngestTableHandle`, etc), which that file's own doc comments flag as
+having a real prior history of subtle Jackson serialization bugs (a handle
+field silently not round-tripping coordinator→worker, only caught via a live
+Trino server test) — extending them needs the same live verification, out of
+reach in an offline sandbox. Tracked as a follow-up.
+
+### Flink
+
+Add `'catalog' = 'rest'` + `'rest-*'` options to either `CREATE TABLE`'s `WITH
+(...)` clause (source/sink both — unlike Trino, this reaches search/scan/
+insert/DELETE, since Flink's DynamicTableSource/Sink objects use plain Java
+serialization, not the JSON-handle round-trip that makes Trino's case risky):
+
+```sql
+CREATE TABLE docs_ingest (
+  id BIGINT, embedding ARRAY<FLOAT>
+) WITH (
+  'connector' = 'ailake',
+  'warehouse' = 's3://my-lake/',
+  'table-name' = 'docs',
+  'vector.dim' = '1536',
+  'catalog' = 'rest',
+  'rest-uri' = 'https://catalog.example.com',
+  'rest-auth' = 'bearer',
+  'rest-token' = '...'
+);
+```
+
+## Airflow usage
+
+Set catalog config in the Airflow Connection's `extra` JSON (alongside cloud
+credentials) — `AilakeHook.run_cli()` forwards it as `--catalog`/`--rest-*` CLI
+flags automatically, single choke point for every hook method and operator:
+
+```json
+{
+    "catalog": "rest",
+    "rest_uri": "https://catalog.example.com",
+    "rest_prefix": "my_catalog",
+    "rest_warehouse": "s3://my-bucket/warehouse",
+    "rest_auth": "bearer",
+    "rest_token": "..."
+}
+```
+
+Omit `catalog` (or set it to `"hadoop"`) for the default local/S3-prefix
+metadata-dir catalog — unchanged behavior, no flags added.
+
+## DuckDB usage
+
+Every `ailake_*` SQL function (table and scalar) takes a trailing optional
+`catalog_opts_json VARCHAR` parameter — a JSON object with the same
+`catalog`/`rest_*` fields, merged into the request sent to the
+statically-linked `ailake-jni` binary. Table functions (`ailake_search`,
+`ailake_search_multimodal`, `ailake_search_text`, `ailake_scan`) expose it as
+a named parameter; scalar functions (`ailake_write_batch`,
+`ailake_write_batch_multi`, `ailake_delete_where`, `ailake_evolve_schema`,
+`ailake_compact`, `ailake_create_table`) expose it as the last positional
+argument in their highest arity overload:
+
+```sql
+SELECT * FROM ailake_search(
+    'file:///data/my_table', [0.1, 0.2, 0.3]::FLOAT[], 10,
+    catalog_opts_json := '{"catalog":"rest","rest_uri":"https://catalog.example.com","rest_auth":"bearer","rest_token":"..."}'
+);
+```
+
+Malformed JSON (or a non-object value) raises `InvalidInputException` — never
+silently falls back to the Hadoop catalog.
+
+## Go usage
+
+`CreateTable`/`WriteBatch`/`Compact`/`DecayMemories`/`Migrate`/`DeleteRows`/
+`AddVectorColumn`/`BackfillVectorColumn` accept `CatalogOpts
+map[string]string` (either directly, or via their `Options` struct) —
+forwarded as `--catalog`/`--rest-*` flags to the `ailake` CLI binary these
+functions shell out to. Nil/empty = default Hadoop catalog:
+
+```go
+err := ailake.WriteBatch(catalog, "default", "docs", "batch.parquet", ailake.WriteBatchOptions{
+    VecCol: "embedding",
+    CatalogOpts: map[string]string{
+        "catalog":   "rest",
+        "rest-uri":  "https://catalog.example.com",
+        "rest-auth": "bearer",
+        "rest-token": "...",
+    },
+})
+```
+
+`DeleteWhere`/`EvolveSchema` don't accept it yet (see "Known limitations").
+`Estimate` needs no catalog config at all — pure math, no warehouse.
+
+## C++ usage
+
+`create_table`/`write_batch`/`write_batch_multi`/`compact`/`decay_memories`/
+`migrate`/`delete_rows`/`add_vector_column`/`backfill_vector_column` accept a
+`catalog_opts: std::map<std::string, std::string>` field (either directly, or
+via their `Options` struct — `CreateTableOptions`/`WriteBatchOptions`/
+`CompactOptions`/`MigrateOptions`/`AddVectorColumnOptions`/
+`BackfillVectorColumnOptions`) — forwarded as `--catalog`/`--rest-*` flags to
+the `ailake` CLI binary these functions shell out to. Empty = default Hadoop
+catalog:
+
+```cpp
+ailake::WriteBatchOptions opts;
+opts.vec_col = "embedding";
+opts.catalog_opts["catalog"]    = "rest";
+opts.catalog_opts["rest-uri"]   = "https://catalog.example.com";
+opts.catalog_opts["rest-auth"]  = "bearer";
+opts.catalog_opts["rest-token"] = "...";
+ailake::write_batch(warehouse, "default.docs", "batch.parquet", opts);
+```
+
+`ailake-go`'s `DeleteWhere`/`EvolveSchema` take it as a trailing variadic
+`...map[string]string` (0 or 1 map) — added after the fact without breaking
+existing call sites, since Go allows a variadic to be omitted entirely by
+callers compiled against the old signature. `estimate` needs no catalog
+config at all — pure math, no warehouse.
+
 ## Known limitations
 
+- **`ailake-go` and `ailake-cpp`'s write paths are both wired now**
+  (`WriteBatchOptions.CatalogOpts`/`CompactOptions.CatalogOpts` in Go,
+  `catalog_opts` in C++), including `DeleteWhere`/`EvolveSchema` in Go (via a
+  trailing variadic `catalogOpts ...map[string]string` — backward compatible,
+  no breaking signature change). Neither SDK has native read-path support (no
+  HTTP client in either — would need a new dependency, unlike the mechanical
+  CLI-flag-forwarding fix). `ailake-cpp`'s `delete_where`/`evolve_schema`
+  still don't take catalog config — same fix (a variadic-equivalent, e.g. a
+  trailing `std::map<std::string,std::string>` defaulted to empty) applies
+  there too; left as a follow-up.
+- **Trino only wires REST catalog into `CALL ailake.system.compact()`** — see
+  "JNI usage → Trino" above for why search/scan/multimodal/INSERT are deferred
+  (JSON-serialized Trino handle classes with a documented prior serialization
+  bug history, needs live-server verification).
 - **`Store` root vs. `RestCatalogConfig.warehouse` must be kept in sync manually**
   for local-filesystem storage. The catalog computes each table's `location` from
   `warehouse`; the `Store` resolves `DataFileEntry.path` against its own root

@@ -54,6 +54,29 @@ snapshot_id = writer.commit()
 print(f"committed snapshot {snapshot_id}")
 ```
 
+**Single-commit lifecycle**: call `write_batch()`/`write_batch_multi()`/etc. any
+number of times to accumulate rows, then `commit()` **exactly once** to flush
+everything as one Iceberg snapshot. `commit()` consumes the writer — any method
+called on it afterward raises `ValueError: "TableWriter already committed"`.
+For a multi-chunk write (e.g. re-embedding a large table in batches), pick one
+of two patterns:
+
+```python
+# One snapshot for the whole job — single writer, single commit at the end
+writer = ailake.TableWriter("s3://my-lake/docs/", dim=1536)
+for chunk in chunks:
+    writer.write_batch(chunk.texts, chunk.embeddings)
+writer.commit()
+
+# Incremental snapshots — safer for a long-running/resumable job (a crash
+# partway through only loses the in-flight chunk, not the whole run); a new
+# TableWriter reopens the same table, it does not overwrite it
+for chunk in chunks:
+    writer = ailake.TableWriter("s3://my-lake/docs/", dim=1536)
+    writer.write_batch(chunk.texts, chunk.embeddings)
+    writer.commit()
+```
+
 **All `TableWriter` parameters:**
 
 ```python

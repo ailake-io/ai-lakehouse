@@ -299,7 +299,14 @@ for _, r := range results {
 
 ## 8. Deletes and schema evolution
 
-Both delegate to the `ailake` CLI.
+`DeleteWhere`/`DeleteRows`/`EvolveSchema` delegate to the `ailake` CLI to commit the delete/
+schema-evolution snapshot. **Masking is applied natively by this package's own `Search`/`Scan`**
+(not just the real `ailake` CLI's own search) — `DeleteRows` (Deletion Vectors) is masked in
+both `Search` and `Scan`; `DeleteWhere` (equality delete) is masked in `Scan`/`FetchRows` only,
+since `Search` alone never decodes any column data to check a predicate against. See
+`ailake-go/delete.go` and the "Equality delete filtering" section of the package README for
+the low-level `LoadEqualityDeleteFilter` primitive if you're calling `Search`+`FetchRows`
+directly instead of `Scan`.
 
 **Logical delete (Iceberg equality delete — no data rewrite):**
 
@@ -310,6 +317,14 @@ err := ailake.DeleteWhere(
     "chunk_id",                              // column to match
     []string{"uuid-aaa", "uuid-bbb"},        // values to delete
 )
+// optional trailing catalog_opts map for REST Catalog — see docs/guides/REST_CATALOG.md
+```
+
+**Position delete (Iceberg V3 Deletion Vectors — no data rewrite, requires `format_version=3`):**
+
+```go
+files, _ := catalog.ListFiles("default", "docs")
+err := ailake.DeleteRows(catalog, "default", "docs", files[0].Path, []int{0, 5, 42}, nil)
 ```
 
 **Schema evolution — add / rename columns:**
@@ -328,6 +343,42 @@ newSchemaID, err := ailake.EvolveSchema(
 )
 fmt.Printf("new schema_id: %d\n", newSchemaID)
 ```
+
+---
+
+## 8b. Table maintenance and agent memory
+
+The rest of the CLI-delegating write ops — see the package README for full parameter docs
+(`CreateTableOptions`, `AddVectorColumnOptions`, `BackfillVectorColumnOptions`,
+`MigrateOptions`, `CompactOptions`, `EstimateOptions`).
+
+```go
+// Create an empty table (schema only) before any INSERT.
+err := ailake.CreateTable(catalog, "default", "docs", 1536, ailake.CreateTableOptions{Metric: "cosine"})
+
+// Add a new vector column, then backfill embeddings for existing rows.
+err = ailake.AddVectorColumn(catalog, "default", "docs", "image_embedding", 512, ailake.AddVectorColumnOptions{})
+err = ailake.BackfillVectorColumn(catalog, "default", "docs", "image_embedding", "python3 embed_images.py",
+    ailake.BackfillVectorColumnOptions{TextColumn: "image_uri"})
+
+// Re-embed a column into a new one via an external embed command.
+err = ailake.Migrate(catalog, "default", "docs", "python3 embed.py",
+    ailake.MigrateOptions{OldColumn: "embedding", NewColumn: "embedding_v2", TextColumn: "chunk_text"})
+
+// Merge small files.
+filesCompacted, err := ailake.Compact(catalog, "default", "docs", ailake.CompactOptions{})
+
+// Phase 9 agent memory — recompute recency_weight for every row.
+filesUpdated, err := ailake.DecayMemories(catalog, "default", "agent_memory", 0.1, nil)
+
+// Storage/index size estimate — pure math, no warehouse needed.
+est, err := ailake.Estimate("1M", 1536, ailake.EstimateOptions{})
+```
+
+`Migrate`/`BackfillVectorColumn`'s `embedCmd` is spawned via `sh -c`, reading a JSON array of
+strings on stdin and writing a JSON array of float arrays on stdout — same protocol the CLI's
+own `--embed-cmd` and the JVM plugins' `ailake_migrate_json`/`ailake_backfill_vector_column_json`
+(Fase 21) use.
 
 ---
 
@@ -447,11 +498,20 @@ func main() {
 | `DecodeF16Vector(raw, dim)` | func | No | Decode F16 Parquet column to `[]float32` |
 | `DetectHardware()` | func | No | Reports CPU SIMD / CUDA / ROCm |
 | `WriteBatch(catalog, ns, name, parquet, opts)` | func | **Yes** | Ingest Parquet batch + build HNSW (single- or multi-column via `opts.VectorCols`) |
+| `CreateTable(catalog, ns, name, dim, opts)` | func | **Yes** | Create an empty table (schema only, no data) |
 | `Compact(catalog, ns, name, opts)` | func | **Yes** | Merge small files; returns files-compacted count |
-| `DeleteWhere(catalog, ns, name, col, vals)` | func | **Yes** | Iceberg equality delete |
-| `EvolveSchema(catalog, ns, name, add, rename)` | func | **Yes** | Add/rename columns (metadata-only) |
+| `DeleteWhere(catalog, ns, name, col, vals, ...catalogOpts)` | func | **Yes** | Iceberg equality delete — masked in `Scan`/`FetchRows`, not `Search` alone (see §8) |
+| `DeleteRows(catalog, ns, name, file, rowIDs, catalogOpts)` | func | **Yes** | V3 Deletion Vector position delete — masked in both `Search` and `Scan` (see §8) |
+| `EvolveSchema(catalog, ns, name, add, rename, ...catalogOpts)` | func | **Yes** | Add/rename columns (metadata-only) |
+| `AddVectorColumn(catalog, ns, name, col, dim, opts)` | func | **Yes** | Add a vector column to the schema (metadata-only, no backfill) |
+| `BackfillVectorColumn(catalog, ns, name, col, embedCmd, opts)` | func | **Yes** | Backfill embeddings for a column added via `AddVectorColumn` |
+| `DecayMemories(catalog, ns, name, lambda, catalogOpts)` | func | **Yes** | Recompute `recency_weight` for every row (Phase 9 agent memory) |
+| `Migrate(catalog, ns, name, embedCmd, opts)` | func | **Yes** | Re-embed a column via an external embed command |
+| `Estimate(rows, dim, opts)` | func | **Yes** | Storage/index size estimates — pure math once invoked, but still shells out to `ailake estimate` (needs the CLI binary resolvable) |
 | `SearchText(catalog, ns, name, query, cols, k)` | func | **Yes** | FTS (Tantivy or BM25 fallback) |
 | `SearchHybrid(catalog, ns, name, vec, text, k, w, col)` | func | **Yes** | BM25+vector RRF |
+| `catalog.ListEqualityDeletes(ns, name)` | method | No | Returns `[]EqualityDeleteFile` for the current snapshot |
+| `LoadEqualityDeleteFilter(warehouse, files)` | func | No | Builds an `EqualityDeleteFilter` from `ListEqualityDeletes`' output |
 | `ErrNoBinary` | var | — | Returned when CLI not found |
 
 **Schema / agent types:**
@@ -469,7 +529,15 @@ func main() {
 | `SearchHybridResult` | `{RowID, Distance, FilePath}` |
 | `SearchTextResult` | `{RowID, Score, FilePath}` |
 | `TableInfo` | Full table metadata incl. `SchemaFields`, `PartitionFields` |
-| `DataFileEntry` | Per-file metadata (centroid, radius, HNSW offset, index status) |
+| `DataFileEntry` | Per-file metadata (centroid, radius, HNSW offset, index status, `DeletionVector *DeletionVectorRef`) |
+| `DeletionVectorRef` | `{Path, Offset, Length, Cardinality}` — pointer to a Puffin `.dvd` Roaring Bitmap blob (Phase H) |
+| `EqualityDeleteFile` | `{Path, EqualityIDs, RecordCount, FileSizeBytes}` — one entry per `ListEqualityDeletes` result (Phase H) |
+| `EqualityDeleteFilter` | Predicate built by `LoadEqualityDeleteFilter`; applied automatically inside `Scan`/`FetchRows` |
+| `CreateTableOptions` | `{Metric, Precision, Column, PreNormalize, HnswM, HnswEfConstruction, PQOnly, IVFResidual, Modality, FormatVersion, FtsColumns, FtsTokenizer, CatalogOpts}` |
+| `AddVectorColumnOptions` | `{Metric, Precision, PreNormalize, HnswM, HnswEfConstruction, CatalogOpts}` |
+| `BackfillVectorColumnOptions` | `{TextColumn, BatchSize, CatalogOpts}` |
+| `MigrateOptions` | `{OldColumn, NewColumn, TextColumn, Strategy, BatchSize, ModelName, ModelVersion, CatalogOpts}` |
+| `EstimateOptions` / `EstimateResult` | Pure-math storage/index size estimate parameters and result rows — no warehouse/catalog needed |
 | `ToolCallSchema` | Column layout for agent tool-call history tables |
 | `EpisodicMemorySchema` | Column layout for agent episodic memory tables |
 

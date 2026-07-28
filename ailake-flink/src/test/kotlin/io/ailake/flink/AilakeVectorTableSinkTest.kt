@@ -357,7 +357,19 @@ class AilakeVectorTableSinkTest {
 
     @Test
     fun executeDeletionFailsClearlyWhenNativeLibraryAbsent() {
-        assumeTrue(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
+        // Regression: this checked AILAKE_LIB_PATH (Spark/Trino's gradle-step env var
+        // name), which the Flink test step never sets (it sets AILAKE_NATIVE_LIB —
+        // see AilakeJniIntegrationTest and .github/workflows/{ci,compat-heavy}.yml) —
+        // the check was always true (never skipped) in every CI job that runs Flink
+        // tests, where the native lib is in fact always present. Previously masked by
+        // an unrelated bug: this same "docs" table never really existed on disk (since
+        // AilakeCatalog.createTable was dead code before this session), so
+        // executeDeletion() threw "table not found" regardless of native-lib state,
+        // accidentally satisfying this assertion for the wrong reason. Now that
+        // createTable is real, that accidental failure is gone — this must correctly
+        // skip whenever the native lib is genuinely loadable.
+        val nativeLib = System.getenv("AILAKE_NATIVE_LIB") ?: System.getProperty("ailake.native.lib")
+        assumeTrue(nativeLib == null || !java.io.File(nativeLib).exists(), "skipped: native library present")
         val s = sink()
         s.applyDeleteFilters(listOf(equalsExpr("id", 5L)))
         // AilakeNativeLoader.lib throws (via getOrThrow()) when the native lib isn't on
