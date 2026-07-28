@@ -149,10 +149,15 @@ struct FileSearchResult {
 struct HadoopCatalog {
     explicit HadoopCatalog(std::string warehouse_root);
 
-    TableInfo            load_table(const std::string& ns, const std::string& tbl);
-    std::vector<DataFileEntry> list_files(const std::string& ns, const std::string& tbl);
+    TableInfo            load_table(const std::string& ns, const std::string& tbl) const;
+    std::vector<DataFileEntry> list_files(const std::string& ns, const std::string& tbl) const;
+    // Equality delete files for the current snapshot (Phase H) — see
+    // "Reading back equality deletes" under ailake::delete_where below.
+    std::vector<EqualityDeleteFile> list_equality_deletes(const std::string& ns, const std::string& tbl) const;
+    static std::vector<std::pair<std::string, std::string>>
+                          read_equality_delete_values(const std::string& resolved_path);
     std::string          resolve_path(const std::string& ns, const std::string& tbl,
-                                      const std::string& rel_path);
+                                      const std::string& rel_path) const;
 };
 ```
 
@@ -318,6 +323,29 @@ ailake::create_table(
     "/path/to/warehouse",  // warehouse root
     "default.docs",        // "namespace.table"
     1536,                  // vector dimension
+    opts
+);
+// throws std::runtime_error if the CLI binary is not found or exits non-zero
+```
+
+### `ailake::write_batch`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Inserts a Parquet file into an AI-Lake table. `opts.vec_col` (default
+// "embedding") identifies which Parquet column holds the embedding vectors.
+// The table is created on first write with default policy if it doesn't
+// already exist — use create_table above for pq_only/ivf_residual/modality
+// or HNSW tuning set up front instead.
+ailake::WriteBatchOptions opts;
+opts.vec_col = "embedding";
+opts.metric = "cosine";
+opts.precision = "f16";
+ailake::write_batch(
+    "/path/to/warehouse",   // warehouse root
+    "default.docs",         // "namespace.table"
+    "/local/batch.parquet", // source Parquet file (must have opts.vec_col column)
     opts
 );
 // throws std::runtime_error if the CLI binary is not found or exits non-zero
@@ -535,6 +563,18 @@ When `detect_hardware().has_rocm` is true, flat-scan delegates to `hipBLAS` SGEM
 cmake -B build && cmake --build build
 ./build/ailake_search -w /data/warehouse -t default.docs -d 1536 -k 10
 ```
+
+## Test
+
+```bash
+cmake -B build && cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+6 test binaries (`test_footer`, `test_hnsw`, `test_ivfpq`, `test_write`, `test_fts`,
+`test_catalog_paths`). `test_write`'s integration tests are gated by env vars and skip
+cleanly when absent: `AILAKE_BIN` (a real `ailake` CLI binary) enables round-trip tests
+against a live table; `AILAKE_FIXTURE` additionally enables tests against a pre-built table.
 
 ## License
 
