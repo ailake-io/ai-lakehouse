@@ -87,6 +87,14 @@ data class VectorScanSplit @JsonCreator constructor(
     @param:JsonProperty("vectorColumn") @get:JsonProperty("vectorColumn") val vectorColumn: String,
     @param:JsonProperty("queryText") @get:JsonProperty("queryText") val queryText: String = "",
     @param:JsonProperty("hybridWeight") @get:JsonProperty("hybridWeight") val hybridWeight: Float = 0.5f,
+    // Sentinel defaults (0 / -1f), same non-nullable pattern as topK/hybridWeight
+    // above rather than introducing nullable fields into this JSON-serialized
+    // handle — see the NB at the top of this file on why every field here needs
+    // care. 0 / -1f both mean "not set, use ailake_search_json's own server-side
+    // default (ef_search=50, pruning_threshold=infinity)" — resolved to null at
+    // the AilakeNative.search() call site (VectorScanRecordSet.kt).
+    @param:JsonProperty("efSearch") @get:JsonProperty("efSearch") val efSearch: Int = 0,
+    @param:JsonProperty("pruningThreshold") @get:JsonProperty("pruningThreshold") val pruningThreshold: Float = -1f,
 ) : ConnectorSplit {
     override fun isRemotelyAccessible(): Boolean = true
     override fun getAddresses(): List<HostAddress> = emptyList()

@@ -86,6 +86,10 @@ class VectorScanConnector(
      *   SET SESSION ailake.top_k = 10;
      *   SELECT * FROM ailake.default.search ORDER BY distance;
      *
+     *   -- HNSW recall/latency tuning (0 / -1 = server defaults: ef_search=50, no pruning)
+     *   SET SESSION ailake.ef_search = 100;
+     *   SET SESSION ailake.pruning_threshold = 0.8;
+     *
      *   -- hybrid BM25+vector RRF fusion (both query_vector and query_text set)
      *   SET SESSION ailake.query_text = 'rust programming';
      *   SET SESSION ailake.hybrid_weight = 0.5;  -- 0.0 = pure vector, 1.0 = pure BM25
@@ -131,6 +135,69 @@ class VectorScanConnector(
             "multimodal_queries",
             "JSON array of {col, query (csv f32), weight} for cross-modal RRF search of " +
             "ailake.default.search_multimodal, e.g. '[{\"col\":\"embedding\",\"query\":\"0.1,-0.2\",\"weight\":1.0}]'",
+            "",
+            false,
+        ),
+        // ailake_search_json (ailake-jni) has always accepted both — never
+        // forwarded from here (or Spark's AilakeNative.search — same gap,
+        // same fix) until now. 0 / -1.0 = "not set, use the server's own
+        // default (ef_search=50, pruning_threshold=infinity/no pruning)".
+        PropertyMetadata.integerProperty(
+            "ef_search",
+            "HNSW ef_search — higher recall at the cost of latency (0 = server default, 50)",
+            0,
+            false,
+        ),
+        PropertyMetadata.doubleProperty(
+            "pruning_threshold",
+            "Geometric pruning cutoff — files whose centroid is farther than this from the " +
+            "query are skipped entirely (-1 = server default, no pruning)",
+            -1.0,
+            false,
+        ),
+        // Session properties consumed by AilakeProcedures' CALL ailake.system.*
+        // maintenance procedures below (decay_memories/migrate/delete_rows/
+        // add_vector_column/backfill_vector_column/estimate) — same
+        // JSON-string-session-property carrier already used by
+        // `multimodal_queries` above for operations with more fields than fit
+        // comfortably as individual typed session properties.
+        PropertyMetadata.doubleProperty(
+            "decay_lambda",
+            "Exponential decay rate for CALL ailake.system.decay_memories() (Phase 9 agent memory)",
+            0.1,
+            false,
+        ),
+        PropertyMetadata.stringProperty(
+            "migrate_config",
+            "JSON config for CALL ailake.system.migrate(): " +
+            "{\"old_column\",\"new_column\",\"text_column\",\"embed_cmd\",\"strategy\"?,\"batch_size\"?,\"model_name\"?,\"model_version\"?}",
+            "",
+            false,
+        ),
+        PropertyMetadata.stringProperty(
+            "delete_rows_config",
+            "JSON config for CALL ailake.system.delete_rows(): {\"file\",\"row_ids\":[...]}",
+            "",
+            false,
+        ),
+        PropertyMetadata.stringProperty(
+            "add_vector_column_config",
+            "JSON config for CALL ailake.system.add_vector_column(): " +
+            "{\"column\",\"dim\",\"metric\"?,\"precision\"?,\"pre_normalize\"?,\"hnsw_m\"?,\"hnsw_ef_construction\"?}",
+            "",
+            false,
+        ),
+        PropertyMetadata.stringProperty(
+            "backfill_vector_column_config",
+            "JSON config for CALL ailake.system.backfill_vector_column(): " +
+            "{\"column\",\"text_column\",\"embed_cmd\",\"batch_size\"?}",
+            "",
+            false,
+        ),
+        PropertyMetadata.stringProperty(
+            "estimate_config",
+            "JSON config for CALL ailake.system.estimate(): {\"rows\",\"dim\",\"hnsw_m\"?,\"pq_m\"?} — " +
+            "result is logged server-side (INFO), CALL procedures have no result set",
             "",
             false,
         ),
