@@ -226,10 +226,13 @@ struct DataFileEntry {
     std::string batch_id;
     std::string embedding_model; // "<name>" or "<name>@<version>"; empty if not set
     std::string partition_value; // agent_id or other partition value (Phase 9)
+    std::optional<DeletionVectorRef> deletion_vector; // Iceberg V3 Deletion Vector (Phase H)
 };
 ```
 
 `extra_vector_indexes` is populated from the `extra_vector_indexes` JSON array in Avro `key_metadata`; used by `search_multimodal` to locate secondary column HNSW indexes.
+
+`deletion_vector` points to a Roaring Bitmap blob in a Puffin `.dvd` file (path/offset/length/cardinality) — parsed from `key_metadata`, but not yet decoded/applied by `search()`. See "Known limitations" under `ailake::delete_where` above.
 
 ### Dim validation in `search()`
 
@@ -349,10 +352,26 @@ ailake::delete_where(
     "/path/to/warehouse",  // warehouse root
     "default.my_table",    // "namespace.table"
     "id",                  // equality delete column
-    {"doc-1", "doc-2"}     // values to delete
+    {"doc-1", "doc-2"},    // values to delete
+    {}                     // optional catalog_opts (REST catalog) — {} = default Hadoop catalog
 );
 // throws std::runtime_error on failure
 ```
+
+**Reading back equality deletes** — `HadoopCatalog::list_equality_deletes` + `read_equality_delete_values` (Phase H) let a caller verify or apply a delete predicate against rows it decodes itself (this header has no native Parquet-row reader — see "Known limitations" below):
+
+```cpp
+ailake::HadoopCatalog cat("/path/to/warehouse");
+auto deletes = cat.list_equality_deletes("default", "my_table");
+for (auto& d : deletes) {
+    std::string path = cat.resolve_path("default", "my_table", d.path);
+    auto values = ailake::HadoopCatalog::read_equality_delete_values(path); // {(col, value), ...}
+}
+```
+
+**Known limitations (Phase H, position/equality deletes)** — `ailake::search()` does **not** mask deleted rows, for both mechanisms, unlike the real `ailake` CLI's own search:
+- Equality deletes (`delete_where`): this header has no native Parquet-row reader (see `ailake-go`'s `Scan`/`FetchRows` for the equivalent — a new C++ Parquet dependency would be needed to decode a predicate column here).
+- Deletion Vectors (`delete_rows`, V3): `DataFileEntry::deletion_vector` **is** now correctly parsed (was previously dropped entirely — every other `key_metadata` field like centroid/hnsw_offset was parsed, this one silently wasn't) and exposed for callers, but `search()` doesn't decode the Puffin `.dvd` blob's Roaring Bitmap itself yet — unlike `ailake-go` (which added `github.com/RoaringBitmap/roaring`), this header has zero external dependencies today, and hand-rolling a correctness-critical binary bitmap format carries real risk (see the Avro parsing bug history in `catalog.hpp`'s own comments). Left as a deliberate follow-up pending a decision on how to decode it.
 
 ### `ailake::evolve_schema`
 
@@ -364,7 +383,8 @@ ailake::evolve_schema(
     "/path/to/warehouse",
     "default.my_table",                        // "namespace.table"
     {{"source_url", "string", ""}},             // add_columns: {name, type, initial_default}
-    {}                                           // rename_columns: {} empty = no renames
+    {},                                          // rename_columns: {} empty = no renames
+    {}                                           // optional catalog_opts (REST catalog)
 );
 // returns the new schema_id (-1 if not parseable from CLI output)
 ```

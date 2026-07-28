@@ -365,11 +365,20 @@ inline void write_batch_multi(
 //
 // No data files are rewritten; deleted rows are masked at scan time.
 // `warehouse` is the table root path (--store arg), `table_id` is "namespace.table".
+//
+// catalog_opts selects/configures a non-Hadoop catalog backend (e.g. REST
+// Catalog) — see WriteBatchOptions::catalog_opts for accepted keys and
+// docs/guides/REST_CATALOG.md. Regression: this was the last write-path
+// function here (with evolve_schema below) never wired to
+// append_catalog_args, even though every other write-path function
+// (create_table, write_batch(_multi), compact, decay_memories, migrate,
+// delete_rows, add_vector_column, backfill_vector_column) already was.
 inline void delete_where(
     const std::string&              warehouse,
     const std::string&              table_id,
     const std::string&              column,
-    const std::vector<std::string>& values)
+    const std::vector<std::string>& values,
+    const std::map<std::string, std::string>& catalog_opts = {})
 {
     if (values.empty()) return;
 
@@ -387,6 +396,7 @@ inline void delete_where(
         + " delete-where " + detail::shell_quote(table_id)
         + " --col "  + detail::shell_quote(column)
         + " --vals " + detail::shell_quote(vals);
+    detail::append_catalog_args(cmd, catalog_opts);
 
     detail::run_cmd(cmd);
 }
@@ -395,11 +405,13 @@ inline void delete_where(
 // Returns the new schema_id (-1 if not parseable from CLI output).
 //
 // add_cols and rename_cols may be empty if only one operation is desired.
+// catalog_opts — see delete_where's doc comment above.
 inline int evolve_schema(
     const std::string&                 warehouse,
     const std::string&                 table_id,
     const std::vector<AddColumnReq>&   add_cols,
-    const std::vector<RenameColumnReq>& rename_cols)
+    const std::vector<RenameColumnReq>& rename_cols,
+    const std::map<std::string, std::string>& catalog_opts = {})
 {
     if (add_cols.empty() && rename_cols.empty()) return 0;
 
@@ -416,6 +428,7 @@ inline int evolve_schema(
     for (const auto& rc : rename_cols) {
         cmd += " --rename " + detail::shell_quote(rc.from + ":" + rc.to);
     }
+    detail::append_catalog_args(cmd, catalog_opts);
 
     std::string out = detail::run_cmd(cmd);
 

@@ -359,13 +359,97 @@ static void test_integration_delete_rows() {
         // delete_rows itself must not throw — confirms this header's argv is
         // accepted by the real CLI (which really does drop the row from its
         // own search, confirmed via a separate manual CLI-only repro).
-        // NOT asserting the effect via ailake::search here: this header, like
-        // ailake-go's native reader, has no deletion-vector/equality-delete
-        // masking in its own search path — see docs/guides/REST_CATALOG.md
-        // and ailake-go's identical, separately-documented finding.
+        // NOT asserting the effect via ailake::search here: this header's
+        // search() does not apply Deletion Vector masking — see
+        // docs/guides/REST_CATALOG.md and the identical, separately-documented
+        // finding in ailake-go (unlike ailake-go, this header has no Roaring
+        // Bitmap decoder — see test_deletion_vector_metadata_parsed below for
+        // what IS fixed: the catalog now correctly parses and exposes the DV
+        // pointer via DataFileEntry::deletion_vector).
         ailake::delete_rows(warehouse, "default.docs", file, {0});
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FAIL integration delete_rows: %s\n", e.what());
+        ++g_fail;
+    }
+}
+
+// Regression: DataFileEntry never carried a deletion_vector field at all —
+// list_files() silently dropped the DV pointer that delete_rows() writes
+// into key_metadata JSON, even though every other key_metadata field
+// (centroid, hnsw_offset, batch_id, ...) was already parsed. Proves the
+// catalog-level parsing fix for real against a file the actual CLI wrote.
+static void test_integration_deletion_vector_metadata_parsed() {
+    const char* bin = std::getenv("AILAKE_BIN");
+    if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
+
+    try {
+        std::string warehouse = make_temp_dir();
+        ailake::CreateTableOptions copts; copts.metric = "cosine"; copts.format_version = 3;
+        ailake::create_table(warehouse, "default.docs", 4, copts);
+
+        ailake::WriteBatchOptions wopts; wopts.vec_col = "embedding";
+        ailake::write_batch(warehouse, "default.docs", fixture_path(), wopts);
+
+        std::string file = find_first_parquet_relative(warehouse);
+        ailake::delete_rows(warehouse, "default.docs", file, {0, 2});
+
+        ailake::HadoopCatalog cat(warehouse);
+        auto entries = cat.list_files("default", "docs");
+        CHECK_EQ(entries.size(), (size_t)1);
+        CHECK(entries[0].deletion_vector.has_value());
+        if (entries[0].deletion_vector) {
+            CHECK(!entries[0].deletion_vector->path.empty());
+            CHECK(entries[0].deletion_vector->length > 0);
+            CHECK_EQ(entries[0].deletion_vector->cardinality, (int64_t)2);
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL integration deletion_vector_metadata_parsed: %s\n", e.what());
+        ++g_fail;
+    }
+}
+
+// Regression: this header had zero equality-delete support at all —
+// list_files() never distinguished data manifests (content=0) from delete
+// manifests (content=1), so a delete manifest's entries silently fell
+// through and got misparsed as regular DataFileEntry rows (or corrupted
+// list_files() output entirely, depending on layout). Proves the fix for
+// real: list_equality_deletes() finds the delete file, and
+// read_equality_delete_values() correctly decodes the predicate values from
+// it (dynamic Avro schema, not the fixed manifest_entry schema).
+static void test_integration_equality_delete_catalog() {
+    const char* bin = std::getenv("AILAKE_BIN");
+    if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
+
+    try {
+        std::string warehouse = make_temp_dir();
+        ailake::CreateTableOptions copts; copts.metric = "cosine";
+        ailake::create_table(warehouse, "default.docs", 4, copts);
+
+        ailake::WriteBatchOptions wopts; wopts.vec_col = "embedding";
+        ailake::write_batch(warehouse, "default.docs", fixture_path(), wopts);
+
+        ailake::delete_where(warehouse, "default.docs", "id", {"3"});
+
+        ailake::HadoopCatalog cat(warehouse);
+        auto deletes = cat.list_equality_deletes("default", "docs");
+        CHECK_EQ(deletes.size(), (size_t)1);
+        if (!deletes.empty()) {
+            CHECK_EQ(deletes[0].equality_ids.size(), (size_t)1);
+            std::string resolved = cat.resolve_path("default", "docs", deletes[0].path);
+            auto values = ailake::HadoopCatalog::read_equality_delete_values(resolved);
+            CHECK_EQ(values.size(), (size_t)1);
+            if (!values.empty()) {
+                CHECK_EQ(values[0].first, std::string("id"));
+                CHECK_EQ(values[0].second, std::string("3"));
+            }
+        }
+
+        // list_files() must still see exactly the 1 real data file — the
+        // delete manifest (content=1) must not leak a phantom DataFileEntry.
+        auto files = cat.list_files("default", "docs");
+        CHECK_EQ(files.size(), (size_t)1);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL integration equality_delete_catalog: %s\n", e.what());
         ++g_fail;
     }
 }
@@ -649,6 +733,8 @@ int main() {
     test_integration_estimate();
     test_integration_add_vector_column();
     test_integration_delete_rows();
+    test_integration_deletion_vector_metadata_parsed();
+    test_integration_equality_delete_catalog();
     test_decay_memories_args_forwarded();
     test_migrate_args_forwarded();
     test_backfill_vector_column_args_forwarded();

@@ -12,6 +12,8 @@
 
 #include "footer.hpp"
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <optional>
@@ -63,6 +65,16 @@ struct ExtraVectorIndex {
     float       radius       = 0.f;
 };
 
+// DeletionVectorRef mirrors ailake_catalog::provider::DeletionVector — a
+// pointer to a Roaring Bitmap blob inside a Puffin ".dvd" file. offset/length
+// address the bitmap bytes directly (after the 4-byte "PFAc" Puffin magic).
+struct DeletionVectorRef {
+    std::string path;
+    uint64_t    offset      = 0;
+    uint64_t    length      = 0;
+    int64_t     cardinality = -1;
+};
+
 struct DataFileEntry {
     std::string path;
     uint64_t    record_count   = 0;
@@ -78,6 +90,16 @@ struct DataFileEntry {
     std::string batch_id;
     std::string embedding_model; // "<name>" or "<name>@<version>"; empty if not set
     std::string partition_value; // agent_id or other partition value (Phase 9)
+    std::optional<DeletionVectorRef> deletion_vector; // Iceberg V3 Deletion Vector (Phase H)
+};
+
+// EqualityDeleteFile mirrors ailake_catalog::provider::EqualityDeleteFile —
+// a reference to an Iceberg equality delete Avro file (Phase H).
+struct EqualityDeleteFile {
+    std::string          path;
+    std::vector<int32_t> equality_ids;
+    uint64_t              record_count    = 0;
+    uint64_t              file_size_bytes = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -449,14 +471,176 @@ public:
         // file:// URI (ailake-py writer) — see resolve_warehouse_path().
         manifest_list = resolve_warehouse_path(manifest_list);
 
-        auto manifest_paths = read_manifest_list(manifest_list);
+        auto manifest_entries = read_manifest_list(manifest_list);
         std::vector<DataFileEntry> all;
-        for (auto& mp : manifest_paths) {
-            mp = resolve_warehouse_path(mp);
+        for (auto& me : manifest_entries) {
+            if (me.content != 0) continue; // skip delete manifests — see list_equality_deletes
+            auto mp = resolve_warehouse_path(me.path);
             auto es = read_manifest_file(mp);
             all.insert(all.end(), es.begin(), es.end());
         }
         return all;
+    }
+
+    // Returns all Iceberg equality delete file references for the current
+    // snapshot (Phase H). Mirrors ailake_catalog's
+    // list_equality_deletes_from_metadata: walks the same manifest list as
+    // list_files, but reads only content=1 (delete) manifests.
+    std::vector<EqualityDeleteFile> list_equality_deletes(const std::string& ns, const std::string& tbl) const {
+        auto dir  = table_dir(ns, tbl);
+        auto meta = read_metadata_json(dir);
+
+        int64_t current_snap = 0;
+        std::string snap_key = "\"current-snapshot-id\":";
+        auto snap_pos = meta.find(snap_key);
+        if (snap_pos != std::string::npos) {
+            snap_pos += snap_key.size();
+            current_snap = std::stoll(meta.substr(snap_pos));
+        }
+
+        std::string manifest_list;
+        {
+            auto snaps_pos = meta.find("\"snapshots\":");
+            if (snaps_pos != std::string::npos) {
+                auto bracket = meta.find('[', snaps_pos);
+                if (bracket != std::string::npos) {
+                    size_t p = bracket + 1;
+                    std::string id_key = "\"snapshot-id\":";
+                    while (p < meta.size()) {
+                        auto obj_start = meta.find('{', p);
+                        if (obj_start == std::string::npos) break;
+                        size_t depth = 1; size_t q2 = obj_start + 1;
+                        while (q2 < meta.size() && depth > 0) {
+                            if (meta[q2] == '{') ++depth;
+                            else if (meta[q2] == '}') --depth;
+                            ++q2;
+                        }
+                        std::string obj = meta.substr(obj_start, q2 - obj_start);
+                        auto id_pos = obj.find(id_key);
+                        int64_t obj_snap_id = -1;
+                        if (id_pos != std::string::npos) {
+                            auto vpos = id_pos + id_key.size();
+                            while (vpos < obj.size() && obj[vpos] == ' ') ++vpos;
+                            try { obj_snap_id = std::stoll(obj.substr(vpos)); } catch (...) {}
+                        }
+                        if (obj_snap_id == current_snap) {
+                            const std::string ml_key = "\"manifest-list\":";
+                            auto mq = obj.find(ml_key);
+                            if (mq != std::string::npos) {
+                                mq += ml_key.size();
+                                auto s = obj.find('"', mq); auto e = obj.find('"', s+1);
+                                if (s != std::string::npos && e != std::string::npos)
+                                    manifest_list = obj.substr(s+1, e-s-1);
+                            }
+                            break;
+                        }
+                        p = q2;
+                        auto arr_end = meta.find(']', bracket);
+                        if (arr_end != std::string::npos && p > arr_end) break;
+                    }
+                }
+            }
+        }
+        if (manifest_list.empty()) return {};
+
+        manifest_list = resolve_warehouse_path(manifest_list);
+        auto manifest_entries = read_manifest_list(manifest_list);
+
+        std::vector<EqualityDeleteFile> deletes;
+        for (auto& me : manifest_entries) {
+            if (me.content != 1) continue; // only delete manifests
+            auto mp = resolve_warehouse_path(me.path);
+            auto es = read_equality_delete_manifest(mp);
+            deletes.insert(deletes.end(), es.begin(), es.end());
+        }
+        return deletes;
+    }
+
+    // Reads (column_name, value_as_string) pairs from an equality delete
+    // Avro file (mirrors ailake_catalog::read_equality_delete_values) — a
+    // standard Avro OCF with one flat single-field record `{col: value}` per
+    // deleted value (written by ailake_catalog::write_equality_delete_avro).
+    // Unlike read_manifest_file/read_manifest_list's fixed schema, this
+    // file's schema is dynamic (embedded in the OCF header, one field named
+    // after the predicate column) — parsed from read_ocf_header's returned
+    // schema JSON rather than hardcoded. `path` must already be resolved
+    // (see resolve_path) — this is a static utility, not tied to a warehouse.
+    static std::vector<std::pair<std::string, std::string>>
+    read_equality_delete_values(const std::string& path) {
+        std::ifstream s(path, std::ios::binary);
+        if (!s) throw std::runtime_error("ailake: cannot open equality delete file " + path);
+        std::array<uint8_t,16> sync;
+        std::string schema_json = detail::read_ocf_header(s, sync);
+
+        // Extract the single field's "name" and "type" from:
+        // {"type":"record","name":"eq_delete_entry","fields":[{"name":"<col>","type":"<type>","field-id":N}]}
+        std::string col_name, col_type;
+        {
+            auto fields_pos = schema_json.find("\"fields\":");
+            if (fields_pos != std::string::npos) {
+                auto obj_start = schema_json.find('{', fields_pos + 9);
+                if (obj_start != std::string::npos) {
+                    auto obj_end = schema_json.find('}', obj_start);
+                    std::string field_obj = schema_json.substr(obj_start, obj_end - obj_start);
+                    auto extract = [&](const std::string& key) -> std::string {
+                        auto p = field_obj.find("\"" + key + "\":");
+                        if (p == std::string::npos) return {};
+                        p = field_obj.find('"', p + key.size() + 3);
+                        if (p == std::string::npos) return {};
+                        auto e2 = field_obj.find('"', p + 1);
+                        if (e2 == std::string::npos) return {};
+                        return field_obj.substr(p + 1, e2 - p - 1);
+                    };
+                    col_name = extract("name");
+                    col_type = extract("type");
+                }
+            }
+        }
+        if (col_name.empty()) return {};
+
+        std::vector<std::pair<std::string, std::string>> pairs;
+        for (;;) {
+            if (s.peek() == std::char_traits<char>::eof()) break;
+            int64_t obj_count = detail::read_zigzag(s);
+            if (obj_count == 0) break;
+            if (obj_count < 0) obj_count = -obj_count;
+            detail::read_zigzag(s); // byte_size
+            for (int64_t i = 0; i < obj_count; ++i) {
+                std::string val;
+                if (col_type == "string") {
+                    val = detail::read_avro_bytes(s);
+                } else if (col_type == "int" || col_type == "long") {
+                    val = std::to_string(detail::read_zigzag(s));
+                } else if (col_type == "float") {
+                    uint8_t b[4]; s.read(reinterpret_cast<char*>(b), 4);
+                    uint32_t bits = (uint32_t)b[0] | ((uint32_t)b[1]<<8) | ((uint32_t)b[2]<<16) | ((uint32_t)b[3]<<24);
+                    float f; std::memcpy(&f, &bits, 4);
+                    val = format_float(f);
+                } else if (col_type == "double") {
+                    uint8_t b[8]; s.read(reinterpret_cast<char*>(b), 8);
+                    uint64_t bits = 0;
+                    for (int k = 0; k < 8; ++k) bits |= (uint64_t)b[k] << (8*k);
+                    double d; std::memcpy(&d, &bits, 8);
+                    val = format_float(d);
+                } else {
+                    val = detail::read_avro_bytes(s); // unrecognized type — default string
+                }
+                pairs.emplace_back(col_name, val);
+            }
+            s.seekg(16, std::ios::cur); // sync marker
+        }
+        return pairs;
+    }
+
+    // Formats a float/double without scientific notation, shortest
+    // reasonable precision — matches Rust's f32/f64 Display for normal-range
+    // values closely enough for equality-delete predicate comparison (see
+    // ailake-go's identical avroScalarToString for the same reasoning).
+    template <typename T>
+    static std::string format_float(T v) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.9g", (double)v);
+        return std::string(buf);
     }
 
 private:
@@ -511,13 +695,20 @@ private:
         return read_file(dir + "/metadata/v" + version + ".metadata.json");
     }
 
-    static std::vector<std::string> read_manifest_list(const std::string& path) {
+    // One row of an Iceberg manifest list — a manifest file path tagged with
+    // its content type (0=data, 1=deletes; manifest_file.content, field-id 517).
+    struct ManifestListEntry {
+        std::string path;
+        int64_t     content = 0;
+    };
+
+    static std::vector<ManifestListEntry> read_manifest_list(const std::string& path) {
         std::ifstream s(path, std::ios::binary);
         if (!s) throw std::runtime_error("ailake: cannot open manifest list " + path);
         std::array<uint8_t,16> sync;
         detail::read_ocf_header(s, sync);
 
-        std::vector<std::string> paths;
+        std::vector<ManifestListEntry> paths;
         for (;;) {
             // write_avro_container never writes a trailing count=0 terminator —
             // the file simply ends after the last block's sync marker (matching
@@ -541,7 +732,6 @@ private:
             for (int64_t i = 0; i < obj_count; ++i) {
                 // manifest_file record — first field is manifest_path (string)
                 std::string mp = detail::read_avro_bytes(s);
-                paths.push_back(mp);
                 // Skip remaining fields (length, spec_id, content, seq, min_seq,
                 // snap_id, added, existing, deleted, added_rows, existing_rows,
                 // deleted_rows, partitions array)
@@ -557,7 +747,8 @@ private:
                 //        deleted_rows_count(i64), partitions(array of records)
                 detail::read_zigzag(s); // manifest_length
                 detail::read_zigzag(s); // partition_spec_id
-                detail::read_zigzag(s); // content
+                int64_t content = detail::read_zigzag(s); // content: 0=data, 1=deletes
+                paths.push_back(ManifestListEntry{mp, content});
                 detail::read_zigzag(s); // sequence_number
                 detail::read_zigzag(s); // min_sequence_number
                 detail::read_zigzag(s); // added_snapshot_id
@@ -733,6 +924,126 @@ private:
         return entries;
     }
 
+    // Reads an Iceberg delete manifest (Avro OCF, content=1 in the manifest
+    // list) and returns its equality delete file references — entries where
+    // data_file.content=2 (EQUALITY_DELETES). Deliberately a near-identical
+    // copy of read_manifest_file's entry loop (same manifest_entry schema,
+    // same write_avro_container writer) rather than a parametrized shared
+    // function — the field-skip logic above has already been the site of
+    // multiple real bugs in this file (see the field==4/5 lower_bounds/
+    // upper_bounds comment), so this keeps read_manifest_file's proven-correct
+    // byte-level logic untouched and just changes what gets captured at the
+    // front (content, equality_ids) instead of generalizing it.
+    static std::vector<EqualityDeleteFile> read_equality_delete_manifest(const std::string& path) {
+        std::ifstream s(path, std::ios::binary);
+        if (!s) throw std::runtime_error("ailake: cannot open delete manifest " + path);
+        std::array<uint8_t,16> sync;
+        detail::read_ocf_header(s, sync);
+
+        std::vector<EqualityDeleteFile> entries;
+        for (;;) {
+            if (s.peek() == std::char_traits<char>::eof()) break;
+            int64_t obj_count = detail::read_zigzag(s);
+            if (obj_count == 0) break;
+            if (obj_count < 0) obj_count = -obj_count;
+            detail::read_zigzag(s); // byte_size (unused)
+            for (int64_t i = 0; i < obj_count; ++i) {
+                detail::read_zigzag(s); // status
+                auto tag = detail::read_zigzag(s);
+                if (tag == 1) detail::read_zigzag(s); // snapshot_id
+                tag = detail::read_zigzag(s);
+                if (tag == 1) detail::read_zigzag(s); // sequence_number
+                tag = detail::read_zigzag(s);
+                if (tag == 1) detail::read_zigzag(s); // file_sequence_number
+
+                int64_t content = detail::read_zigzag(s); // content: 0=DATA, 2=EQUALITY_DELETES
+                std::string file_path = detail::read_avro_bytes(s);
+                detail::read_avro_bytes(s); // file_format (ignore)
+                uint64_t record_count    = (uint64_t)detail::read_zigzag(s);
+                uint64_t file_size_bytes = (uint64_t)detail::read_zigzag(s);
+
+                // Same 6-field map skip as read_manifest_file (column_sizes,
+                // value_counts, null_value_counts, nan_value_counts,
+                // lower_bounds, upper_bounds — last 2 are map<int,bytes>).
+                for (int field = 0; field < 6; ++field) {
+                    bool value_is_bytes = (field == 4 || field == 5);
+                    int64_t t = detail::read_zigzag(s);
+                    if (t != 0) {
+                        for (;;) {
+                            int64_t bc = detail::read_zigzag(s);
+                            if (bc == 0) break;
+                            if (bc < 0) { detail::read_zigzag(s); bc = -bc; }
+                            for (int64_t r = 0; r < bc; ++r) {
+                                detail::read_zigzag(s); // key (int)
+                                if (value_is_bytes) {
+                                    int64_t len = detail::read_zigzag(s);
+                                    if (len > 0) s.seekg(len, std::ios::cur);
+                                } else {
+                                    detail::read_zigzag(s); // value (long)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // key_metadata: union null/bytes — always null for eq-delete
+                // entries (write_equality_delete_manifest always encodes
+                // encode_union_null), but consume it defensively either way.
+                {
+                    int64_t t = detail::read_zigzag(s);
+                    if (t != 0) detail::read_avro_bytes(s);
+                }
+                // split_offsets: union null/array<long> — always null here.
+                {
+                    int64_t t = detail::read_zigzag(s);
+                    if (t != 0) {
+                        for (;;) {
+                            int64_t bc = detail::read_zigzag(s);
+                            if (bc == 0) break;
+                            if (bc < 0) { detail::read_zigzag(s); bc = -bc; }
+                            for (int64_t r = 0; r < bc; ++r) detail::read_zigzag(s);
+                        }
+                    }
+                }
+                // equality_ids: union null/array<int> — the field we actually want.
+                std::vector<int32_t> equality_ids;
+                {
+                    int64_t t = detail::read_zigzag(s);
+                    if (t != 0) {
+                        for (;;) {
+                            int64_t bc = detail::read_zigzag(s);
+                            if (bc == 0) break;
+                            if (bc < 0) { detail::read_zigzag(s); bc = -bc; }
+                            for (int64_t r = 0; r < bc; ++r)
+                                equality_ids.push_back((int32_t)detail::read_zigzag(s));
+                        }
+                    }
+                }
+                // sort_order_id: union null/int
+                {
+                    int64_t t = detail::read_zigzag(s);
+                    if (t != 0) detail::read_zigzag(s);
+                }
+                // first_row_id: union null/long (V3 row lineage)
+                {
+                    int64_t t = detail::read_zigzag(s);
+                    if (t != 0) detail::read_zigzag(s);
+                }
+
+                if (content == 2 && !file_path.empty()) {
+                    EqualityDeleteFile ed;
+                    ed.path            = file_path;
+                    ed.equality_ids    = std::move(equality_ids);
+                    ed.record_count    = record_count;
+                    ed.file_size_bytes = file_size_bytes;
+                    entries.push_back(std::move(ed));
+                }
+            }
+            s.seekg(16, std::ios::cur); // sync marker
+        }
+        return entries;
+    }
+
     // Parse the JSON stored in key_metadata bytes into DataFileEntry fields.
     // Uses a simple string search approach (no JSON library dependency).
     static void parse_key_metadata(const std::string& json, DataFileEntry& e) {
@@ -844,6 +1155,58 @@ private:
 
                         obj_start = arr.find('{', obj_end + 1);
                     }
+                }
+            }
+        }
+
+        // Parse nested "deletion_vector": {"path","offset","length","cardinality"}
+        // (Iceberg V3, Phase H) — same key_metadata JSON blob that carries
+        // centroid/hnsw_offset, populated by ailake_query::delete::delete_rows.
+        {
+            auto dv_pos = json.find("\"deletion_vector\":");
+            if (dv_pos != std::string::npos) {
+                auto obj_start = json.find('{', dv_pos);
+                if (obj_start != std::string::npos) {
+                    size_t depth = 1; size_t q = obj_start + 1;
+                    while (q < json.size() && depth > 0) {
+                        if (json[q] == '{') ++depth;
+                        else if (json[q] == '}') --depth;
+                        ++q;
+                    }
+                    std::string dv_obj = json.substr(obj_start, q - obj_start);
+
+                    auto dv_str = [&](const std::string& key) -> std::string {
+                        auto p = dv_obj.find("\"" + key + "\":");
+                        if (p == std::string::npos) return {};
+                        p = dv_obj.find('"', p + key.size() + 3);
+                        if (p == std::string::npos) return {};
+                        auto e2 = dv_obj.find('"', p + 1);
+                        if (e2 == std::string::npos) return {};
+                        return dv_obj.substr(p + 1, e2 - p - 1);
+                    };
+                    auto dv_u64 = [&](const std::string& key) -> uint64_t {
+                        auto p = dv_obj.find("\"" + key + "\":");
+                        if (p == std::string::npos) return 0;
+                        p += key.size() + 3;
+                        while (p < dv_obj.size() && dv_obj[p] == ' ') ++p;
+                        if (p >= dv_obj.size() || dv_obj[p] == 'n') return 0;
+                        try { return std::stoull(dv_obj.substr(p)); } catch (...) { return 0; }
+                    };
+                    auto dv_i64 = [&](const std::string& key) -> int64_t {
+                        auto p = dv_obj.find("\"" + key + "\":");
+                        if (p == std::string::npos) return -1;
+                        p += key.size() + 3;
+                        while (p < dv_obj.size() && dv_obj[p] == ' ') ++p;
+                        if (p >= dv_obj.size() || dv_obj[p] == 'n') return -1;
+                        try { return std::stoll(dv_obj.substr(p)); } catch (...) { return -1; }
+                    };
+
+                    DeletionVectorRef dv;
+                    dv.path        = dv_str("path");
+                    dv.offset      = dv_u64("offset");
+                    dv.length      = dv_u64("length");
+                    dv.cardinality = dv_i64("cardinality");
+                    if (!dv.path.empty()) e.deletion_vector = std::move(dv);
                 }
             }
         }
