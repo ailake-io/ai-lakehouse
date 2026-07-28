@@ -55,6 +55,7 @@ static void AilakeCompactExec(
     bool    deferred           = false;
     std::string ns             = "default";
     std::string table_name     = "table";
+    std::string catalog_opts_json;
 
     if ((idx_t)args.data.size() > 1 && !args.data[1].GetValue(0).IsNull())
         min_files          = BigIntValue::Get(args.data[1].GetValue(0));
@@ -68,9 +69,12 @@ static void AilakeCompactExec(
         ns                 = StringValue::Get(args.data[5].GetValue(0));
     if ((idx_t)args.data.size() > 6 && !args.data[6].GetValue(0).IsNull())
         table_name         = StringValue::Get(args.data[6].GetValue(0));
+    if ((idx_t)args.data.size() > 7 && !args.data[7].GetValue(0).IsNull())
+        catalog_opts_json  = StringValue::Get(args.data[7].GetValue(0));
 
     int64_t files_compacted = lib.compact(
-        warehouse, table_name, min_files, target_size_bytes, max_files_per_pass, deferred, ns
+        warehouse, table_name, min_files, target_size_bytes, max_files_per_pass, deferred, ns,
+        catalog_opts_json
     );
     result.SetValue(0, Value::BIGINT(files_compacted));
 }
@@ -126,6 +130,16 @@ void RegisterAilakeCompact(duckdb::ExtensionLoader &loader) {
     fn_set.AddFunction(ScalarFunction(
         {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
          LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::VARCHAR},
+        LogicalType::BIGINT,
+        AilakeCompactExec
+    ));
+
+    // Arity 8: + catalog_opts_json VARCHAR — REST catalog config, e.g.
+    // '{"catalog":"rest","rest_uri":"...","rest_auth":"bearer","rest_token":"..."}'
+    // (see docs/guides/REST_CATALOG.md). Empty/omitted = default Hadoop catalog.
+    fn_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
+         LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
         LogicalType::BIGINT,
         AilakeCompactExec
     ));

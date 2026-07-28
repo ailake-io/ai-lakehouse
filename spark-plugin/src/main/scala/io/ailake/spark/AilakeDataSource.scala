@@ -80,9 +80,34 @@ class AilakeDataSource extends TableProvider with DataSourceRegister {
     new AilakeTable(
       AilakeWriteHandle(tableUri, namespace, tableName, vectorColumn, dim, metric, precision,
         idColIndex = idIdx, vecColIndex = vecIdx, textColIndices = textCols,
-        partitionFields = partitionFields, formatVersion = formatVersion),
+        partitionFields = partitionFields, formatVersion = formatVersion,
+        catalogOpts = catalogOptsFromWriteOptions(opts)),
       tableSchema = resolvedSchema,
     )
+  }
+
+  /**
+   * REST Catalog (Fase 17/19) config read from `df.write.option("rest-*", ...)`
+   * (and `.option("catalog", "rest")`), same snake_case translation as
+   * `AilakeCatalog.catalogOptsFromConfig`. Empty (no `catalog` option set) =
+   * default Hadoop catalog, unchanged behavior. See docs/guides/REST_CATALOG.md.
+   */
+  private def catalogOptsFromWriteOptions(opts: CaseInsensitiveStringMap): Map[String, String] = {
+    val keys = Seq(
+      "catalog"                    -> "catalog",
+      "rest-uri"                   -> "rest_uri",
+      "rest-prefix"                -> "rest_prefix",
+      "rest-warehouse"             -> "rest_warehouse",
+      "rest-auth"                  -> "rest_auth",
+      "rest-token"                 -> "rest_token",
+      "rest-oauth-token-endpoint"  -> "rest_oauth_token_endpoint",
+      "rest-oauth-client-id"       -> "rest_oauth_client_id",
+      "rest-oauth-client-secret"   -> "rest_oauth_client_secret",
+      "rest-oauth-scope"           -> "rest_oauth_scope",
+    )
+    keys.flatMap { case (sparkKey, jniKey) =>
+      Option(opts.get(sparkKey)).filter(_.nonEmpty).map(jniKey -> _)
+    }.toMap
   }
 
   private def requireOpt(opts: CaseInsensitiveStringMap, keys: String*): String =

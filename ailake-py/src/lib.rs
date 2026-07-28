@@ -276,6 +276,25 @@ fn local_catalog_store(
 }
 
 /// Python-facing table writer. Wraps ailake_query::TableWriter.
+///
+/// Single-commit lifecycle: call `write_batch()`/`write_batch_multi()`/etc.
+/// any number of times to accumulate rows, then `commit()` exactly once to
+/// flush everything as one Iceberg snapshot. `commit()` consumes the writer
+/// (`self.inner.take()`) — every method after that raises `PyValueError:
+/// "TableWriter already committed"`. This mirrors the underlying Rust
+/// `ailake_query::TableWriter::commit`'s move semantics; Python has no
+/// equivalent compile-time "moved value" check, so it's enforced at runtime
+/// instead.
+///
+/// For a multi-chunk write (e.g. a migration script re-embedding a large
+/// table), there are two valid patterns — pick based on whether you want one
+/// snapshot for the whole job or incremental checkpoints:
+///   - One snapshot: keep a single `TableWriter`, call `write_batch()` per
+///     chunk, `commit()` once at the very end.
+///   - Incremental snapshots (safer for a long-running/resumable job — a
+///     crash partway through only loses the in-flight chunk, not the whole
+///     run): open a **new** `TableWriter(path, ...)` for each chunk, and
+///     call `commit()` on that one before moving to the next chunk.
 #[pyclass]
 pub struct TableWriter {
     inner: Option<RsTableWriter>,

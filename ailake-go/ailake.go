@@ -254,6 +254,24 @@ func searchFile(
 		}
 	}
 
+	// Deletion Vector (position delete, Phase H) — mask rows the same way
+	// ailake_query::scanner.rs's dv_bitmap.contains(row_id) does. Regression:
+	// this package's Search never applied DVs at all — a row deleted via
+	// DeleteRows still came back until now (see delete.go).
+	if entry.DeletionVector != nil {
+		bm, err := loadDeletionVector(warehouse, entry.DeletionVector)
+		if err != nil {
+			return nil, err
+		}
+		filtered := hits[:0]
+		for _, h := range hits {
+			if !bm.Contains(uint32(h.RowID)) {
+				filtered = append(filtered, h)
+			}
+		}
+		hits = filtered
+	}
+
 	out := make([]FileSearchResult, len(hits))
 	for i, h := range hits {
 		out[i] = FileSearchResult{

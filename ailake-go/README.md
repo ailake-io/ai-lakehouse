@@ -127,7 +127,7 @@ func Scan(
 ) ([]ScanRow, error)
 ```
 
-`Search` + Parquet row fetch in one call. Returns all columns for each top-K hit alongside `Distance`.
+`Search` + Parquet row fetch in one call. Returns all columns for each top-K hit alongside `Distance`. Applies both Iceberg logical-delete mechanisms (Phase H) automatically: Deletion Vectors via `Search`, equality deletes via `FetchRows`'s decoded rows — see `DeleteWhere`/`DeleteRows` below and `delete.go`.
 
 ### `SearchOptions`
 
@@ -179,7 +179,18 @@ type DataFileEntry struct {
     BatchID            string
     EmbeddingModel     string // "<name>" or "<name>@<version>"; empty if not set
     PartitionValue     string // agent_id or other partition value (Phase 9)
+    DeletionVector     *DeletionVectorRef // Iceberg V3 Deletion Vector (Phase H); nil if none
 }
+```
+
+### Equality delete filtering (`Scan` / `FetchRows`)
+
+`Scan` loads and applies equality-delete files automatically. To filter manually with the lower-level `Search` + `FetchRows` pair:
+
+```go
+deletes, err := catalog.ListEqualityDeletes("default", "docs")
+filter, err := ailake.LoadEqualityDeleteFilter(catalog.Warehouse, deletes) // nil filter = no-op
+rows, err := ailake.FetchRows(results, catalog.Warehouse, "embedding", 1536, filter)
 ```
 
 `EmbeddingModel` is read from per-file Avro `key_metadata` JSON. `ExtraVectorIndexes` holds HNSW offset, length, and centroid for each secondary vector column — populated from the `extra_vector_indexes` JSON array in `key_metadata`.
@@ -254,6 +265,37 @@ type ScanRow struct {
 
 CLI-delegated operations — require the `ailake` binary on `PATH` or `AILAKE_BIN` env. Return `ErrNoBinary` when neither is available.
 
+### `CreateTable`
+
+```go
+func CreateTable(
+    catalog   *HadoopCatalog,
+    namespace, table string,
+    dim       int,
+    opts      CreateTableOptions,
+) error
+```
+
+Creates an empty AI-Lake table with the given vector schema and policy (`ailake create` CLI). Unlike `WriteBatch` (which auto-creates a table on first insert with default policy), this is the only way to set `PQOnly`/`IVFResidual`/`Modality` or HNSW tuning before any data is written.
+
+```go
+type CreateTableOptions struct {
+    Metric              string // "cosine" | "euclidean" | "dot"
+    Precision           string // "f32" | "f16" | "i8"
+    Column              string // vector column name (default "embedding")
+    PreNormalize        bool
+    HnswM               int      // 0 = CLI default (16)
+    HnswEfConstruction  int      // 0 = CLI default (150)
+    PQOnly              bool
+    IVFResidual         bool
+    Modality            string   // "text" | "image" | "audio" | "video"
+    FormatVersion       int      // 0 | 2 | 3; 0 means omit (uses CLI default 2)
+    FtsColumns          []string
+    FtsTokenizer        string
+    CatalogOpts         map[string]string // REST catalog config — see docs/guides/REST_CATALOG.md
+}
+```
+
 ### `WriteBatch`
 
 ```go
@@ -285,6 +327,8 @@ type WriteBatchOptions struct {
     HnswEfConstruction int      // 0 = table default
     PreNormalize       bool
     Deferred           bool
+    VectorCols         []VectorColSpec   // multi-column (Phase 8 multimodal) write
+    CatalogOpts        map[string]string // REST catalog config — see docs/guides/REST_CATALOG.md
 }
 ```
 
@@ -295,10 +339,11 @@ func DeleteWhere(
     catalog   *HadoopCatalog,
     namespace, table, column string,
     values    []string,
+    catalogOpts ...map[string]string, // optional (0 or 1 map) — REST catalog config, see docs/guides/REST_CATALOG.md
 ) error
 ```
 
-Commits an Iceberg equality delete (`ailake delete-where` CLI). No data files are rewritten; deleted rows masked at scan time. Empty `values` is a no-op.
+Commits an Iceberg equality delete (`ailake delete-where` CLI). No data files are rewritten; deleted rows are masked at scan time both by the real `ailake` CLI's own search and — since `delete.go` (`EqualityDeleteFilter`) — by this package's own **`Scan`** (`FetchRows`), which decodes full rows and filters them against the delete predicate the same way `ailake_query::equality_delete::EqualityDeleteFilter` does. **`Search` alone does not**: it's a pointer-only API (`RowID`/`Distance`/`FilePath`, no decoded columns) and equality-delete predicates need an actual column value to check — use `Scan` (or `Search` + `FetchRows`, which applies the same filter when given one via `LoadEqualityDeleteFilter`) if deleted rows must be masked. Empty `values` is a no-op.
 
 ### `EvolveSchema`
 
@@ -309,6 +354,7 @@ func EvolveSchema(
     table      string,
     addCols    []AddColumnReq,
     renameCols []RenameColumnReq,
+    catalogOpts ...map[string]string, // optional (0 or 1 map) — REST catalog config, see docs/guides/REST_CATALOG.md
 ) (int, error)  // returns new schema_id or -1 for no-op
 ```
 
@@ -322,6 +368,84 @@ type AddColumnReq struct {
 }
 type RenameColumnReq struct{ From, To string }
 ```
+
+### `DeleteRows`
+
+```go
+func DeleteRows(
+    catalog      *HadoopCatalog,
+    namespace, table, file string, // file: Parquet data file path, as reported by ListFiles
+    rowPositions []int,
+    catalogOpts  map[string]string,
+) error
+```
+
+Marks rows as deleted in a V3 table using Iceberg Deletion Vectors (`ailake delete-rows` CLI). Requires the table to have been created with `format_version: 3` (`CreateTableOptions.FormatVersion = 3`) — the CLI raises a clear error on a V2 table. Use `DeleteWhere` (equality predicate) for V2 tables. Unlike `DeleteWhere`'s partial coverage, Deletion Vectors are masked in **both** `Search` and `Scan` — the mask is a row-position bitmap (`DataFileEntry.DeletionVector`, `loadDeletionVector` in `delete.go`), so `Search` can check it directly against `RowID` without needing any decoded column data. No-op when `rowPositions` is empty.
+
+### `DecayMemories`
+
+```go
+func DecayMemories(
+    catalog     *HadoopCatalog,
+    namespace, table string,
+    lambda      float32,
+    catalogOpts map[string]string,
+) (int, error)  // returns number of files updated
+```
+
+Recomputes recency weights (`exp(-λ×days_since_access)`) across all memory files in the table (`ailake decay-memories` CLI, Phase 9 agent-memory schema).
+
+### `Migrate`
+
+```go
+func Migrate(
+    catalog  *HadoopCatalog,
+    namespace, table, embedCmd string,
+    opts     MigrateOptions,
+) error
+```
+
+Re-embeds a table's vector column via an external embed command (`ailake migrate` CLI). `embedCmd` is a shell command reading a JSON array of strings from stdin and writing a JSON array of float arrays to stdout.
+
+```go
+type MigrateOptions struct {
+    OldColumn    string            // existing embedding column (default "embedding")
+    NewColumn    string            // migrated column name (default "embedding_v2")
+    TextColumn   string            // raw-text column to re-embed (default "chunk_text")
+    Strategy     string            // "atomic-replace" | "dual-write-then-cutover" (default)
+    BatchSize    int               // texts per embed-cmd call (default 512)
+    ModelName    string            // stored in ailake.embedding-model after migration
+    ModelVersion string            // appended to ModelName as "<name>@<version>"
+    CatalogOpts  map[string]string
+}
+```
+
+### `AddVectorColumn` / `BackfillVectorColumn`
+
+```go
+func AddVectorColumn(
+    catalog *HadoopCatalog,
+    namespace, table, column string,
+    dim     int,
+    opts    AddVectorColumnOptions,
+) error
+
+func BackfillVectorColumn(
+    catalog  *HadoopCatalog,
+    namespace, table, column, embedCmd string,
+    opts     BackfillVectorColumnOptions,
+) error
+```
+
+`AddVectorColumn` adds a new vector column to the schema (no data rewritten, `ailake add-vector-column` CLI) — old files return null until `BackfillVectorColumn` (`ailake backfill-vector-column` CLI) rewrites each file with the new embeddings. Idempotent: files already containing the column are skipped.
+
+### `Estimate`
+
+```go
+func Estimate(rows string, dim int, opts EstimateOptions) (*EstimateResult, error)
+```
+
+Computes storage-usage estimates before writing — pure math, no I/O, no warehouse/catalog (`ailake estimate` CLI). `rows` supports `K`/`M`/`B` suffixes (e.g. `"1M"`, `"500K"`). `EstimateResult.Estimates` holds one entry per storage mode (F32/F16/I8/IVF-PQ variants/PQ-only) as a raw `map[string]any` (`mode`, `vectors_bytes`, `index_bytes`, `total_bytes`, `reduction_factor`, `recall_at_10`, `note`).
 
 ### `SearchHybrid`
 
@@ -392,7 +516,7 @@ go test ./...
 AILAKE_FIXTURE=/path/to/fixture go test ./... -run Integration
 ```
 
-33 unit tests pass without a fixture. 7 integration tests require `AILAKE_FIXTURE` (includes `TestListFilesIntegration` for `EmbeddingModel` and `TestSearchDimMismatchIntegration` for dim validation).
+99 tests total. 85 pass without a fixture/native binary. 14 integration tests require `AILAKE_FIXTURE` and/or a real `ailake` CLI binary on `PATH`/`AILAKE_BIN` (includes `TestListFilesIntegration` for `EmbeddingModel`, `TestSearchDimMismatchIntegration` for dim validation, and `TestCreateTableIntegration`/`TestEstimateIntegration`/`TestAddVectorColumnIntegration`/`TestDeleteRowsIntegration`).
 
 ## License
 

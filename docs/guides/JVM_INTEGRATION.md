@@ -734,6 +734,12 @@ ALTER TABLE ailake.default.ingest RENAME COLUMN source TO doc_source;
 
 -- Compacts small files in the catalog's configured table
 CALL ailake.system.compact();
+
+-- Creates the catalog's configured table on disk (Iceberg metadata.json +
+-- manifest). No arguments — same reasoning as compact(): table-uri/namespace/
+-- table-name/vector-column/dim/metric/precision/format-version are all
+-- catalog-level properties (ailake.*), not per-statement.
+CALL ailake.system.create_table();
 ```
 
 ### 5D — Nessie catalog (demo stack)
@@ -770,7 +776,7 @@ cd trino-plugin
 #   VectorScanSplitManagerTest — split creation from session
 #   VectorScanRecordSetTest    — cursor iteration, column types
 #   AilakeNativeTest           — graceful degradation, CSV parsing
-#   AilakeProceduresTest       — CALL ailake.system.compact()
+#   AilakeProceduresTest       — CALL ailake.system.compact(), CALL ailake.system.create_table()
 ```
 
 ---
@@ -1106,6 +1112,26 @@ delete, matching the native equality-delete-file mechanism.
 | Trino | `CALL ailake.system.compact()` | `AilakeNative.compact(...)` (Kotlin) |
 | Flink | `SELECT ailake_compact(warehouse, ns, table)` (scalar function — Flink has no `CALL`-equivalent for connectors) | `AilakeNativeLoader.compact(...)` |
 | Python | `ailake.compact(path, min_files=4, target_size_bytes=128*1024*1024)` |
+
+### Create table (Fase 23 — closed a "dead capability" gap in all three)
+
+`AilakeNative(Loader).createTable` was already fully implemented and tested in
+every plugin's native-call layer, but each catalog's own `createTable`
+override only built an in-memory/local `Table` handle — it never called it,
+so the on-disk Iceberg table (`metadata.json` + manifest) was never actually
+created through any of the three catalogs' SQL/DDL surface.
+
+| Engine | SQL surface | Underlying call |
+|---|---|---|
+| Spark | `CREATE TABLE ailake.default.docs (...)` (via catalog `AilakeCatalog.createTable`) | `AilakeNative.createTable(tableUri, ns, table, vectorColumn, dim, metric, precision)` |
+| Trino | `CALL ailake.system.create_table()` (no args — same reasoning as `compact()`, catalog is configured for exactly one table) | `AilakeNative.createTable(...)` (Kotlin) |
+| Flink | `CREATE TABLE ailake_docs (...) WITH (...)` (via catalog `AilakeCatalog.createTable`) | `AilakeNativeLoader.createTable(...)` |
+| Python | `ailake.TableWriter(path, ...)` creates the table implicitly on first `commit()` — no separate call needed |
+
+**Note (Spark/Flink)**: the native call runs *before* the in-memory catalog
+entry is registered — if it fails (e.g. table already exists on disk,
+warehouse unreachable), `CREATE TABLE` raises and no local entry is left
+behind.
 
 ---
 

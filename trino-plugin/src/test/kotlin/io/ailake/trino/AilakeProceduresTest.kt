@@ -18,13 +18,16 @@ class AilakeProceduresTest {
     private val session = mock<ConnectorSession>()
 
     @Test
-    fun getProceduresReturnsExactlyOneCompactProcedure() {
+    fun getProceduresReturnsCompactAndCreateTableProcedures() {
         val procs = procedures.getProcedures()
-        assertEquals(1, procs.size)
-        val p = procs.first()
-        assertEquals("system", p.schema)
-        assertEquals("compact", p.name)
-        assertTrue(p.arguments.isEmpty())
+        assertEquals(2, procs.size)
+        val byName = procs.associateBy { it.name }
+        val compact = byName.getValue("compact")
+        assertEquals("system", compact.schema)
+        assertTrue(compact.arguments.isEmpty())
+        val createTable = byName.getValue("create_table")
+        assertEquals("system", createTable.schema)
+        assertTrue(createTable.arguments.isEmpty())
     }
 
     @Test
@@ -33,6 +36,15 @@ class AilakeProceduresTest {
         // CALL ailake.system.compact() must surface this as a clear SQL error, not silently no-op.
         assume(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
         assertThrows(TrinoException::class.java) { procedures.compact(session) }
+    }
+
+    @Test
+    fun createTableThrowsTrinoExceptionWhenNativeLibraryAbsent() {
+        // Same reasoning as compactThrowsTrinoExceptionWhenNativeLibraryAbsent above —
+        // AilakeNative.createTable returns false (not an exception) when the native lib
+        // is absent; CALL ailake.system.create_table() must still surface a clear SQL error.
+        assume(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
+        assertThrows(TrinoException::class.java) { procedures.createTable(session) }
     }
 
     private fun assume(condition: Boolean, message: String) {

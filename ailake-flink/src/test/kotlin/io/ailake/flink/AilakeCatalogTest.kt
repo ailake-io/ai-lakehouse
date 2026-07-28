@@ -14,11 +14,22 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Path
 
 class AilakeCatalogTest {
 
+    // JUnit5's default per-method test lifecycle injects a fresh @TempDir for every
+    // @Test — required since AilakeCatalog.createTable (Fase 23) now genuinely creates
+    // the table on disk instead of only touching in-memory state; the tests below used
+    // to share a single hardcoded "file:///tmp/x" warehouse, which was harmless while
+    // createTable was a no-op but now makes the second test to call createTable() on
+    // the same ObjectPath("default", "docs") fail with "table already exists".
+    @TempDir
+    lateinit var tmpDir: Path
+
     private fun catalog(defaultNamespace: String = "default") =
-        AilakeCatalog("ailake", warehouse = "file:///tmp/x", defaultNamespace = defaultNamespace).apply { open() }
+        AilakeCatalog("ailake", warehouse = "file://$tmpDir", defaultNamespace = defaultNamespace).apply { open() }
 
     private fun ingestSchema() = Schema.newBuilder()
         .column("id", DataTypes.BIGINT())
@@ -79,7 +90,11 @@ class AilakeCatalogTest {
 
     @Test
     fun alterTableWithAddColumnChangeFailsClearlyWhenNativeLibraryAbsent() {
-        assumeTrue(System.getenv("AILAKE_LIB_PATH") == null, "skipped: native library present")
+        // See AilakeVectorTableSinkTest.executeDeletionFailsClearlyWhenNativeLibraryAbsent
+        // for why this checks AILAKE_NATIVE_LIB, not AILAKE_LIB_PATH (never set for
+        // Flink's gradle-test step in any workflow — this assumeTrue was always true).
+        val nativeLib = System.getenv("AILAKE_NATIVE_LIB") ?: System.getProperty("ailake.native.lib")
+        assumeTrue(nativeLib == null || !java.io.File(nativeLib).exists(), "skipped: native library present")
         val cat = catalog()
         val path = ObjectPath("default", "docs")
         cat.createTable(path, ingestTable(), false)

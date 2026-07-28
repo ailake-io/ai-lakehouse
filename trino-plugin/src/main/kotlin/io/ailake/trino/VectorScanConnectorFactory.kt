@@ -67,7 +67,33 @@ class VectorScanConnectorFactory : ConnectorFactory {
             tableUri, vectorColumn, dim, metric, precision, namespace, tableName, embeddingModel,
             partitionFields, formatVersion, textColumns,
             hnswM, hnswEfConstruction, preNormalize, deferred, ftsColumns, ftsTokenizer,
-            vectorColumns,
+            vectorColumns, catalogOptsFromConfig(config),
         )
+    }
+
+    /**
+     * REST Catalog (Fase 17/19) config read from `ailake.catalog`/`ailake.rest-*`
+     * catalog properties, translated to the snake_case field names
+     * `ailake-jni`'s `CatalogOpts` expects. Empty (no `ailake.catalog` property
+     * set) = default Hadoop catalog, unchanged behavior. Only reaches
+     * `AilakeProcedures` today (see `VectorScanConnector`'s doc comment) — not
+     * yet the search/scan/insert paths. See docs/guides/REST_CATALOG.md.
+     */
+    private fun catalogOptsFromConfig(config: Map<String, String>): Map<String, String> {
+        val keys = listOf(
+            "ailake.catalog"                   to "catalog",
+            "ailake.rest-uri"                  to "rest_uri",
+            "ailake.rest-prefix"                to "rest_prefix",
+            "ailake.rest-warehouse"             to "rest_warehouse",
+            "ailake.rest-auth"                  to "rest_auth",
+            "ailake.rest-token"                 to "rest_token",
+            "ailake.rest-oauth-token-endpoint"   to "rest_oauth_token_endpoint",
+            "ailake.rest-oauth-client-id"        to "rest_oauth_client_id",
+            "ailake.rest-oauth-client-secret"    to "rest_oauth_client_secret",
+            "ailake.rest-oauth-scope"            to "rest_oauth_scope",
+        )
+        return keys.mapNotNull { (configKey, jniKey) ->
+            config[configKey]?.takeIf { it.isNotEmpty() }?.let { jniKey to it }
+        }.toMap()
     }
 }

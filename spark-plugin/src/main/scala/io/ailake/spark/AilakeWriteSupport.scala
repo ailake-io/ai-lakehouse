@@ -27,6 +27,10 @@ case class AilakeWriteHandle(
   embeddingModel:  Option[String] = None,
   partitionFields: Seq[AilakeNative.PartitionFieldDef] = Seq.empty,
   formatVersion:   Int = 2,
+  // REST Catalog (Fase 17/19) config, e.g. Map("catalog" -> "rest", "rest_uri" -> "...").
+  // Empty (default) = Hadoop catalog. Populated from spark.sql.catalog.<name>.rest-*
+  // options by AilakeCatalog — see docs/guides/REST_CATALOG.md.
+  catalogOpts:     Map[String, String] = Map.empty,
 )
 
 object AilakeWriteHandle {
@@ -128,6 +132,7 @@ class AilakeDataWriter(handle: AilakeWriteHandle, partitionId: Int, taskId: Long
       partitionFields = handle.partitionFields,
       formatVersion   = handle.formatVersion,
       columns         = textValues.map { case (k, v) => k -> v.toSeq },
+      catalogOpts     = handle.catalogOpts,
     )
     log.info(s"[ailake] partition=$partitionId wrote ${ids.size} rows → snapshot=$snapshotId")
     AilakeCommitMessage(snapshotId)

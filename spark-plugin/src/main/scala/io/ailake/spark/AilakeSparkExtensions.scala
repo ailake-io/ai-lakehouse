@@ -39,6 +39,12 @@ class AilakeSparkExtensions extends (SparkSessionExtensions => Unit) {
  *
  * Cross-modal search: `spark.ailakeSearchMultimodal(tableUri, queries, topK)` returns
  * columns: row_id (Long), rrf_score (Double), file_path (String).
+ *
+ * REST Catalog: every method below takes a `catalogOpts: Map[String, String]` (default
+ * empty = Hadoop catalog), e.g. `Map("catalog" -> "rest", "rest_uri" -> "...", "rest_auth"
+ * -> "bearer", "rest_token" -> "...")` — see docs/guides/REST_CATALOG.md. `ailakeWrite`
+ * (the DataSourceV2 path) instead takes `.option("catalog", "rest").option("rest-uri", ...)`
+ * on the DataFrameWriter, same options `spark.sql.catalog.<name>.rest-*` uses.
  */
 object implicits {
   implicit class AilakeSession(private val spark: SparkSession) extends AnyVal {
@@ -64,11 +70,13 @@ object implicits {
       hybridText:  Option[String] = None,
       textColumn:  String = "chunk_text",
       bm25Weight:  Float = 0.5f,
+      catalogOpts: Map[String, String] = Map.empty,
     ): DataFrame = {
       val plan = VectorSearchPlan(tableUri, queryVector, topK)
       val rows = AilakeNative.search(
         tableUri, queryVector, topK, namespace = namespace, tableName = tableName,
-        hybridText = hybridText, textColumn = textColumn, bm25Weight = bm25Weight)
+        hybridText = hybridText, textColumn = textColumn, bm25Weight = bm25Weight,
+        catalogOpts = catalogOpts)
       val sparkRows = rows.map(r => Row(r.rowId, r.distance.toDouble, r.filePath))
       spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), plan.schema)
     }
@@ -88,13 +96,15 @@ object implicits {
       textColumns:     Seq[String] = Seq("chunk_text"),
       topK:            Int = 10,
       partitionFilter: Option[String] = None,
+      catalogOpts:     Map[String, String] = Map.empty,
     ): DataFrame = {
       val schema = StructType(Seq(
         StructField("row_id", LongType, nullable = false),
         StructField("distance", DoubleType, nullable = false),
         StructField("file_path", StringType, nullable = false),
       ))
-      val rows = AilakeNative.searchText(tableUri, namespace, tableName, queryText, textColumns, topK, partitionFilter)
+      val rows = AilakeNative.searchText(
+        tableUri, namespace, tableName, queryText, textColumns, topK, partitionFilter, catalogOpts)
       val sparkRows = rows.map(r => Row(r.rowId, r.distance.toDouble, r.filePath))
       spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), schema)
     }
@@ -115,6 +125,7 @@ object implicits {
       namespace:       String = "default",
       tableName:       String = "",
       partitionFilter: Option[String] = None,
+      catalogOpts:     Map[String, String] = Map.empty,
     ): DataFrame = {
       val schema = StructType(Seq(
         StructField("row_id", LongType, nullable = false),
@@ -122,7 +133,7 @@ object implicits {
         StructField("file_path", StringType, nullable = false),
       ))
       val rows = AilakeNative.searchMultimodal(
-        tableUri, queries, topK, partitionFilter, namespace, tableName)
+        tableUri, queries, topK, partitionFilter, namespace, tableName, catalogOpts)
       val sparkRows = rows.map(r => Row(r.rowId, r.rrfScore.toDouble, r.filePath))
       spark.createDataFrame(spark.sparkContext.parallelize(sparkRows, numSlices = 1), schema)
     }
@@ -147,9 +158,10 @@ object implicits {
       namespace:       String = "default",
       tableName:       String = "",
       partitionFilter: Option[String] = None,
+      catalogOpts:     Map[String, String] = Map.empty,
     ): DataFrame = {
       val scanResult = AilakeNative.scan(
-        tableUri, queryVector, topK, vectorColumn, partitionFilter, namespace, tableName)
+        tableUri, queryVector, topK, vectorColumn, partitionFilter, namespace, tableName, catalogOpts)
       val fields = scanResult.schema.map { col =>
         val sparkType = col.dataType match {
           case "int64"       => LongType
@@ -187,10 +199,12 @@ object implicits {
       targetSizeBytes: Long = 128L * 1024 * 1024,
       maxFilesPerPass: Int = 20,
       deferred:        Boolean = false,
+      catalogOpts:     Map[String, String] = Map.empty,
     ): Option[Int] = {
       val resolvedName = if (tableName.nonEmpty) tableName
                          else tableUri.stripSuffix("/").split("/").last
-      AilakeNative.compact(tableUri, namespace, resolvedName, minFiles, targetSizeBytes, maxFilesPerPass, deferred)
+      AilakeNative.compact(
+        tableUri, namespace, resolvedName, minFiles, targetSizeBytes, maxFilesPerPass, deferred, catalogOpts)
     }
 
     /**
@@ -295,6 +309,7 @@ object implicits {
       ftsColumns:     Seq[String] = Seq.empty,
       ftsTokenizer:   String = "default",
       deferred:       Boolean = false,
+      catalogOpts:    Map[String, String] = Map.empty,
     ): Option[Long] = {
       import org.apache.spark.sql.types.{ArrayType, LongType, StringType}
       require(vectorColumns.nonEmpty, "ailakeWriteMulti requires at least one VectorColSpec")
@@ -363,6 +378,7 @@ object implicits {
         ftsTokenizer   = ftsTokenizer,
         deferred       = deferred,
         columns        = extraColumnData,
+        catalogOpts    = catalogOpts,
       )
     }
   }

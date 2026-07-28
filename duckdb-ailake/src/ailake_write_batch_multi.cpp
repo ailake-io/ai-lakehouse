@@ -155,9 +155,15 @@ static void AilakeWriteBatchMultiExec(
         format_version = IntegerValue::Get(args.data[5].GetValue(0));
     if ((idx_t)args.data.size() > 6 && !args.data[6].GetValue(0).IsNull())
         deferred       = BooleanValue::Get(args.data[6].GetValue(0));
+    // arity 8: catalog_opts_json VARCHAR — REST catalog config, see
+    // docs/guides/REST_CATALOG.md. Empty/omitted = default Hadoop catalog.
+    std::string catalog_opts_json;
+    if ((idx_t)args.data.size() > 7 && !args.data[7].GetValue(0).IsNull())
+        catalog_opts_json = StringValue::Get(args.data[7].GetValue(0));
 
     int64_t snap = lib.write_batch_multi(
-        warehouse, ns, table_name, ids, vector_columns, format_version, deferred
+        warehouse, ns, table_name, ids, vector_columns, format_version, deferred,
+        catalog_opts_json
     );
     result.SetValue(0, Value::BIGINT(snap));
 }
@@ -227,6 +233,20 @@ void RegisterAilakeWriteBatchMulti(duckdb::ExtensionLoader &loader) {
          LogicalType::VARCHAR,
          LogicalType::INTEGER,
          LogicalType::BOOLEAN},
+        LogicalType::BIGINT,
+        AilakeWriteBatchMultiExec
+    ));
+
+    // Arity 8: + catalog_opts_json VARCHAR
+    fn_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::BIGINT),
+         LogicalType::LIST(struct_type),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::INTEGER,
+         LogicalType::BOOLEAN,
+         LogicalType::VARCHAR},
         LogicalType::BIGINT,
         AilakeWriteBatchMultiExec
     ));

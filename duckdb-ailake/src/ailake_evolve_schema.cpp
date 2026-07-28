@@ -61,6 +61,11 @@ static void AilakeEvolveSchemaExec(
     std::string table_name = "table";
     if ((idx_t)args.data.size() > 4 && !args.data[4].GetValue(0).IsNull())
         table_name = StringValue::Get(args.data[4].GetValue(0));
+    // arity 6: catalog_opts_json VARCHAR — REST catalog config, see
+    // docs/guides/REST_CATALOG.md. Empty/omitted = default Hadoop catalog.
+    std::string catalog_opts_json;
+    if ((idx_t)args.data.size() > 5 && !args.data[5].GetValue(0).IsNull())
+        catalog_opts_json = StringValue::Get(args.data[5].GetValue(0));
 
     auto is_empty_arr = [](const std::string &s) -> bool {
         std::string t;
@@ -73,7 +78,9 @@ static void AilakeEvolveSchemaExec(
         return;
     }
 
-    int32_t schema_id = lib.evolve_schema(warehouse, table_name, add_cols_json, rename_cols_json, ns);
+    int32_t schema_id = lib.evolve_schema(
+        warehouse, table_name, add_cols_json, rename_cols_json, ns, catalog_opts_json
+    );
     result.SetValue(0, Value::INTEGER(schema_id));
 }
 
@@ -93,6 +100,18 @@ void RegisterAilakeEvolveSchema(duckdb::ExtensionLoader &loader) {
     // Arity 5: + namespace VARCHAR, table_name VARCHAR
     fn_set.AddFunction(ScalarFunction(
         {LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
+        LogicalType::INTEGER,
+        AilakeEvolveSchemaExec
+    ));
+
+    // Arity 6: + catalog_opts_json VARCHAR
+    fn_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
          LogicalType::VARCHAR,
          LogicalType::VARCHAR,
          LogicalType::VARCHAR,

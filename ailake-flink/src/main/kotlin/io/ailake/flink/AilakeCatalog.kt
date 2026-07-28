@@ -112,6 +112,15 @@ class AilakeCatalog(
         tables[ObjectPath(tablePath.databaseName, newTableName)] = tbl
     }
 
+    /**
+     * `AilakeNativeLoader.createTable` was already fully implemented and tested but had
+     * no SQL surface — this used to only insert into the catalog's in-memory `tables`
+     * map, never actually creating the on-disk AI-Lake table (Iceberg metadata.json +
+     * manifest). Same "dead capability" gap Trino/Spark had before them, closed the same
+     * way: the native call now runs first, and `CREATE TABLE` only registers the
+     * in-memory entry (so subsequent `INSERT`/`SELECT` resolve via [AilakeVectorConnectorFactory])
+     * once the real table exists.
+     */
     override fun createTable(tablePath: ObjectPath, table: CatalogBaseTable, ignoreIfExists: Boolean) {
         if (tables.containsKey(tablePath)) {
             if (!ignoreIfExists) throw TableAlreadyExistException(name, tablePath)
@@ -130,11 +139,49 @@ class AilakeCatalog(
         props.putIfAbsent("warehouse", warehouse)
         props.putIfAbsent("table-name", tablePath.objectName)
         props.putIfAbsent("namespace", tablePath.databaseName.takeIf { it.isNotBlank() } ?: defaultNamespace)
+
+        val ok = AilakeNativeLoader.createTable(
+            warehouse     = props.getValue("warehouse"),
+            namespace     = props.getValue("namespace"),
+            table         = props.getValue("table-name"),
+            vectorColumn  = props["vector.column"] ?: "embedding",
+            dim           = props["vector.dim"]?.toInt() ?: 1536,
+            metric        = props["vector.metric"] ?: "cosine",
+            precision     = props["vector.precision"] ?: "f16",
+            formatVersion = props["format.version"]?.toInt() ?: 2,
+            catalogOpts   = catalogOptsFromProps(props),
+        )
+        if (!ok) throw RuntimeException("ailake CREATE TABLE failed for ${tablePath} — see logs")
+
         tables[tablePath] = CatalogTableImpl(
             (table as CatalogTable).schema,
             props,
             table.comment,
         )
+    }
+
+    /**
+     * Same translation as [AilakeVectorConnectorFactory]'s private
+     * `catalogOptsFromConfig`, but reading raw `WITH (...)` string options directly —
+     * this catalog builds/validates a [CatalogTableImpl] before Flink's
+     * `FactoryUtil`/`ReadableConfig` machinery is available, so it can't reuse that
+     * (private, `ReadableConfig`-typed) helper. Same keys, same "catalog left unset or
+     * 'hadoop' → default Hadoop catalog" semantics. See docs/guides/REST_CATALOG.md.
+     */
+    private fun catalogOptsFromProps(props: Map<String, String>): Map<String, String> {
+        val catalog = props["catalog"] ?: return emptyMap()
+        if (catalog.isBlank() || catalog == "hadoop") return emptyMap()
+        val entries = mutableMapOf("catalog" to catalog)
+        props["rest-uri"]?.let { entries["rest_uri"] = it }
+        props["rest-prefix"]?.let { entries["rest_prefix"] = it }
+        props["rest-warehouse"]?.let { entries["rest_warehouse"] = it }
+        entries["rest_auth"] = props["rest-auth"] ?: "none"
+        props["rest-token"]?.let { entries["rest_token"] = it }
+        props["rest-oauth-token-endpoint"]?.let { entries["rest_oauth_token_endpoint"] = it }
+        props["rest-oauth-client-id"]?.let { entries["rest_oauth_client_id"] = it }
+        props["rest-oauth-client-secret"]?.let { entries["rest_oauth_client_secret"] = it }
+        props["rest-oauth-scope"]?.let { entries["rest_oauth_scope"] = it }
+        return entries
     }
 
     override fun alterTable(tablePath: ObjectPath, newTable: CatalogBaseTable, ignoreIfNotExists: Boolean) {

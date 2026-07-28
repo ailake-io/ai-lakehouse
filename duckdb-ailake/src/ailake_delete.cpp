@@ -70,13 +70,18 @@ static void AilakeDeleteWhereExec(
     std::string table_name = "table";
     if ((idx_t)args.data.size() > 4 && !args.data[4].GetValue(0).IsNull())
         table_name = StringValue::Get(args.data[4].GetValue(0));
+    // arity 6: catalog_opts_json VARCHAR — REST catalog config, see
+    // docs/guides/REST_CATALOG.md. Empty/omitted = default Hadoop catalog.
+    std::string catalog_opts_json;
+    if ((idx_t)args.data.size() > 5 && !args.data[5].GetValue(0).IsNull())
+        catalog_opts_json = StringValue::Get(args.data[5].GetValue(0));
 
     if (values.empty()) {
         result.SetValue(0, Value::BOOLEAN(true));
         return;
     }
 
-    bool ok = lib.delete_where(warehouse, table_name, column, values, ns);
+    bool ok = lib.delete_where(warehouse, table_name, column, values, ns, catalog_opts_json);
     result.SetValue(0, Value::BOOLEAN(ok));
 }
 
@@ -97,6 +102,18 @@ void RegisterAilakeDeleteWhere(duckdb::ExtensionLoader &loader) {
         {LogicalType::VARCHAR,
          LogicalType::VARCHAR,
          LogicalType::LIST(LogicalType::VARCHAR),
+         LogicalType::VARCHAR,
+         LogicalType::VARCHAR},
+        LogicalType::BOOLEAN,
+        AilakeDeleteWhereExec
+    ));
+
+    // Arity 6: + catalog_opts_json VARCHAR
+    fn_set.AddFunction(ScalarFunction(
+        {LogicalType::VARCHAR,
+         LogicalType::VARCHAR,
+         LogicalType::LIST(LogicalType::VARCHAR),
+         LogicalType::VARCHAR,
          LogicalType::VARCHAR,
          LogicalType::VARCHAR},
         LogicalType::BOOLEAN,
