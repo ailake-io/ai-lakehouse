@@ -910,7 +910,8 @@ CREATE TABLE ailake_docs_search (
     'vector.column' = 'embedding',
     'vector.dim'    = '1536',
     'search.top-k'  = '10',
-    'search.ef'     = '50'
+    'search.ef'     = '50',
+    'search.pruning-threshold' = '0.8'  -- unset (default) = no pruning
 );
 
 -- Query vector passed via job parameters (Flink SQL has no per-query SET SESSION):
@@ -1062,6 +1063,7 @@ loader.evolveSchema(
 | `vector.precision` | `"f16"` | `f32` \| `f16` \| `i8` |
 | `search.top-k` | `10` | Nearest neighbors to return (source tables). Capped at 100,000 — a higher value fails the job with a clear error |
 | `search.ef` | `50` | HNSW `ef_search` (source tables) |
+| `search.pruning-threshold` | unset | Geometric pruning cutoff — files whose centroid is farther than this from the query are skipped entirely. Unset = no pruning |
 | `embedding.model` | unset | Stored in `ailake.embedding-model` Iceberg property |
 | `partition.fields` | `"[]"` | JSON array of `{column, transform, column_type}` |
 | `format.version` | `2` | Iceberg format version (`2` or `3`) |

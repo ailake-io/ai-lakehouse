@@ -86,6 +86,11 @@ object AilakeNativeLoader {
         query: FloatArray,
         topK: Int = 10,
         efSearch: Int = 50,
+        // ailake_search_json's Req struct (ailake-jni/src/lib.rs) has always
+        // accepted pruning_threshold too — found auditing this plugin against
+        // trino-plugin/spark-plugin, which both got this same fix moments
+        // earlier this session (Fase 21). null = server default (no pruning).
+        pruningThreshold: Float? = null,
         partitionFilter: String? = null,
         hybridText: String? = null,
         textColumn: String = "chunk_text",
@@ -102,6 +107,7 @@ object AilakeNativeLoader {
             "top_k" to topK,
             "ef_search" to efSearch,
         )
+        if (pruningThreshold != null) payload["pruning_threshold"] = pruningThreshold
         if (partitionFilter != null) payload["partition_filter"] = partitionFilter
         if (hybridText != null) {
             payload["hybrid_text"]  = hybridText

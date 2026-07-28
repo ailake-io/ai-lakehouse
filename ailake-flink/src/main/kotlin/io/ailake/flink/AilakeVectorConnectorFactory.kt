@@ -87,6 +87,12 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
         val VEC_PREC        = ConfigOptions.key("vector.precision").stringType().defaultValue("f16")
         val SEARCH_TOPK       = ConfigOptions.key("search.top-k").intType().defaultValue(10)
         val SEARCH_EF         = ConfigOptions.key("search.ef").intType().defaultValue(50)
+        /** Geometric pruning cutoff — files whose centroid is farther than this from the
+         * query are skipped entirely. No default (unset = server default: no pruning) —
+         * found missing entirely (unlike SEARCH_EF above) auditing this plugin against
+         * trino-plugin/spark-plugin, which both got this same fix moments earlier this
+         * session (Fase 21); ailake_search_json has always accepted it. */
+        val SEARCH_PRUNING_THRESHOLD = ConfigOptions.key("search.pruning-threshold").floatType().noDefaultValue()
         /** `"search"` (default, fixed 3-column shape) or `"full"` (Fase 11 — search + full-row fetch, dynamic columns from the DDL, no JOIN needed). */
         val SEARCH_MODE       = ConfigOptions.key("search.mode").stringType().defaultValue("search")
         val EMBEDDING_MODEL   = ConfigOptions.key("embedding.model").stringType().noDefaultValue()
@@ -132,7 +138,7 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
     override fun requiredOptions(): Set<ConfigOption<*>> = setOf(WAREHOUSE, TABLE_NAME, VEC_DIM)
 
     override fun optionalOptions(): Set<ConfigOption<*>> = setOf(
-        NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF, SEARCH_MODE, EMBEDDING_MODEL,
+        NAMESPACE, VEC_COL, VEC_METRIC, VEC_PREC, SEARCH_TOPK, SEARCH_EF, SEARCH_PRUNING_THRESHOLD, SEARCH_MODE, EMBEDDING_MODEL,
         PARTITION_FIELDS, FORMAT_VERSION, FTS_COLUMNS, FTS_TOKENIZER,
         HNSW_M, HNSW_EF_CONSTRUCTION, PRE_NORMALIZE, DEFERRED, VEC_COLUMNS,
         CATALOG, REST_URI, REST_PREFIX, REST_WAREHOUSE, REST_AUTH, REST_TOKEN,
@@ -239,6 +245,7 @@ class AilakeVectorConnectorFactory : DynamicTableSourceFactory, DynamicTableSink
                 dim        = opts.get(VEC_DIM),
                 topK       = opts.get(SEARCH_TOPK),
                 efSearch   = opts.get(SEARCH_EF),
+                pruningThreshold = runCatching { opts.get(SEARCH_PRUNING_THRESHOLD) }.getOrNull(),
                 schema     = context.catalogTable.resolvedSchema,
                 catalogOpts = catalogOptsFromConfig(opts),
             )
