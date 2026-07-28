@@ -55,6 +55,12 @@ class VectorScanRecordSetProvider : ConnectorRecordSetProvider {
         // (query_text only, no query_vector — AilakeNative.searchText,
         // O(log N) via Tantivy when the table has an FTS index, see
         // ailake.fts-columns).
+        // Sentinel→null: 0/-1f (VectorScanHandles.kt's split defaults) mean
+        // "not set" — AilakeNative.search's ef_search/pruning_threshold are
+        // omitted from the native JSON request entirely in that case, same as
+        // partitionFilter/hybridText's existing null-means-omit convention.
+        val efSearch = s.efSearch.takeIf { it > 0 }
+        val pruningThreshold = s.pruningThreshold.takeIf { it >= 0f }
         val rows = when {
             s.queryBytes.isBlank() && s.queryText.isNotBlank() ->
                 AilakeNative.searchText(s.tableUri, s.namespace, s.tableName, s.queryText, topK = s.topK)
@@ -63,11 +69,13 @@ class VectorScanRecordSetProvider : ConnectorRecordSetProvider {
                     s.tableUri, s.queryBytes, s.topK,
                     hybridText = s.queryText, bm25Weight = s.hybridWeight,
                     namespace = s.namespace, tableName = s.tableName, vectorColumn = s.vectorColumn,
+                    efSearch = efSearch, pruningThreshold = pruningThreshold,
                 )
             else ->
                 AilakeNative.search(
                     s.tableUri, s.queryBytes, s.topK,
                     namespace = s.namespace, tableName = s.tableName, vectorColumn = s.vectorColumn,
+                    efSearch = efSearch, pruningThreshold = pruningThreshold,
                 )
         }
         return VectorScanRecordSet(rows, cols)

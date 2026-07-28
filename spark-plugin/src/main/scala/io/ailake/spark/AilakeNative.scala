@@ -105,6 +105,24 @@ object AilakeNative {
     /** Create an empty AI-Lake table. Returns `{"ok":true}`. Caller must free. */
     def ailake_create_table_json(requestJson: String): Pointer
 
+    /** Recompute recency_weight (Phase 9 agent memory). Returns `{"ok":true,"files_updated":N}`. Caller must free. */
+    def ailake_decay_memories_json(requestJson: String): Pointer
+
+    /** Re-embed a column via an external embed command. Returns `{"ok":true}`. Caller must free. */
+    def ailake_migrate_json(requestJson: String): Pointer
+
+    /** Position-level delete via Iceberg V3 Deletion Vectors. Returns `{"ok":true}`. Caller must free. */
+    def ailake_delete_rows_json(requestJson: String): Pointer
+
+    /** Add a vector column to an existing table's schema (metadata-only). Returns `{"ok":true,"new_schema_id":N}`. Caller must free. */
+    def ailake_add_vector_column_json(requestJson: String): Pointer
+
+    /** Backfill embeddings for a column added via add_vector_column. Returns `{"ok":true}`. Caller must free. */
+    def ailake_backfill_vector_column_json(requestJson: String): Pointer
+
+    /** Storage/index size estimates — pure math, no I/O. Returns `{"ok":true,"estimates":[...]}`. Caller must free. */
+    def ailake_estimate_json(requestJson: String): Pointer
+
     def ailake_free_string(ptr: Pointer): Unit
   }
 
@@ -515,16 +533,23 @@ object AilakeNative {
    * @param bm25Weight  BM25 weight in RRF (0.0 = pure vector, 1.0 = pure BM25)
    */
   def search(
-    tableUri:        String,
-    query:           Array[Float],
-    topK:            Int,
-    partitionFilter: Option[String] = None,
-    hybridText:      Option[String] = None,
-    textColumn:      String = "chunk_text",
-    bm25Weight:      Float = 0.5f,
-    namespace:       String = "default",
-    tableName:       String = "",
-    catalogOpts:     Map[String, String] = Map.empty,
+    tableUri:         String,
+    query:            Array[Float],
+    topK:             Int,
+    partitionFilter:  Option[String] = None,
+    hybridText:       Option[String] = None,
+    textColumn:       String = "chunk_text",
+    bm25Weight:       Float = 0.5f,
+    namespace:        String = "default",
+    tableName:        String = "",
+    catalogOpts:      Map[String, String] = Map.empty,
+    // ailake_search_json's Req struct (ailake-jni/src/lib.rs) accepts both —
+    // server defaults (ef_search=50, pruning_threshold=infinity/no pruning)
+    // apply when None. Regression: never forwarded from Spark (or Trino —
+    // same gap, same fix) despite the JNI contract supporting it since
+    // before either plugin existed; Flink already had it (`search.ef` DDL).
+    efSearch:         Option[Int] = None,
+    pruningThreshold: Option[Float] = None,
   ): Seq[SearchRow] = {
     if (query.isEmpty) return Seq.empty
     lib match {
@@ -536,9 +561,11 @@ object AilakeNative {
         val hybridJson = hybridText.map(t =>
           s""","hybrid_text":${jsonStr(t)},"text_column":${jsonStr(textColumn)},"bm25_weight":$bm25Weight"""
         ).getOrElse("")
+        val efJson = efSearch.map(v => s""","ef_search":$v""").getOrElse("")
+        val pruningJson = pruningThreshold.map(v => s""","pruning_threshold":$v""").getOrElse("")
         val requestJson =
           s"""{"warehouse":${jsonStr(tableUri)},"namespace":${jsonStr(namespace)},"table":${jsonStr(effectiveTable)},""" +
-          s""""query":$queryJson,"dim":${query.length},"top_k":$topK$partJson$hybridJson${catalogOptsJsonFragment(catalogOpts)}}"""
+          s""""query":$queryJson,"dim":${query.length},"top_k":$topK$partJson$hybridJson$efJson$pruningJson${catalogOptsJsonFragment(catalogOpts)}}"""
         val ptr = native.ailake_search_json(requestJson)
         if (ptr == null) {
           log.warn("[ailake] ailake_search_json returned null pointer for tableUri={}", tableUri)
@@ -827,6 +854,226 @@ object AilakeNative {
         }
         log.info(s"[ailake] create_table OK table=$namespace.$table")
         Some(())
+    }
+  }
+
+  // ── decay_memories / migrate / delete_rows / add_vector_column /
+  // backfill_vector_column / estimate — closes a gap found auditing
+  // trino-plugin (same for all 3 JVM plugins): none of these 6 had a C-ABI
+  // path at all, unlike create_table (which existed in ailake-jni but was
+  // simply never called from any plugin). ailake-go/ailake-cpp reach these
+  // only by shelling out to the ailake CLI binary; Spark/Trino/Flink bind
+  // exclusively to ailake-jni via JNA, so all three needed the new
+  // ailake_*_json exports below before any of them could reach these ops.
+
+  /** Recomputes recency_weight for every row (Phase 9 agent memory). Returns files_updated, or None on failure. */
+  def decayMemories(
+    warehouse:   String,
+    namespace:   String,
+    table:       String,
+    lambda:      Float,
+    catalogOpts: Map[String, String] = Map.empty,
+  ): Option[Int] = {
+    lib match {
+      case None => None
+      case Some(native) =>
+        val requestJson =
+          s"""{"warehouse":${jsonStr(warehouse)},"namespace":${jsonStr(namespace)},""" +
+          s""""table":${jsonStr(table)},"lambda":$lambda${catalogOptsJsonFragment(catalogOpts)}}"""
+        val ptr = native.ailake_decay_memories_json(requestJson)
+        if (ptr == null) {
+          log.warn(s"[ailake] ailake_decay_memories_json returned null for table=$namespace.$table")
+          return None
+        }
+        try {
+          val json = ptr.getString(0)
+          val root = mapper.readTree(json)
+          if (!root.path("ok").asBoolean(false)) {
+            log.warn(s"[ailake] decayMemories failed for table=$namespace.$table: ${root.path("error").asText()}")
+            None
+          } else {
+            val n = root.path("files_updated").asInt(0)
+            log.info(s"[ailake] decayMemories OK table=$namespace.$table files_updated=$n")
+            Some(n)
+          }
+        } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to parse decayMemories response for table=$namespace.$table: ${e.getMessage}", e)
+            None
+        } finally {
+          Try(native.ailake_free_string(ptr))
+        }
+    }
+  }
+
+  /** Re-embeds oldColumn → newColumn via an external embed command (spawned `sh -c embedCmd`, JSON stdin/stdout). Throws on failure. */
+  def migrate(
+    warehouse:    String,
+    namespace:    String,
+    table:        String,
+    oldColumn:    String,
+    newColumn:    String,
+    textColumn:   String,
+    embedCmd:     String,
+    strategy:     String = "atomic-replace",
+    batchSize:    Int = 10000,
+    modelName:    Option[String] = None,
+    modelVersion: Option[String] = None,
+    catalogOpts:  Map[String, String] = Map.empty,
+  ): Unit = {
+    val native = lib.getOrElse(throw new RuntimeException("ailake native library not loaded"))
+    val modelJson = modelName.map(n => s""","model_name":${jsonStr(n)}""").getOrElse("") +
+      modelVersion.map(v => s""","model_version":${jsonStr(v)}""").getOrElse("")
+    val requestJson =
+      s"""{"warehouse":${jsonStr(warehouse)},"namespace":${jsonStr(namespace)},"table":${jsonStr(table)},""" +
+      s""""old_column":${jsonStr(oldColumn)},"new_column":${jsonStr(newColumn)},""" +
+      s""""text_column":${jsonStr(textColumn)},"embed_cmd":${jsonStr(embedCmd)},""" +
+      s""""strategy":${jsonStr(strategy)},"batch_size":$batchSize$modelJson${catalogOptsJsonFragment(catalogOpts)}}"""
+    val ptr = native.ailake_migrate_json(requestJson)
+    if (ptr == null) {
+      throw new RuntimeException(s"ailake_migrate_json returned null for table=$namespace.$table")
+    }
+    val resp = try {
+      mapper.readTree(ptr.getString(0))
+    } finally {
+      Try(native.ailake_free_string(ptr))
+    }
+    if (!resp.path("ok").asBoolean(false)) {
+      throw new RuntimeException(s"ailake migrate failed for table=$namespace.$table: ${resp.path("error").asText()}")
+    }
+    log.info(s"[ailake] migrate OK table=$namespace.$table $oldColumn→$newColumn")
+  }
+
+  /** Deletes row positions from `file` via Iceberg V3 Deletion Vectors — different from [[deleteWhere]]'s equality predicate. Throws on failure. */
+  def deleteRows(
+    warehouse:   String,
+    namespace:   String,
+    table:       String,
+    file:        String,
+    rowIds:      Seq[Int],
+    catalogOpts: Map[String, String] = Map.empty,
+  ): Unit = {
+    val native = lib.getOrElse(throw new RuntimeException("ailake native library not loaded"))
+    val requestJson =
+      s"""{"warehouse":${jsonStr(warehouse)},"namespace":${jsonStr(namespace)},"table":${jsonStr(table)},""" +
+      s""""file":${jsonStr(file)},"row_ids":[${rowIds.mkString(",")}]${catalogOptsJsonFragment(catalogOpts)}}"""
+    val ptr = native.ailake_delete_rows_json(requestJson)
+    if (ptr == null) {
+      throw new RuntimeException(s"ailake_delete_rows_json returned null for table=$namespace.$table")
+    }
+    val resp = try {
+      mapper.readTree(ptr.getString(0))
+    } finally {
+      Try(native.ailake_free_string(ptr))
+    }
+    if (!resp.path("ok").asBoolean(false)) {
+      throw new RuntimeException(s"ailake delete_rows failed for table=$namespace.$table: ${resp.path("error").asText()}")
+    }
+    log.info(s"[ailake] deleteRows OK table=$namespace.$table file=$file rows=${rowIds.size}")
+  }
+
+  /** Adds a new vector column to the schema (metadata-only, no backfill). Returns the new schema_id, or None on failure. */
+  def addVectorColumn(
+    warehouse:            String,
+    namespace:            String,
+    table:                String,
+    column:               String,
+    dim:                  Int,
+    metric:               String = "cosine",
+    precision:            String = "f16",
+    preNormalize:         Boolean = false,
+    hnswM:                Option[Int] = None,
+    hnswEfConstruction:   Option[Int] = None,
+    catalogOpts:          Map[String, String] = Map.empty,
+  ): Option[Int] = {
+    lib match {
+      case None => None
+      case Some(native) =>
+        val hnswJson = hnswM.map(v => s""","hnsw_m":$v""").getOrElse("") +
+          hnswEfConstruction.map(v => s""","hnsw_ef_construction":$v""").getOrElse("")
+        val requestJson =
+          s"""{"warehouse":${jsonStr(warehouse)},"namespace":${jsonStr(namespace)},"table":${jsonStr(table)},""" +
+          s""""column":${jsonStr(column)},"dim":$dim,"metric":${jsonStr(metric)},""" +
+          s""""precision":${jsonStr(precision)},"pre_normalize":$preNormalize$hnswJson${catalogOptsJsonFragment(catalogOpts)}}"""
+        val ptr = native.ailake_add_vector_column_json(requestJson)
+        if (ptr == null) {
+          log.warn(s"[ailake] ailake_add_vector_column_json returned null for table=$namespace.$table")
+          return None
+        }
+        try {
+          val root = mapper.readTree(ptr.getString(0))
+          if (!root.path("ok").asBoolean(false)) {
+            log.warn(s"[ailake] addVectorColumn failed for table=$namespace.$table: ${root.path("error").asText()}")
+            None
+          } else {
+            val schemaId = root.path("new_schema_id").asInt(-1)
+            log.info(s"[ailake] addVectorColumn OK table=$namespace.$table column=$column new_schema_id=$schemaId")
+            Some(schemaId)
+          }
+        } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to parse addVectorColumn response for table=$namespace.$table: ${e.getMessage}", e)
+            None
+        } finally {
+          Try(native.ailake_free_string(ptr))
+        }
+    }
+  }
+
+  /** Backfills embeddings for a column added via [[addVectorColumn]] — reads `textColumn`, embeds via `embedCmd`. Throws on failure. */
+  def backfillVectorColumn(
+    warehouse:   String,
+    namespace:   String,
+    table:       String,
+    column:      String,
+    textColumn:  String,
+    embedCmd:    String,
+    batchSize:   Int = 512,
+    catalogOpts: Map[String, String] = Map.empty,
+  ): Unit = {
+    val native = lib.getOrElse(throw new RuntimeException("ailake native library not loaded"))
+    val requestJson =
+      s"""{"warehouse":${jsonStr(warehouse)},"namespace":${jsonStr(namespace)},"table":${jsonStr(table)},""" +
+      s""""column":${jsonStr(column)},"text_column":${jsonStr(textColumn)},""" +
+      s""""embed_cmd":${jsonStr(embedCmd)},"batch_size":$batchSize${catalogOptsJsonFragment(catalogOpts)}}"""
+    val ptr = native.ailake_backfill_vector_column_json(requestJson)
+    if (ptr == null) {
+      throw new RuntimeException(s"ailake_backfill_vector_column_json returned null for table=$namespace.$table")
+    }
+    val resp = try {
+      mapper.readTree(ptr.getString(0))
+    } finally {
+      Try(native.ailake_free_string(ptr))
+    }
+    if (!resp.path("ok").asBoolean(false)) {
+      throw new RuntimeException(s"ailake backfill_vector_column failed for table=$namespace.$table: ${resp.path("error").asText()}")
+    }
+    log.info(s"[ailake] backfillVectorColumn OK table=$namespace.$table column=$column")
+  }
+
+  /** Storage/index size estimates for a hypothetical table — pure math, no warehouse/catalog needed. Returns the raw JSON response text, or None on failure. */
+  def estimate(
+    rows:  Long,
+    dim:   Int,
+    hnswM: Int = 16,
+    pqM:   Option[Int] = None,
+  ): Option[String] = {
+    lib match {
+      case None => None
+      case Some(native) =>
+        val pqJson = pqM.map(v => s""","pq_m":$v""").getOrElse("")
+        val requestJson = s"""{"rows":$rows,"dim":$dim,"hnsw_m":$hnswM$pqJson}"""
+        val ptr = native.ailake_estimate_json(requestJson)
+        if (ptr == null) return None
+        try {
+          Some(ptr.getString(0))
+        } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read estimate response: ${e.getMessage}", e)
+            None
+        } finally {
+          Try(native.ailake_free_string(ptr))
+        }
     }
   }
 
