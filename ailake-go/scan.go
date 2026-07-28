@@ -67,20 +67,50 @@ func Scan(
 		return nil, err
 	}
 
-	return FetchRows(results, catalog.Warehouse, info.VectorColumn, dim)
+	// Equality delete (Phase H) — Search only masks Deletion Vectors (row-id
+	// based, cheap); equality-delete predicates need decoded column values,
+	// which Search's pointer-only result (RowID/Distance/FilePath) doesn't
+	// have. Scan does decode full rows below, so it applies both mechanisms —
+	// full parity with the real `ailake` CLI's own search. See delete.go.
+	eqDeletes, err := catalog.ListEqualityDeletes(namespace, table)
+	if err != nil {
+		return nil, fmt.Errorf("ailake scan: list equality deletes: %w", err)
+	}
+	var eqFilter *EqualityDeleteFilter
+	if len(eqDeletes) > 0 {
+		eqFilter, err = LoadEqualityDeleteFilter(catalog.Warehouse, eqDeletes)
+		if err != nil {
+			return nil, fmt.Errorf("ailake scan: load equality delete filter: %w", err)
+		}
+	}
+
+	return FetchRows(results, catalog.Warehouse, info.VectorColumn, dim, eqFilter)
 }
 
 // FetchRows reads full Parquet rows for the given search results.
 // vectorCol and dim are used to auto-decode the vector column (F16→F32).
 // Pass empty string / 0 to skip vector decoding.
+//
+// eqFilter is optional (variadic — 0 or 1) — pass the result of
+// LoadEqualityDeleteFilter(catalog.Warehouse, catalog.ListEqualityDeletes(...))
+// to mask rows matching an equality delete predicate (Phase H). Omit for the
+// pre-existing behavior (no equality-delete filtering) — Scan always passes
+// one automatically. Deletion Vectors (position deletes) are not re-checked
+// here: they were already applied to the RowID list by Search, so a result
+// reaching FetchRows never points at a DV-masked position.
 func FetchRows(
 	results []FileSearchResult,
 	warehouse string,
 	vectorCol string,
 	dim uint32,
+	eqFilter ...*EqualityDeleteFilter,
 ) ([]ScanRow, error) {
 	if len(results) == 0 {
 		return nil, nil
+	}
+	var eqf *EqualityDeleteFilter
+	if len(eqFilter) > 0 {
+		eqf = eqFilter[0]
 	}
 
 	// Group by file path — minimize file opens.
@@ -93,7 +123,7 @@ func FetchRows(
 	scanRows := make([]ScanRow, 0, len(results))
 
 	for filePath, hits := range byFile {
-		rows, err := readParquetRows(filePath, hits, vectorCol, dim)
+		rows, err := readParquetRows(filePath, hits, vectorCol, dim, eqf)
 		if err != nil {
 			return nil, fmt.Errorf("ailake fetch rows %s: %w", filePath, err)
 		}
@@ -114,6 +144,7 @@ func readParquetRows(
 	hits []fileHit,
 	vectorCol string,
 	dim uint32,
+	eqFilter *EqualityDeleteFilter,
 ) ([]ScanRow, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -174,12 +205,17 @@ func readParquetRows(
 				globalRowID := rowOffset + localIdx
 				if dist, ok := target[globalRowID]; ok {
 					fields := parquetRowToFields(rowBuf[0], colPaths, vectorCol, dim)
-					result = append(result, ScanRow{
-						RowID:    globalRowID,
-						Distance: dist,
-						FilePath: filePath,
-						Fields:   fields,
-					})
+					// Skip rows matching the equality-delete predicate — do not
+					// `continue` the outer loop here, it would also skip the
+					// io.EOF/error handling below for this same ReadRows call.
+					if eqFilter.IsEmpty() || !eqFilter.shouldDeleteRow(fields) {
+						result = append(result, ScanRow{
+							RowID:    globalRowID,
+							Distance: dist,
+							FilePath: filePath,
+							Fields:   fields,
+						})
+					}
 				}
 				localIdx++
 			}

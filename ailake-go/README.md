@@ -127,7 +127,7 @@ func Scan(
 ) ([]ScanRow, error)
 ```
 
-`Search` + Parquet row fetch in one call. Returns all columns for each top-K hit alongside `Distance`.
+`Search` + Parquet row fetch in one call. Returns all columns for each top-K hit alongside `Distance`. Applies both Iceberg logical-delete mechanisms (Phase H) automatically: Deletion Vectors via `Search`, equality deletes via `FetchRows`'s decoded rows — see `DeleteWhere`/`DeleteRows` below and `delete.go`.
 
 ### `SearchOptions`
 
@@ -179,7 +179,18 @@ type DataFileEntry struct {
     BatchID            string
     EmbeddingModel     string // "<name>" or "<name>@<version>"; empty if not set
     PartitionValue     string // agent_id or other partition value (Phase 9)
+    DeletionVector     *DeletionVectorRef // Iceberg V3 Deletion Vector (Phase H); nil if none
 }
+```
+
+### Equality delete filtering (`Scan` / `FetchRows`)
+
+`Scan` loads and applies equality-delete files automatically. To filter manually with the lower-level `Search` + `FetchRows` pair:
+
+```go
+deletes, err := catalog.ListEqualityDeletes("default", "docs")
+filter, err := ailake.LoadEqualityDeleteFilter(catalog.Warehouse, deletes) // nil filter = no-op
+rows, err := ailake.FetchRows(results, catalog.Warehouse, "embedding", 1536, filter)
 ```
 
 `EmbeddingModel` is read from per-file Avro `key_metadata` JSON. `ExtraVectorIndexes` holds HNSW offset, length, and centroid for each secondary vector column — populated from the `extra_vector_indexes` JSON array in `key_metadata`.
@@ -332,7 +343,7 @@ func DeleteWhere(
 ) error
 ```
 
-Commits an Iceberg equality delete (`ailake delete-where` CLI). No data files are rewritten; deleted rows are masked at scan time **by the real `ailake` CLI's own search** (confirmed manually) — **this package's own `Search`/`Scan` (pure-Go native reader) does not apply equality deletes or position deletes (`DeleteRows`) at all**, so a row logically deleted via `DeleteWhere`/`DeleteRows` still comes back from this package's `Search`/`Scan` until a real fix lands here. Mixing `DeleteWhere`/`DeleteRows` with this package's native reads on the same table currently gives inconsistent results depending on which reader you use. Empty `values` is a no-op.
+Commits an Iceberg equality delete (`ailake delete-where` CLI). No data files are rewritten; deleted rows are masked at scan time both by the real `ailake` CLI's own search and — since `delete.go` (`EqualityDeleteFilter`) — by this package's own **`Scan`** (`FetchRows`), which decodes full rows and filters them against the delete predicate the same way `ailake_query::equality_delete::EqualityDeleteFilter` does. **`Search` alone does not**: it's a pointer-only API (`RowID`/`Distance`/`FilePath`, no decoded columns) and equality-delete predicates need an actual column value to check — use `Scan` (or `Search` + `FetchRows`, which applies the same filter when given one via `LoadEqualityDeleteFilter`) if deleted rows must be masked. Empty `values` is a no-op.
 
 ### `EvolveSchema`
 
@@ -369,7 +380,7 @@ func DeleteRows(
 ) error
 ```
 
-Marks rows as deleted in a V3 table using Iceberg Deletion Vectors (`ailake delete-rows` CLI). Requires the table to have been created with `format_version: 3` (`CreateTableOptions.FormatVersion = 3`) — the CLI raises a clear error on a V2 table. Use `DeleteWhere` (equality predicate) for V2 tables. Same native-reader caveat as `DeleteWhere` above: this package's own `Search`/`Scan` does not apply the deletion. No-op when `rowPositions` is empty.
+Marks rows as deleted in a V3 table using Iceberg Deletion Vectors (`ailake delete-rows` CLI). Requires the table to have been created with `format_version: 3` (`CreateTableOptions.FormatVersion = 3`) — the CLI raises a clear error on a V2 table. Use `DeleteWhere` (equality predicate) for V2 tables. Unlike `DeleteWhere`'s partial coverage, Deletion Vectors are masked in **both** `Search` and `Scan` — the mask is a row-position bitmap (`DataFileEntry.DeletionVector`, `loadDeletionVector` in `delete.go`), so `Search` can check it directly against `RowID` without needing any decoded column data. No-op when `rowPositions` is empty.
 
 ### `DecayMemories`
 

@@ -351,25 +351,55 @@ func TestDeleteRowsIntegration(t *testing.T) {
 		t.Fatalf("DeleteRows: %v", err)
 	}
 
-	// NOT asserting the deleted row is excluded from Search here: this
-	// package's Search/Scan is a pure-Go native reader that — discovered while
-	// verifying this test — never applies either deletion mechanism (position
-	// deletes from DeleteRows, or the pre-existing equality deletes from
-	// DeleteWhere) at all; masking only happens in the real ailake CLI's own
-	// search (confirmed manually: `ailake search` after an equivalent
-	// `ailake delete-rows` correctly drops the row). That's a real,
-	// pre-existing native-reader gap unrelated to this wrapper — DeleteWhere
-	// has had the identical characteristic since before this change, it was
-	// just never exercised end-to-end against Search before now. What this
-	// test verifies for real: DeleteRows builds a request the CLI accepts
-	// (exit 0, "deleted 1 rows..." — confirmed via a separate manual
-	// CLI-only repro) and ListFiles' path round-trips correctly as --file.
+	// Regression fix (delete.go): this package's Search/Scan now applies
+	// Deletion Vectors (position deletes, V3) the same way the real `ailake`
+	// CLI's own search does — DeleteRows above wrote row position 0 of
+	// files[0] into a Puffin DV, and searchFile() masks it via
+	// bm.Contains(rowID) before returning hits. 1 of 6 rows is gone.
 	results, err := Search(catalog, "default", "docs", []float32{0.1, 0.2, 0.3, 0.4}, SearchOptions{TopK: 20})
 	if err != nil {
 		t.Fatalf("Search after DeleteRows: %v", err)
 	}
-	if len(results) != 6 {
-		t.Errorf("expected all 6 rows still visible via this package's native Search (deletion vectors not applied there — see comment above), got %d", len(results))
+	if len(results) != 5 {
+		t.Errorf("expected 5 of 6 rows visible after DeleteRows masked 1 via its Deletion Vector, got %d", len(results))
+	}
+	for _, r := range results {
+		if r.FilePath == files[0].Path && r.RowID == 0 {
+			t.Errorf("expected row 0 of %s to be masked by the Deletion Vector, but it was returned", files[0].Path)
+		}
+	}
+}
+
+func TestDeleteWhereAppliedInNativeScan(t *testing.T) {
+	if os.Getenv("AILAKE_BIN") == "" {
+		t.Skip("AILAKE_BIN not set")
+	}
+
+	// Regression: this package's native Scan (Search + FetchRows) never
+	// applied equality deletes at all — see delete.go. testdata/multimodal_fixture.parquet
+	// has 6 rows with a plain int64 "id" column (0..5), dim=4 "embedding".
+	catalog := &HadoopCatalog{Warehouse: t.TempDir()}
+	if err := CreateTable(catalog, "default", "docs", 4, CreateTableOptions{Metric: "cosine"}); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	if err := WriteBatch(catalog, "default", "docs", "testdata/multimodal_fixture.parquet", WriteBatchOptions{}); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+	if err := DeleteWhere(catalog, "default", "docs", "id", []string{"3"}); err != nil {
+		t.Fatalf("DeleteWhere: %v", err)
+	}
+
+	rows, err := Scan(catalog, "default", "docs", []float32{0.1, 0.2, 0.3, 0.4}, SearchOptions{TopK: 20})
+	if err != nil {
+		t.Fatalf("Scan after DeleteWhere: %v", err)
+	}
+	if len(rows) != 5 {
+		t.Errorf("expected 5 of 6 rows visible after DeleteWhere masked id=3, got %d", len(rows))
+	}
+	for _, r := range rows {
+		if id, ok := r.Fields["id"].(int64); ok && id == 3 {
+			t.Errorf("expected id=3 to be masked by the equality delete, but it was returned")
+		}
 	}
 }
 
