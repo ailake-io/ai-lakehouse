@@ -332,6 +332,28 @@ type WriteBatchOptions struct {
 }
 ```
 
+### `Compact`
+
+```go
+func Compact(
+    catalog   *HadoopCatalog,
+    namespace, table string,
+    opts      CompactOptions,
+) (int, error)
+```
+
+Merges small files into larger ones (`ailake compact` CLI). Returns the number of files compacted (`0` = nothing eligible).
+
+```go
+type CompactOptions struct {
+    TargetSize      int64             // target output file size in bytes (0 = CLI default, 512 MiB)
+    MinFiles        int               // minimum small files to trigger compaction (0 = CLI default, 4)
+    MaxFilesPerPass int               // bounds peak RAM / HNSW rebuild cost (0 = CLI default, 20)
+    Deferred        bool              // write Parquet immediately, build HNSW in the background
+    CatalogOpts     map[string]string // REST catalog config — see docs/guides/REST_CATALOG.md
+}
+```
+
 ### `DeleteWhere`
 
 ```go
@@ -516,7 +538,7 @@ go test ./...
 AILAKE_FIXTURE=/path/to/fixture go test ./... -run Integration
 ```
 
-99 tests total. 85 pass without a fixture/native binary. 14 integration tests require `AILAKE_FIXTURE` and/or a real `ailake` CLI binary on `PATH`/`AILAKE_BIN` (includes `TestListFilesIntegration` for `EmbeddingModel`, `TestSearchDimMismatchIntegration` for dim validation, and `TestCreateTableIntegration`/`TestEstimateIntegration`/`TestAddVectorColumnIntegration`/`TestDeleteRowsIntegration`).
+100 tests total. 85 pass without a fixture/native binary; 92 pass with `AILAKE_BIN` set to a real `ailake` CLI binary (no fixture needed). The remaining 8 need `AILAKE_FIXTURE` specifically (a pre-built table — `TestListFilesIntegration` for `EmbeddingModel`, `TestSearchDimMismatchIntegration` for dim validation, `TestDeleteWhereIntegration`, `TestEvolveSchemaIntegration`, `TestSearchIntegration`, `TestLoadTableIntegration`, `TestScanIntegration`, `TestScanVsSearchConsistency`).
 
 ## License
 
