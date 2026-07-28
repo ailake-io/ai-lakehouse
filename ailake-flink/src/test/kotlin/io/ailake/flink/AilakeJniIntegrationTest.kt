@@ -224,12 +224,13 @@ class AilakeJniIntegrationTest {
         val tmp = File(System.getProperty("java.io.tmpdir"), "ailake-flink-altspi-${System.nanoTime()}")
         tmp.mkdirs()
         try {
-            AilakeNativeLoader.writeBatch(
-                warehouse = tmp.absolutePath, namespace = "default", table = "docs",
-                vecCol = "embedding", dim = 4, metric = "cosine",
-                ids = longArrayOf(0L, 1L),
-                embeddings = arrayOf(floatArrayOf(1f, 0f, 0f, 0f), floatArrayOf(0f, 1f, 0f, 0f)),
-            )
+            // Regression (Fase 23): AilakeCatalog.createTable below now genuinely creates
+            // the table on disk via AilakeNativeLoader.createTable — it used to be a
+            // no-op (in-memory only), so pre-writing rows here via writeBatch (which
+            // implicitly creates the table on first write, same as TableWriter) was
+            // needed just to have a real table for ALTER TABLE to evolve. Now that
+            // createTable is real, doing both would collide ("table already exists").
+            // evolveSchema is metadata-only anyway — no rows are needed.
             val catalog = AilakeCatalog("ailake", warehouse = tmp.absolutePath)
             catalog.open()
             val path = ObjectPath("default", "docs")
