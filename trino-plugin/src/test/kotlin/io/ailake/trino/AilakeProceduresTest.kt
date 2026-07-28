@@ -20,14 +20,20 @@ class AilakeProceduresTest {
     @Test
     fun getProceduresReturnsCompactAndCreateTableProcedures() {
         val procs = procedures.getProcedures()
-        assertEquals(2, procs.size)
+        // compact, create_table, decay_memories, migrate, delete_rows,
+        // add_vector_column, backfill_vector_column, estimate (Fase 21) — all
+        // no-arg, same reasoning as compact/create_table (parameters come
+        // from SET SESSION properties, not typed CALL arguments).
+        assertEquals(8, procs.size)
         val byName = procs.associateBy { it.name }
-        val compact = byName.getValue("compact")
-        assertEquals("system", compact.schema)
-        assertTrue(compact.arguments.isEmpty())
-        val createTable = byName.getValue("create_table")
-        assertEquals("system", createTable.schema)
-        assertTrue(createTable.arguments.isEmpty())
+        for (name in listOf(
+            "compact", "create_table", "decay_memories", "migrate",
+            "delete_rows", "add_vector_column", "backfill_vector_column", "estimate",
+        )) {
+            val proc = byName.getValue(name)
+            assertEquals("system", proc.schema)
+            assertTrue(proc.arguments.isEmpty(), "expected $name to have no arguments")
+        }
     }
 
     @Test
