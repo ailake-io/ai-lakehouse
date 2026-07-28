@@ -328,6 +328,7 @@ func DeleteWhere(
     catalog   *HadoopCatalog,
     namespace, table, column string,
     values    []string,
+    catalogOpts ...map[string]string, // optional (0 or 1 map) — REST catalog config, see docs/guides/REST_CATALOG.md
 ) error
 ```
 
@@ -342,6 +343,7 @@ func EvolveSchema(
     table      string,
     addCols    []AddColumnReq,
     renameCols []RenameColumnReq,
+    catalogOpts ...map[string]string, // optional (0 or 1 map) — REST catalog config, see docs/guides/REST_CATALOG.md
 ) (int, error)  // returns new schema_id or -1 for no-op
 ```
 
@@ -503,7 +505,7 @@ go test ./...
 AILAKE_FIXTURE=/path/to/fixture go test ./... -run Integration
 ```
 
-86 tests total. 67 unit tests pass without a fixture. 19 integration tests (`Test*Integration`) require `AILAKE_FIXTURE` (includes `TestListFilesIntegration` for `EmbeddingModel` and `TestSearchDimMismatchIntegration` for dim validation).
+99 tests total. 85 pass without a fixture/native binary. 14 integration tests require `AILAKE_FIXTURE` and/or a real `ailake` CLI binary on `PATH`/`AILAKE_BIN` (includes `TestListFilesIntegration` for `EmbeddingModel`, `TestSearchDimMismatchIntegration` for dim validation, and `TestCreateTableIntegration`/`TestEstimateIntegration`/`TestAddVectorColumnIntegration`/`TestDeleteRowsIntegration`).
 
 ## License
 

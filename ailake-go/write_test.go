@@ -484,3 +484,93 @@ func TestBackfillVectorColumn_ArgsForwarded(t *testing.T) {
 		}
 	}
 }
+
+// TestDeleteWhere_CatalogOptsForwarded and TestEvolveSchema_CatalogOptsForwarded
+// verify the fix for the gap documented in docs/guides/REST_CATALOG.md's
+// "Known limitations": DeleteWhere/EvolveSchema were the two remaining
+// write-path functions never wired to appendCatalogArgs (Fase 19 only wired
+// WriteBatch/Compact) — every other write-path function (WriteBatch, Compact,
+// DecayMemories, Migrate, DeleteRows, AddVectorColumn, BackfillVectorColumn,
+// CreateTable) already forwarded --catalog/--rest-*.
+
+func TestDeleteWhere_CatalogOptsForwarded(t *testing.T) {
+	dir := t.TempDir()
+	bin, argsPath := writeFakeAilakeBin(t, dir, "")
+	orig := os.Getenv("AILAKE_BIN")
+	os.Setenv("AILAKE_BIN", bin)
+	defer os.Setenv("AILAKE_BIN", orig)
+
+	catalog := &HadoopCatalog{Warehouse: "/tmp/wh"}
+	err := DeleteWhere(catalog, "default", "docs", "doc_id", []string{"a", "b"},
+		map[string]string{"catalog": "rest", "rest-uri": "https://catalog.example.com"})
+	if err != nil {
+		t.Fatalf("DeleteWhere: %v", err)
+	}
+	argsRaw, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("reading captured args: %v", err)
+	}
+	args := string(argsRaw)
+	for _, want := range []string{
+		"delete-where", "default.docs", "--col doc_id", "--vals a,b",
+		"--catalog rest", "--rest-uri https://catalog.example.com",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("expected args to contain %q, got: %s", want, args)
+		}
+	}
+}
+
+func TestDeleteWhere_CatalogOptsOmittedStillWorks(t *testing.T) {
+	// Backward compatibility: the variadic param must be safely omittable by
+	// existing callers compiled against the pre-Fase-19-fix signature.
+	dir := t.TempDir()
+	bin, argsPath := writeFakeAilakeBin(t, dir, "")
+	orig := os.Getenv("AILAKE_BIN")
+	os.Setenv("AILAKE_BIN", bin)
+	defer os.Setenv("AILAKE_BIN", orig)
+
+	catalog := &HadoopCatalog{Warehouse: "/tmp/wh"}
+	if err := DeleteWhere(catalog, "default", "docs", "doc_id", []string{"a"}); err != nil {
+		t.Fatalf("DeleteWhere: %v", err)
+	}
+	argsRaw, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("reading captured args: %v", err)
+	}
+	if strings.Contains(string(argsRaw), "--catalog") {
+		t.Errorf("expected no --catalog flag when catalogOpts omitted, got: %s", string(argsRaw))
+	}
+}
+
+func TestEvolveSchema_CatalogOptsForwarded(t *testing.T) {
+	dir := t.TempDir()
+	bin, argsPath := writeFakeAilakeBin(t, dir, "new_schema_id: 2")
+	orig := os.Getenv("AILAKE_BIN")
+	os.Setenv("AILAKE_BIN", bin)
+	defer os.Setenv("AILAKE_BIN", orig)
+
+	catalog := &HadoopCatalog{Warehouse: "/tmp/wh"}
+	schemaID, err := EvolveSchema(catalog, "default", "docs",
+		[]AddColumnReq{{Name: "source", Type: "string"}}, nil,
+		map[string]string{"catalog": "rest", "rest-uri": "https://catalog.example.com"})
+	if err != nil {
+		t.Fatalf("EvolveSchema: %v", err)
+	}
+	if schemaID != 2 {
+		t.Errorf("expected schema_id=2 from fake response, got %d", schemaID)
+	}
+	argsRaw, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("reading captured args: %v", err)
+	}
+	args := string(argsRaw)
+	for _, want := range []string{
+		"evolve", "default.docs", "--add source:string",
+		"--catalog rest", "--rest-uri https://catalog.example.com",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("expected args to contain %q, got: %s", want, args)
+		}
+	}
+}

@@ -239,20 +239,24 @@ opts.catalog_opts["rest-token"] = "...";
 ailake::write_batch(warehouse, "default.docs", "batch.parquet", opts);
 ```
 
-`delete_where`/`evolve_schema` don't accept it yet (see "Known limitations").
-`estimate` needs no catalog config at all — pure math, no warehouse.
+`ailake-go`'s `DeleteWhere`/`EvolveSchema` take it as a trailing variadic
+`...map[string]string` (0 or 1 map) — added after the fact without breaking
+existing call sites, since Go allows a variadic to be omitted entirely by
+callers compiled against the old signature. `estimate` needs no catalog
+config at all — pure math, no warehouse.
 
 ## Known limitations
 
 - **`ailake-go` and `ailake-cpp`'s write paths are both wired now**
   (`WriteBatchOptions.CatalogOpts`/`CompactOptions.CatalogOpts` in Go,
-  `catalog_opts` in C++). Neither has native read-path support (no HTTP
-  client in either — would need a new dependency, unlike the mechanical
-  CLI-flag-forwarding fix). Both SDKs' `DeleteWhere`/`EvolveSchema`
-  (`delete_where`/`evolve_schema` in C++) don't take catalog config yet —
-  they predate an `Options`
-  struct parameter, and adding one now would be a breaking API change; left
-  as a follow-up (new sibling functions, not a signature change).
+  `catalog_opts` in C++), including `DeleteWhere`/`EvolveSchema` in Go (via a
+  trailing variadic `catalogOpts ...map[string]string` — backward compatible,
+  no breaking signature change). Neither SDK has native read-path support (no
+  HTTP client in either — would need a new dependency, unlike the mechanical
+  CLI-flag-forwarding fix). `ailake-cpp`'s `delete_where`/`evolve_schema`
+  still don't take catalog config — same fix (a variadic-equivalent, e.g. a
+  trailing `std::map<std::string,std::string>` defaulted to empty) applies
+  there too; left as a follow-up.
 - **Trino only wires REST catalog into `CALL ailake.system.compact()`** — see
   "JNI usage → Trino" above for why search/scan/multimodal/INSERT are deferred
   (JSON-serialized Trino handle classes with a documented prior serialization

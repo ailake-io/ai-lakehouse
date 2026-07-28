@@ -185,10 +185,20 @@ func CreateTable(
 // `values`. Writes an Iceberg equality delete file via the `ailake` CLI.
 //
 // No data files are rewritten; deleted rows are masked at scan time.
+//
+// catalogOpts is variadic (0 or 1 map) for backward compatibility with
+// existing callers — pass a single map[string]string to select/configure a
+// non-Hadoop catalog backend (see WriteBatchOptions.CatalogOpts for accepted
+// keys and docs/guides/REST_CATALOG.md). Regression: this was never wired to
+// appendCatalogArgs when every other write-path function (WriteBatch,
+// Compact, DecayMemories, Migrate, DeleteRows, AddVectorColumn,
+// BackfillVectorColumn, CreateTable) was — DeleteWhere/EvolveSchema were the
+// two remaining Hadoop-only holdouts in the write path.
 func DeleteWhere(
 	catalog *HadoopCatalog,
 	namespace, table, column string,
 	values []string,
+	catalogOpts ...map[string]string,
 ) error {
 	if len(values) == 0 {
 		return nil
@@ -213,6 +223,9 @@ func DeleteWhere(
 		"--col", column,
 		"--vals", strings.Join(values, ","),
 	}
+	if len(catalogOpts) > 0 {
+		args = appendCatalogArgs(args, catalogOpts[0])
+	}
 
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = os.Stdout
@@ -228,11 +241,16 @@ func DeleteWhere(
 // new_schema_id (e.g. a no-op evolution where nothing changed).
 //
 // addCols and renameCols may be empty if only one operation is desired.
+//
+// catalogOpts is variadic (0 or 1 map) for backward compatibility — see
+// DeleteWhere's doc comment for why this and DeleteWhere were the two
+// remaining Hadoop-only holdouts in the write path.
 func EvolveSchema(
 	catalog *HadoopCatalog,
 	namespace, table string,
 	addCols []AddColumnReq,
 	renameCols []RenameColumnReq,
+	catalogOpts ...map[string]string,
 ) (int, error) {
 	if len(addCols) == 0 && len(renameCols) == 0 {
 		return 0, nil
@@ -265,6 +283,9 @@ func EvolveSchema(
 	}
 	for _, rc := range renameCols {
 		args = append(args, "--rename", rc.From+":"+rc.To)
+	}
+	if len(catalogOpts) > 0 {
+		args = appendCatalogArgs(args, catalogOpts[0])
 	}
 
 	out, err := exec.Command(bin, args...).CombinedOutput()
