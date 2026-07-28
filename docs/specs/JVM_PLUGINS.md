@@ -1,6 +1,15 @@
-# JVM_PLUGINS.md — Trino VectorScanConnector + Spark VectorScanStrategy
+# JVM_PLUGINS.md — Trino VectorScanConnector + Spark VectorScanStrategy + Flink connector
 
-Reference guide for the two JVM query-engine plugins that expose AI-Lake vector search to Trino and Spark.
+Reference guide for the three JVM query-engine plugins that expose AI-Lake vector search to
+Trino, Spark, and Flink.
+
+> **This doc predates several capabilities and drifts out of date faster than it's updated.**
+> For the current, actively-maintained full capability list (all `ailake_*_json` C-ABI
+> exports, session properties, `CALL` procedures, scalar functions) across all three
+> plugins, see `docs/guides/JVM_INTEGRATION.md` instead — especially its §7 "Cross-engine
+> reference" and the "Create table"/"decay_memories / migrate / ..." subsections. This file
+> is kept for the build/install walkthroughs and architecture diagrams below, some of which
+> (marked inline) are historical snapshots rather than current state.
 
 ---
 
@@ -26,22 +35,35 @@ Reference guide for the two JVM query-engine plugins that expose AI-Lake vector 
              ┌────────────────────────────────────────┐
              │  libailake_jni.so  (Rust cdylib)        │
              │                                         │
-             │  ailake_search_json()        ← search   │
-             │  ailake_write_batch_json()   ← write    │
-             │  ailake_delete_where_json()  ← delete   │
-             │  ailake_evolve_schema_json() ← schema   │
-             │  ailake_compact_json()       ← compact  │
-             │  ailake_scan_json()          ← full-read│
-             │  ailake_search_text_json()   ← BM25 FTS │
-             │  ailake_search_multimodal_json() ← RRF  │
-             │  ailake_create_table_json()  ← create   │
-             │  ailake_version()            ← version  │
-             │  ailake_free_string()        ← free ptr │
+             │  ailake_search_json()             ← search (ef_search, pruning_threshold) │
+             │  ailake_search_text_json()        ← BM25/Tantivy FTS       │
+             │  ailake_search_multimodal_json()  ← cross-modal RRF        │
+             │  ailake_scan_json()               ← search + full-row fetch│
+             │  ailake_write_batch_json()        ← write                 │
+             │  ailake_write_batch_multi_json()  ← multi-column write     │
+             │  ailake_write_batch_ipc()         ← Arrow IPC write (Spark)│
+             │  ailake_delete_where_json()       ← equality delete        │
+             │  ailake_delete_rows_json()        ← V3 position/DV delete  │
+             │  ailake_evolve_schema_json()      ← add/rename column      │
+             │  ailake_add_vector_column_json()  ← add vector column      │
+             │  ailake_backfill_vector_column_json() ← backfill embeddings│
+             │  ailake_compact_json()            ← compact small files    │
+             │  ailake_create_table_json()       ← create table           │
+             │  ailake_decay_memories_json()     ← Phase 9 memory decay   │
+             │  ailake_migrate_json()            ← re-embed a column      │
+             │  ailake_estimate_json()           ← size estimates (no I/O)│
+             │  ailake_version() / ailake_free_string()                   │
              │          │                              │
              │  do_search() ← ailake-query             │
              │  HNSW + pruning                         │
              └────────────────────────────────────────┘
 ```
+
+All 19 exports above are wired into all three JVM plugins (Fase 21, 2026-07-28) — see
+`docs/guides/JVM_INTEGRATION.md` §7 for the per-engine SQL/DataFrame surface (`CALL
+ailake.system.*` in Trino, `spark.ailake*` session methods, `ailake_*` scalar functions in
+Flink). `ailake_vector_search_json` (legacy raw-pointer API, Hadoop-only, no JSON body) isn't
+listed above — it predates the JSON-envelope API and isn't used by any plugin's normal path.
 
 **Key invariant**: the search logic lives entirely in Rust (`ailake-jni` → `ailake-query` → `ailake-index`). The JVM plugins are thin adapters that translate engine-specific SPI calls into native library calls and parse the JSON response.
 
@@ -108,12 +130,17 @@ The library exports C-ABI symbols consumed by JNA. All three plugins use the JSO
 // Vector search
 // request_json: {"warehouse":"...","namespace":"default","table":"...","vec_col":"embedding",
 //                "dim":1536,"query":[...],"top_k":10,
+//                "ef_search":50,                    ← optional, default 50 (HNSW recall/latency)
+//                "pruning_threshold":0.8,            ← optional, default: no pruning
 //                "partition_filter":"agent-42",  ← optional
 //                "hybrid_text":"rust programming", ← optional (BM25)
 //                "text_column":"chunk_text",        ← optional, default "chunk_text"
 //                "bm25_weight":0.5}                 ← optional, default 0.5
 // Returns: {"ok":true,"results":[{"row_id":N,"distance":F,"file_path":"..."}]}
 // top_k above 100,000 returns {"ok":false,"error":"..."} instead of proceeding.
+// ef_search/pruning_threshold reach Trino/Spark/Flink's SQL surface as of Fase 21
+// (2026-07-28) — session properties in Trino, Option params in Spark, DDL options
+// in Flink (search.ef / search.pruning-threshold).
 char* ailake_search_json(const char* request_json);
 
 // Write batch (auto-selects IVF-PQ or HNSW based on HardwareProfile::detect())
@@ -165,13 +192,52 @@ char* ailake_search_multimodal_json(const char* request_json);
 //                "partition_by":"agent_id","partition_value":"agent-42"} ← optional
 // Returns: {"ok":true} or {"ok":false,"error":"..."} (fails if the table already exists)
 // Bridged into Spark's `AilakeNative.createTable`, Trino's `AilakeNative.createTable`
-// (Kotlin), and Flink's `AilakeNativeLoader.createTable`, but as of PR #104 none of the
-// three wire it into SQL `CREATE TABLE` DDL — the existing `AilakeCatalog.createTable`
-// overrides in all three plugins remain lazy, schema-on-read table builders unrelated to
-// this call. Only DuckDB's `ailake_create_table` SQL function and Python's
-// `ailake.create_table()` are reachable from a query surface today; the JVM bridge exists
-// so a future SQL wiring is a JVM-side change only, no native code needed.
+// (Kotlin), and Flink's `AilakeNativeLoader.createTable`. As of Fase 23 (2026-07-27) all
+// three DO wire it into a real SQL/DDL surface: Spark's `AilakeCatalog.createTable` calls
+// it before building the table handle (`CREATE TABLE ailake.ns.tbl (...)`), Trino exposes
+// `CALL ailake.system.create_table()`, and Flink's `AilakeCatalog.createTable` calls it
+// before registering the DDL-declared table (`CREATE TABLE ... WITH (...)`). See
+// `docs/guides/JVM_INTEGRATION.md` §7 "Create table" for the full per-engine detail — this
+// paragraph previously claimed none of the three did this; that was true when written
+// (PR #104) but is not current.
 char* ailake_create_table_json(const char* request_json);
+
+// Phase 9 agent memory — recomputes recency_weight = exp(-lambda * days_since_access) for
+// every row. request_json: {"warehouse":"...","namespace":"default","table":"...","lambda":0.1}
+// Returns: {"ok":true,"files_updated":N}. Added Fase 21 (2026-07-28) — bridged into all
+// three JVM plugins from day one (unlike create_table above, there was no unwired period).
+char* ailake_decay_memories_json(const char* request_json);
+
+// Re-embeds a column via an external embed command (spawned `sh -c <embed_cmd>`, JSON
+// array-of-strings on stdin, JSON array-of-float-arrays on stdout — same protocol as
+// ailake-cli's --embed-cmd). request_json: {"warehouse":"...","namespace":"...","table":"...",
+// "old_column":"embedding","new_column":"embedding_v2","text_column":"chunk_text",
+// "embed_cmd":"python3 embed.py","strategy":"atomic-replace","batch_size":10000,
+// "model_name":"...","model_version":"..."}. Returns: {"ok":true}. Added Fase 21.
+char* ailake_migrate_json(const char* request_json);
+
+// Position-level delete via Iceberg V3 Deletion Vectors — different from
+// ailake_delete_where_json's equality predicate. request_json: {"warehouse":"...",
+// "namespace":"...","table":"...","file":"data/part-00000.parquet","row_ids":[0,5,42]}.
+// Returns: {"ok":true}. Requires format-version=3. Added Fase 21.
+char* ailake_delete_rows_json(const char* request_json);
+
+// Adds a vector column to the schema (metadata-only, no backfill). request_json:
+// {"warehouse":"...","namespace":"...","table":"...","column":"image_embedding","dim":512,
+// "metric":"cosine","precision":"f16"}. Returns: {"ok":true,"new_schema_id":N}. Added Fase 21.
+char* ailake_add_vector_column_json(const char* request_json);
+
+// Backfills embeddings for a column added via ailake_add_vector_column_json — same
+// embed_cmd protocol as ailake_migrate_json. request_json: {"warehouse":"...",
+// "namespace":"...","table":"...","column":"image_embedding","text_column":"image_uri",
+// "embed_cmd":"python3 embed_images.py","batch_size":512}. Returns: {"ok":true}. Added Fase 21.
+char* ailake_backfill_vector_column_json(const char* request_json);
+
+// Storage/index size estimates for a hypothetical table — pure math, no warehouse/catalog.
+// request_json: {"rows":1000000,"dim":1536,"hnsw_m":16,"pq_m":48}. Returns:
+// {"ok":true,"estimates":[{"mode","vectors_bytes","index_bytes","total_bytes",
+// "reduction_vs_f32_hnsw","recall","note"}, ...]}. Added Fase 21.
+char* ailake_estimate_json(const char* request_json);
 
 void ailake_free_string(char* ptr);
 
@@ -291,10 +357,25 @@ Multiple AI-Lake tables → multiple catalog files with different names and `tab
 
 ### Session properties
 
+> This table only listed 2 of the connector's session properties for a long time — see
+> `VectorScanConnector.getSessionProperties()` for the authoritative current list, or
+> `docs/guides/JVM_INTEGRATION.md` §5B for a maintained copy with usage examples.
+
 | Property | Type | Default | Description |
 |---|---|---|---|
 | `query_vector` | `varchar` | `""` | Comma-separated f32 values: `"0.1,-0.2,0.3,..."` |
 | `top_k` | `integer` | `10` | Nearest neighbors to return. Capped at 100,000 (rejected above that) |
+| `query_text` | `varchar` | `""` | Pure full-text search (alone) or hybrid BM25+vector RRF (with `query_vector`) |
+| `hybrid_weight` | `double` | `0.5` | BM25 weight in RRF fusion (`0.0`=pure vector, `1.0`=pure BM25) |
+| `multimodal_queries` | `varchar` | `""` | JSON array of `{col, query, weight}` for `ailake.default.search_multimodal` |
+| `ef_search` | `integer` | `0` | HNSW `ef_search` (`0` = server default, 50) — Fase 21 |
+| `pruning_threshold` | `double` | `-1.0` | Geometric pruning cutoff (`-1.0` = no pruning) — Fase 21 |
+| `decay_lambda` | `double` | `0.1` | Decay rate for `CALL ailake.system.decay_memories()` — Fase 21 |
+| `migrate_config` | `varchar` | `""` | JSON config for `CALL ailake.system.migrate()` — Fase 21 |
+| `delete_rows_config` | `varchar` | `""` | JSON config for `CALL ailake.system.delete_rows()` — Fase 21 |
+| `add_vector_column_config` | `varchar` | `""` | JSON config for `CALL ailake.system.add_vector_column()` — Fase 21 |
+| `backfill_vector_column_config` | `varchar` | `""` | JSON config for `CALL ailake.system.backfill_vector_column()` — Fase 21 |
+| `estimate_config` | `varchar` | `""` | JSON config for `CALL ailake.system.estimate()` — Fase 21 |
 
 ### Schema
 
@@ -382,10 +463,11 @@ cd trino-plugin
 
 # Test classes:
 #   VectorScanMetadataTest   — schema discovery (7 tests)
-#   VectorScanConnectorTest  — session properties, transaction handle (7 tests)
+#   VectorScanConnectorTest  — session properties, transaction handle (9 tests)
 #   VectorScanSplitManagerTest — split creation from session (5 tests)
 #   VectorScanRecordSetTest  — cursor iteration, column types (9 tests)
 #   AilakeNativeTest         — graceful degradation, CSV parsing (5 tests)
+#   AilakeProceduresTest     — CALL ailake.system.* procedures (3 tests, Fase 21)
 ```
 
 ---
