@@ -507,7 +507,7 @@ func main() {
 | `BackfillVectorColumn(catalog, ns, name, col, embedCmd, opts)` | func | **Yes** | Backfill embeddings for a column added via `AddVectorColumn` |
 | `DecayMemories(catalog, ns, name, lambda, catalogOpts)` | func | **Yes** | Recompute `recency_weight` for every row (Phase 9 agent memory) |
 | `Migrate(catalog, ns, name, embedCmd, opts)` | func | **Yes** | Re-embed a column via an external embed command |
-| `Estimate(rows, dim, opts)` | func | No | Storage/index size estimates — pure math, no warehouse needed |
+| `Estimate(rows, dim, opts)` | func | **Yes** | Storage/index size estimates — pure math once invoked, but still shells out to `ailake estimate` (needs the CLI binary resolvable) |
 | `SearchText(catalog, ns, name, query, cols, k)` | func | **Yes** | FTS (Tantivy or BM25 fallback) |
 | `SearchHybrid(catalog, ns, name, vec, text, k, w, col)` | func | **Yes** | BM25+vector RRF |
 | `catalog.ListEqualityDeletes(ns, name)` | method | No | Returns `[]EqualityDeleteFile` for the current snapshot |

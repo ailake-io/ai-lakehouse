@@ -316,7 +316,14 @@ trailing `WriteBatchOptions` argument still applies for
 
 ## 9. Deletes, schema evolution, and compaction
 
-All three delegate to the `ailake` CLI.
+All of these delegate to the `ailake` CLI. **None of them are masked by this SDK's own
+`search()`/`search_multimodal()`/`search_text()`** — `ailake-cpp` has no native Parquet-row
+reader (see §14's "Deliberately out of scope" note), so there's no decoded-row path to apply
+an equality-delete predicate against, and no Roaring Bitmap decoder for Deletion Vectors
+either (see the README's "Known limitations" under `ailake::delete_where`). Masking only
+happens via the real `ailake` CLI's own search — `HadoopCatalog::list_equality_deletes` +
+`read_equality_delete_values` (added Phase H) let a caller apply the predicate itself against
+rows it decodes with its own Parquet reader (e.g. Apache Arrow C++).
 
 **Logical delete (Iceberg equality delete — no data rewrite):**
 
@@ -327,7 +334,27 @@ ailake::delete_where(
     "/data/warehouse",      // warehouse root
     "default.docs",         // "namespace.table"
     "chunk_id",             // match column
-    {"uuid-aaa", "uuid-bbb"} // values to delete
+    {"uuid-aaa", "uuid-bbb"}, // values to delete
+    {}                       // optional catalog_opts (REST catalog)
+);
+
+// Read back what was deleted (e.g. to apply against your own decoded rows):
+ailake::HadoopCatalog cat("/data/warehouse");
+auto deletes = cat.list_equality_deletes("default", "docs");
+for (auto& d : deletes) {
+    auto values = ailake::HadoopCatalog::read_equality_delete_values(
+        cat.resolve_path("default", "docs", d.path));
+}
+```
+
+**Position delete (Iceberg V3 Deletion Vectors — no data rewrite, requires `format_version=3`):**
+
+```cpp
+ailake::delete_rows(
+    "/data/warehouse", "default.docs",
+    "data/part-00000.parquet",  // file, as reported by catalog.list_files()
+    {0, 5, 42},                 // 0-based row positions
+    {}                          // optional catalog_opts
 );
 ```
 
@@ -371,6 +398,45 @@ omitted this flag and always parsed `0` from the CLI's plain-text output —
 see the Fase 13 fix in `CHANGELOG.md` for that unrelated SDK's version of the
 same mistake). Returns `0` when no files were eligible for compaction (below
 `min_files`).
+
+**Add + backfill a vector column** (schema change is metadata-only; backfill rewrites files):
+
+```cpp
+ailake::AddVectorColumnOptions avopts;
+avopts.metric = "cosine";
+ailake::add_vector_column("/data/warehouse", "default.docs", "image_embedding", 512, avopts);
+
+ailake::BackfillVectorColumnOptions bopts;
+bopts.text_column = "image_uri";
+ailake::backfill_vector_column("/data/warehouse", "default.docs", "image_embedding",
+    "python3 embed_images.py", bopts);
+```
+
+**Re-embed a column via an external embed command** (`embed_cmd` reads a JSON array of
+strings on stdin, writes a JSON array of float arrays on stdout — same protocol the CLI's own
+`--embed-cmd` uses):
+
+```cpp
+ailake::MigrateOptions mopts;
+mopts.old_column = "embedding";
+mopts.new_column = "embedding_v2";
+mopts.strategy   = "dual-write-then-cutover";
+ailake::migrate("/data/warehouse", "default.docs", "python3 embed.py", mopts);
+```
+
+**Phase 9 agent memory — recompute `recency_weight` for every row:**
+
+```cpp
+int files_updated = ailake::decay_memories("/data/warehouse", "default.memories", 0.1f);
+```
+
+**Storage/index size estimate — pure math, no I/O, no warehouse:**
+
+```cpp
+std::string json = ailake::estimate("1M", 1536); // "1M" rows, dim=1536
+// raw JSON string — this header has no JSON dependency, parse with whatever
+// library your application already uses
+```
 
 ---
 
@@ -570,14 +636,23 @@ target_link_libraries(my_rag PRIVATE ailake ailake_catalog)
 | `catalog.list_files(ns, tbl)` | `catalog.hpp` | No | Returns `std::vector<DataFileEntry>` |
 | `catalog.resolve_path(ns, tbl, rel)` | `catalog.hpp` | No | Resolve relative data file path to absolute |
 | `catalog.warehouse()` | `catalog.hpp` | No | Returns warehouse root string |
+| `catalog.list_equality_deletes(ns, tbl)` | `catalog.hpp` | No | Returns `std::vector<EqualityDeleteFile>` for the current snapshot (Phase H) |
+| `HadoopCatalog::read_equality_delete_values(path)` | `catalog.hpp` | No | Static — decodes `(column, value)` pairs from a resolved equality-delete file path |
 | `search(catalog, ns, tbl, query, dim, opts)` | `ailake.hpp` | No | Geometric pruning + HNSW/IVF-PQ search |
 | `search_multimodal(catalog, ns, tbl, queries, opts)` | `ailake.hpp` | No | Cross-modal RRF fusion |
 | `search_text(catalog, ns, tbl, text, cols, k)` | `ailake.hpp` | **Yes** | FTS (Tantivy or BM25 fallback) |
+| `create_table(warehouse, table_id, dim, opts)` | `write.hpp` | **Yes** | Create an empty table (schema only, no data) |
 | `write_batch(warehouse, table_id, parquet, opts)` | `write.hpp` | **Yes** | Ingest Parquet batch + build HNSW |
 | `write_batch_multi(warehouse, table_id, parquet, cols, opts)` | `write.hpp` | **Yes** | Multi-column (multimodal) ingest |
-| `delete_where(warehouse, table_id, col, vals)` | `write.hpp` | **Yes** | Iceberg equality delete |
-| `evolve_schema(warehouse, table_id, add, rename)` | `write.hpp` | **Yes** | Add/rename columns (metadata-only) |
+| `delete_where(warehouse, table_id, col, vals, catalog_opts)` | `write.hpp` | **Yes** | Iceberg equality delete — not masked by this SDK's own search (§9) |
+| `delete_rows(warehouse, table_id, file, row_positions, catalog_opts)` | `write.hpp` | **Yes** | V3 Deletion Vector position delete — not masked by this SDK's own search (§9) |
+| `evolve_schema(warehouse, table_id, add, rename, catalog_opts)` | `write.hpp` | **Yes** | Add/rename columns (metadata-only) |
+| `add_vector_column(warehouse, table_id, col, dim, opts)` | `write.hpp` | **Yes** | Add a vector column to the schema (metadata-only, no backfill) |
+| `backfill_vector_column(warehouse, table_id, col, embed_cmd, opts)` | `write.hpp` | **Yes** | Backfill embeddings for a column added via `add_vector_column` |
 | `compact(warehouse, table_id, opts)` | `write.hpp` | **Yes** | Merge small files, returns files compacted |
+| `decay_memories(warehouse, table_id, lambda, catalog_opts)` | `write.hpp` | **Yes** | Recompute `recency_weight` for every row (Phase 9 agent memory) |
+| `migrate(warehouse, table_id, embed_cmd, opts)` | `write.hpp` | **Yes** | Re-embed a column via an external embed command |
+| `estimate(rows, dim, opts)` | `write.hpp` | **Yes** | Storage/index size estimate — pure math once invoked, but still shells out to `ailake estimate` (needs the CLI binary resolvable) |
 | `detect_hardware()` | `hardware.hpp` | No | Returns `HardwareProfile` (CUDA/ROCm/SIMD flags) |
 | `parse_header(bytes)` | `footer.hpp` | No | Parse AILK header from 64-byte buffer |
 | `deserialize_hnsw(data, len)` | `hnsw.hpp` | No | Deserialize HNSW graph from bincode bytes |
@@ -595,11 +670,18 @@ target_link_libraries(my_rag PRIVATE ailake ailake_catalog)
 | `MultimodalResult` | `{row_id, rrf_score, file_path}` |
 | `FtsResult` | `{row_id, score, file_path}` |
 | `TableInfo` | Full metadata: dim, metric, files, rows, `schema_fields`, `partition_fields` |
-| `DataFileEntry` | Per-file: `centroid`, `radius`, `hnsw_offset`, `hnsw_len`, `index_status` |
+| `DataFileEntry` | Per-file: `centroid`, `radius`, `hnsw_offset`, `hnsw_len`, `index_status`, `deletion_vector` (Phase H, not yet decoded — see README "Known limitations") |
+| `DeletionVectorRef` | `{path, offset, length, cardinality}` — pointer to a Puffin `.dvd` Roaring Bitmap blob (Phase H) |
+| `EqualityDeleteFile` | `{path, equality_ids, record_count, file_size_bytes}` — one entry per `list_equality_deletes` result (Phase H) |
 | `AddColumnReq` | `{name, type, initial_default}` for schema evolution |
 | `RenameColumnReq` | `{from, to}` for schema evolution |
 | `VectorColSpec` | `{column, dim, metric, modality}` for `write_batch_multi` |
-| `CompactOptions` | `target_size`, `min_files`, `max_files_per_pass`, `deferred` |
+| `CreateTableOptions` | `metric`, `precision`, `column`, `pre_normalize`, `hnsw_m`, `hnsw_ef_construction`, `pq_only`, `ivf_residual`, `modality`, `format_version`, `fts_columns`, `fts_tokenizer`, `catalog_opts` |
+| `AddVectorColumnOptions` | `metric`, `precision`, `pre_normalize`, `hnsw_m`, `hnsw_ef_construction`, `catalog_opts` |
+| `BackfillVectorColumnOptions` | `text_column`, `batch_size`, `catalog_opts` |
+| `MigrateOptions` | `old_column`, `new_column`, `text_column`, `strategy`, `batch_size`, `model_name`, `model_version`, `catalog_opts` |
+| `EstimateOptions` | `hnsw_m`, `pq_m` (0 = CLI default for both) |
+| `CompactOptions` | `target_size`, `min_files`, `max_files_per_pass`, `deferred`, `catalog_opts` |
 | `HardwareProfile` | `has_cuda`, `has_rocm`, `has_avx2`, `has_avx512` |
 
 **Deliberately out of scope — `scan` / full-row fetch:** unlike
