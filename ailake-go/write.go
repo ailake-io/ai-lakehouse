@@ -6,8 +6,8 @@
 // business logic (equality delete, schema evolution) are delegated to the
 // `ailake` CLI binary:
 //
-//   Priority 1: AILAKE_BIN env var       — path to a specific `ailake` binary
-//   Priority 2: `ailake` found in PATH   — system-wide install
+//	Priority 1: AILAKE_BIN env var       — path to a specific `ailake` binary
+//	Priority 2: `ailake` found in PATH   — system-wide install
 //
 // Both functions return ErrNoBinary when neither source resolves a binary.
 package ailake
@@ -940,10 +940,10 @@ type EstimateOptions struct {
 
 // EstimateResult is the parsed output of `ailake estimate --format json`.
 type EstimateResult struct {
-	Rows      int64
-	Dim       int
-	HnswM     int
-	PqM       int
+	Rows  int64
+	Dim   int
+	HnswM int
+	PqM   int
 	// Estimates holds one entry per storage mode (F32, F16, I8, IVF-PQ
 	// variants, PQ-only), each a raw map with keys: mode, vectors_bytes,
 	// index_bytes, total_bytes, reduction_factor, recall_at_10, note.

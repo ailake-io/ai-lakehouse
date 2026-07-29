@@ -357,7 +357,7 @@ func u64FromKVHint(s string) uint64 {
 // Used when decoding vector columns stored as F16.
 func f16ToF32(bits uint16) float32 {
 	sign := uint32(bits>>15) << 31
-	exp := uint32((bits>>10)&0x1F)
+	exp := uint32((bits >> 10) & 0x1F)
 	mant := uint32(bits & 0x3FF)
 
 	var f32bits uint32

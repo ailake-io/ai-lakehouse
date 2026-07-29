@@ -3,17 +3,18 @@
 // HNSW index deserialization and search.
 //
 // Wire format: bincode v1 serialization of ailake_index::HnswSnapshot:
-//   m:                usize  (u64 LE)
-//   ef_construction:  usize
-//   max_elements:     usize
-//   metric:           u8     (0=cosine, 1=euclidean, 2=dotproduct)
-//   dim:              u32
-//   row_ids:          Vec<u64>
-//   flat_vecs:        Vec<f32>  — flat storage, stride=dim
-//   neighbors:        Vec<Vec<Vec<usize>>>  — [node][layer] = []neighbor_idx
-//   node_levels:      Vec<usize>
-//   entry_point:      Option<usize>
-//   max_layer:        usize
+//
+//	m:                usize  (u64 LE)
+//	ef_construction:  usize
+//	max_elements:     usize
+//	metric:           u8     (0=cosine, 1=euclidean, 2=dotproduct)
+//	dim:              u32
+//	row_ids:          Vec<u64>
+//	flat_vecs:        Vec<f32>  — flat storage, stride=dim
+//	neighbors:        Vec<Vec<Vec<usize>>>  — [node][layer] = []neighbor_idx
+//	node_levels:      Vec<usize>
+//	entry_point:      Option<usize>
+//	max_layer:        usize
 package ailake
 
 import (
@@ -192,20 +193,20 @@ type candidate struct {
 // maxHeap — farthest element on top (for ef-size result set).
 type maxHeap []candidate
 
-func (h maxHeap) Len() int            { return len(h) }
-func (h maxHeap) Less(i, j int) bool  { return h[i].dist > h[j].dist }
-func (h maxHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *maxHeap) Push(x any)         { *h = append(*h, x.(candidate)) }
-func (h *maxHeap) Pop() any           { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+func (h maxHeap) Len() int           { return len(h) }
+func (h maxHeap) Less(i, j int) bool { return h[i].dist > h[j].dist }
+func (h maxHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *maxHeap) Push(x any)        { *h = append(*h, x.(candidate)) }
+func (h *maxHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
 
 // minHeap — closest element on top (priority queue of candidates to explore).
 type minHeap []candidate
 
-func (h minHeap) Len() int            { return len(h) }
-func (h minHeap) Less(i, j int) bool  { return h[i].dist < h[j].dist }
-func (h minHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *minHeap) Push(x any)         { *h = append(*h, x.(candidate)) }
-func (h *minHeap) Pop() any           { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+func (h minHeap) Len() int           { return len(h) }
+func (h minHeap) Less(i, j int) bool { return h[i].dist < h[j].dist }
+func (h minHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *minHeap) Push(x any)        { *h = append(*h, x.(candidate)) }
+func (h *minHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
 
 func (h *HnswIndex) beamSearch(query []float32, entry uint64, layer, ef int) []candidate {
 	visited := make(map[uint64]bool)

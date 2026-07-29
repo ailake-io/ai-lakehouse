@@ -3,11 +3,12 @@
 // Iceberg catalog reader for AI-Lake tables (HadoopCatalog / local / S3).
 //
 // Reads:
-//   metadata/version-hint.text   → current version N
-//   metadata/vN.metadata.json    → current-snapshot-id + snapshots array
-//   metadata/snap-{id}-1.avro    → manifest list (Avro OCF)
-//   metadata/{snap_id}-m0.avro   → manifest file (Avro OCF)
-//   key_metadata bytes           → JSON-encoded AilakeEntryExt
+//
+//	metadata/version-hint.text   → current version N
+//	metadata/vN.metadata.json    → current-snapshot-id + snapshots array
+//	metadata/snap-{id}-1.avro    → manifest list (Avro OCF)
+//	metadata/{snap_id}-m0.avro   → manifest file (Avro OCF)
+//	key_metadata bytes           → JSON-encoded AilakeEntryExt
 package ailake
 
 import (
@@ -79,10 +80,10 @@ type PartitionDef struct {
 
 // SchemaField mirrors one field in the Iceberg table schema.
 type SchemaField struct {
-	ID      int    `json:"id"`
-	Name    string `json:"name"`
-	Type    string `json:"type"`    // Iceberg primitive type string
-	Required bool  `json:"required"`
+	ID       int    `json:"id"`
+	Name     string `json:"name"`
+	Type     string `json:"type"` // Iceberg primitive type string
+	Required bool   `json:"required"`
 }
 
 // TableInfo mirrors the JSON output of "ailake info --format json".
