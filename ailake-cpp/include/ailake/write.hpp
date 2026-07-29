@@ -715,4 +715,24 @@ inline std::string estimate(
     return detail::run_cmd(cmd);
 }
 
+// info reports table metadata (current snapshot, file/row/size counts,
+// index status breakdown, "foreign" files with no AI-Lake centroid/HNSW) via
+// `ailake info`. Returns the raw JSON response string — same convention as
+// estimate() (no JSON dependency in this header); parse with whatever JSON
+// library your application already uses if you need structured access.
+inline std::string info(
+    const std::string& warehouse,
+    const std::string& table_id,
+    const std::map<std::string, std::string>& catalog_opts = {})
+{
+    std::string bin = detail::resolve_bin();
+    std::string cmd = detail::shell_quote(bin)
+        + " --store " + detail::shell_quote(warehouse)
+        + " info " + detail::shell_quote(table_id)
+        + " --format json";
+    detail::append_catalog_args(cmd, catalog_opts);
+
+    return detail::run_cmd(cmd);
+}
+
 } // namespace ailake

@@ -123,6 +123,8 @@ object AilakeNative {
     /** Storage/index size estimates — pure math, no I/O. Returns `{"ok":true,"estimates":[...]}`. Caller must free. */
     def ailake_estimate_json(requestJson: String): Pointer
 
+    def ailake_info_json(requestJson: String): Pointer
+
     def ailake_free_string(ptr: Pointer): Unit
   }
 
@@ -1070,6 +1072,41 @@ object AilakeNative {
         } catch {
           case e: Exception =>
             log.error(s"[ailake] Failed to read estimate response: ${e.getMessage}", e)
+            None
+        } finally {
+          Try(native.ailake_free_string(ptr))
+        }
+    }
+  }
+
+  /**
+   * Table metadata: current snapshot, file/row/size counts, index status
+   * breakdown, and "foreign" files (written by a generic Iceberg engine —
+   * no AI-Lake centroid/HNSW). Mirrors `ailake info --format json`. Returns
+   * the raw JSON response string on success (same convention as estimate()).
+   */
+  def info(
+    warehouse:   String,
+    namespace:   String,
+    table:       String,
+    catalogOpts: Map[String, String] = Map.empty,
+  ): Option[String] = {
+    lib match {
+      case None => None
+      case Some(native) =>
+        val requestJson =
+          s"""{"warehouse":${jsonStr(warehouse)},"namespace":${jsonStr(namespace)},""" +
+          s""""table":${jsonStr(table)}${catalogOptsJsonFragment(catalogOpts)}}"""
+        val ptr = native.ailake_info_json(requestJson)
+        if (ptr == null) {
+          log.warn(s"[ailake] ailake_info_json returned null for table=$namespace.$table")
+          return None
+        }
+        try {
+          Some(ptr.getString(0))
+        } catch {
+          case e: Exception =>
+            log.error(s"[ailake] Failed to read info response for table=$namespace.$table: ${e.getMessage}", e)
             None
         } finally {
           Try(native.ailake_free_string(ptr))

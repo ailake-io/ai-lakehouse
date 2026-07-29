@@ -71,6 +71,9 @@ class AilakeProcedures(
         private val ESTIMATE = MethodHandles.lookup().unreflect(
             AilakeProcedures::class.java.getMethod("estimate", ConnectorSession::class.java)
         )
+        private val INFO = MethodHandles.lookup().unreflect(
+            AilakeProcedures::class.java.getMethod("info", ConnectorSession::class.java)
+        )
     }
 
     fun getProcedures(): Set<Procedure> = setOf(
@@ -103,6 +106,11 @@ class AilakeProcedures(
         Procedure("system", "add_vector_column", emptyList(), ADD_VECTOR_COLUMN.bindTo(this)),
         Procedure("system", "backfill_vector_column", emptyList(), BACKFILL_VECTOR_COLUMN.bindTo(this)),
         Procedure("system", "estimate", emptyList(), ESTIMATE.bindTo(this)),
+        // Found in a later audit pass: `info` (table metadata / foreign-file
+        // report — `ailake info`) had zero binding coverage anywhere outside
+        // the CLI and the Airflow provider, not even a C-ABI export. Same
+        // no-arg/logged-result pattern as the 6 procedures above.
+        Procedure("system", "info", emptyList(), INFO.bindTo(this)),
     )
 
     /** Invoked by the Trino engine as `CALL ailake.system.compact()`. */
@@ -277,5 +285,22 @@ class AilakeProcedures(
             "ailake estimate failed — native library absent or the call failed",
         )
         log.info("[ailake] CALL estimate() result={}", mapper.writeValueAsString(result))
+    }
+
+    /**
+     * `CALL ailake.system.info()` — reports current snapshot, file/row/size
+     * counts, index status breakdown, and "foreign" files (written by a
+     * generic Iceberg engine — no AI-Lake centroid/HNSW) for the catalog's
+     * configured table. No arguments, same reasoning as `compact()`. `CALL`
+     * procedures have no result set — logged server-side (INFO) instead.
+     */
+    fun info(session: ConnectorSession) {
+        val result = AilakeNative.info(tableUri, namespace, tableName, catalogOpts)
+            ?: throw TrinoException(
+                StandardErrorCode.GENERIC_USER_ERROR,
+                "ailake info failed for table=$namespace.$tableName — native library absent or the call " +
+                "failed; check the coordinator/worker logs for [ailake] info failed",
+            )
+        log.info("[ailake] CALL info() table={}.{} result={}", namespace, tableName, mapper.writeValueAsString(result))
     }
 }

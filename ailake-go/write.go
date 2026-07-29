@@ -841,6 +841,94 @@ func BackfillVectorColumn(
 	return nil
 }
 
+// InfoResult is the parsed output of `ailake info --format json`: current
+// snapshot, file/row/size counts, index status breakdown, and "foreign"
+// files (written by a generic Iceberg engine — no AI-Lake centroid/HNSW —
+// every query against them degrades to an O(N) flat scan until compaction
+// repairs them).
+type InfoResult struct {
+	Table            string
+	Location         string
+	VectorColumn     string
+	VectorDim        string
+	VectorMetric     string
+	Files            int
+	IndexedFiles     int
+	FailedFiles      int
+	ForeignFiles     int
+	ForeignFilePaths []string
+	Rows             int64
+	SizeBytes        int64
+	SnapshotID       *int64
+}
+
+// Info reports table metadata by delegating to the `ailake info` CLI.
+func Info(
+	catalog *HadoopCatalog,
+	namespace, table string,
+	catalogOpts map[string]string,
+) (*InfoResult, error) {
+	bin, err := resolveBin()
+	if err != nil {
+		return nil, err
+	}
+
+	warehouse := catalog.Warehouse
+	if isLocalPath(warehouse) && !filepath.IsAbs(warehouse) {
+		if abs, absErr := filepath.Abs(warehouse); absErr == nil {
+			warehouse = abs
+		}
+	}
+
+	tableID := namespace + "." + table
+
+	args := []string{
+		"--store", warehouse,
+		"info", tableID,
+		"--format", "json",
+	}
+	args = appendCatalogArgs(args, catalogOpts)
+
+	out, err := exec.Command(bin, args...).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("ailake info: %w\n%s", err, out)
+	}
+
+	var raw struct {
+		Table            string   `json:"table"`
+		Location         string   `json:"location"`
+		VectorColumn     string   `json:"vector_column"`
+		VectorDim        string   `json:"vector_dim"`
+		VectorMetric     string   `json:"vector_metric"`
+		Files            int      `json:"files"`
+		IndexedFiles     int      `json:"indexed_files"`
+		FailedFiles      int      `json:"failed_files"`
+		ForeignFiles     int      `json:"foreign_files"`
+		ForeignFilePaths []string `json:"foreign_file_paths"`
+		Rows             int64    `json:"rows"`
+		SizeBytes        int64    `json:"size_bytes"`
+		SnapshotID       *int64   `json:"snapshot_id"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("ailake info: parsing JSON output: %w\n%s", err, out)
+	}
+	return &InfoResult{
+		Table:            raw.Table,
+		Location:         raw.Location,
+		VectorColumn:     raw.VectorColumn,
+		VectorDim:        raw.VectorDim,
+		VectorMetric:     raw.VectorMetric,
+		Files:            raw.Files,
+		IndexedFiles:     raw.IndexedFiles,
+		FailedFiles:      raw.FailedFiles,
+		ForeignFiles:     raw.ForeignFiles,
+		ForeignFilePaths: raw.ForeignFilePaths,
+		Rows:             raw.Rows,
+		SizeBytes:        raw.SizeBytes,
+		SnapshotID:       raw.SnapshotID,
+	}, nil
+}
+
 // EstimateOptions controls optional parameters for Estimate.
 type EstimateOptions struct {
 	// HnswM is the HNSW M parameter (0 = CLI default, 16).

@@ -469,6 +469,19 @@ func Estimate(rows string, dim int, opts EstimateOptions) (*EstimateResult, erro
 
 Computes storage-usage estimates before writing — pure math, no I/O, no warehouse/catalog (`ailake estimate` CLI). `rows` supports `K`/`M`/`B` suffixes (e.g. `"1M"`, `"500K"`). `EstimateResult.Estimates` holds one entry per storage mode (F32/F16/I8/IVF-PQ variants/PQ-only) as a raw `map[string]any` (`mode`, `vectors_bytes`, `index_bytes`, `total_bytes`, `reduction_factor`, `recall_at_10`, `note`).
 
+### `Info`
+
+```go
+func Info(catalog *HadoopCatalog, namespace, table string, catalogOpts map[string]string) (*InfoResult, error)
+```
+
+Reports current snapshot, file/row/size counts, index status breakdown, and "foreign" files —
+files written by a generic Iceberg engine (Spark/Trino `OPTIMIZE`, DuckDB) with no AI-Lake
+centroid/HNSW (`ailake info` CLI). Every query against a foreign file degrades to an O(N) flat
+scan until `Compact` repairs it. Found in an ecosystem-wide audit: `info` had zero binding
+coverage anywhere outside the CLI and the Airflow provider until this — not even a C-ABI export
+in `ailake-jni`.
+
 ### `SearchHybrid`
 
 ```go
