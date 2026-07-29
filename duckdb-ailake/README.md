@@ -13,7 +13,8 @@ Bridges DuckDB to [`ailake-jni`](../ailake-jni) using the same C-ABI as the Spar
 
 ## Functions
 
-> **REST Catalog**: every function below (except `ailake_version`) takes a trailing optional
+> **REST Catalog**: every function below (except `ailake_version` and `ailake_estimate`, which
+> has no warehouse/table to resolve a catalog for) takes a trailing optional
 > `catalog_opts_json VARCHAR` — a JSON object like
 > `'{"catalog":"rest","rest_uri":"https://catalog.example.com","rest_auth":"bearer","rest_token":"..."}'`,
 > targeting a Polaris/Unity Catalog/BigLake/Nessie/Gravitino server instead of the default
@@ -416,6 +417,160 @@ Compacts small files in an AI-Lake table into a larger merged file. Backed by `a
 ```sql
 -- Force a merge even with just 2 small files present
 SELECT ailake_compact('file:///data/my_table', min_files := 2);
+```
+
+### `ailake_delete_rows` — position/DV delete
+
+```sql
+SELECT ailake_delete_rows(
+    table_path           VARCHAR,          -- table root path/URI
+    file                  VARCHAR,          -- data file path (e.g. from ailake_search's file_path)
+    row_ids               UINTEGER[],       -- row positions within that file
+    -- named or positional (optional), in order:
+    namespace              VARCHAR,         -- default 'default'
+    table_name             VARCHAR          -- default 'table'
+) → BOOLEAN
+```
+
+Position/DV delete: marks `row_ids` as deleted within a single named data file. Different from
+`ailake_delete_where`, which is an equality delete by column value across the whole table. Backed
+by `ailake_delete_rows_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_delete_rows('file:///data/my_table', 'data/part-00001.parquet', [3, 7, 12]::UINTEGER[]);
+```
+
+### `ailake_add_vector_column` — schema evolution (add vector column)
+
+```sql
+SELECT ailake_add_vector_column(
+    table_path             VARCHAR,   -- table root path/URI
+    column                  VARCHAR,   -- new vector column name
+    dim                     INTEGER,   -- vector dimension
+    -- named or positional (optional), in order:
+    metric                   VARCHAR,  -- default 'cosine'
+    precision                VARCHAR,  -- default 'f16'
+    pre_normalize             BOOLEAN, -- default false
+    hnsw_m                    INTEGER, -- default -1 (use native default)
+    hnsw_ef_construction       INTEGER, -- default -1 (use native default)
+    namespace                  VARCHAR, -- default 'default'
+    table_name                 VARCHAR  -- default 'table'
+) → INTEGER  -- new schema_id, or -1 on error
+```
+
+Metadata-only schema evolution adding a new vector column (Phase 8 multimodal / migration
+workflows). Follow up with `ailake_backfill_vector_column` to populate it. Backed by
+`ailake_add_vector_column_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_add_vector_column('file:///data/my_table', 'image_embedding', 512, metric := 'euclidean');
+```
+
+### `ailake_backfill_vector_column` — populate a vector column via embed_cmd
+
+```sql
+SELECT ailake_backfill_vector_column(
+    table_path            VARCHAR,   -- table root path/URI
+    column                 VARCHAR,   -- vector column to backfill (must already exist)
+    text_column             VARCHAR,   -- source text column for embedding
+    embed_cmd                VARCHAR,   -- shell command: stdin JSON array-of-strings →
+                                        --   stdout JSON array-of-arrays-of-float
+    -- named or positional (optional), in order:
+    batch_size                BIGINT,  -- default 512
+    namespace                  VARCHAR, -- default 'default'
+    table_name                 VARCHAR  -- default 'table'
+) → BOOLEAN
+```
+
+Populates a vector column previously added via `ailake_add_vector_column` by running `embed_cmd`
+over `text_column` for every existing row. Backed by `ailake_backfill_vector_column_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_add_vector_column('file:///data/my_table', 'v2', 1536);
+SELECT ailake_backfill_vector_column('file:///data/my_table', 'v2', 'chunk_text', 'python3 embed.py');
+```
+
+### `ailake_decay_memories` — recompute agent-memory recency weights
+
+```sql
+SELECT ailake_decay_memories(
+    table_path      VARCHAR,   -- table root path/URI
+    lambda           FLOAT,     -- decay rate
+    -- named or positional (optional), in order:
+    namespace          VARCHAR, -- default 'default'
+    table_name          VARCHAR  -- default 'table'
+) → BIGINT  -- number of files updated, -1 on error
+```
+
+Recomputes `recency_weight = exp(-lambda * days_since_access)` from the `last_accessed_at` column
+across every data file and commits a new snapshot. Requires the table to carry
+`ailake.vector-dim`/`.vector-column`/`.vector-metric` properties (any table written with a vector
+column has them). Backed by `ailake_decay_memories_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_decay_memories('file:///data/agent_memory', 0.1);
+```
+
+### `ailake_migrate` — atomic re-embedding of a vector column
+
+```sql
+SELECT ailake_migrate(
+    table_path           VARCHAR,   -- table root path/URI
+    old_column             VARCHAR,   -- existing vector column to migrate from
+    new_column              VARCHAR,   -- vector column to migrate to
+    embed_cmd                VARCHAR,   -- shell command (same protocol as backfill above)
+    -- named or positional (optional), in order:
+    text_column                VARCHAR, -- default 'chunk_text'
+    strategy                    VARCHAR, -- default 'atomic-replace'
+                                         --   ('atomic-replace' | 'dual-write-then-cutover')
+    batch_size                   BIGINT,  -- default 10000
+    model_name                    VARCHAR, -- default '' (unset)
+    model_version                  VARCHAR, -- default '' (unset)
+    namespace                       VARCHAR, -- default 'default'
+    table_name                      VARCHAR  -- default 'table'
+) → BOOLEAN
+```
+
+Re-embeds `old_column` into `new_column` via `embed_cmd`, then atomically replaces the table's
+data files (`atomic-replace`, default) or writes `new_column` alongside `old_column` for a
+cutover window (`dual-write-then-cutover`). Backed by `ailake_migrate_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT ailake_migrate('file:///data/my_table', 'embedding', 'embedding_v2',
+    'python3 embed_v2.py', model_name := 'text-embedding-3-large');
+```
+
+### `ailake_estimate` — storage/index size math (no I/O)
+
+```sql
+SELECT * FROM ailake_estimate(
+    rows       BIGINT,
+    dim         INTEGER,
+    hnsw_m       INTEGER := 16,  -- named only
+    pq_m          INTEGER := -1   -- named only; -1 = auto (dim/32, clamped [8, dim])
+) → TABLE(mode VARCHAR, vectors_bytes BIGINT, index_bytes BIGINT, total_bytes BIGINT,
+          reduction_vs_f32_hnsw DOUBLE, recall VARCHAR, note VARCHAR)
+```
+
+Pure storage/index-size math — no warehouse, no table, no catalog (nothing to resolve, so no
+`catalog_opts_json` parameter). Same formula as `ailake estimate` (CLI) / `ailake-py`'s
+`estimate()`. Returns one row per storage/precision mode (F32, F16, I8, F16+IVF-PQ, I8+IVF-PQ,
+PQ-only). Backed by `ailake_estimate_json` C-ABI.
+
+**Example:**
+
+```sql
+SELECT * FROM ailake_estimate(100000000, 1536);
 ```
 
 ### `ailake_version` — linked library version
