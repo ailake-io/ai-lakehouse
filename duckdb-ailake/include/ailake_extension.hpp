@@ -68,6 +68,25 @@ struct ScanResult {
     std::vector<ScanColumn>  columns;
 };
 
+// ── ailake_estimate row shape ───────────────────────────────────────────────
+
+// One storage/precision mode row from ailake_estimate_json's `estimates` array.
+struct EstimateRow {
+    std::string mode;
+    int64_t     vectors_bytes           = 0;
+    int64_t     index_bytes             = 0;
+    int64_t     total_bytes             = 0;
+    double      reduction_vs_f32_hnsw   = 0.0;
+    std::string recall;
+    std::string note;
+};
+
+struct EstimateResult {
+    bool                      ok = false;
+    std::string               error;
+    std::vector<EstimateRow>  rows;
+};
+
 // ── AilakeLib singleton ───────────────────────────────────────────────────────
 
 // Singleton holding resolved C-ABI function pointers. `ailake-jni` is linked
@@ -87,6 +106,12 @@ public:
     using write_multi_fn_t   = char *(*)(const char *);
     using create_table_fn_t  = char *(*)(const char *);
     using compact_fn_t       = char *(*)(const char *);
+    using delete_rows_fn_t   = char *(*)(const char *);
+    using add_vector_column_fn_t     = char *(*)(const char *);
+    using backfill_vector_column_fn_t = char *(*)(const char *);
+    using decay_memories_fn_t = char *(*)(const char *);
+    using migrate_fn_t       = char *(*)(const char *);
+    using estimate_fn_t      = char *(*)(const char *);
     using free_fn_t          = void (*)(char *);
 
     static AilakeLib &get();
@@ -117,6 +142,12 @@ public:
     bool is_write_multi_ready()  const { return write_multi_fn_   != nullptr; }
     bool is_compact_ready()      const { return compact_fn_       != nullptr; }
     bool is_create_table_ready() const { return create_table_fn_ != nullptr; }
+    bool is_delete_rows_ready()  const { return delete_rows_fn_   != nullptr; }
+    bool is_add_vector_column_ready() const { return add_vector_column_fn_ != nullptr; }
+    bool is_backfill_vector_column_ready() const { return backfill_vector_column_fn_ != nullptr; }
+    bool is_decay_memories_ready() const { return decay_memories_fn_ != nullptr; }
+    bool is_migrate_ready()      const { return migrate_fn_       != nullptr; }
+    bool is_estimate_ready()     const { return estimate_fn_      != nullptr; }
 
     // Execute ailake_search_json. Returns empty on any error.
     // hybrid_text: when non-empty, enables hybrid BM25+vector RRF fusion.
@@ -295,6 +326,87 @@ public:
         const std::string  &catalog_opts_json  = ""
     ) const;
 
+    // Execute ailake_delete_rows_json. Position/DV delete by row_id within a
+    // single named file — different from delete_where (equality delete by
+    // column value across the whole table). Returns true on success.
+    bool delete_rows(
+        const std::string        &warehouse,
+        const std::string        &table_name,
+        const std::string        &file,
+        const std::vector<uint32_t> &row_ids,
+        const std::string        &ns = "default",
+        const std::string        &catalog_opts_json = ""
+    ) const;
+
+    // Execute ailake_add_vector_column_json. Metadata-only schema evolution
+    // adding a new vector column. Returns new_schema_id, or -1 on error.
+    int32_t add_vector_column(
+        const std::string &warehouse,
+        const std::string &ns,
+        const std::string &table_name,
+        const std::string &column,
+        int                 dim,
+        const std::string &metric               = "cosine",
+        const std::string &precision             = "f16",
+        bool                pre_normalize        = false,
+        int                 hnsw_m               = -1,
+        int                 hnsw_ef_construction = -1,
+        const std::string &catalog_opts_json     = ""
+    ) const;
+
+    // Execute ailake_backfill_vector_column_json. Populates a vector column
+    // added via add_vector_column() by running embed_cmd over text_column.
+    // Column must already exist (add_vector_column first). Returns true on
+    // success.
+    bool backfill_vector_column(
+        const std::string &warehouse,
+        const std::string &table_name,
+        const std::string &column,
+        const std::string &text_column,
+        const std::string &embed_cmd,
+        int64_t             batch_size = 512,
+        const std::string &ns = "default",
+        const std::string &catalog_opts_json = ""
+    ) const;
+
+    // Execute ailake_decay_memories_json. Recomputes recency_weight from
+    // last_accessed_at across every data file. Returns files_updated, or -1
+    // on error.
+    int64_t decay_memories(
+        const std::string &warehouse,
+        const std::string &table_name,
+        float               lambda,
+        const std::string &ns = "default",
+        const std::string &catalog_opts_json = ""
+    ) const;
+
+    // Execute ailake_migrate_json. Re-embeds old_column into new_column via
+    // embed_cmd (atomic-replace or dual-write-then-cutover). Returns true on
+    // success.
+    bool migrate(
+        const std::string &warehouse,
+        const std::string &table_name,
+        const std::string &old_column,
+        const std::string &new_column,
+        const std::string &embed_cmd,
+        const std::string &text_column   = "chunk_text",
+        const std::string &strategy      = "atomic-replace",
+        int64_t             batch_size    = 10000,
+        const std::string &model_name    = "",
+        const std::string &model_version = "",
+        const std::string &ns            = "default",
+        const std::string &catalog_opts_json = ""
+    ) const;
+
+    // Execute ailake_estimate_json. Pure storage/index-size math, no I/O, no
+    // catalog_opts (nothing to resolve — no warehouse/table involved).
+    EstimateResult estimate(
+        uint64_t rows,
+        int      dim,
+        int      hnsw_m = 16,
+        int      pq_m   = -1
+    ) const;
+
 private:
     AilakeLib() = default;
 
@@ -308,6 +420,12 @@ private:
     write_multi_fn_t   write_multi_fn_   = nullptr;
     create_table_fn_t  create_table_fn_  = nullptr;
     compact_fn_t       compact_fn_       = nullptr;
+    delete_rows_fn_t   delete_rows_fn_   = nullptr;
+    add_vector_column_fn_t     add_vector_column_fn_     = nullptr;
+    backfill_vector_column_fn_t backfill_vector_column_fn_ = nullptr;
+    decay_memories_fn_t decay_memories_fn_ = nullptr;
+    migrate_fn_t       migrate_fn_       = nullptr;
+    estimate_fn_t      estimate_fn_      = nullptr;
     free_fn_t          free_fn_          = nullptr;
 };
 

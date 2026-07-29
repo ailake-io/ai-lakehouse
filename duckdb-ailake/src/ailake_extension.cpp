@@ -32,6 +32,12 @@ extern "C" {
     char *ailake_write_batch_multi_json(const char *);
     char *ailake_compact_json(const char *);
     char *ailake_create_table_json(const char *);
+    char *ailake_delete_rows_json(const char *);
+    char *ailake_add_vector_column_json(const char *);
+    char *ailake_backfill_vector_column_json(const char *);
+    char *ailake_decay_memories_json(const char *);
+    char *ailake_migrate_json(const char *);
+    char *ailake_estimate_json(const char *);
     void  ailake_free_string(char *);
 }
 
@@ -57,6 +63,12 @@ bool AilakeLib::load() {
     write_multi_fn_    = ailake_write_batch_multi_json;
     compact_fn_        = ailake_compact_json;
     create_table_fn_   = ailake_create_table_json;
+    delete_rows_fn_    = ailake_delete_rows_json;
+    add_vector_column_fn_     = ailake_add_vector_column_json;
+    backfill_vector_column_fn_ = ailake_backfill_vector_column_json;
+    decay_memories_fn_ = ailake_decay_memories_json;
+    migrate_fn_        = ailake_migrate_json;
+    estimate_fn_       = ailake_estimate_json;
     free_fn_           = ailake_free_string;
     return true;
 }
@@ -609,6 +621,294 @@ int64_t AilakeLib::compact(
     return j.value("files_compacted", int64_t(-1));
 }
 
+bool AilakeLib::delete_rows(
+    const std::string           &warehouse,
+    const std::string           &table_name,
+    const std::string           &file,
+    const std::vector<uint32_t> &row_ids,
+    const std::string           &ns,
+    const std::string           &catalog_opts_json
+) const {
+    if (!delete_rows_fn_ || !free_fn_ || row_ids.empty()) return false;
+
+    std::string ids_json = "[";
+    for (size_t i = 0; i < row_ids.size(); ++i) {
+        if (i > 0) ids_json += ',';
+        ids_json += std::to_string(row_ids[i]);
+    }
+    ids_json += ']';
+
+    std::string req =
+        "{\"warehouse\":"  + json_escape(warehouse)  +
+        ",\"namespace\":"  + json_escape(ns)          +
+        ",\"table\":"      + json_escape(table_name)  +
+        ",\"file\":"       + json_escape(file)        +
+        ",\"row_ids\":"    + ids_json +
+        catalog_opts_json_fields(catalog_opts_json) +
+        "}";
+
+    char *raw = delete_rows_fn_(req.c_str());
+    if (!raw) return false;
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(resp);
+    } catch (...) {
+        return false;
+    }
+    if (!j.value("ok", false)) {
+        throw InvalidInputException(
+            "ailake_delete_rows failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    return true;
+}
+
+int32_t AilakeLib::add_vector_column(
+    const std::string &warehouse,
+    const std::string &ns,
+    const std::string &table_name,
+    const std::string &column,
+    int                 dim,
+    const std::string &metric,
+    const std::string &precision,
+    bool                pre_normalize,
+    int                 hnsw_m,
+    int                 hnsw_ef_construction,
+    const std::string &catalog_opts_json
+) const {
+    if (!add_vector_column_fn_ || !free_fn_) return -1;
+
+    std::string req =
+        "{\"warehouse\":"  + json_escape(warehouse)  +
+        ",\"namespace\":"  + json_escape(ns)          +
+        ",\"table\":"      + json_escape(table_name)  +
+        ",\"column\":"     + json_escape(column)      +
+        ",\"dim\":"        + std::to_string(dim)      +
+        ",\"metric\":"     + json_escape(metric)      +
+        ",\"precision\":"  + json_escape(precision);
+    if (pre_normalize)
+        req += ",\"pre_normalize\":true";
+    if (hnsw_m >= 0)
+        req += ",\"hnsw_m\":" + std::to_string(hnsw_m);
+    if (hnsw_ef_construction >= 0)
+        req += ",\"hnsw_ef_construction\":" + std::to_string(hnsw_ef_construction);
+    req += catalog_opts_json_fields(catalog_opts_json);
+    req += "}";
+
+    char *raw = add_vector_column_fn_(req.c_str());
+    if (!raw) return -1;
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(resp);
+    } catch (...) {
+        return -1;
+    }
+    if (!j.value("ok", false)) {
+        throw InvalidInputException(
+            "ailake_add_vector_column failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    return j.value("new_schema_id", int32_t(-1));
+}
+
+bool AilakeLib::backfill_vector_column(
+    const std::string &warehouse,
+    const std::string &table_name,
+    const std::string &column,
+    const std::string &text_column,
+    const std::string &embed_cmd,
+    int64_t             batch_size,
+    const std::string &ns,
+    const std::string &catalog_opts_json
+) const {
+    if (!backfill_vector_column_fn_ || !free_fn_) return false;
+
+    std::string req =
+        "{\"warehouse\":"    + json_escape(warehouse)    +
+        ",\"namespace\":"    + json_escape(ns)             +
+        ",\"table\":"        + json_escape(table_name)    +
+        ",\"column\":"       + json_escape(column)        +
+        ",\"text_column\":"  + json_escape(text_column)   +
+        ",\"embed_cmd\":"    + json_escape(embed_cmd);
+    if (batch_size > 0)
+        req += ",\"batch_size\":" + std::to_string(batch_size);
+    req += catalog_opts_json_fields(catalog_opts_json);
+    req += "}";
+
+    char *raw = backfill_vector_column_fn_(req.c_str());
+    if (!raw) return false;
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(resp);
+    } catch (...) {
+        return false;
+    }
+    if (!j.value("ok", false)) {
+        throw InvalidInputException(
+            "ailake_backfill_vector_column failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    return true;
+}
+
+int64_t AilakeLib::decay_memories(
+    const std::string &warehouse,
+    const std::string &table_name,
+    float               lambda,
+    const std::string &ns,
+    const std::string &catalog_opts_json
+) const {
+    if (!decay_memories_fn_ || !free_fn_) return -1;
+
+    std::string req =
+        "{\"warehouse\":" + json_escape(warehouse)  +
+        ",\"namespace\":" + json_escape(ns)          +
+        ",\"table\":"     + json_escape(table_name)  +
+        ",\"lambda\":"    + std::to_string(lambda) +
+        catalog_opts_json_fields(catalog_opts_json) +
+        "}";
+
+    char *raw = decay_memories_fn_(req.c_str());
+    if (!raw) return -1;
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(resp);
+    } catch (...) {
+        return -1;
+    }
+    if (!j.value("ok", false)) {
+        throw InvalidInputException(
+            "ailake_decay_memories failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    return j.value("files_updated", int64_t(-1));
+}
+
+bool AilakeLib::migrate(
+    const std::string &warehouse,
+    const std::string &table_name,
+    const std::string &old_column,
+    const std::string &new_column,
+    const std::string &embed_cmd,
+    const std::string &text_column,
+    const std::string &strategy,
+    int64_t             batch_size,
+    const std::string &model_name,
+    const std::string &model_version,
+    const std::string &ns,
+    const std::string &catalog_opts_json
+) const {
+    if (!migrate_fn_ || !free_fn_) return false;
+
+    std::string req =
+        "{\"warehouse\":"    + json_escape(warehouse)    +
+        ",\"namespace\":"    + json_escape(ns)             +
+        ",\"table\":"        + json_escape(table_name)    +
+        ",\"old_column\":"   + json_escape(old_column)    +
+        ",\"new_column\":"   + json_escape(new_column)    +
+        ",\"text_column\":"  + json_escape(text_column)   +
+        ",\"embed_cmd\":"    + json_escape(embed_cmd)     +
+        ",\"strategy\":"     + json_escape(strategy);
+    if (batch_size > 0)
+        req += ",\"batch_size\":" + std::to_string(batch_size);
+    if (!model_name.empty())
+        req += ",\"model_name\":" + json_escape(model_name);
+    if (!model_version.empty())
+        req += ",\"model_version\":" + json_escape(model_version);
+    req += catalog_opts_json_fields(catalog_opts_json);
+    req += "}";
+
+    char *raw = migrate_fn_(req.c_str());
+    if (!raw) return false;
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(resp);
+    } catch (...) {
+        return false;
+    }
+    if (!j.value("ok", false)) {
+        throw InvalidInputException(
+            "ailake_migrate failed: " + j.value("error", std::string("unknown error"))
+        );
+    }
+    return true;
+}
+
+EstimateResult AilakeLib::estimate(
+    uint64_t rows,
+    int      dim,
+    int      hnsw_m,
+    int      pq_m
+) const {
+    EstimateResult result;
+    if (!estimate_fn_ || !free_fn_) {
+        result.error = "ailake_estimate_json not available";
+        return result;
+    }
+
+    std::string req =
+        "{\"rows\":"    + std::to_string(rows)   +
+        ",\"dim\":"     + std::to_string(dim)    +
+        ",\"hnsw_m\":"  + std::to_string(hnsw_m);
+    if (pq_m >= 0)
+        req += ",\"pq_m\":" + std::to_string(pq_m);
+    req += "}";
+
+    char *raw = estimate_fn_(req.c_str());
+    if (!raw) {
+        result.error = "ailake_estimate_json returned null";
+        return result;
+    }
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    try {
+        auto j = nlohmann::json::parse(resp);
+        if (!j.value("ok", false)) {
+            result.error = j.value("error", "unknown error");
+            return result;
+        }
+        for (auto &e : j["estimates"]) {
+            EstimateRow row;
+            row.mode                  = e.value("mode", "");
+            row.vectors_bytes         = e.value("vectors_bytes", int64_t(0));
+            row.index_bytes           = e.value("index_bytes", int64_t(0));
+            row.total_bytes           = e.value("total_bytes", int64_t(0));
+            row.reduction_vs_f32_hnsw = e.value("reduction_vs_f32_hnsw", 0.0);
+            row.recall                = e.value("recall", "");
+            row.note                  = e.value("note", "");
+            result.rows.push_back(std::move(row));
+        }
+        result.ok = true;
+    } catch (const std::exception &ex) {
+        result.error = ex.what();
+    } catch (...) {
+        result.error = "unknown exception in estimate()";
+    }
+    return result;
+}
+
 bool AilakeLib::create_table(
     const std::string &warehouse,
     const std::string &ns,
@@ -853,6 +1153,12 @@ void RegisterAilakeEvolveSchema(duckdb::ExtensionLoader &loader);
 void RegisterAilakeWriteBatchMulti(duckdb::ExtensionLoader &loader);
 void RegisterAilakeCompact(duckdb::ExtensionLoader &loader);
 void RegisterAilakeVersion(duckdb::ExtensionLoader &loader);
+void RegisterAilakeDeleteRows(duckdb::ExtensionLoader &loader);
+void RegisterAilakeAddVectorColumn(duckdb::ExtensionLoader &loader);
+void RegisterAilakeBackfillVectorColumn(duckdb::ExtensionLoader &loader);
+void RegisterAilakeDecayMemories(duckdb::ExtensionLoader &loader);
+void RegisterAilakeMigrate(duckdb::ExtensionLoader &loader);
+void RegisterAilakeEstimate(duckdb::ExtensionLoader &loader);
 
 extern "C" {
 
@@ -870,6 +1176,12 @@ DUCKDB_CPP_EXTENSION_ENTRY(ailake, loader) {
     RegisterAilakeCompact(loader);
     RegisterAilakeDeleteWhere(loader);
     RegisterAilakeEvolveSchema(loader);
+    RegisterAilakeDeleteRows(loader);
+    RegisterAilakeAddVectorColumn(loader);
+    RegisterAilakeBackfillVectorColumn(loader);
+    RegisterAilakeDecayMemories(loader);
+    RegisterAilakeMigrate(loader);
+    RegisterAilakeEstimate(loader);
     RegisterAilakeVersion(loader);
 }
 
