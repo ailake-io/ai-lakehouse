@@ -108,10 +108,10 @@ func TestParseHeader_Reader(t *testing.T) {
 
 func TestParseTrailerBytes_Valid(t *testing.T) {
 	buf := make([]byte, TrailerSize)
-	binary.LittleEndian.PutUint64(buf[0:], 12345678)  // FooterOffset
-	binary.LittleEndian.PutUint64(buf[8:], 4194304)   // FooterLen
-	binary.LittleEndian.PutUint16(buf[16:], 1)         // FormatVersion
-	binary.LittleEndian.PutUint16(buf[18:], 0)         // Flags
+	binary.LittleEndian.PutUint64(buf[0:], 12345678) // FooterOffset
+	binary.LittleEndian.PutUint64(buf[8:], 4194304)  // FooterLen
+	binary.LittleEndian.PutUint16(buf[16:], 1)       // FormatVersion
+	binary.LittleEndian.PutUint16(buf[18:], 0)       // Flags
 	buf[20], buf[21], buf[22], buf[23] = 'A', 'I', 'L', 'K'
 
 	tr, err := ParseTrailerBytes(buf)

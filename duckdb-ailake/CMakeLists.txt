@@ -70,6 +70,7 @@ add_library(duckdb_ailake MODULE
     src/ailake_decay_memories.cpp
     src/ailake_migrate.cpp
     src/ailake_estimate.cpp
+    src/ailake_info.cpp
     src/ailake_version.cpp
 )
 

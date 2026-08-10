@@ -19,6 +19,7 @@ from airflow_providers_ailake.operators.ailake import (
     AilakeAddVectorColumnOperator,
     AilakeBackfillVectorColumnOperator,
     AilakeCompactOperator,
+    AilakeDecayMemoriesOperator,
     AilakeDeleteRowsOperator,
     AilakeDeleteWhereOperator,
     AilakeEvolveSchemaOperator,
@@ -284,6 +285,42 @@ class TestAilakeCompactOperator:
         assert "1024" in args
         assert "--min-files" in args
         assert "2" in args
+
+
+# ---------------------------------------------------------------------------
+# AilakeDecayMemoriesOperator
+# ---------------------------------------------------------------------------
+
+class TestAilakeDecayMemoriesOperator:
+    def test_execute_calls_decay_memories(self):
+        op = AilakeDecayMemoriesOperator(task_id="decay", table="default.memory")
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                op.execute(context={})
+        call_args = mock_cli.call_args[0]
+        assert "decay-memories" in call_args
+        assert "default.memory" in call_args
+
+    def test_custom_lambda_passed(self):
+        op = AilakeDecayMemoriesOperator(task_id="decay", table="t", decay_lambda=0.3)
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(hook, "run_cli", return_value=_completed()) as mock_cli:
+                op.execute(context={})
+        args = mock_cli.call_args[0]
+        assert "--lambda" in args
+        assert "0.3" in args
+
+    def test_execute_returns_files_updated(self):
+        op = AilakeDecayMemoriesOperator(task_id="decay", table="default.memory")
+        hook = _make_hook()
+        with patch("airflow_providers_ailake.operators.ailake.AilakeHook", return_value=hook):
+            with patch.object(
+                hook, "run_cli", return_value=_completed(stdout="files_updated: 3\n")
+            ):
+                result = op.execute(context={})
+        assert result == 3
 
 
 # ---------------------------------------------------------------------------

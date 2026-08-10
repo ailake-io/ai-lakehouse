@@ -573,6 +573,36 @@ PQ-only). Backed by `ailake_estimate_json` C-ABI.
 SELECT * FROM ailake_estimate(100000000, 1536);
 ```
 
+### `ailake_info` — table metadata report
+
+```sql
+SELECT * FROM ailake_info(
+    table_path       VARCHAR,   -- table root path/URI
+    -- named only:
+    namespace          VARCHAR,  -- default 'default'
+    table_name          VARCHAR,  -- default 'table'
+    catalog_opts_json    VARCHAR   -- REST catalog config, see docs/guides/REST_CATALOG.md
+) → TABLE(table VARCHAR, location VARCHAR, vector_column VARCHAR, vector_dim VARCHAR,
+          vector_metric VARCHAR, files BIGINT, indexed_files BIGINT, failed_files BIGINT,
+          foreign_files BIGINT, foreign_file_paths VARCHAR[], rows BIGINT, size_bytes BIGINT,
+          snapshot_id BIGINT)
+```
+
+Reports current snapshot, file/row/size counts, index status breakdown, and "foreign" files —
+files written by a generic Iceberg engine (Spark/Trino `OPTIMIZE`, DuckDB) with no AI-Lake
+centroid/HNSW. Every query against a foreign file degrades to an O(N) flat scan until
+`ailake_compact` repairs it. `snapshot_id` is `NULL` when the table has never been committed to.
+Mirrors `ailake info --format json` exactly (same fields, same source data). Backed by
+`ailake_info_json` C-ABI — until this was added, `info` had zero binding coverage anywhere
+outside the CLI itself and the Airflow provider (which shells out to the CLI directly).
+
+**Example:**
+
+```sql
+SELECT foreign_files, foreign_file_paths FROM ailake_info('file:///data/my_table')
+    WHERE foreign_files > 0;
+```
+
 ### `ailake_version` — linked library version
 
 ```sql

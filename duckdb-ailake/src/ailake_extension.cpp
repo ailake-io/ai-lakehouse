@@ -38,6 +38,7 @@ extern "C" {
     char *ailake_decay_memories_json(const char *);
     char *ailake_migrate_json(const char *);
     char *ailake_estimate_json(const char *);
+    char *ailake_info_json(const char *);
     void  ailake_free_string(char *);
 }
 
@@ -69,6 +70,7 @@ bool AilakeLib::load() {
     decay_memories_fn_ = ailake_decay_memories_json;
     migrate_fn_        = ailake_migrate_json;
     estimate_fn_       = ailake_estimate_json;
+    info_fn_           = ailake_info_json;
     free_fn_           = ailake_free_string;
     return true;
 }
@@ -909,6 +911,66 @@ EstimateResult AilakeLib::estimate(
     return result;
 }
 
+InfoResult AilakeLib::info(
+    const std::string &warehouse,
+    const std::string &table_name,
+    const std::string &ns,
+    const std::string &catalog_opts_json
+) const {
+    InfoResult result;
+    if (!info_fn_ || !free_fn_) {
+        result.error = "ailake_info_json not available";
+        return result;
+    }
+
+    std::string req =
+        "{\"warehouse\":" + json_escape(warehouse)  +
+        ",\"namespace\":" + json_escape(ns)          +
+        ",\"table\":"     + json_escape(table_name)  +
+        catalog_opts_json_fields(catalog_opts_json) +
+        "}";
+
+    char *raw = info_fn_(req.c_str());
+    if (!raw) {
+        result.error = "ailake_info_json returned null";
+        return result;
+    }
+
+    std::string resp(raw);
+    free_fn_(raw);
+
+    try {
+        auto j = nlohmann::json::parse(resp);
+        if (!j.value("ok", false)) {
+            result.error = j.value("error", "unknown error");
+            return result;
+        }
+        result.table              = j.value("table", "");
+        result.location           = j.value("location", "");
+        result.vector_column      = j.value("vector_column", "");
+        result.vector_dim         = j.value("vector_dim", "");
+        result.vector_metric      = j.value("vector_metric", "");
+        result.files              = j.value("files", int64_t(0));
+        result.indexed_files      = j.value("indexed_files", int64_t(0));
+        result.failed_files       = j.value("failed_files", int64_t(0));
+        result.foreign_files      = j.value("foreign_files", int64_t(0));
+        for (auto &p : j.value("foreign_file_paths", nlohmann::json::array()))
+            result.foreign_file_paths.push_back(p.get<std::string>());
+        result.rows               = j.value("rows", int64_t(0));
+        result.size_bytes         = j.value("size_bytes", int64_t(0));
+        if (j.contains("snapshot_id") && !j["snapshot_id"].is_null()) {
+            result.has_snapshot_id = true;
+            result.snapshot_id     = j["snapshot_id"].get<int64_t>();
+        }
+        result.ok = true;
+    } catch (const std::exception &ex) {
+        result.error = ex.what();
+    } catch (...) {
+        result.error = "unknown exception in info()";
+    }
+    return result;
+}
+
 bool AilakeLib::create_table(
     const std::string &warehouse,
     const std::string &ns,
@@ -1159,6 +1221,7 @@ void RegisterAilakeBackfillVectorColumn(duckdb::ExtensionLoader &loader);
 void RegisterAilakeDecayMemories(duckdb::ExtensionLoader &loader);
 void RegisterAilakeMigrate(duckdb::ExtensionLoader &loader);
 void RegisterAilakeEstimate(duckdb::ExtensionLoader &loader);
+void RegisterAilakeInfo(duckdb::ExtensionLoader &loader);
 
 extern "C" {
 
@@ -1182,6 +1245,7 @@ DUCKDB_CPP_EXTENSION_ENTRY(ailake, loader) {
     RegisterAilakeDecayMemories(loader);
     RegisterAilakeMigrate(loader);
     RegisterAilakeEstimate(loader);
+    RegisterAilakeInfo(loader);
     RegisterAilakeVersion(loader);
 }
 

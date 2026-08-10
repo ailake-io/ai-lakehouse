@@ -19,7 +19,7 @@ func TestAsInt64(t *testing.T) {
 	}{
 		{int64(42), 42},
 		{int32(7), 7},
-		{float64(3.9), 3},   // truncates
+		{float64(3.9), 3}, // truncates
 		{"99", 99},
 		{nil, 0},
 		{"bad", 0},
@@ -261,7 +261,7 @@ func buildTestMetaMap(fv int, schemaID int, specs bool) map[string]any {
 				"type":      "struct",
 				"fields": []any{
 					map[string]any{"id": float64(1), "name": "agent_id", "type": "string", "required": false},
-					map[string]any{"id": float64(2), "name": "ts",       "type": "long",   "required": false},
+					map[string]any{"id": float64(2), "name": "ts", "type": "long", "required": false},
 				},
 			},
 		},

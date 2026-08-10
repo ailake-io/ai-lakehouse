@@ -576,11 +576,10 @@ static void test_integration_write_batch_multi() {
 // trip (not this header's own read path), a stronger signal than asserting
 // against the same code under test.
 static int row_count_via_info(const std::string& warehouse, const std::string& table_id) {
-    std::string cmd = ailake::detail::shell_quote(ailake::detail::resolve_bin())
-        + " --store " + ailake::detail::shell_quote(warehouse)
-        + " info " + ailake::detail::shell_quote(table_id)
-        + " --format json";
-    std::string out = ailake::detail::run_cmd(cmd);
+    // Goes through ailake::info() itself (not a hand-rolled duplicate of its
+    // command construction) — every call site using this helper doubles as a
+    // regression check on info()'s own output shape.
+    std::string out = ailake::info(warehouse, table_id);
     std::string key = "\"rows\":";
     auto pos = out.find(key);
     if (pos == std::string::npos) throw std::runtime_error("no \"rows\" key in info output: " + out);
@@ -650,6 +649,42 @@ static void test_integration_compact() {
         std::fprintf(stderr, "FAIL integration compact: %s\n", e.what());
         ++g_fail;
     }
+}
+
+static void test_integration_info() {
+    const char* bin = std::getenv("AILAKE_BIN");
+    if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
+
+    try {
+        std::string warehouse = make_temp_dir();
+        ailake::WriteBatchOptions wopts; wopts.vec_col = "embedding";
+        ailake::write_batch(warehouse, "default.docs", fixture_path(), wopts);
+
+        std::string out = ailake::info(warehouse, "default.docs");
+        CHECK(out.find("\"files\":1") != std::string::npos);
+        CHECK(out.find("\"indexed_files\":1") != std::string::npos);
+        CHECK(out.find("\"foreign_files\":0") != std::string::npos);
+        CHECK(out.find("\"rows\":6") != std::string::npos);
+        CHECK(out.find("\"vector_column\":\"embedding\"") != std::string::npos);
+        CHECK(out.find("\"snapshot_id\":null") == std::string::npos); // must be a real id
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL integration info: %s\n", e.what());
+        ++g_fail;
+    }
+}
+
+static void test_integration_info_missing_table_throws() {
+    const char* bin = std::getenv("AILAKE_BIN");
+    if (!bin) { std::fprintf(stdout, "SKIP: AILAKE_BIN not set\n"); return; }
+
+    std::string warehouse = make_temp_dir();
+    bool threw = false;
+    try {
+        ailake::info(warehouse, "default.nonexistent");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
 }
 
 // ── Integration (AILAKE_BIN + AILAKE_FIXTURE required) ───────────────────────
@@ -741,6 +776,8 @@ int main() {
     test_integration_write_batch_multi();
     test_integration_batch_id_idempotency();
     test_integration_compact();
+    test_integration_info();
+    test_integration_info_missing_table_throws();
     test_integration_delete_where();
     test_integration_evolve_schema();
 

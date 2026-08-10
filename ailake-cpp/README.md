@@ -496,6 +496,21 @@ ailake::backfill_vector_column("/path/to/warehouse", "default.docs", "image_embe
 std::string json = ailake::estimate("1M", 1536);
 ```
 
+### `ailake::info`
+
+```cpp
+#include <ailake/write.hpp>
+
+// Current snapshot, file/row/size counts, index status breakdown, and
+// "foreign" files (written by a generic Iceberg engine — no AI-Lake
+// centroid/HNSW). Returns the raw JSON response string (no JSON dependency
+// in this header, same convention as ailake::estimate).
+std::string json = ailake::info("/path/to/warehouse", "default.docs");
+```
+
+Found in an ecosystem-wide audit: `info` had zero binding coverage anywhere outside the CLI and
+the Airflow provider until this — not even a C-ABI export in `ailake-jni`.
+
 ### `ailake::search_text`
 
 ```cpp

@@ -123,6 +123,9 @@ object AilakeNative {
         /** Storage/index size estimates — pure math, no I/O. Returns `{"ok":true,"estimates":[...]}`. Caller must free. */
         fun ailake_estimate_json(requestJson: String): Pointer?
 
+        /** Table metadata report: snapshot, file/row/size counts, index status, foreign files. Returns `{"ok":true,...}`. Caller must free. */
+        fun ailake_info_json(requestJson: String): Pointer?
+
         fun ailake_free_string(ptr: Pointer?)
     }
 
@@ -1036,6 +1039,39 @@ object AilakeNative {
             mapper.readValue<Map<String, Any>>(ptr.getString(0))
         } catch (e: Exception) {
             log.error("[ailake] Failed to parse estimate response: {}", e.message, e)
+            null
+        } finally {
+            runCatching { native.ailake_free_string(ptr) }
+        }
+    }
+
+    /** Table metadata: current snapshot, file/row/size counts, index status breakdown, and
+     * "foreign" files (written by a generic Iceberg engine — no AI-Lake centroid/HNSW). Mirrors
+     * `ailake info --format json`. Returns null on failure or if the native lib isn't loaded. */
+    fun info(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        catalogOpts: Map<String, String> = emptyMap(),
+    ): Map<String, Any>? {
+        val native = lib ?: return null
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse, "namespace" to namespace, "table" to table,
+        )
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
+        val ptr = native.ailake_info_json(mapper.writeValueAsString(payload)) ?: run {
+            log.warn("[ailake] ailake_info_json returned null for table={}.{}", namespace, table)
+            return null
+        }
+        return try {
+            val resp = mapper.readValue<Map<String, Any>>(ptr.getString(0))
+            if (resp["ok"] != true) {
+                log.warn("[ailake] info failed for table={}.{}: {}", namespace, table, resp["error"])
+                return null
+            }
+            resp
+        } catch (e: Exception) {
+            log.error("[ailake] Failed to parse info response for table={}.{}: {}", namespace, table, e.message, e)
             null
         } finally {
             runCatching { native.ailake_free_string(ptr) }

@@ -87,6 +87,30 @@ struct EstimateResult {
     std::vector<EstimateRow>  rows;
 };
 
+// ── ailake_info row shape ───────────────────────────────────────────────────
+
+// Table metadata report: current snapshot, file/row/size counts, index
+// status breakdown, and "foreign" files (written by a generic Iceberg
+// engine — no AI-Lake centroid/HNSW). Mirrors `ailake info --format json`.
+struct InfoResult {
+    bool                      ok = false;
+    std::string               error;
+    std::string                table;
+    std::string                location;
+    std::string                vector_column;
+    std::string                vector_dim;
+    std::string                vector_metric;
+    int64_t                     files          = 0;
+    int64_t                     indexed_files  = 0;
+    int64_t                     failed_files   = 0;
+    int64_t                     foreign_files  = 0;
+    std::vector<std::string>    foreign_file_paths;
+    int64_t                     rows           = 0;
+    int64_t                     size_bytes     = 0;
+    bool                         has_snapshot_id = false;
+    int64_t                      snapshot_id    = 0;
+};
+
 // ── AilakeLib singleton ───────────────────────────────────────────────────────
 
 // Singleton holding resolved C-ABI function pointers. `ailake-jni` is linked
@@ -112,6 +136,7 @@ public:
     using decay_memories_fn_t = char *(*)(const char *);
     using migrate_fn_t       = char *(*)(const char *);
     using estimate_fn_t      = char *(*)(const char *);
+    using info_fn_t          = char *(*)(const char *);
     using free_fn_t          = void (*)(char *);
 
     static AilakeLib &get();
@@ -148,6 +173,7 @@ public:
     bool is_decay_memories_ready() const { return decay_memories_fn_ != nullptr; }
     bool is_migrate_ready()      const { return migrate_fn_       != nullptr; }
     bool is_estimate_ready()     const { return estimate_fn_      != nullptr; }
+    bool is_info_ready()         const { return info_fn_          != nullptr; }
 
     // Execute ailake_search_json. Returns empty on any error.
     // hybrid_text: when non-empty, enables hybrid BM25+vector RRF fusion.
@@ -407,6 +433,15 @@ public:
         int      pq_m   = -1
     ) const;
 
+    // Execute ailake_info_json. Reports current snapshot, file/row/size
+    // counts, index status breakdown, and "foreign" files.
+    InfoResult info(
+        const std::string &warehouse,
+        const std::string &table_name,
+        const std::string &ns = "default",
+        const std::string &catalog_opts_json = ""
+    ) const;
+
 private:
     AilakeLib() = default;
 
@@ -426,6 +461,7 @@ private:
     decay_memories_fn_t decay_memories_fn_ = nullptr;
     migrate_fn_t       migrate_fn_       = nullptr;
     estimate_fn_t      estimate_fn_      = nullptr;
+    info_fn_t          info_fn_          = nullptr;
     free_fn_t          free_fn_          = nullptr;
 };
 

@@ -52,10 +52,10 @@ type ToolCallSchema struct {
 // Use Agent.recall() which applies hybrid scoring automatically.
 type EpisodicMemorySchema struct {
 	// Recency and importance signals
-	RecencyWeight  float32   `json:"recency_weight"`   // starts at 1.0, decays via exp(-λ*t)
-	AccessCount    uint32    `json:"access_count"`     // incremented on each recall hit
-	LastAccessedAt time.Time `json:"last_accessed_at"` // updated on each recall hit
-	ImportanceScore float32  `json:"importance_score"` // agent-defined; 1.0 = neutral
+	RecencyWeight   float32   `json:"recency_weight"`   // starts at 1.0, decays via exp(-λ*t)
+	AccessCount     uint32    `json:"access_count"`     // incremented on each recall hit
+	LastAccessedAt  time.Time `json:"last_accessed_at"` // updated on each recall hit
+	ImportanceScore float32   `json:"importance_score"` // agent-defined; 1.0 = neutral
 
 	// LlmContextSchema fields (inherited)
 	AgentID         string    `json:"agent_id"`

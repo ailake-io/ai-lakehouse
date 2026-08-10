@@ -1196,6 +1196,40 @@ SELECT ailake_decay_memories('s3://my-lake/agent-memory/', 'default', 'memories'
 stdin/stdout JSON protocol as `ailake-cli`'s own `--embed-cmd` — see
 `ailake_migrate_json`'s doc comment in `ailake-jni/src/lib.rs`.
 
+### `info`
+
+Found in a later audit pass, one level below the 6-operation gap above:
+`ailake info` (current snapshot, file/row/size counts, index status
+breakdown, "foreign" files) had **zero C-ABI export in `ailake-jni` at
+all** — not even the "existed but unwired" state `create_table` was in.
+`ailake-py`, `ailake-go`, `ailake-cpp`, `duckdb-ailake`, and all three JVM
+plugins had no path to it even in principle; only `airflow-providers-ailake`
+worked, by shelling out to the CLI binary directly (bypassing `ailake-jni`
+entirely). New `ailake_info_json` export closes the gap at the source.
+
+| Engine | SQL surface | Underlying call |
+|---|---|---|
+| Spark | `spark.ailakeInfo(tableUri, ...)` (plain session method — returns the raw JSON response string, same convention as `ailakeEstimate`) | `AilakeNative.info(...)` |
+| Trino | `CALL ailake.system.info()` — no-arg, logged server-side (same reasoning as `compact()`) | `AilakeNative.info(...)` (Kotlin) |
+| Flink | `SELECT ailake_info(warehouse, namespace, table)` — scalar function, returns a JSON string | `AilakeNativeLoader.info(...)` |
+| Go / C++ / Python / DuckDB / CLI | Already reachable (`Info`/`info`/`ailake.info()`/`ailake_info`/`ailake info`) | — |
+
+```sql
+-- Trino
+CALL ailake.system.info();
+```
+
+```scala
+// Spark
+val infoJson = spark.ailakeInfo("s3://my-lake/docs/")
+```
+
+```sql
+-- Flink
+CREATE TEMPORARY FUNCTION ailake_info AS 'io.ailake.flink.AilakeInfoFunction';
+SELECT ailake_info('s3://my-lake/docs/', 'default', 'docs');
+```
+
 ---
 
 ## 8. Troubleshooting

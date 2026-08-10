@@ -224,6 +224,9 @@ interface AilakeNativeLib : Library {
     /** Storage/index size estimates — pure math, no I/O. Returns `{"ok":true,"estimates":[...]}`. Caller must free. */
     fun ailake_estimate_json(requestJson: String): Pointer?
 
+    /** Table metadata report: snapshot, file/row/size counts, index status, foreign files. Returns `{"ok":true,...}`. Caller must free. */
+    fun ailake_info_json(requestJson: String): Pointer?
+
     /** Free a string pointer returned by any ailake_* function. */
     fun ailake_free_string(ptr: Pointer?)
 }

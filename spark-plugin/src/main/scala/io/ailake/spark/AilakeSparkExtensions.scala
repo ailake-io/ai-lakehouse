@@ -305,6 +305,24 @@ object implicits {
       AilakeNative.estimate(rows, dim, hnswM, pqM)
 
     /**
+     * Table metadata: current snapshot, file/row/size counts, index status
+     * breakdown, and "foreign" files (written by a generic Iceberg engine —
+     * no AI-Lake centroid/HNSW). Mirrors `ailake info --format json`.
+     * Found in a later audit pass: zero binding coverage anywhere outside
+     * the CLI and the Airflow provider before this. Returns the raw JSON
+     * response text, or None on failure.
+     */
+    def ailakeInfo(
+      tableUri:    String,
+      namespace:   String = "default",
+      tableName:   String = "",
+      catalogOpts: Map[String, String] = Map.empty,
+    ): Option[String] = {
+      val resolvedName = if (tableName.nonEmpty) tableName else tableUri.stripSuffix("/").split("/").last
+      AilakeNative.info(tableUri, namespace, resolvedName, catalogOpts)
+    }
+
+    /**
      * Write a DataFrame to an AI-Lake table via the native library.
      *
      * The DataFrame must have columns: id (Long), embedding (Array[Double]).

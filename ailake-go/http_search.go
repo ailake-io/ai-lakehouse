@@ -22,8 +22,8 @@ import (
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 type httpSearchRequest struct {
-	Query  []float32 `json:"query"`
-	TopK   int       `json:"top_k"`
+	Query []float32 `json:"query"`
+	TopK  int       `json:"top_k"`
 }
 
 type httpSearchResponse struct {

@@ -5,14 +5,14 @@
 // Wire format: bincode v1 serialization of ailake_index::IvfPqSnapshotCore
 // followed by an optional trailing byte for the residual flag:
 //
-//   config:            IvfPqConfig { nlist, nprobe, pq_m, pq_k, max_iter: usize each }
-//   metric:            u8
-//   dim:               usize
-//   coarse_centroids:  Vec<Vec<f32>>
-//   pq:                PQCodebook { m: usize, k: usize, centroids: Vec<Vec<f32>> }
-//   inv_row_ids:       Vec<Vec<u64>>
-//   inv_codes:         Vec<Vec<u8>>   — flat PQ codes, stride=pq_m per entry
-//   [residual: u8]     — optional trailing byte; 0x01 = residual PQ encoding active
+//	config:            IvfPqConfig { nlist, nprobe, pq_m, pq_k, max_iter: usize each }
+//	metric:            u8
+//	dim:               usize
+//	coarse_centroids:  Vec<Vec<f32>>
+//	pq:                PQCodebook { m: usize, k: usize, centroids: Vec<Vec<f32>> }
+//	inv_row_ids:       Vec<Vec<u64>>
+//	inv_codes:         Vec<Vec<u8>>   — flat PQ codes, stride=pq_m per entry
+//	[residual: u8]     — optional trailing byte; 0x01 = residual PQ encoding active
 package ailake
 
 import (
@@ -21,11 +21,11 @@ import (
 
 // IvfPqConfig mirrors ailake_index::IvfPqConfig.
 type IvfPqConfig struct {
-	Nlist   uint64
-	Nprobe  uint64
-	PqM     uint64 // sub-vector count
-	PqK     uint64 // centroids per sub-space (≤ 256)
-	MaxIter uint64
+	Nlist    uint64
+	Nprobe   uint64
+	PqM      uint64 // sub-vector count
+	PqK      uint64 // centroids per sub-space (≤ 256)
+	MaxIter  uint64
 	Residual bool // true = codes are per-cluster residuals; requires per-cluster ADC
 }
 

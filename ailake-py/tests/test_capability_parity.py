@@ -130,6 +130,34 @@ def test_compact_native_merges_files(tmp_path):
     assert result2 == {"ok": True, "files_compacted": 0, "output_path": None}
 
 
+# ── info(): only CLI + Airflow provider had this before — no ailake-py/-go/-cpp
+# binding, no ailake-jni C-ABI export at all. ──────────────────────────────────
+
+def test_info_reports_files_rows_and_index_status(tmp_path):
+    path = str(tmp_path / "t3b")
+    w = ailake.TableWriter(path, dim=4)
+    w.write_batch(["a", "b", "c"], [_rand_vec(4) for _ in range(3)])
+    w.commit()
+
+    info = ailake.info(path)
+    assert info["table"] == "default.table"
+    assert info["vector_column"] == "embedding"
+    assert info["vector_dim"] == "4"
+    assert info["files"] == 1
+    assert info["indexed_files"] == 1
+    assert info["failed_files"] == 0
+    assert info["foreign_files"] == 0
+    assert info["foreign_file_paths"] == []
+    assert info["rows"] == 3
+    assert info["size_bytes"] > 0
+    assert info["snapshot_id"] is not None
+
+
+def test_info_missing_table_raises(tmp_path):
+    with pytest.raises(Exception):
+        ailake.info(str(tmp_path / "nonexistent"))
+
+
 # ── Finding #11: estimate() ─────────────────────────────────────────────────
 
 def test_estimate_returns_six_precision_modes():

@@ -290,4 +290,3 @@ func parquetRowToFields(
 
 	return fields
 }
-
