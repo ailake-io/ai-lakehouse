@@ -73,6 +73,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             }],
             equality_delete_files: vec![],
         };
