@@ -944,6 +944,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             })
             .collect();
         assert!(planner.plan(&files).is_empty());
@@ -976,6 +977,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
             DataFileEntry {
                 path: "large.parquet".into(),
@@ -996,6 +998,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
             DataFileEntry {
                 path: "also-small.parquet".into(),
@@ -1016,6 +1019,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
         ];
         let selected = planner.plan(&files);
@@ -1052,6 +1056,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             })
             .collect();
         let selected = planner.plan(&files);
@@ -1089,6 +1094,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
             DataFileEntry {
                 path: "a.parquet".into(),
@@ -1109,6 +1115,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
             DataFileEntry {
                 path: "b.parquet".into(),
@@ -1129,6 +1136,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
         ];
         let selected = planner.plan(&files);
@@ -1157,6 +1165,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         }
     }
 
@@ -1304,6 +1313,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -1324,6 +1334,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
         ];
 
@@ -1434,6 +1445,7 @@ mod tests {
             }),
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let entry_b = DataFileEntry {
             path: "data/b.parquet".into(),
@@ -1454,6 +1466,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
 
         let executor = CompactionExecutor::new(store.clone(), policy.clone());
@@ -1564,6 +1577,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let entries = vec![
             make_entry(&path_a, bytes_a.len() as u64),
@@ -1678,6 +1692,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
             DataFileEntry {
                 path: "data/small.parquet".into(),
@@ -1698,6 +1713,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
         ];
 
@@ -1828,6 +1844,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let entries = vec![
             make_entry(&path_dom, n_dom, bytes_dom.len() as u64),
@@ -1923,6 +1940,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -1943,6 +1961,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
         ];
 
@@ -2056,6 +2075,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
             DataFileEntry {
                 path: "data/b.parquet".into(),
@@ -2076,6 +2096,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
         ];
 
@@ -2182,6 +2203,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             }
         }
         let entries = vec![
@@ -2324,6 +2346,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
 
         let initial_snap_id = ailake_catalog::new_snapshot_id();
@@ -2499,6 +2522,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
             DataFileEntry {
                 path: "data/foreign.parquet".into(),
@@ -2519,6 +2543,7 @@ mod tests {
                 deletion_vector: None,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             },
         ];
 
@@ -2658,6 +2683,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let entry_b = DataFileEntry {
             path: "data/b.parquet".into(),
@@ -2678,6 +2704,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
 
         catalog
@@ -2751,6 +2778,7 @@ mod tests {
             deletion_vector: merged.deletion_vector,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         catalog
             .commit_snapshot(

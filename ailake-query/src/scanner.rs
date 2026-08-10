@@ -717,7 +717,11 @@ async fn search_one_file(
                 continue;
             }
             // Phase H: skip rows matched by an equality delete predicate.
-            if eq_del_filter.should_delete_row(&batch, row_id.as_u64() as usize) {
+            if eq_del_filter.should_delete_row(
+                &batch,
+                row_id.as_u64() as usize,
+                file_entry.sequence_number,
+            ) {
                 continue;
             }
             // Predicate pushdown: row survived the file-level check above,
@@ -773,7 +777,7 @@ async fn search_one_file(
         // Phase H: skip rows matched by an equality delete predicate.
         // parquet_data is always loaded when eq_del_filter is non-empty (see need_parquet).
         if let Some((ref batch, _)) = parquet_data {
-            if eq_del_filter.should_delete_row(batch, idx) {
+            if eq_del_filter.should_delete_row(batch, idx, file_entry.sequence_number) {
                 continue;
             }
         }
@@ -1463,7 +1467,11 @@ pub async fn search_text(
                             if row_idx >= batch.num_rows() {
                                 continue;
                             }
-                            if eq_del_filter.should_delete_row(&batch, row_idx) {
+                            if eq_del_filter.should_delete_row(
+                                &batch,
+                                row_idx,
+                                file_entry.sequence_number,
+                            ) {
                                 continue;
                             }
                             results.push(SearchResult {
@@ -1490,7 +1498,7 @@ pub async fn search_text(
 
         for row_idx in 0..batch.num_rows() {
             // Phase H: skip rows matched by equality delete predicate.
-            if eq_del_filter.should_delete_row(&batch, row_idx) {
+            if eq_del_filter.should_delete_row(&batch, row_idx, file_entry.sequence_number) {
                 continue;
             }
             let doc_text: String = text_columns

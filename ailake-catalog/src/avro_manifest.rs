@@ -425,6 +425,24 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
     for value in reader {
         let value = value?;
         if let Value::Record(fields) = value {
+            // Data sequence number (spec field-id 3) — the commit that added this
+            // entry. Legacy manifests written before this field existed decode as
+            // null; `0` is a safe fallback (see `DataFileEntry::sequence_number` doc).
+            let sequence_number: i64 = fields
+                .iter()
+                .find(|(k, _)| k == "sequence_number")
+                .and_then(|(_, v)| match v {
+                    Value::Union(_, inner) => {
+                        if let Value::Long(n) = inner.as_ref() {
+                            Some(*n)
+                        } else {
+                            None
+                        }
+                    }
+                    Value::Long(n) => Some(*n),
+                    _ => None,
+                })
+                .unwrap_or(0);
             // Extract key_metadata bytes for AI-Lake extension fields
             let key_meta_bytes: Option<Vec<u8>> = fields
                 .iter()
@@ -575,6 +593,7 @@ pub fn read_manifest_file(data: &[u8]) -> apache_avro::AvroResult<Vec<DataFileEn
                         // encoded as real native Avro fields by `write_manifest_file`,
                         // not read back — nothing downstream consumes it post-read.
                         column_stats: None,
+                        sequence_number,
                     });
                 }
             }
@@ -862,6 +881,23 @@ pub fn read_equality_delete_manifest(
     for value in reader {
         let value = value?;
         if let Value::Record(fields) = value {
+            // See the identical block in `read_manifest_file` — same field,
+            // same fallback rationale (`EqualityDeleteFile::sequence_number` doc).
+            let sequence_number: i64 = fields
+                .iter()
+                .find(|(k, _)| k == "sequence_number")
+                .and_then(|(_, v)| match v {
+                    Value::Union(_, inner) => {
+                        if let Value::Long(n) = inner.as_ref() {
+                            Some(*n)
+                        } else {
+                            None
+                        }
+                    }
+                    Value::Long(n) => Some(*n),
+                    _ => None,
+                })
+                .unwrap_or(0);
             let data_file = fields
                 .iter()
                 .find(|(k, _)| k == "data_file")
@@ -955,6 +991,7 @@ pub fn read_equality_delete_manifest(
                         record_count,
                         file_size_bytes,
                         inline_values: None,
+                        sequence_number,
                     });
                 }
             }
@@ -1199,6 +1236,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -1248,6 +1286,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -1288,6 +1327,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -1320,6 +1360,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: Some(5000),
             column_stats: None,
+            sequence_number: 0,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -1349,6 +1390,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -1404,6 +1446,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: Some(serde_json::to_string(&stats).unwrap()),
+            sequence_number: 0,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -1494,6 +1537,7 @@ mod tests {
             record_count: 3,
             file_size_bytes: 512,
             inline_values: None,
+            sequence_number: 0,
         };
         let bytes = write_equality_delete_manifest(&[del], 42, 1);
         let entries =
@@ -1552,6 +1596,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[{"id":1,"name":"agent_id","required":false,"type":"string"}]}"#;
         let partition_spec_json = r#"[{"spec-id":0,"fields":[]},{"spec-id":1,"fields":[{"name":"agent_id","transform":"identity","source-id":1,"field-id":1000}]}]"#;
@@ -1602,6 +1647,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[{"id":1,"name":"shard_id","required":false,"type":"int"}]}"#;
         let partition_spec_json = r#"[{"spec-id":1,"fields":[{"name":"shard_id","transform":"identity","source-id":1,"field-id":1000}]}]"#;
@@ -1661,6 +1707,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[{"id":1,"name":"agent_id","required":false,"type":"string"},{"id":2,"name":"ts","required":false,"type":"string"}]}"#;
         let partition_spec_json = r#"[{"spec-id":0,"fields":[]},{"spec-id":1,"fields":[{"name":"agent_id","transform":"identity","source-id":1,"field-id":1000},{"name":"ts","transform":"truncate[4]","source-id":2,"field-id":1001}]}]"#;
@@ -1728,6 +1775,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         }
     }
 
@@ -1847,6 +1895,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let schema_json = r#"{"schema-id":0,"type":"struct","fields":[]}"#;
         let partition_spec = r#"[{"spec-id":0,"fields":[]}]"#;
@@ -2020,6 +2069,7 @@ mod tests {
                         deletion_vector,
                         first_row_id,
                         column_stats: None,
+                        sequence_number: 0,
                     }
                 },
             )
@@ -2039,6 +2089,7 @@ mod tests {
                         record_count,
                         file_size_bytes,
                         inline_values: None,
+                        sequence_number: 0,
                     }
                 })
         }

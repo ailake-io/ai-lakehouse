@@ -186,6 +186,7 @@ async fn concurrent_search_and_compact() {
                 deletion_vector: merged.deletion_vector,
                 first_row_id: None,
                 column_stats: None,
+                sequence_number: 0,
             };
 
             let result = comp_cat
