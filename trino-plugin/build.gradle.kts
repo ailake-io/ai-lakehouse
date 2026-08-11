@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "io.ailake"
-version = "0.1.10"
+version = "0.1.11"
 
 repositories {
     mavenCentral()

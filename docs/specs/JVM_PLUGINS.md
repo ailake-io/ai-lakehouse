@@ -86,8 +86,8 @@ listed above — it predates the JSON-envelope API and isn't used by any plugin'
 Each GitHub Release includes pre-built artifacts uploaded by the `publish-jvm.yml` workflow. No Rust toolchain or Gradle required.
 
 ```bash
-TAG=v0.1.10          # GitHub release tag — replace with desired release (Rust/PyPI version)
-JAR_VERSION=0.1.10   # JVM plugin version — gradle, versioned independently of TAG; check the release page
+TAG=v0.1.11          # GitHub release tag — replace with desired release (Rust/PyPI version)
+JAR_VERSION=0.1.11   # JVM plugin version — gradle, versioned independently of TAG; check the release page
 
 # Spark plugin
 wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/spark-plugin-${JAR_VERSION}-plugin.jar
@@ -272,7 +272,7 @@ gradle wrapper       # creates ./gradlew — run once
 ./gradlew shadowJar  # builds fat-jar with JNA bundled
 
 # Output
-ls -lh build/libs/trino-plugin-0.1.10-plugin.jar
+ls -lh build/libs/trino-plugin-0.1.11-plugin.jar
 ```
 
 ### Install
@@ -282,7 +282,7 @@ TRINO_HOME=/opt/trino   # adjust to your installation
 
 # 1. Plugin jar
 mkdir -p $TRINO_HOME/plugin/ailake
-cp build/libs/trino-plugin-0.1.10-plugin.jar $TRINO_HOME/plugin/ailake/
+cp build/libs/trino-plugin-0.1.11-plugin.jar $TRINO_HOME/plugin/ailake/
 
 # 2. Native library — add to Trino's JVM library path
 echo "-Djava.library.path=$NATIVE_LIB_DIR" >> $TRINO_HOME/etc/jvm.config
@@ -481,7 +481,7 @@ cd spark-plugin
 gradle wrapper
 ./gradlew shadowJar
 
-ls -lh build/libs/spark-plugin-0.1.10-plugin.jar
+ls -lh build/libs/spark-plugin-0.1.11-plugin.jar
 ```
 
 ### How the strategy works
@@ -508,7 +508,7 @@ spark.ailakeSearch(uri, query, topK)
 ### Launching Spark
 
 ```bash
-PLUGIN_JAR=$(pwd)/spark-plugin/build/libs/spark-plugin-0.1.10-plugin.jar
+PLUGIN_JAR=$(pwd)/spark-plugin/build/libs/spark-plugin-0.1.11-plugin.jar
 
 # Interactive (spark-shell)
 $SPARK_HOME/bin/spark-shell \
@@ -579,7 +579,7 @@ export AILAKE_TABLE=/tmp/ailakeXXXXXX/warehouse/default/demo_table
 
 # 2. Start spark-shell with plugin
 $SPARK_HOME/bin/spark-shell \
-  --jars $(pwd)/spark-plugin/build/libs/spark-plugin-0.1.10-plugin.jar \
+  --jars $(pwd)/spark-plugin/build/libs/spark-plugin-0.1.11-plugin.jar \
   --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions \
   --conf "spark.driver.extraJavaOptions=-Djava.library.path=$(pwd)/target/release" \
   --conf spark.ui.enabled=false
