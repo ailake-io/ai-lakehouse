@@ -65,7 +65,7 @@ pub struct ExtraVectorIndex {
 }
 
 /// Metadata about a single data file in a table snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DataFileEntry {
     /// Relative path within the warehouse (e.g., "data/part-00001.parquet")
     pub path: String,
@@ -122,6 +122,22 @@ pub struct DataFileEntry {
     /// format version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_stats: Option<String>,
+    /// Iceberg data sequence number of the snapshot that added this file (spec
+    /// `manifest_entry.sequence_number`). `0` for files predating this field
+    /// (legacy manifests, or any in-memory entry not yet round-tripped through
+    /// `read_manifest_file`) — safe because it only ever *lowers* an equality
+    /// delete's apparent reach (a delete with sequence_number > 0 still masks
+    /// a `0`-tagged file, same as before this field existed). Populated only
+    /// on read (`avro_manifest::read_manifest_file`); writers never need to
+    /// set it correctly — `write_manifest_file` always stamps every entry
+    /// with the *commit's* sequence number, ignoring whatever this field
+    /// held going in. See `EqualityDeleteFile::sequence_number` doc for why
+    /// both exist: Iceberg masks a data file only when
+    /// `data_file.sequence_number < delete_file.sequence_number`, which is
+    /// what makes an insert+delete of the same key inside one commit leave
+    /// the insert visible (equal sequence numbers never mask).
+    #[serde(default)]
+    pub sequence_number: i64,
 }
 
 impl DataFileEntry {
@@ -250,7 +266,7 @@ pub struct IcebergSchemaUpdate {
 /// The delete file is an Avro file with `content=2` whose rows contain equality
 /// predicates — any data row matching one of those rows is logically deleted.
 /// `equality_ids` lists the field IDs used for the equality check.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EqualityDeleteFile {
     /// Absolute or warehouse-relative path of the Avro delete file.
     pub path: String,
@@ -267,6 +283,17 @@ pub struct EqualityDeleteFile {
     /// `DELETE FROM lake.tbl WHERE col IN (...)` when the column is declared.
     #[serde(default, skip_serializing)]
     pub inline_values: Option<(String, Vec<String>)>,
+    /// Iceberg data sequence number this delete file was committed with (spec
+    /// `manifest_entry.sequence_number`). Per spec, an equality delete only
+    /// masks a data file whose own `DataFileEntry::sequence_number` is
+    /// strictly less than this — see that field's doc for why. `0` for
+    /// legacy/in-memory entries; populated on read by
+    /// `avro_manifest::read_equality_delete_manifest`. Writers don't need to
+    /// set it correctly for the same reason as `DataFileEntry::sequence_number`:
+    /// `write_equality_delete_manifest` always stamps every entry with the
+    /// commit's own sequence number, ignoring this field on the way in.
+    #[serde(default)]
+    pub sequence_number: i64,
 }
 
 /// Snapshot commit request.
@@ -556,6 +583,7 @@ pub fn make_multi_column_data_file_entry(
         deletion_vector: None,
         first_row_id: None,
         column_stats: None,
+        sequence_number: 0,
     }
 }
 
@@ -597,6 +625,7 @@ pub fn make_data_file_entry_indexing(
         deletion_vector: None,
         first_row_id: None,
         column_stats: None,
+        sequence_number: 0,
     }
 }
 
@@ -668,6 +697,7 @@ mod batch_id_tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         }
     }
 

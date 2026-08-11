@@ -230,6 +230,10 @@ pub(crate) async fn build_commit(
             record_count: d.record_count,
             file_size_bytes: d.file_size_bytes,
             inline_values: None,
+            // Discarded on the write path: `write_equality_delete_manifest` below
+            // stamps every entry with `seq` (this commit's own sequence number)
+            // regardless of what this struct carries in.
+            sequence_number: 0,
         })
         .collect();
     if !abs_eq_deletes.is_empty() {

@@ -38,12 +38,12 @@ func (b Backend) String() string {
 
 // HardwareProfile mirrors ailake_index::HardwareProfile.
 type HardwareProfile struct {
-	Backend     Backend
-	HasCUDA     bool
-	HasROCm     bool
-	CPUCores    int
-	HasAVX2     bool // x86_64 only
-	HasAVX512   bool // x86_64 only
+	Backend   Backend
+	HasCUDA   bool
+	HasROCm   bool
+	CPUCores  int
+	HasAVX2   bool // x86_64 only
+	HasAVX512 bool // x86_64 only
 }
 
 // MinVectorsForIvfPq is the minimum dataset size that justifies IVF-PQ training.
@@ -70,7 +70,7 @@ func (h *HardwareProfile) HasGPU() bool {
 // ---------------------------------------------------------------------------
 
 var (
-	profileOnce sync.Once
+	profileOnce   sync.Once
 	globalProfile HardwareProfile
 )
 
@@ -187,7 +187,7 @@ func detectSIMD() (hasAVX2, hasAVX512 bool) {
 	// We call the assembly stub defined in simd_amd64.s.
 	// If the stub is not compiled (non-amd64), the linker simply omits it.
 	ebx := cpuidLeaf7EBX()
-	hasAVX2   = (ebx>>5)&1 == 1
+	hasAVX2 = (ebx>>5)&1 == 1
 	hasAVX512 = (ebx>>16)&1 == 1
 	return
 }

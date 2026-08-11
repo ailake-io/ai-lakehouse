@@ -21,14 +21,17 @@ class AilakeProceduresTest {
     fun getProceduresReturnsCompactAndCreateTableProcedures() {
         val procs = procedures.getProcedures()
         // compact, create_table, decay_memories, migrate, delete_rows,
-        // add_vector_column, backfill_vector_column, estimate (Fase 21) — all
-        // no-arg, same reasoning as compact/create_table (parameters come
-        // from SET SESSION properties, not typed CALL arguments).
-        assertEquals(8, procs.size)
+        // add_vector_column, backfill_vector_column, estimate (Fase 21),
+        // info (later audit pass — ailake_info_json had zero binding
+        // coverage anywhere until then) — all no-arg, same reasoning as
+        // compact/create_table (parameters come from SET SESSION
+        // properties, not typed CALL arguments).
+        assertEquals(9, procs.size)
         val byName = procs.associateBy { it.name }
         for (name in listOf(
             "compact", "create_table", "decay_memories", "migrate",
             "delete_rows", "add_vector_column", "backfill_vector_column", "estimate",
+            "info",
         )) {
             val proc = byName.getValue(name)
             assertEquals("system", proc.schema)

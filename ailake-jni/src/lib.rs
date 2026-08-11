@@ -2208,6 +2208,154 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
     })
 }
 
+// ── ailake_info_json — table metadata / foreign-file / index-status report ────
+
+/// Report table metadata: current snapshot, file/row/size counts, index
+/// status breakdown, and "foreign" files (written by a generic Iceberg
+/// engine — no AI-Lake centroid/HNSW — see `is_foreign()`). Mirrors
+/// `ailake info --format json` exactly (same fields, same source data).
+///
+/// `request_json`:
+/// ```json
+/// {"warehouse": "/data/my_table", "namespace": "default", "table": "my_table"}
+/// ```
+///
+/// Returns `{"ok":true,"table":...,"location":...,"vector_column":...,
+/// "vector_dim":...,"vector_metric":...,"files":N,"indexed_files":N,
+/// "failed_files":N,"foreign_files":N,"foreign_file_paths":[...],"rows":N,
+/// "size_bytes":N,"snapshot_id":...}` on success, `{"error":"..."}` on failure.
+///
+/// # Safety
+/// Caller must free the returned pointer with `ailake_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_info_json(request_json: *const c_char) -> *mut c_char {
+    catch_ffi_panic("ailake_info_json", move || {
+        #[derive(serde::Deserialize)]
+        struct Req {
+            warehouse: String,
+            #[serde(flatten)]
+            catalog_opts: CatalogOpts,
+            #[serde(default = "info_default_ns")]
+            namespace: String,
+            table: String,
+        }
+        fn info_default_ns() -> String {
+            "default".into()
+        }
+
+        if request_json.is_null() {
+            return cstr_err_json("null request_json");
+        }
+        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let req: Req = match serde_json::from_str(json_str) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("ailake_info_json: JSON parse error: {}", e);
+                return cstr_err_json(e);
+            }
+        };
+
+        let store = match store_for_warehouse(&req.warehouse) {
+            Ok(s) => s,
+            Err(e) => return cstr_err_json(e),
+        };
+        let catalog = match resolve_catalog(&req.warehouse, store, &req.catalog_opts) {
+            Ok(c) => c,
+            Err(e) => return cstr_err_json(e),
+        };
+        let table = TableIdent::new(&req.namespace, &req.table);
+
+        let meta = match rt().block_on(catalog.load_table(&table)) {
+            Ok(m) => m,
+            Err(e) => return cstr_err_json(e),
+        };
+        let files = match rt().block_on(catalog.list_files(&table, None)) {
+            Ok(f) => f,
+            Err(e) => return cstr_err_json(e),
+        };
+
+        let file_count = files.len();
+        let row_count: u64 = files.iter().map(|f| f.record_count).sum();
+        let size_bytes: u64 = files.iter().map(|f| f.file_size_bytes).sum();
+        let ready = files
+            .iter()
+            .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Ready)
+            .count();
+        let failed = files
+            .iter()
+            .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Failed)
+            .count();
+        let foreign: Vec<&str> = files
+            .iter()
+            .filter(|f| f.is_foreign())
+            .map(|f| f.path.as_str())
+            .collect();
+
+        let location = meta
+            .properties
+            .get("ailake.location")
+            .cloned()
+            .unwrap_or_else(|| meta.location.clone());
+        let vector_column = meta
+            .properties
+            .get("ailake.vector-column")
+            .map(String::as_str)
+            .unwrap_or("-")
+            .to_string();
+        let vector_dim = meta
+            .properties
+            .get("ailake.vector-dim")
+            .map(String::as_str)
+            .unwrap_or("-")
+            .to_string();
+        let vector_metric = meta
+            .properties
+            .get("ailake.vector-metric")
+            .map(String::as_str)
+            .unwrap_or("-")
+            .to_string();
+
+        #[derive(serde::Serialize)]
+        struct Resp<'a> {
+            ok: bool,
+            table: String,
+            location: String,
+            vector_column: String,
+            vector_dim: String,
+            vector_metric: String,
+            files: usize,
+            indexed_files: usize,
+            failed_files: usize,
+            foreign_files: usize,
+            foreign_file_paths: Vec<&'a str>,
+            rows: u64,
+            size_bytes: u64,
+            snapshot_id: Option<i64>,
+        }
+        serde_json::to_string(&Resp {
+            ok: true,
+            table: format!("{}.{}", req.namespace, req.table),
+            location,
+            vector_column,
+            vector_dim,
+            vector_metric,
+            files: file_count,
+            indexed_files: ready,
+            failed_files: failed,
+            foreign_files: foreign.len(),
+            foreign_file_paths: foreign,
+            rows: row_count,
+            size_bytes,
+            snapshot_id: meta.current_snapshot_id,
+        })
+        .map(cstr_json)
+        .unwrap_or_else(cstr_err_json)
+    })
+}
+
 // ── ailake_delete_where_json — Phase H: logical row deletion ──────────────────
 
 /// Delete all rows where `column` equals any value in `values`.
@@ -4504,6 +4652,85 @@ mod tests {
     /// Not testing embedding quality — proving the JNI plumbing (spawn, stdin/
     /// stdout JSON protocol, job execution, snapshot commit) actually works.
     const FIXED_EMBED_CMD: &str = "python3 -c \"import sys,json; texts=json.load(sys.stdin); print(json.dumps([[1.0,2.0] for _ in texts]))\"";
+
+    #[test]
+    fn info_json_roundtrip_reports_files_and_counts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let warehouse = dir.path().to_str().unwrap().to_string();
+
+        let create_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "dim": 4, "vector_column": "embedding", "metric": "cosine", "precision": "f16",
+        })
+        .to_string();
+        let c = CString::new(create_req).unwrap();
+        let resp = call_json(unsafe { ailake_create_table_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "create_table: {resp}"
+        );
+
+        let write_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+            "vec_col": "embedding", "dim": 4, "metric": "cosine",
+            "ids": [1, 2, 3],
+            "embeddings": [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8], [0.9, 1.0, 1.1, 1.2]],
+        })
+        .to_string();
+        let c = CString::new(write_req).unwrap();
+        let resp = call_json(unsafe { ailake_write_batch_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(true),
+            "write_batch: {resp}"
+        );
+
+        let info_req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "docs",
+        })
+        .to_string();
+        let c = CString::new(info_req).unwrap();
+        let resp = call_json(unsafe { ailake_info_json(c.as_ptr()) });
+        assert_eq!(resp["ok"], serde_json::Value::Bool(true), "info: {resp}");
+        assert_eq!(resp["table"], "default.docs");
+        assert_eq!(resp["vector_column"], "embedding");
+        assert_eq!(resp["vector_dim"], "4");
+        assert_eq!(resp["files"], 1);
+        assert_eq!(
+            resp["indexed_files"], 1,
+            "expected the single file HNSW-ready: {resp}"
+        );
+        assert_eq!(resp["failed_files"], 0);
+        assert_eq!(
+            resp["foreign_files"], 0,
+            "SDK-written file must not be foreign: {resp}"
+        );
+        assert_eq!(resp["rows"], 3);
+        assert!(resp["size_bytes"].as_u64().unwrap() > 0);
+        assert!(
+            resp["snapshot_id"].is_i64(),
+            "expected a real snapshot_id: {resp}"
+        );
+    }
+
+    #[test]
+    fn info_json_missing_table_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let warehouse = dir.path().to_str().unwrap().to_string();
+        let req = serde_json::json!({
+            "warehouse": warehouse, "namespace": "default", "table": "nonexistent",
+        })
+        .to_string();
+        let c = CString::new(req).unwrap();
+        let resp = call_json(unsafe { ailake_info_json(c.as_ptr()) });
+        assert_eq!(
+            resp["ok"],
+            serde_json::Value::Bool(false),
+            "expected error: {resp}"
+        );
+        assert!(resp["error"].is_string());
+    }
 
     #[test]
     fn estimate_json_pure_math_no_warehouse() {

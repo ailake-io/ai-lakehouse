@@ -745,6 +745,21 @@ def compact(
     """
     ...
 
+def info(
+    path: str,
+    catalog_opts: Optional[dict[str, str]] = None,
+) -> dict[str, object]:
+    """Report table metadata: current snapshot, file/row/size counts, index
+    status breakdown, and "foreign" files (written by a generic Iceberg
+    engine — no AI-Lake centroid/HNSW). Mirrors ``ailake info --format json``.
+
+    Returns ``{"table": str, "location": str, "vector_column": str,
+    "vector_dim": str, "vector_metric": str, "files": int, "indexed_files": int,
+    "failed_files": int, "foreign_files": int, "foreign_file_paths": list[str],
+    "rows": int, "size_bytes": int, "snapshot_id": int | None}``.
+    """
+    ...
+
 def estimate(
     rows: int,
     dim: int,

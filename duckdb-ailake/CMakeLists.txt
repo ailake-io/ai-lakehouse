@@ -64,6 +64,13 @@ add_library(duckdb_ailake MODULE
     src/ailake_write_batch_multi.cpp
     src/ailake_compact.cpp
     src/ailake_create_table.cpp
+    src/ailake_delete_rows.cpp
+    src/ailake_add_vector_column.cpp
+    src/ailake_backfill_vector_column.cpp
+    src/ailake_decay_memories.cpp
+    src/ailake_migrate.cpp
+    src/ailake_estimate.cpp
+    src/ailake_info.cpp
     src/ailake_version.cpp
 )
 

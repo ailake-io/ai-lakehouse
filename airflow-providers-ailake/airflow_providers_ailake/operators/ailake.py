@@ -199,6 +199,43 @@ class AilakeCompactOperator(BaseOperator):
         return files_compacted
 
 
+class AilakeDecayMemoriesOperator(BaseOperator):
+    """Recompute agent-memory recency weights via exponential decay.
+
+    Wraps ``ailake decay-memories <table> --lambda <λ>``. Companion to
+    :class:`AilakeCompactOperator` for periodic-maintenance DAGs on
+    ``EpisodicMemorySchema`` tables (Phase 9) — schedule alongside compaction
+    to keep ``recency_weight`` current for hybrid recall scoring
+    (``final_score = distance * recency_weight * importance_score``).
+
+    :param table: Fully-qualified table name (``namespace.table``).
+    :param decay_lambda: Exponential decay rate λ (default 0.1, half-life ≈ 7 days).
+    :param ailake_conn_id: Airflow connection id.
+    """
+
+    template_fields: Sequence[str] = ("table",)
+    ui_color = "#ffe0b3"
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        decay_lambda: float = 0.1,
+        ailake_conn_id: str = AilakeHook.default_conn_name,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.table = table
+        self.decay_lambda = decay_lambda
+        self.ailake_conn_id = ailake_conn_id
+
+    def execute(self, context: Context) -> int:
+        hook = AilakeHook(ailake_conn_id=self.ailake_conn_id)
+        files_updated = hook.decay_memories(self.table, decay_lambda=self.decay_lambda)
+        self.log.info("decay_memories: table=%s files_updated=%d", self.table, files_updated)
+        return files_updated
+
+
 class AilakeSearchOperator(BaseOperator):
     """Run a vector similarity search on an AI-Lake table and return the results.
 

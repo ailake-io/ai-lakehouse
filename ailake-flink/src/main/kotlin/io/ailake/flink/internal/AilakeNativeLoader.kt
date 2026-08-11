@@ -816,6 +816,38 @@ object AilakeNativeLoader {
     }
 
     /**
+     * Table metadata: current snapshot, file/row/size counts, index status
+     * breakdown, and "foreign" files (written by a generic Iceberg engine —
+     * no AI-Lake centroid/HNSW). Mirrors `ailake info --format json`.
+     * Found in a later audit pass: had zero binding coverage anywhere
+     * outside the CLI and the Airflow provider. Returns the raw JSON
+     * response as a Map. Throws on failure.
+     */
+    fun info(
+        warehouse: String,
+        namespace: String,
+        table: String,
+        catalogOpts: Map<String, String> = emptyMap(),
+    ): Map<String, Any> {
+        val payload = mutableMapOf<String, Any>(
+            "warehouse" to warehouse, "namespace" to namespace, "table" to table,
+        )
+        if (catalogOpts.isNotEmpty()) payload.putAll(catalogOpts)
+        val ptr = lib.ailake_info_json(mapper.writeValueAsString(payload))
+            ?: throw RuntimeException("ailake_info_json returned null for table=$namespace.$table")
+        return try {
+            val resp = mapper.readValue<Map<String, Any>>(ptr.getString(0))
+            if (resp["ok"] != true) {
+                throw RuntimeException("ailake_info_json error: ${resp["error"]}")
+            }
+            log.info("[ailake] info OK table={}.{}", namespace, table)
+            resp
+        } finally {
+            lib.ailake_free_string(ptr)
+        }
+    }
+
+    /**
      * Compact small files in an AI-Lake table.
      *
      * @param minFiles          minimum eligible files to trigger compaction (default 4)

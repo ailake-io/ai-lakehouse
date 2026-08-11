@@ -183,6 +183,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         };
         let query = vec![0.0f32, 0.0, 1.0];
         let kept = VectorPruner::prune(vec![entry], &query, VectorMetric::Cosine, 0.0);

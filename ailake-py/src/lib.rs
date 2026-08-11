@@ -1630,6 +1630,96 @@ fn compact(
     Ok(d.into())
 }
 
+/// Report table metadata: current snapshot, file/row/size counts, index
+/// status breakdown, and "foreign" files (written by a generic Iceberg
+/// engine — no AI-Lake centroid/HNSW — see `DataFileEntry::is_foreign`).
+///
+/// Mirrors `ailake info --format json` exactly (same fields, same source data
+/// — `catalog.load_table` + `catalog.list_files`).
+///
+/// Args:
+///   path: table root path or URI (same value passed to TableWriter)
+///
+/// Returns a dict: {"table": str, "location": str, "vector_column": str,
+///   "vector_dim": str, "vector_metric": str, "files": int, "indexed_files": int,
+///   "failed_files": int, "foreign_files": int, "foreign_file_paths": list[str],
+///   "rows": int, "size_bytes": int, "snapshot_id": int | None}.
+#[pyfunction]
+#[pyo3(signature = (path, catalog_opts=None))]
+fn info(
+    py: Python<'_>,
+    path: &str,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
+) -> PyResult<Py<PyAny>> {
+    let rt = rt()?;
+    let (catalog, _store) = local_catalog_store(path, catalog_opts.as_ref())?;
+    let table = TableIdent::new("default", "table");
+
+    let meta = rt
+        .block_on(catalog.load_table(&table))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let files = rt
+        .block_on(catalog.list_files(&table, None))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let file_count = files.len();
+    let row_count: u64 = files.iter().map(|f| f.record_count).sum();
+    let size_bytes: u64 = files.iter().map(|f| f.file_size_bytes).sum();
+    let ready = files
+        .iter()
+        .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Ready)
+        .count();
+    let failed = files
+        .iter()
+        .filter(|f| f.index_status == ailake_catalog::provider::IndexStatus::Failed)
+        .count();
+    let foreign: Vec<&str> = files
+        .iter()
+        .filter(|f| f.is_foreign())
+        .map(|f| f.path.as_str())
+        .collect();
+
+    let location = meta
+        .properties
+        .get("ailake.location")
+        .cloned()
+        .unwrap_or_else(|| meta.location.clone());
+    let vector_column = meta
+        .properties
+        .get("ailake.vector-column")
+        .map(String::as_str)
+        .unwrap_or("-")
+        .to_string();
+    let vector_dim = meta
+        .properties
+        .get("ailake.vector-dim")
+        .map(String::as_str)
+        .unwrap_or("-")
+        .to_string();
+    let vector_metric = meta
+        .properties
+        .get("ailake.vector-metric")
+        .map(String::as_str)
+        .unwrap_or("-")
+        .to_string();
+
+    let d = PyDict::new(py);
+    d.set_item("table", "default.table")?;
+    d.set_item("location", location)?;
+    d.set_item("vector_column", vector_column)?;
+    d.set_item("vector_dim", vector_dim)?;
+    d.set_item("vector_metric", vector_metric)?;
+    d.set_item("files", file_count)?;
+    d.set_item("indexed_files", ready)?;
+    d.set_item("failed_files", failed)?;
+    d.set_item("foreign_files", foreign.len())?;
+    d.set_item("foreign_file_paths", foreign)?;
+    d.set_item("rows", row_count)?;
+    d.set_item("size_bytes", size_bytes)?;
+    d.set_item("snapshot_id", meta.current_snapshot_id)?;
+    Ok(d.into())
+}
+
 /// Estimate storage usage before writing a table (pure math, no I/O).
 ///
 /// Mirrors `ailake estimate`'s math exactly (ailake-cli/src/main.rs
@@ -2112,6 +2202,7 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(add_vector_column, m)?)?;
     m.add_function(wrap_pyfunction!(backfill_vector_column, m)?)?;
     m.add_function(wrap_pyfunction!(compact, m)?)?;
+    m.add_function(wrap_pyfunction!(info, m)?)?;
     m.add_function(wrap_pyfunction!(estimate, m)?)?;
     m.add_function(wrap_pyfunction!(create_table, m)?)?;
     Ok(())

@@ -23,6 +23,7 @@ from ailake._ailake import (  # type: ignore[import]
     delete_where,
     estimate,
     hardware_info,
+    info,
     migrate_embeddings,
     now_ns,
     rename_column,
@@ -77,6 +78,7 @@ __all__ = [
     "backfill_vector_column",
     "now_ns",
     "hardware_info",
+    "info",
     "create_table",
 ]
 

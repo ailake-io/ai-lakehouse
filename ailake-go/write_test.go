@@ -296,6 +296,59 @@ func TestEstimateIntegration(t *testing.T) {
 	}
 }
 
+// ── Info ──────────────────────────────────────────────────────────────────────
+
+func TestInfoIntegration(t *testing.T) {
+	bin := os.Getenv("AILAKE_BIN")
+	if bin == "" {
+		t.Skip("AILAKE_BIN not set")
+	}
+
+	catalog := &HadoopCatalog{Warehouse: t.TempDir()}
+	opts := WriteBatchOptions{VecCol: "embedding"}
+	if err := WriteBatch(catalog, "default", "docs", "testdata/multimodal_fixture.parquet", opts); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+
+	info, err := Info(catalog, "default", "docs", nil)
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	if info.Files != 1 {
+		t.Errorf("expected 1 file, got %d", info.Files)
+	}
+	if info.IndexedFiles != 1 {
+		t.Errorf("expected 1 indexed file (SDK-written, must not be foreign), got %d", info.IndexedFiles)
+	}
+	if info.ForeignFiles != 0 {
+		t.Errorf("expected 0 foreign files, got %d (%v)", info.ForeignFiles, info.ForeignFilePaths)
+	}
+	if info.Rows != 6 {
+		t.Errorf("expected 6 rows (multimodal_fixture.parquet), got %d", info.Rows)
+	}
+	if info.SizeBytes <= 0 {
+		t.Errorf("expected size_bytes > 0, got %d", info.SizeBytes)
+	}
+	if info.SnapshotID == nil {
+		t.Error("expected a non-nil snapshot_id")
+	}
+	if info.VectorColumn != "embedding" {
+		t.Errorf("expected vector_column=embedding, got %q", info.VectorColumn)
+	}
+}
+
+func TestInfoIntegration_MissingTableErrors(t *testing.T) {
+	bin := os.Getenv("AILAKE_BIN")
+	if bin == "" {
+		t.Skip("AILAKE_BIN not set")
+	}
+
+	catalog := &HadoopCatalog{Warehouse: t.TempDir()}
+	if _, err := Info(catalog, "default", "nonexistent", nil); err == nil {
+		t.Error("expected an error for a nonexistent table, got nil")
+	}
+}
+
 // ── AddVectorColumn / DeleteRows (own temp warehouse) ────────────────────────
 
 func TestAddVectorColumnIntegration(t *testing.T) {

@@ -251,6 +251,9 @@ pub async fn delete_where(
             column_name.to_string(),
             values.iter().map(|v| v.to_string()).collect(),
         )),
+        // Discarded on the write path — `write_equality_delete_manifest` (called via
+        // `commit_snapshot` below) stamps every entry with this commit's own `seq`.
+        sequence_number: 0,
     };
 
     // Commit Delete snapshot — inherits previous data manifests, appends delete manifest.
@@ -326,6 +329,7 @@ mod tests {
             deletion_vector: None,
             first_row_id: None,
             column_stats: None,
+            sequence_number: 0,
         }
     }
 
@@ -466,7 +470,11 @@ mod tests {
             ]))],
         )
         .unwrap();
-        let filtered = filter.apply(batch).unwrap();
+        // data_file_sequence_number=0 simulates a file committed before the delete
+        // (the delete's own real sequence number, read back via `edfs`, is 2 — see
+        // `setup_v3_table`'s Append at seq 1 followed by this `delete_where`'s Delete
+        // commit) — masking still applies for genuinely older files.
+        let filtered = filter.apply(batch, 0).unwrap();
         assert_eq!(
             filtered.num_rows(),
             1,
