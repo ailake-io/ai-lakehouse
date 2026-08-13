@@ -525,6 +525,37 @@ def search_with_data(
     ...
 
 
+def read_changes(
+    path: str,
+    start_snapshot: Optional[int] = None,
+    end_snapshot: Optional[int] = None,
+    pk_columns: Optional[list[str]] = None,
+    coalesce_updates: bool = False,
+    catalog_opts: Optional[dict[str, str]] = None,
+) -> bytes:
+    """Read the change stream between two snapshots of an AI-Lake table.
+
+    Returns Arrow IPC file-format bytes.  Deserialize to a ``pyarrow.Table``
+    containing the changed rows plus CDC envelope columns:
+    ``_change_type`` (str), ``_snapshot_id`` (int), ``_sequence_number`` (int),
+    ``_commit_timestamp`` (int milliseconds).
+
+    Args:
+        path: Table root — same value used when writing.
+        start_snapshot: Start snapshot id (inclusive).  When omitted, the parent
+            of *end_snapshot* is used.
+        end_snapshot: End snapshot id (inclusive).  When omitted, the current
+            snapshot is used.
+        pk_columns: Primary-key column names.  Required when *coalesce_updates*
+            is ``True``.
+        coalesce_updates: When ``True``, a same-PK ``DELETE`` + ``INSERT`` pair
+            in the same snapshot is emitted as ``UPDATE_BEFORE`` +
+            ``UPDATE_AFTER``.
+        catalog_opts: Optional catalog backend configuration.
+    """
+    ...
+
+
 def assemble_context(
     chunks: list[dict[str, object]],
     max_tokens: int = 4096,

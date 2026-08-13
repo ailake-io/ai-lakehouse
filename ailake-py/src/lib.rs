@@ -28,10 +28,11 @@ use ailake_core::{
     VectorStoragePolicy,
 };
 use ailake_query::{
-    delete_rows as rs_delete_rows, fetch_rows as rs_fetch_rows, search as rs_search,
-    search_multimodal as rs_search_multimodal, Chunk, ContextAssembler, ContextAssemblerConfig,
-    EmbedFn, FusionMethod, MigrationJob, MigrationProgress, MigrationStrategy, ModalQuery,
-    MultiVectorBatch, ProgressFn, SearchConfig, TableWriter as RsTableWriter,
+    delete_rows as rs_delete_rows, fetch_rows as rs_fetch_rows, read_changes as rs_read_changes,
+    search as rs_search, search_multimodal as rs_search_multimodal, ChangeReaderConfig, Chunk,
+    ContextAssembler, ContextAssemblerConfig, EmbedFn, FusionMethod, MigrationJob,
+    MigrationProgress, MigrationStrategy, ModalQuery, MultiVectorBatch, ProgressFn, SearchConfig,
+    TableWriter as RsTableWriter,
 };
 use ailake_store::{store::Store, store_from_url, LocalStore};
 
@@ -987,6 +988,45 @@ fn search_with_data(
             dim,
             &meta.schema_fields,
         ))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let ipc_bytes = record_batch_to_ipc(&batch)?;
+    Ok(PyBytes::new(py, &ipc_bytes).into())
+}
+
+/// Read the change stream between two snapshots of an AI-Lake table.
+///
+/// Returns a `pyarrow.Table` serialized as Arrow IPC bytes. The Python wrapper
+/// deserializes it automatically.
+#[pyfunction]
+#[pyo3(name = "read_changes", signature = (path, start_snapshot=None, end_snapshot=None, pk_columns=None, coalesce_updates=false, catalog_opts=None))]
+fn read_changes_py(
+    py: Python<'_>,
+    path: &str,
+    start_snapshot: Option<i64>,
+    end_snapshot: Option<i64>,
+    pk_columns: Option<Vec<String>>,
+    coalesce_updates: bool,
+    catalog_opts: Option<std::collections::HashMap<String, String>>,
+) -> PyResult<Py<PyAny>> {
+    let rt = rt()?;
+    debug!(
+        "ailake-py: read_changes path={} start={:?} end={:?}",
+        path, start_snapshot, end_snapshot
+    );
+
+    let (catalog, store) = local_catalog_store(path, catalog_opts.as_ref())?;
+    let table = TableIdent::new("default", "table");
+
+    let config = ChangeReaderConfig {
+        start_snapshot_id: start_snapshot,
+        end_snapshot_id: end_snapshot,
+        pk_columns: pk_columns.unwrap_or_default(),
+        coalesce_updates,
+    };
+
+    let batch = rt
+        .block_on(rs_read_changes(catalog, store, &table, config))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let ipc_bytes = record_batch_to_ipc(&batch)?;
@@ -2190,6 +2230,7 @@ fn _ailake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(search_text, m)?)?;
     m.add_function(wrap_pyfunction!(search_multimodal, m)?)?;
     m.add_function(wrap_pyfunction!(search_with_data, m)?)?;
+    m.add_function(wrap_pyfunction!(read_changes_py, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_context, m)?)?;
     m.add_function(wrap_pyfunction!(migrate_embeddings, m)?)?;
     m.add_function(wrap_pyfunction!(decay_memories, m)?)?;

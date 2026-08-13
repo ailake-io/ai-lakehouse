@@ -174,6 +174,17 @@ impl CatalogProvider for HadoopCatalog {
         list_equality_deletes_from_metadata(&*self.store, &meta, snapshot_id).await
     }
 
+    async fn load_raw_metadata(
+        &self,
+        table: &TableIdent,
+    ) -> AilakeResult<crate::metadata::IcebergMetadata> {
+        let version = self.current_version(table).await?;
+        let path = self.versioned_metadata_path(table, version);
+        let bytes = self.store.get(&path).await?;
+        let json = std::str::from_utf8(&bytes).map_err(|e| AilakeError::Catalog(e.to_string()))?;
+        crate::metadata::IcebergMetadata::from_json(json)
+    }
+
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()> {
         let version = self.current_version(name).await?;
         if version > 0 {

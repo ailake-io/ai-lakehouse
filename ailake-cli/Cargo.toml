@@ -33,6 +33,8 @@ serde          = { workspace = true }
 axum           = { workspace = true }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
+arrow-ipc      = { workspace = true }
+parquet        = { workspace = true }
 
 [dev-dependencies]
 tempfile       = { workspace = true }

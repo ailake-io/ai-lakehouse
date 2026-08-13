@@ -527,3 +527,25 @@ Verifying finding 4 against the CLI surfaced a **fifth, unrelated, pre-existing 
 - Hand-roll matching Avro-manifest logic separately in `glue.rs`/`jdbc.rs`/`rest.rs`: rejected — the whole reason this gap existed for years is that these backends drifted from Hadoop's Phase 2 manifest work in the first place; writing separate copies risks the exact same drift recurring on the next feature.
 - Make `GlueCatalog`/`JdbcCatalog` newtype-wrap or delegate to `HadoopCatalog` (like `NessieCatalog` delegates to `RestCatalog`): doesn't fit — Hadoop's pointer-storage model (`version-hint.text` + versioned `vN.metadata.json` on a `Store`) is architecturally different from Glue's Data Catalog `version_id` and Jdbc's SQL row, not a thin wrapper relationship.
 - Leave `RestCatalog` on the flat JSON manifest permanently (the original plan when this ADR was first written): rejected once the REST spec turned out to map cleanly onto `CommitArtifacts` field-for-field (schema updates, statistics updates, and server-derived `next-row-id` all had a direct spec-sanctioned equivalent) — the only reason not to do it would have been spec incompatibility, which didn't hold up under actual verification.
+
+---
+
+## ADR-021: CDC as a read-only format capability, not a table flag
+
+**Date**: 2026-08
+**Status**: Accepted
+
+**Context**: Users want to consume AI-Lake tables in CDC pipelines (e.g. replicate to a data warehouse, drive materialized views, feed streaming processors). A common approach is to add a table-level property such as `write.wap.enabled` or a dedicated CDC log. That requires every writer to opt-in and complicates interoperability with standard Iceberg readers.
+
+**Decision**: Implement CDC as a pure read operation over the existing Iceberg snapshot history. No table flag, no extra write-time metadata, no rewrite of data files. `read_changes(start_snapshot, end_snapshot)` compares two snapshots and emits `insert`/`delete`/`update_before`/`update_after` rows with envelope columns `_change_type`, `_snapshot_id`, `_sequence_number`, `_commit_timestamp`.
+
+**Consequences**:
+- Any AI-Lake table with multiple snapshots and reachable data files supports CDC immediately.
+- Standard Iceberg readers are unaffected; the table remains fully compatible.
+- Deletes are detected from equality-delete Avro files, V3 deletion vectors, and file replacement (compaction). The reader must load and parse the committed delete artifacts — it cannot rely on write-path-only hints such as `EqualityDeleteFile::inline_values`.
+- Equality-delete predicates are resolved against the raw data files present in both snapshots, so emitted `DELETE` rows carry the full pre-image and coalesced `UPDATE_BEFORE` records are complete.
+- Update coalescing (`DELETE`+`INSERT` → `UPDATE_BEFORE`+`UPDATE_AFTER`) requires caller-provided primary-key columns and is performed at read time.
+
+**Rejected alternatives**:
+- Table-level CDC flag: would require every writer to check the flag and would break read compatibility with standard Iceberg tools if the flag changed on-disk format.
+- Separate CDC log file: would add a new write path and consistency surface (log + snapshot must agree), increasing complexity and failure modes.
