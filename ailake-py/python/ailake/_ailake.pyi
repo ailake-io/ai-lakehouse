@@ -791,23 +791,6 @@ def info(
     """
     ...
 
-def read_changes(
-    path: str,
-    start_snapshot: Optional[int] = None,
-    end_snapshot: Optional[int] = None,
-    pk_columns: Optional[list[str]] = None,
-    coalesce_updates: bool = False,
-    catalog_opts: Optional[dict[str, str]] = None,
-) -> bytes:
-    """Read the change stream between two snapshots of an AI-Lake table.
-
-    Returns Arrow IPC file bytes containing the changed rows plus CDC envelope
-    columns ``_change_type``, ``_snapshot_id``, ``_sequence_number``,
-    ``_commit_timestamp``. The high-level ``ailake.read_changes`` wrapper
-    deserializes these bytes into a ``pyarrow.Table``.
-    """
-    ...
-
 def estimate(
     rows: int,
     dim: int,

@@ -51,7 +51,7 @@ def read_changes(
     pk_columns: "list[str] | None" = None,
     coalesce_updates: bool = False,
     catalog_opts: "dict[str, str] | None" = None,
-) -> "pyarrow.Table":
+) -> "pa.Table":
     """Read the change stream between two snapshots of an AI-Lake table.
 
     Returns a ``pyarrow.Table`` with the changed rows plus CDC envelope columns:
@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     import numpy as np
     import pandas as pd
     import polars as pl
+    import pyarrow as pa
 
 # Accepted embedding input types — list, numpy array, or any array with .tolist()
 _Embeddings = Union[Sequence[Sequence[float]], "np.ndarray"]
