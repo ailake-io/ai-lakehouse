@@ -482,7 +482,7 @@ pub(crate) async fn commit_into_metadata(
 
 /// Read the active (or given) snapshot's data manifests back into a flat
 /// `DataFileEntry` list — skips delete manifests (`content=1`).
-pub(crate) async fn list_files_from_metadata(
+pub async fn list_files_from_metadata(
     store: &dyn Store,
     meta: &IcebergMetadata,
     snapshot_id: Option<SnapshotId>,
@@ -517,7 +517,7 @@ pub(crate) async fn list_files_from_metadata(
 
 /// Read the active (or given) snapshot's delete manifests (`content=1`) back
 /// into a flat `EqualityDeleteFile` list.
-pub(crate) async fn list_equality_deletes_from_metadata(
+pub async fn list_equality_deletes_from_metadata(
     store: &dyn Store,
     meta: &IcebergMetadata,
     snapshot_id: Option<SnapshotId>,

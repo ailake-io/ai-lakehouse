@@ -7,6 +7,7 @@
 pub mod backfill;
 pub mod bloom;
 pub mod bm25;
+pub mod cdc;
 pub mod compaction;
 pub mod context_assembler;
 pub mod delete;
@@ -28,6 +29,7 @@ pub use ailake_index::IvfPqConfig;
 pub use backfill::{BackfillJob, BackfillProgress, BackfillProgressFn};
 pub use bloom::BloomFilter;
 pub use bm25::{BM25Scorer, HybridConfig, HybridFusion, IdfStats};
+pub use cdc::{read_changes, ChangeReaderConfig, ChangeRecord, ChangeType};
 pub use compaction::{CompactionConfig, CompactionExecutor, CompactionMode, CompactionPlanner};
 pub use context_assembler::{AssembledContext, Chunk, ContextAssembler, ContextAssemblerConfig};
 pub use delete::{delete_rows, delete_where, PuffinWriter};
