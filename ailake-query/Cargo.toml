@@ -23,6 +23,7 @@ ailake-parquet = { path = "../ailake-parquet", version = "0.1.11" }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
 arrow-select   = { workspace = true }
+arrow-buffer   = { workspace = true }
 tokio          = { workspace = true }
 bytes          = { workspace = true }
 serde          = { workspace = true }

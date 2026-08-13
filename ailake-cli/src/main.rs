@@ -14,11 +14,13 @@ use ailake_core::{
     VectorStoragePolicy,
 };
 use ailake_query::{
-    delete_rows as rs_delete_rows, CompactionConfig, CompactionExecutor, CompactionPlanner,
-    EmbedFn, HybridConfig, MemoryDecayJob, MigrationJob, MigrationProgress, MigrationStrategy,
-    MultiVectorBatch, ProgressFn, SearchConfig, TableWriter,
+    delete_rows as rs_delete_rows, read_changes as rs_read_changes, ChangeReaderConfig,
+    CompactionConfig, CompactionExecutor, CompactionPlanner, EmbedFn, HybridConfig, MemoryDecayJob,
+    MigrationJob, MigrationProgress, MigrationStrategy, MultiVectorBatch, ProgressFn, SearchConfig,
+    TableWriter,
 };
 use ailake_store::{store_from_url, Store};
+use arrow_array::RecordBatch;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -322,6 +324,26 @@ enum Commands {
         #[arg(long, value_enum, default_value = "text")]
         format: OutputFormat,
     },
+    /// Read the change stream between two snapshots (CDC)
+    ReadChanges {
+        /// Table name (namespace.table or just table)
+        table: String,
+        /// Start snapshot id (inclusive). Omit to use the parent of --end-snapshot.
+        #[arg(long)]
+        start_snapshot: Option<i64>,
+        /// End snapshot id (inclusive). Omit to use the current snapshot.
+        #[arg(long)]
+        end_snapshot: Option<i64>,
+        /// Primary-key column names. Required when --coalesce-updates is set.
+        #[arg(long)]
+        pk_column: Vec<String>,
+        /// Coalesce same-PK DELETE + INSERT pairs into UPDATE_BEFORE + UPDATE_AFTER.
+        #[arg(long, default_value_t = false)]
+        coalesce_updates: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: CdcOutputFormat,
+    },
     /// Migrate embedding column to a new model by re-embedding all chunks via an external command
     Migrate {
         /// Table name (namespace.table or just table)
@@ -524,6 +546,14 @@ impl From<Precision> for VectorPrecision {
 enum OutputFormat {
     Text,
     Json,
+}
+
+#[derive(ValueEnum, Clone)]
+enum CdcOutputFormat {
+    Text,
+    Json,
+    Parquet,
+    Arrow,
 }
 
 #[derive(ValueEnum, Clone)]
@@ -1544,6 +1574,53 @@ async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
 
+        Commands::ReadChanges {
+            table,
+            start_snapshot,
+            end_snapshot,
+            pk_column,
+            coalesce_updates,
+            format,
+        } => {
+            let ident = parse_table_ident(&table);
+            let config = ChangeReaderConfig {
+                start_snapshot_id: start_snapshot,
+                end_snapshot_id: end_snapshot,
+                pk_columns: pk_column,
+                coalesce_updates,
+            };
+            let batch = rs_read_changes(catalog, store, &ident, config)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            match format {
+                CdcOutputFormat::Json => {
+                    let json_rows = record_batch_to_json_lines(&batch)?;
+                    for line in json_rows {
+                        println!("{}", line);
+                    }
+                }
+                CdcOutputFormat::Parquet => {
+                    let bytes = record_batch_to_parquet(&batch)?;
+                    std::io::Write::write_all(&mut std::io::stdout(), &bytes)
+                        .map_err(|e| e.to_string())?;
+                }
+                CdcOutputFormat::Arrow => {
+                    let bytes = record_batch_to_arrow_ipc(&batch)?;
+                    std::io::Write::write_all(&mut std::io::stdout(), &bytes)
+                        .map_err(|e| e.to_string())?;
+                }
+                CdcOutputFormat::Text => {
+                    println!("{} change(s)", batch.num_rows());
+                    let json_rows = record_batch_to_json_lines(&batch)?;
+                    for line in json_rows {
+                        println!("{}", line);
+                    }
+                }
+            }
+            Ok(())
+        }
+
         Commands::Migrate {
             table,
             old_column,
@@ -2114,4 +2191,95 @@ fn format_bytes(b: u64) -> String {
     } else {
         format!("{b} B")
     }
+}
+
+fn record_batch_to_json_lines(batch: &RecordBatch) -> Result<Vec<String>, String> {
+    let mut lines = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        let mut obj = serde_json::Map::new();
+        for (j, field) in batch.schema().fields().iter().enumerate() {
+            let col = batch.column(j);
+            let val = array_value_to_json(col, i)?;
+            obj.insert(field.name().clone(), val);
+        }
+        lines.push(
+            serde_json::to_string(&serde_json::Value::Object(obj)).map_err(|e| e.to_string())?,
+        );
+    }
+    Ok(lines)
+}
+
+fn array_value_to_json(
+    array: &arrow_array::ArrayRef,
+    row: usize,
+) -> Result<serde_json::Value, String> {
+    use arrow_array::cast::AsArray;
+    use arrow_schema::DataType;
+    if array.is_null(row) {
+        return Ok(serde_json::Value::Null);
+    }
+    match array.data_type() {
+        DataType::Utf8 => Ok(serde_json::Value::String(
+            array.as_string::<i32>().value(row).to_string(),
+        )),
+        DataType::LargeUtf8 => Ok(serde_json::Value::String(
+            array.as_string::<i64>().value(row).to_string(),
+        )),
+        DataType::Int32 => Ok(serde_json::Value::Number(
+            array
+                .as_primitive::<arrow_array::types::Int32Type>()
+                .value(row)
+                .into(),
+        )),
+        DataType::Int64 => Ok(serde_json::Value::Number(
+            array
+                .as_primitive::<arrow_array::types::Int64Type>()
+                .value(row)
+                .into(),
+        )),
+        DataType::Float32 => Ok(serde_json::json!(array
+            .as_primitive::<arrow_array::types::Float32Type>()
+            .value(row))),
+        DataType::Float64 => Ok(serde_json::json!(array
+            .as_primitive::<arrow_array::types::Float64Type>()
+            .value(row))),
+        DataType::Boolean => Ok(serde_json::Value::Bool(array.as_boolean().value(row))),
+        DataType::FixedSizeList(_, dim) => {
+            let list = array.as_fixed_size_list();
+            let values = list.values();
+            let start = row * *dim as usize;
+            let end = start + *dim as usize;
+            let floats: Vec<f32> = (start..end)
+                .map(|i| {
+                    values
+                        .as_primitive::<arrow_array::types::Float32Type>()
+                        .value(i)
+                })
+                .collect();
+            Ok(serde_json::json!(floats))
+        }
+        _ => Ok(serde_json::Value::String(format!("{:?}", array))), // fallback
+    }
+}
+
+fn record_batch_to_parquet(batch: &RecordBatch) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(&mut buf, batch.schema(), Default::default())
+            .map_err(|e| e.to_string())?;
+    writer.write(batch).map_err(|e| e.to_string())?;
+    writer.close().map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+fn record_batch_to_arrow_ipc(batch: &RecordBatch) -> Result<Vec<u8>, String> {
+    use arrow_ipc::writer::FileWriter;
+    let mut buf = Vec::new();
+    {
+        let mut writer =
+            FileWriter::try_new(&mut buf, batch.schema_ref()).map_err(|e| e.to_string())?;
+        writer.write(batch).map_err(|e| e.to_string())?;
+        writer.finish().map_err(|e| e.to_string())?;
+    }
+    Ok(buf)
 }

@@ -29,6 +29,7 @@ data/
 compat-fixture/
 actions-runner/
 LAB_PLAN.md
+.cache/
 
 # graphify (local knowledge-graph tooling, machine-specific)
 graphify-out/

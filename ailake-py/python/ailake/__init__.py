@@ -26,6 +26,7 @@ from ailake._ailake import (  # type: ignore[import]
     info,
     migrate_embeddings,
     now_ns,
+    read_changes as _read_changes_raw,
     rename_column,
     search as _search_raw,
     search_multimodal,
@@ -41,10 +42,51 @@ search_with_data = _search_with_data
 # fetch in one call, no JOIN needed against a separately-registered table).
 scan = _search_with_data
 
+
+def read_changes(
+    path: str,
+    *,
+    start_snapshot: "int | None" = None,
+    end_snapshot: "int | None" = None,
+    pk_columns: "list[str] | None" = None,
+    coalesce_updates: bool = False,
+    catalog_opts: "dict[str, str] | None" = None,
+) -> "pa.Table":
+    """Read the change stream between two snapshots of an AI-Lake table.
+
+    Returns a ``pyarrow.Table`` with the changed rows plus CDC envelope columns:
+    ``_change_type``, ``_snapshot_id``, ``_sequence_number``, ``_commit_timestamp``.
+
+    Args:
+        path: table path or URI.
+        start_snapshot: start snapshot id (inclusive). When omitted, the parent
+            of ``end_snapshot`` is used.
+        end_snapshot: end snapshot id (inclusive). When omitted, the current
+            snapshot is used.
+        pk_columns: primary-key column names. Required when ``coalesce_updates=True``.
+        coalesce_updates: when ``True``, convert a same-PK ``DELETE`` + ``INSERT``
+            pair in the same snapshot into ``UPDATE_BEFORE`` + ``UPDATE_AFTER``.
+        catalog_opts: optional catalog backend configuration.
+    """
+    import io
+    import pyarrow as pa  # noqa: PLC0415
+
+    ipc_bytes: bytes = _read_changes_raw(
+        path,
+        start_snapshot,
+        end_snapshot,
+        pk_columns,
+        coalesce_updates,
+        catalog_opts,
+    )
+    return pa.ipc.open_file(io.BytesIO(ipc_bytes)).read_all()
+
+
 if TYPE_CHECKING:
     import numpy as np
     import pandas as pd
     import polars as pl
+    import pyarrow as pa
 
 # Accepted embedding input types — list, numpy array, or any array with .tolist()
 _Embeddings = Union[Sequence[Sequence[float]], "np.ndarray"]
@@ -57,6 +99,7 @@ __all__ = [
     "search_multimodal",
     "search_with_data",
     "scan",
+    "read_changes",
     "compact",
     "estimate",
     "Table",

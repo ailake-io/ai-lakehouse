@@ -12,7 +12,7 @@ pub mod column_stats;
 #[cfg(feature = "rest-catalog")]
 pub mod databricks;
 pub mod hadoop;
-mod manifest_commit;
+pub mod manifest_commit;
 pub mod metadata;
 pub mod provider;
 pub mod puffin;
@@ -41,7 +41,9 @@ pub use column_stats::{extract_column_stats, FieldStats};
 #[cfg(feature = "rest-catalog")]
 pub use databricks::{databricks_aws, databricks_azure, databricks_gcp, DatabricksAuth};
 pub use hadoop::HadoopCatalog;
-pub use metadata::{BlobRef, IcebergPartitionStatsRef, IcebergStatisticsRef};
+pub use metadata::{
+    BlobRef, IcebergMetadata, IcebergPartitionStatsRef, IcebergSnapshot, IcebergStatisticsRef,
+};
 pub use provider::{
     decode_centroid, encode_centroid_b64, make_data_file_entry, make_data_file_entry_indexing,
     make_multi_column_data_file_entry, new_snapshot_id, CatalogProvider, DataFileEntry,

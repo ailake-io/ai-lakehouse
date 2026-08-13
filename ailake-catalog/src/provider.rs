@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub use crate::metadata::{IcebergMetadata, IcebergSnapshot};
+
 /// Whether a shard's HNSW index has been built.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -461,6 +463,23 @@ pub trait CatalogProvider: Send + Sync {
         _snapshot_id: Option<SnapshotId>,
     ) -> AilakeResult<Vec<EqualityDeleteFile>> {
         Ok(vec![])
+    }
+
+    /// Load the raw Iceberg metadata object for this table.
+    ///
+    /// Required for CDC and other operations that need to inspect snapshots beyond
+    /// the current one. Defaults to an error; file-based backends (Hadoop, Glue, JDBC)
+    /// override this. Server-backed backends (REST, Nessie) may not expose raw metadata.
+    async fn load_raw_metadata(&self, _table: &TableIdent) -> AilakeResult<IcebergMetadata> {
+        Err(ailake_core::AilakeError::Catalog(
+            "load_raw_metadata not supported by this catalog backend".into(),
+        ))
+    }
+
+    /// List all snapshots known to this table.
+    async fn list_snapshots(&self, table: &TableIdent) -> AilakeResult<Vec<IcebergSnapshot>> {
+        let meta = self.load_raw_metadata(table).await?;
+        Ok(meta.snapshots.clone())
     }
 
     /// Add a new vector column to the table schema without rewriting data files.
