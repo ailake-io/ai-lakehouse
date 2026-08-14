@@ -345,6 +345,7 @@ debug       = true
 | **Phase 7** | ✅ Complete | DuckDB extension (`duckdb-ailake/`), Python `fetch_data=True`, `write_batch_auto_deferred` + async (~200k vec/s), `pq_only`/`ivf_residual` in Python SDK, Airbyte CDK v3 destination connector, expanded JupyterLab demo (`01`–`13` notebooks, 11 fixture tables in `init_demo.py`), **Tantivy FTS** (`ailake-fts` crate, `AILK_FTS` section, O(log N) `search_text()`, `fts_columns` in all SDKs + JVM plugins — delivered in Phase T), **hybrid BM25+vector** (`SearchConfig::hybrid`, RRF fusion — delivered in Phase 9), **DuckLake catalog backend** (`ailake-catalog::DuckLakeCatalog`, opt-in `catalog-ducklake` feature, sidecar table for AI-Lake vector metadata over a real DuckLake attachment). |
 | **Phase 8** | ✅ Complete | Multimodal — `VectorModality` enum, `ailake.modality-<col>` Iceberg property, N generalized vector columns with independent HNSW, `write_batch_multi`, CLI `--vector-cols`, cross-modal RRF (`search_multimodal`), `MultimodalContextSchema`, Python `VectorColSpec`. Propagated to all plugins: `ailake_search_multimodal_json` C-ABI, `searchMultimodal()` Spark/Trino/Flink, `ailake_search_multimodal()` DuckDB, `SearchMultimodal()` Go SDK, `search_multimodal()` C++ SDK |
 | **Phase 9** | ✅ Complete | BM25 Hybrid Search + Agent Memory — `BM25Scorer`, `IdfStats` at write time, `SearchConfig::hybrid` (RRF + linear fusion), `search_text()` pure-lexical scan, `ailake_search_text_json` C-ABI, `ailake_search_text()` DuckDB, Flink `searchText()` + hybrid params; `ToolCallSchema`, `EpisodicMemorySchema` with recency decay, injectable `ScoreFn`, `agent_id` Iceberg identity partitioning, `WorkingMemoryBuffer`, `MemoryDecayJob`, Python `ailake.Agent` helper |
+| **Phase 10** | ✅ Complete | Change Data Capture — `read_changes` engine diffs Iceberg snapshots and emits `insert`/`delete`/`update_before`/`update_after` rows; equality-delete predicates resolved against raw data files for full pre-images; Python `ailake.read_changes()` and CLI `ailake read-changes`. See `docs/specs/CDC.md` and ADR-021. |
 
 ### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
@@ -507,6 +508,19 @@ Delivered in Phase 9:
 - **Python `ailake.Agent`** — `Agent(table_path, embed_fn, agent_id)` with `remember()`, `recall()`, `log_tool_call()`, `assemble_context()`. High-level abstraction for LangChain/CrewAI/AutoGen.
 - **Demo** — `08_agents.ipynb` (26 cells), `09_hybrid_search.ipynb` (7 sections), `ailake_bm25` fixture in `init_demo.py`.
 - **Tests** — 6 BM25 integration tests in `tests/tests/hybrid_search.rs`; 4 `WorkingMemoryBuffer` unit tests; 4 `MemoryDecayJob` unit tests.
+
+### Phase 10 — Change Data Capture ✅
+
+Delivered in Phase 10 (branch `feature/ailake-cdc-format`):
+
+- **`read_changes` engine** (`ailake-query/src/cdc.rs`) — compares two Iceberg snapshots and emits a change stream. Insert detection from new data files; delete detection from removed files, V3 deletion vectors, and equality-delete Avro files.
+- **Full pre-images for equality deletes** — resolves equality-delete predicates against the raw data files present in both snapshots, so `DELETE` rows carry the complete old row. This makes coalesced `UPDATE_BEFORE` records complete.
+- **`coalesce_updates`** — with caller-provided primary-key columns, converts a same-PK `DELETE` + `INSERT` pair within one snapshot into `UPDATE_BEFORE` + `UPDATE_AFTER`.
+- **CDC envelope columns** — `_change_type`, `_snapshot_id`, `_sequence_number`, `_commit_timestamp`.
+- **Python API** — `ailake.read_changes(path, start_snapshot=..., end_snapshot=..., pk_columns=..., coalesce_updates=True)` returns `pyarrow.Table`.
+- **CLI** — `ailake read-changes default.table --start-snapshot N --end-snapshot M --pk-column id --coalesce-updates` with output formats `json`, `text`, `parquet`, `arrow`.
+- **ADR-021** — documented the decision to implement CDC as a read-only format capability with no table-level flag.
+- **Tests** — `ailake-query/tests/cdc_tests.rs` (4 Rust integration tests) and `ailake-py/tests/test_cdc.py`.
 
 ### Phase T — Tantivy per-file FTS ✅
 

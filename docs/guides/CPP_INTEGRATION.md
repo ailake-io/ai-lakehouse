@@ -20,6 +20,8 @@ AMD ROCm is probed at runtime via `dlopen` without any build-time SDK.
 | CUDA (optional) | CUDA Toolkit 11.0+ (`-DAILAKE_CUDA=ON`) |
 | `ailake` CLI | Required only for write / delete / FTS / schema ops / compact |
 
+> **CDC note:** Change Data Capture (`read_changes`) is not exposed in `ailake-cpp`. Use the Python SDK (`ailake.read_changes()`), the Rust core, or the `ailake read-changes` CLI to produce CDC output.
+
 ---
 
 ## 2. Building and linking

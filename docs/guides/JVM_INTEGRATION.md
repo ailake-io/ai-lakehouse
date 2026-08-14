@@ -11,6 +11,8 @@ Engine (Spark / Trino / Flink)
                                         └─ ailake-query (HNSW + pruning)
 ```
 
+> **CDC note:** Change Data Capture (`read_changes`) is not exposed through the JVM plugins. Use the Python SDK (`ailake.read_changes()`), the Rust core, or the `ailake read-changes` CLI to produce CDC output; the result can then be read by Spark/Trino/Flink as a standard Iceberg or Parquet table.
+
 ---
 
 ## 1. Prerequisites

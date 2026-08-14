@@ -41,7 +41,7 @@ cargo build --release -p ailake-cli --features catalog-rest
 ```
 
 ```bash
-ailake --version   # ailake 0.1.6
+ailake --version   # ailake 0.1.11
 ailake --help      # full command list
 ```
 
@@ -475,7 +475,24 @@ ailake search "$TABLE" --hybrid-text "DuckLake catalog changes" \
 
 ---
 
-## 15. Command reference
+## 15. Change Data Capture
+
+Read the change stream between two table snapshots:
+
+```bash
+ailake read-changes default.docs \
+  --start-snapshot 1234567890 \
+  --end-snapshot   1234567891 \
+  --pk-column doc_id \
+  --coalesce-updates \
+  --format json
+```
+
+Output rows include the CDC envelope columns `_change_type`, `_snapshot_id`, `_sequence_number`, and `_commit_timestamp`. Use `--coalesce-updates` to turn a same-PK `DELETE` + `INSERT` pair into `UPDATE_BEFORE` / `UPDATE_AFTER`. See `docs/specs/CDC.md` for full semantics.
+
+---
+
+## 16. Command reference
 
 | Command | Purpose |
 |---|---|
@@ -492,6 +509,7 @@ ailake search "$TABLE" --hybrid-text "DuckLake catalog changes" \
 | `delete-rows` | positional logical delete via Deletion Vectors (V3 only) |
 | `migrate` | re-embed to a new model, atomic or dual-write cutover |
 | `decay-memories` | recompute agent-memory recency weights |
+| `read-changes` | read the CDC change stream between two snapshots |
 | `serve` | HTTP API for search/write/compact/info |
 
 ---

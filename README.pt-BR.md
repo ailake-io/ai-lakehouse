@@ -40,6 +40,7 @@ Formato de Lakehouse nativo para vetores, construído sobre o Apache Iceberg Spe
 | Pruning geométrico de arquivos | ❌ | ❌ | ✅ |
 | Busca GPU (NVIDIA + AMD) | ❌ | Vendor-específico | ✅ |
 | Time-travel em vetores | ❌ | ❌ | ✅ |
+| Change Data Capture | ❌ | ❌ | ✅ |
 
 → **[Argumento técnico completo — AI-Lake vs Iceberg vs LanceDB vs DBs vetoriais externos](docs/WHY_AILAKE.md)**
 
@@ -317,6 +318,7 @@ cargo check --workspace
 | **Fase 7** | ✅ Completa | Extensão DuckDB (`duckdb-ailake/`), leitura completa Python (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` expostos no SDK Python, guia dbt (`docs/guides/DBT_INTEGRATION.md`), `partition_fields` (spec de partição Iceberg multi-coluna), `format_version=3` (tabelas Iceberg v3), `delete_where` + `evolve_schema` em todos os SDKs (Python, Go, C++, Spark, Trino, Flink, DuckDB, Airflow, Airbyte), binding `hardware_info()` Python, notebook de demo GPU (`10_gpu_demo.ipynb`), demo JupyterLab expandida (10 notebooks), **FTS Tantivy por arquivo** (crate `ailake-fts` — seção `AILK_FTS`, zstd; fast path `search_text()` O(log N); opt-in via `fts_columns` em todos os SDKs e plugins JVM), **busca híbrida BM25+vetor** (`SearchConfig::hybrid`, fusão RRF, fallback BM25 brute-force para arquivos legados), **backend de catálogo DuckLake** (`ailake-catalog::DuckLakeCatalog`, feature opt-in `catalog-ducklake`) |
 | **Fase 8** | ✅ Completa | Multimodal — enum `VectorModality`, propriedade Iceberg `ailake.modality-<col>`, N colunas vetoriais generalizadas com HNSW independente, `write_batch_multi`, CLI `--vector-cols`, `search_multimodal` (RRF cross-modal), `MultimodalContextSchema` + módulo `multimodal_columns`, Python `VectorColSpec`, notebook e fixture multimodal |
 | **Fase 9** | ✅ Completa | Memória de agentes — `ToolCallSchema` (histórico de tool calls pesquisável), `EpisodicMemorySchema` (decaimento de recência, contagem de acesso, pontuação de importância), `ScoreFn` injetável para scoring híbrido (distância × recência × importância), `partition_by`/`partition_value` para isolamento por agente via particionamento Iceberg, `partition_filter` para pruning ao nível de manifesto antes de centroide e HNSW, helper Python `ailake.Agent` (LangChain/CrewAI/AutoGen). Propagado para todos os SDKs e conectores: Spark, Trino, Flink, Go, C++, DuckDB, Airbyte, Airflow. Fix: `TableWriter::create_or_open` inicializa `part_counter` a partir da contagem de arquivos existentes. |
+| **Fase 10** | ✅ Completa | Change Data Capture — engine `read_changes` difere snapshots Iceberg e emite linhas `insert`/`delete`/`update_before`/`update_after`; predicados de equality delete resolvidos contra arquivos de dados brutos para pré-imagem completa; Python `ailake.read_changes()` e CLI `ailake read-changes`. Veja `docs/specs/CDC.md`. |
 
 ## Apoie o projeto
 

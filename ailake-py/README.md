@@ -1,6 +1,6 @@
 # ailake — AI-Lake Format Python SDK
 
-**Version**: 0.1.6 — Unified storage for tabular data, embeddings, and HNSW vector index in a single Parquet-compatible file. Apache Iceberg Spec v2/v3 compatible.
+**Version**: 0.1.11 — Unified storage for tabular data, embeddings, and HNSW vector index in a single Parquet-compatible file. Apache Iceberg Spec v2/v3 compatible.
 
 ## Install
 
@@ -506,6 +506,22 @@ hits = ailake.search_text(path, "query", text_columns=["chunk_text", "document_t
 ### `scan(path, query, top_k=10, ...) → bytes`
 
 Alias for `search_with_data` — same capability as ailake-go's `Scan()` and ailake-jni's `ailake_scan_json` (search + full-row fetch in one call, no JOIN needed against a separately-registered table). See `search_with_data` below.
+
+### `read_changes(path, *, start_snapshot=None, end_snapshot=None, pk_columns=None, coalesce_updates=False, catalog_opts=None) → pyarrow.Table`
+
+Change Data Capture: read the change stream between two Iceberg snapshots. Returns a `pyarrow.Table` with the original columns plus `_change_type`, `_snapshot_id`, `_sequence_number`, and `_commit_timestamp`.
+
+```python
+changes = ailake.read_changes(
+    "./my_table",
+    start_snapshot=snap1,
+    end_snapshot=snap2,
+    pk_columns=["id"],
+    coalesce_updates=True,  # emits UPDATE_BEFORE/UPDATE_AFTER for same-PK changes
+)
+```
+
+See `docs/specs/CDC.md` for full semantics.
 
 ### `assemble_context(chunks, max_tokens=4096, dedup_threshold=0.05, group_by_document=True, max_chunks_per_document=10) → dict`
 

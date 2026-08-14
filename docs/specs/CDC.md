@@ -122,6 +122,5 @@ Equality-delete predicates are resolved against the raw data files present in bo
 
 ## Future work
 
-- Pre-image enrichment: for equality-delete `DELETE` rows, fetch the full old row from the start snapshot's data files so `UPDATE_BEFORE` is complete.
-- Range/positional deletes: currently only equality deletes and deletion vectors are handled.
+- Range/positional deletes: currently equality deletes and deletion vectors are handled.
 - Streaming CDC: expose a cursor-based API that advances from one snapshot to the next without re-reading the full range.
