@@ -74,6 +74,9 @@ pub struct ChangeReaderConfig {
     /// When `true`, convert a `DELETE` + `INSERT` pair with the same PK within the
     /// same snapshot into `UPDATE_BEFORE` + `UPDATE_AFTER`.
     pub coalesce_updates: bool,
+    /// When `true`, failures while loading deletion vectors abort CDC instead
+    /// of silently treating the vector as empty.
+    pub strict_deletes: bool,
 }
 
 /// Read the change stream between two snapshots of an AI-Lake table.
@@ -131,7 +134,7 @@ pub async fn read_changes(
     // Files only in end → all surviving rows are INSERT.
     for file in &end_files {
         if !start_file_map.contains_key(file.path.as_str()) {
-            let dv = load_dv(&store, file).await?;
+            let dv = load_dv(&store, file, config.strict_deletes).await?;
             let batch =
                 read_file_as_batch(&*store, file, &vector_column, dim, &schema_fields).await?;
             let batch = apply_dv(batch, dv.as_ref())?;
@@ -167,8 +170,8 @@ pub async fn read_changes(
     // Files in both → detect newly deleted rows via deletion vectors.
     for file in &end_files {
         if let Some(start_file) = start_file_map.get(file.path.as_str()) {
-            let start_dv = load_dv(&store, start_file).await?;
-            let end_dv = load_dv(&store, file).await?;
+            let start_dv = load_dv(&store, start_file, config.strict_deletes).await?;
+            let end_dv = load_dv(&store, file, config.strict_deletes).await?;
             if dv_bitmap(&start_dv) != dv_bitmap(&end_dv) {
                 let batch =
                     read_file_as_batch(&*store, file, &vector_column, dim, &schema_fields).await?;
@@ -195,8 +198,8 @@ pub async fn read_changes(
     if !new_eq_predicates.is_empty() {
         for file in &end_files {
             if let Some(start_file) = start_file_map.get(file.path.as_str()) {
-                let start_dv = load_dv(&store, start_file).await?;
-                let end_dv = load_dv(&store, file).await?;
+                let start_dv = load_dv(&store, start_file, config.strict_deletes).await?;
+                let end_dv = load_dv(&store, file, config.strict_deletes).await?;
                 let batch =
                     read_file_as_batch(&*store, file, &vector_column, dim, &schema_fields).await?;
 
@@ -281,11 +284,15 @@ fn find_snapshot(meta: &IcebergMetadata, id: SnapshotId) -> AilakeResult<Iceberg
 async fn load_dv(
     store: &Arc<dyn Store>,
     file: &DataFileEntry,
+    strict_deletes: bool,
 ) -> AilakeResult<Option<RoaringBitmap>> {
     match &file.deletion_vector {
         Some(dv) => match load_deletion_vector(store, dv).await {
             Ok(bm) => Ok(Some(bm)),
             Err(e) => {
+                if strict_deletes {
+                    return Err(e);
+                }
                 tracing::warn!("cdc: failed to load deletion vector for {}: {e}", file.path);
                 Ok(None)
             }
@@ -759,5 +766,23 @@ mod tests {
         assert_eq!(ChangeType::Delete.as_str(), "delete");
         assert_eq!(ChangeType::UpdateBefore.as_str(), "update_before");
         assert_eq!(ChangeType::UpdateAfter.as_str(), "update_after");
+    }
+
+    #[tokio::test]
+    async fn strict_dv_loading_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(ailake_store::LocalStore::new(dir.path()));
+        let file = DataFileEntry {
+            deletion_vector: Some(ailake_catalog::provider::DeletionVector {
+                path: "missing/deletes.dvd".into(),
+                offset: 0,
+                length: 16,
+                cardinality: 1,
+            }),
+            ..Default::default()
+        };
+
+        assert!(load_dv(&store, &file, true).await.is_err());
+        assert!(load_dv(&store, &file, false).await.unwrap().is_none());
     }
 }

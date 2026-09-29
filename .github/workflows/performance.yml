@@ -1,0 +1,168 @@
+name: Performance and load CI
+
+on:
+  pull_request:
+    paths:
+      - "ailake-index/**"
+      - "ailake-query/**"
+      - "ailake-store/**"
+      - "ailake-catalog/**"
+      - "ailake-cli/**"
+      - "ailake-vec/**"
+      - "tests/**"
+      - "scripts/ci/**"
+      - ".github/workflows/performance.yml"
+  push:
+    branches: [main, develop]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark-cpu:
+    name: CPU microbenchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run structured vector benchmark
+        run: |
+          mkdir -p perf
+          cargo bench --quiet -p ailake-vec --bench distance -- --json > perf/cpu-distance.json
+      - name: Validate benchmark result
+        run: python3 scripts/ci/compare_benchmark.py perf/cpu-distance.json
+      - name: Upload CPU benchmark
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-cpu-${{ github.run_id }}
+          path: perf/
+          if-no-files-found: ignore
+
+  recall-latency:
+    name: Recall and latency regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AILAKE_MIN_RECALL: "0.95"
+      AILAKE_MAX_P95_MS: "500"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run deterministic CPU regression test
+        run: cargo test -p ailake-tests --test performance_regression -- --nocapture
+
+  http-load-and-writers:
+    name: HTTP load and multi-writer smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release server
+        run: cargo build --release -p ailake-cli
+      - name: Create load-test table
+        run: |
+          rm -rf /tmp/ailake-performance
+          target/release/ailake --store /tmp/ailake-performance create default.load --dim 32 --metric cosine
+      - name: Run real HTTP load with concurrent writers
+        run: |
+          mkdir -p perf
+          target/release/ailake --store /tmp/ailake-performance serve default.load --port 7700 > perf/serve.log 2>&1 &
+          echo $! > perf/serve.pid
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:7700/healthz >/dev/null; then break; fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:7700/healthz >/dev/null
+          python3 scripts/ci/http_load.py --base-url http://127.0.0.1:7700 --output perf/http-load.json
+          kill "$(cat perf/serve.pid)"
+      - name: Verify multi-process serve fencing
+        run: bash scripts/ci/check_multi_process_lock.sh target/release/ailake /tmp/ailake-performance default.load
+      - name: Run local concurrent writer integration tests
+        run: cargo test -p ailake-tests --test concurrent_writes -- --test-threads=1
+      - name: Upload load results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-http-${{ github.run_id }}
+          path: perf/
+          if-no-files-found: ignore
+
+  catalog-matrix:
+    name: Catalog smoke (${{ matrix.catalog }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        catalog: [local, s3-minio, rest-iceberg]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Local catalog concurrency baseline
+        if: matrix.catalog == 'local'
+        run: cargo test -p ailake-tests --test concurrent_writes -- --test-threads=1
+      - name: Start object-store and catalog emulators
+        if: matrix.catalog != 'local'
+        run: |
+          docker compose -f tests/docker/compose.yml up -d minio minio-init nessie localstack
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && break || sleep 2
+          done
+          curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null
+          curl -fsS http://127.0.0.1:4566/_localstack/health >/dev/null
+          curl -fsS http://127.0.0.1:19120/api/v2/config >/dev/null
+      - name: REST catalog compatibility smoke
+        if: matrix.catalog == 'rest-iceberg'
+        run: cargo test -p ailake-tests --test iceberg_compat -- --test-threads=1
+      - name: Stop emulators
+        if: always() && matrix.catalog != 'local'
+        run: docker compose -f tests/docker/compose.yml down -v
+
+  gpu-performance-matrix:
+    name: GPU correctness/performance (${{ matrix.backend }})
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: cpu
+            runner: '"ubuntu-latest"'
+          - backend: cuda
+            runner: '["self-hosted","Linux","X64","gpu-nvidia"]'
+          - backend: rocm
+            runner: '["self-hosted","Linux","X64","gpu-amd"]'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: CPU fallback regression
+        if: matrix.backend == 'cpu'
+        run: cargo test -p ailake-index -- --nocapture
+      - name: CUDA GPU regression
+        if: matrix.backend == 'cuda'
+        run: |
+          docker build --file docker/gpu-cuda/Dockerfile --tag ailake-gpu-cuda:perf-${{ github.sha }} .
+          docker run --rm --gpus all -e AILAKE_GPU_BACKEND=cuda ailake-gpu-cuda:perf-${{ github.sha }} \
+            cargo test -p ailake-index --test gpu_data -- --nocapture
+      - name: ROCm GPU regression
+        if: matrix.backend == 'rocm'
+        run: |
+          docker build --file docker/gpu-rocm/Dockerfile --tag ailake-gpu-rocm:perf-${{ github.sha }} .
+          docker run --rm --device /dev/kfd --device /dev/dri --group-add video \
+            -e AILAKE_GPU_BACKEND=rocm ailake-gpu-rocm:perf-${{ github.sha }} \
+            cargo test -p ailake-index --test gpu_data -- --nocapture

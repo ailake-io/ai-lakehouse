@@ -183,11 +183,12 @@ Consequences wired into the code:
   same asymmetry as before, now the fallback case instead of the default.
   Either way, the sidecar is always written too, so AI-Lake readers are
   unaffected by whether the native path fired.
-- **No multi-writer support**: the metadata catalog is a local DuckDB file
-  (SQLite-class single-writer constraint). Concurrent processes writing to
-  the same table are not safe. A Postgres-backed DuckLake metadata catalog
-  would lift this but is out of scope here (see `ailake-catalog/Cargo.toml`
-  — v1 scopes to DuckDB-as-metadata only).
+- **Single-writer database architecture**: the metadata catalog is a local
+  DuckDB file (SQLite-class single-writer constraint). AI-Lake now uses a
+  process-level lock around the two-phase catalog commit, so concurrent
+  processes fail clearly instead of racing. A Postgres-backed DuckLake metadata
+  catalog would be the next step for distributed writer throughput (see
+  `ailake-catalog/Cargo.toml` — v1 still scopes to DuckDB-as-metadata).
 - **`list_files(_, Some(snapshot_id))`** only accepts the table's current
   snapshot id (as returned by `load_table`) — arbitrary point-in-time
   time-travel isn't wired up. No caller in this codebase requests anything

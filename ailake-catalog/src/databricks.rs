@@ -23,13 +23,16 @@
 //   GcpBearer          — GCP production (short-lived GCP access token)
 
 use crate::rest::{RestCatalogAuth, RestCatalogConfig};
+#[cfg(test)]
+use secrecy::ExposeSecret;
+use secrecy::SecretString;
 
 /// Authentication strategy for Databricks.
 #[derive(Debug, Clone)]
 pub enum DatabricksAuth {
     /// Personal Access Token (all clouds). Simple; avoid in production for
     /// long-running services (tokens don't expire on a machine-friendly schedule).
-    Pat(String),
+    Pat(SecretString),
 
     /// Azure AD service principal via OAuth2 client credentials.
     /// Requires an app registration with Databricks resource permission.
@@ -38,7 +41,7 @@ pub enum DatabricksAuth {
     AzureServicePrincipal {
         tenant_id: String,
         client_id: String,
-        client_secret: String,
+        client_secret: SecretString,
     },
 
     /// Databricks OAuth2 M2M on AWS.
@@ -46,13 +49,13 @@ pub enum DatabricksAuth {
     /// Create a service principal in the Databricks account console.
     AwsOAuth2 {
         client_id: String,
-        client_secret: String,
+        client_secret: SecretString,
     },
 
     /// GCP — pre-obtained Google/Databricks access token.
     /// Obtain via `gcloud auth print-access-token` or Workload Identity Federation.
     /// For long-running services prefer a token refresh loop outside the SDK.
-    GcpBearer(String),
+    GcpBearer(SecretString),
 }
 
 /// Configuration builder for Databricks Unity Catalog on Azure.
@@ -163,44 +166,42 @@ pub fn databricks_gcp(
 
 fn to_rest_auth_azure(auth: DatabricksAuth) -> RestCatalogAuth {
     match auth {
-        DatabricksAuth::Pat(token) => RestCatalogAuth::Bearer(token),
+        DatabricksAuth::Pat(token) => RestCatalogAuth::bearer(token),
         DatabricksAuth::AzureServicePrincipal {
             tenant_id,
             client_id,
             client_secret,
-        } => RestCatalogAuth::OAuth2 {
-            token_endpoint: format!(
-                "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-            ),
+        } => RestCatalogAuth::oauth2(
+            format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"),
             client_id,
             client_secret,
             // Databricks resource ID in Azure AD (constant across all tenants)
-            scope: Some("2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default".into()),
-        },
+            Some("2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default".into()),
+        ),
         other => databricks_auth_to_bearer(other),
     }
 }
 
 fn to_rest_auth_aws(auth: DatabricksAuth, workspace_host: &str) -> RestCatalogAuth {
     match auth {
-        DatabricksAuth::Pat(token) => RestCatalogAuth::Bearer(token),
+        DatabricksAuth::Pat(token) => RestCatalogAuth::bearer(token),
         DatabricksAuth::AwsOAuth2 {
             client_id,
             client_secret,
-        } => RestCatalogAuth::OAuth2 {
-            token_endpoint: format!("https://{workspace_host}/oidc/v1/token"),
+        } => RestCatalogAuth::oauth2(
+            format!("https://{workspace_host}/oidc/v1/token"),
             client_id,
             client_secret,
-            scope: Some("all-apis".into()),
-        },
+            Some("all-apis".into()),
+        ),
         other => databricks_auth_to_bearer(other),
     }
 }
 
 fn databricks_auth_to_bearer(auth: DatabricksAuth) -> RestCatalogAuth {
     match auth {
-        DatabricksAuth::Pat(token) => RestCatalogAuth::Bearer(token),
-        DatabricksAuth::GcpBearer(token) => RestCatalogAuth::Bearer(token),
+        DatabricksAuth::Pat(token) => RestCatalogAuth::bearer(token),
+        DatabricksAuth::GcpBearer(token) => RestCatalogAuth::bearer(token),
         DatabricksAuth::AzureServicePrincipal { .. } => {
             // If caller uses AzureServicePrincipal on a non-Azure builder, treat as no-auth
             // and let them hit the 401 — better than silently misconfiguring.
@@ -233,7 +234,7 @@ mod tests {
             cfg.warehouse.as_deref(),
             Some("abfss://container@account.dfs.core.windows.net/wh")
         );
-        assert!(matches!(cfg.auth, RestCatalogAuth::Bearer(t) if t == "dapiabc"));
+        assert!(matches!(cfg.auth, RestCatalogAuth::Bearer(t) if t.expose_secret() == "dapiabc"));
     }
 
     #[test]
@@ -300,7 +301,9 @@ mod tests {
             "gs://my-bucket/warehouse",
             DatabricksAuth::GcpBearer("ya29.token".into()),
         );
-        assert!(matches!(cfg.auth, RestCatalogAuth::Bearer(t) if t == "ya29.token"));
+        assert!(
+            matches!(cfg.auth, RestCatalogAuth::Bearer(t) if t.expose_secret() == "ya29.token")
+        );
         assert_eq!(
             cfg.uri,
             "https://myworkspace.gcp.databricks.com/api/2.1/unity-catalog/iceberg"

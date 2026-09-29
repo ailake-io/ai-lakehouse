@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use ailake_core::{AilakeError, AilakeResult};
 use object_store::aws::AmazonS3Builder;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::ObjectStoreBackend;
 
@@ -10,8 +11,8 @@ pub enum S3Credentials {
     /// Explicit key + secret — dev, CI, MinIO, LocalStack.
     Static {
         access_key_id: String,
-        secret_access_key: String,
-        session_token: Option<String>,
+        secret_access_key: SecretString,
+        session_token: Option<SecretString>,
     },
     /// IRSA / EKS Pod Identity — reads `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`
     /// from env (injected by the EKS controller). Fails at build time if either var is absent.
@@ -63,9 +64,9 @@ pub fn s3_store(config: S3Config, prefix: impl Into<String>) -> AilakeResult<Obj
         } => {
             b = b
                 .with_access_key_id(access_key_id)
-                .with_secret_access_key(secret_access_key);
+                .with_secret_access_key(secret_access_key.expose_secret().to_owned());
             if let Some(tok) = session_token {
-                b = b.with_token(tok);
+                b = b.with_token(tok.expose_secret().to_owned());
             }
         }
         S3Credentials::WebIdentity => {

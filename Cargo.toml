@@ -14,12 +14,15 @@ members = [
     "ailake-jni",
     "ailake-py",
     "ailake-fts",
+    "ailake-secrets",
+    "ailake-cache",
 ]
 
 [workspace.dependencies]
 # Core
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
+secrecy     = "0.10"
 uuid        = { version = "1", features = ["v4", "serde"] }
 thiserror   = "1"
 bytes       = "1"
@@ -29,6 +32,7 @@ async-trait = "0.1"
 # Async
 tokio       = { version = "1", features = ["rt-multi-thread", "io-util", "fs", "sync", "time", "macros"] }
 futures     = "0.3"
+redis       = { version = "0.27", default-features = false, features = ["tokio-comp", "script"] }
 
 # Data
 parquet      = { version = "52", features = ["async"] }
@@ -70,6 +74,9 @@ axum        = "0.7"
 # Observability
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Secrets
+zeroize     = "1"
 
 # Dev/test
 tempfile    = "3"

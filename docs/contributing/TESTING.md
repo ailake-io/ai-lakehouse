@@ -17,7 +17,7 @@
 | Unit | `src/` inline `#[cfg(test)]` | `cargo test` | Single function, no I/O |
 | Integration | `tests/` at workspace root | `cargo test -p ailake-tests` | Multiple crates, local FS |
 | Property-based | `src/` inline or `tests/` | `cargo test` | Invariants across random inputs |
-| Benchmark | external [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks) repo | `cargo run --release` (in that repo) | SIFT-1M write/index/search throughput + recall vs. LanceDB/pgvector/Deep Lake |
+| Benchmark | `ailake-vec/benches/` + external [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks) repo | `cargo bench` locally; `performance.yml` in CI | CPU kernels, deterministic Recall@10/p95, HTTP load, and SIFT-1M release comparisons |
 | UB detection (Miri) | `src/` inline `#[cfg(miri)]` | `ci-safety.yml` — every PR | `get_unchecked_mut`, SIMD intrinsics, CStr FFI, scalar edge cases |
 | Concurrency model (Loom) | `src/` inline `#[cfg(feature = "loom")]` | `ci-safety.yml` — every PR | JNI table locks, shared codebooks, atomic counters |
 | Compat (Python/DuckDB) | `tests/compat/` | `ci.yml` — every PR | PyArrow, DuckDB, PyIceberg, ailake-py SDK |
@@ -546,7 +546,29 @@ Scripts:
 
 ---
 
-## Benchmarks
+## Benchmarks and load tests
+
+### In-repository CI checks
+
+The performance workflow is `.github/workflows/performance.yml`. It runs the
+CPU benchmark, deterministic recall/latency checks, real HTTP load with
+concurrent writers, process-level serve fencing, and a catalog emulator
+matrix. See [`docs/guides/PERFORMANCE_BENCHMARKS.md`](../guides/PERFORMANCE_BENCHMARKS.md)
+for commands and thresholds.
+
+```bash
+cargo bench -p ailake-vec --bench distance -- --json > perf/cpu-distance.json
+python3 scripts/ci/compare_benchmark.py perf/cpu-distance.json
+
+AILAKE_MIN_RECALL=0.95 AILAKE_MAX_P95_MS=500 \
+  cargo test -p ailake-tests --test performance_regression -- --nocapture
+```
+
+The HTTP harness measures QPS, mean, p50, p95 and p99 while exercising
+concurrent `/write` and `/search` requests. The Rust `concurrent_writes`
+suite remains the catalog correctness gate, and
+`check_multi_process_lock.sh` verifies that two `ailake serve` processes
+cannot own the same table simultaneously.
 
 ### SIFT-1M end-to-end (external repo)
 
@@ -580,15 +602,16 @@ Engine selection guide:
 - `ailake-auto` — hardware-adaptive; use in heterogeneous deployments
 - `lancedb` — comparison baseline only
 
-No in-repo `criterion` microbenchmarks exist today (no crate depends on `criterion`,
-no `benches/` directory in the workspace) — `cargo bench` is not a working command
-here. The SIFT-1M benchmark above is the only current benchmarking mechanism.
+The in-repository benchmark is intentionally dependency-free and does not use
+Criterion. It is a kernel smoke benchmark, not a replacement for the external
+SIFT-1M comparison. Both results should be recorded with runner, compiler and
+SIMD information.
 
 ---
 
 ## CI matrix (GitHub Actions)
 
-### `ci.yml` — manual dispatch (`workflow_dispatch`)
+### `ci.yml` — pull request, push and manual dispatch
 
 | Job | Command | What it covers |
 |---|---|---|
@@ -604,6 +627,7 @@ here. The SIFT-1M benchmark above is the only current benchmarking mechanism.
 | `compat-pyiceberg` | `write_fixture` + `pip install pyiceberg[pyarrow]` + `check_pyiceberg.py` | PyIceberg `StaticTable.scan()` |
 | `test-airflow-provider` | `pip install apache-airflow pytest` + `pytest tests/` | Airflow provider unit tests (2.x/3.x) |
 | `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context; `fts_text_columns` write + `search_text()` (Tantivy fast path); `search_multimodal` RRF |
+| `performance.yml` | CPU benchmark, Recall@10/p95, HTTP load, multi-writer and catalog matrix | Performance artifacts and regression gates; GPU matrix on non-PR triggers |
 
 ### `ci-gpu.yml` — manual dispatch (`workflow_dispatch`)
 
@@ -750,7 +774,7 @@ Re-builds and re-publishes `apache-airflow-providers-ailake` to PyPI + attaches 
 
 ## Manual Actions trigger order (pre-release)
 
-All CI workflows are `workflow_dispatch`. Trigger in this order — each step must succeed before the next.
+Use the trigger configured by each workflow. For a pre-release validation, trigger the manual workflows in this order — each step must succeed before the next.
 
 | Step | Workflow | What it does | Blocks on |
 |---|---|---|---|
@@ -758,11 +782,12 @@ All CI workflows are `workflow_dispatch`. Trigger in this order — each step mu
 | 1b | **CI Safety** (`ci-safety.yml`) | Miri UB detection (nightly) + Loom concurrency model checking (stable). Runs in parallel with CI. | Must pass |
 | 2 | **CI Go** (`ci-go.yml`) | Go SDK build + vet | Must pass |
 | 3 | **CI C++** (`ci-cpp.yml`) | C++17 cmake build | Must pass |
-| 4 | **CI GPU** (`ci-gpu.yml`) | GPU unit + data integration tests on Windows bare-metal; Linux jobs disabled (`if: false`); skips gracefully if `AILAKE_GPU_BACKEND=none` | Must pass (on GPU runner) |
-| 5 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
-| 6 | **Release** (`release.yml`) | Triggered automatically on merge to `main` — runs all publishing steps sequentially (see chain below). Can also be triggered manually via `workflow_dispatch`. | Steps 1–5 green |
+| 4 | **Performance** (`performance.yml`) | CPU benchmark, Recall@10/p95, HTTP load, concurrent writers, serve fencing and catalog emulator matrix; GPU matrix on push/nightly/manual | CPU jobs must pass; GPU jobs require runners |
+| 5 | **CI GPU** (`ci-gpu.yml`) | GPU unit + data integration tests on Windows bare-metal; Linux jobs disabled (`if: false`); skips gracefully if `AILAKE_GPU_BACKEND=none` | Must pass (on GPU runner) |
+| 6 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
+| 7 | **Release** (`release.yml`) | Triggered automatically on merge to `main` — runs all publishing steps sequentially (see chain below). Can also be triggered manually via `workflow_dispatch`. | Steps 1–6 green |
 
-Step 4 requires the Windows GPU runner — can run in parallel with steps 2 and 3. Only the Windows job is currently active; Linux jobs (`index-gpu-linux-cuda`, `index-gpu-linux-rocm`) are disabled until a Linux GPU runner is registered.
+Step 5 requires the Windows GPU runner — can run in parallel with steps 2–4. Only the Windows job is currently active; Linux jobs (`index-gpu-linux-cuda`, `index-gpu-linux-rocm`) are disabled until a Linux GPU runner is registered. The performance workflow uses the same GPU labels for its non-PR matrix.
 
 ### `release.yml` sequential chain
 

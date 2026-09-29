@@ -226,7 +226,7 @@ fn local_catalog_store(
                     let token = opts.get("rest_token").cloned().ok_or_else(|| {
                         PyValueError::new_err("rest_auth=\"bearer\" requires \"rest_token\"")
                     })?;
-                    RestCatalogAuth::Bearer(token)
+                    RestCatalogAuth::bearer(token)
                 }
                 "oauth2" => {
                     let token_endpoint = opts
@@ -250,12 +250,12 @@ fn local_catalog_store(
                                     "rest_auth=\"oauth2\" requires \"rest_oauth_client_secret\"",
                                 )
                             })?;
-                    RestCatalogAuth::OAuth2 {
+                    RestCatalogAuth::oauth2(
                         token_endpoint,
                         client_id,
                         client_secret,
-                        scope: opts.get("rest_oauth_scope").cloned(),
-                    }
+                        opts.get("rest_oauth_scope").cloned(),
+                    )
                 }
                 other => return Err(PyValueError::new_err(format!("unknown rest_auth: {other}"))),
             };
@@ -828,6 +828,7 @@ fn search(
         partition_filter,
         hybrid,
         column_filter: None,
+        strict_deletes: false,
     };
 
     let results = rt
@@ -966,6 +967,7 @@ fn search_with_data(
         partition_filter,
         hybrid,
         column_filter: None,
+        strict_deletes: false,
     };
 
     let results = rt
@@ -1023,6 +1025,7 @@ fn read_changes_py(
         end_snapshot_id: end_snapshot,
         pk_columns: pk_columns.unwrap_or_default(),
         coalesce_updates,
+        strict_deletes: false,
     };
 
     let batch = rt
@@ -1398,6 +1401,7 @@ fn search_multimodal(
         partition_filter,
         hybrid: None,
         column_filter: None,
+        strict_deletes: false,
     };
 
     let results = rt

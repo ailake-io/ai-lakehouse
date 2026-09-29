@@ -20,6 +20,8 @@ use bytes::Bytes;
 use serde_json;
 use tracing::{error, info, warn};
 
+use crate::index_jobs::{handle_for, list_index_jobs, table_key, IndexAlgorithm, IndexJobHandle};
+
 /// Merges `new`'s fields into `existing`, preserving `existing`'s field order and only
 /// appending fields whose name isn't already present.
 ///
@@ -92,6 +94,8 @@ pub struct MultiVectorBatch<'a> {
     pub policy: VectorStoragePolicy,
     pub embeddings: &'a [Vec<f32>],
 }
+
+type MultiIndexPayload = (Vec<VectorStoragePolicy>, Vec<Vec<Vec<f32>>>);
 
 pub struct TableWriter {
     catalog: Arc<dyn CatalogProvider>,
@@ -234,29 +238,30 @@ impl TableWriter {
         entry.column_stats = column_stats;
         self.pending_files.push(entry);
 
-        // Spawn background HNSW build (fire-and-forget; errors are logged).
+        let job = IndexJobHandle::create(
+            self.store.clone(),
+            &self.table,
+            &file_path,
+            IndexAlgorithm::Hnsw,
+            None,
+        )
+        .await?;
         let store = self.store.clone();
         let catalog = self.catalog.clone();
         let policy = self.policy.clone();
         let table = self.table.clone();
         let fp = file_path.clone();
-        tokio::spawn(async move {
-            if let Err(e) = build_and_patch_index(
-                store.clone(),
-                catalog.clone(),
-                policy,
-                table.clone(),
-                fp.clone(),
-            )
-            .await
-            {
-                error!(
-                    "ailake: deferred HNSW build failed for {fp}: {e}; \
-                     marking IndexStatus::Failed — compaction will rebuild"
-                );
-                patch_index_failed(catalog, &table, &fp, &e.to_string()).await;
-            }
-        });
+        spawn_index_job(
+            job,
+            store,
+            catalog,
+            policy,
+            table,
+            fp,
+            IndexAlgorithm::Hnsw,
+            None,
+            None,
+        );
 
         // Update BM25 IDF stats + build Bloom filter (Phase F) for the new file.
         if self.bm25_text_column.is_some() {
@@ -313,25 +318,25 @@ impl TableWriter {
         let table = self.table.clone();
         let fp = file_path.clone();
         let codebook_cell = self.deferred_ivf_codebook.clone();
-        tokio::spawn(async move {
-            if let Err(e) = build_ivf_pq_and_patch_index(
-                store.clone(),
-                catalog.clone(),
-                policy,
-                table.clone(),
-                fp.clone(),
-                ivf_config,
-                codebook_cell,
-            )
-            .await
-            {
-                error!(
-                    "ailake: deferred IVF-PQ build failed for {fp}: {e}; \
-                     marking IndexStatus::Failed — compaction will rebuild"
-                );
-                patch_index_failed(catalog, &table, &fp, &e.to_string()).await;
-            }
-        });
+        let job = IndexJobHandle::create(
+            self.store.clone(),
+            &self.table,
+            &file_path,
+            IndexAlgorithm::IvfPq,
+            Some(ivf_config.clone()),
+        )
+        .await?;
+        spawn_index_job(
+            job,
+            store,
+            catalog,
+            policy,
+            table,
+            fp,
+            IndexAlgorithm::IvfPq,
+            Some((ivf_config, codebook_cell)),
+            None,
+        );
 
         Ok(())
     }
@@ -848,28 +853,26 @@ impl TableWriter {
             columns.iter().map(|c| c.policy.clone()).collect();
         let all_embeddings: Vec<Vec<Vec<f32>>> =
             columns.iter().map(|c| c.embeddings.to_vec()).collect();
-        let store = self.store.clone();
-        let catalog = self.catalog.clone();
-        let table = self.table.clone();
-        let fp = file_path.clone();
-        tokio::spawn(async move {
-            if let Err(e) = build_and_patch_multi_index(
-                store,
-                catalog.clone(),
-                all_policies,
-                table.clone(),
-                fp.clone(),
-                all_embeddings,
-            )
-            .await
-            {
-                error!(
-                    "ailake: deferred multi-column HNSW build failed for {fp}: {e}; \
-                     marking IndexStatus::Failed — compaction will rebuild"
-                );
-                patch_index_failed(catalog, &table, &fp, &e.to_string()).await;
-            }
-        });
+        let runner_payload = (all_policies.clone(), all_embeddings.clone());
+        let job = IndexJobHandle::create_multi(
+            self.store.clone(),
+            &self.table,
+            &file_path,
+            all_policies,
+            all_embeddings,
+        )
+        .await?;
+        spawn_index_job(
+            job,
+            self.store.clone(),
+            self.catalog.clone(),
+            self.policy.clone(),
+            self.table.clone(),
+            file_path.clone(),
+            IndexAlgorithm::MultiHnsw,
+            None,
+            Some(runner_payload),
+        );
 
         Ok(())
     }
@@ -1033,6 +1036,7 @@ impl TableWriter {
         // shrinks the count, making a later writer reuse a retired file's name.
         match catalog.load_table(&table).await {
             Ok(existing_meta) => {
+                store.validate_location(&existing_meta.location)?;
                 // Hard error: dim stored in table metadata must match the policy dim.
                 // validate_embedding_dim() only checks vectors vs policy.dim; without this
                 // check a caller can open with dim=16 on a dim=8 table and silently corrupt it.
@@ -1084,6 +1088,8 @@ impl TableWriter {
                         },
                     )
                     .await?;
+                let created_meta = catalog.load_table(&table).await?;
+                store.validate_location(&created_meta.location)?;
             }
         }
         let parent_snapshot_id = catalog
@@ -1091,8 +1097,19 @@ impl TableWriter {
             .await
             .ok()
             .and_then(|m| m.current_snapshot_id);
+        let recovery_catalog = Arc::clone(&catalog);
+        let recovery_store = Arc::clone(&store);
+        let recovery_policy = policy.clone();
+        let recovery_table = table.clone();
         let mut writer = Self::new(catalog, store, policy, table);
         writer.parent_snapshot_id = parent_snapshot_id;
+        resume_index_jobs(
+            recovery_store,
+            recovery_catalog,
+            recovery_policy,
+            recovery_table,
+        )
+        .await?;
         Ok(writer)
     }
 }
@@ -1319,17 +1336,239 @@ async fn patch_index_failed(
         });
 }
 
-pub(crate) async fn build_and_patch_index(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_index_job(
+    job: IndexJobHandle,
     store: Arc<dyn Store>,
     catalog: Arc<dyn CatalogProvider>,
     policy: VectorStoragePolicy,
     table: TableIdent,
     file_path: String,
+    algorithm: IndexAlgorithm,
+    ivf: Option<(IvfPqConfig, Arc<tokio::sync::OnceCell<IvfPqCodebook>>)>,
+    multi: Option<MultiIndexPayload>,
+) {
+    tokio::spawn(async move {
+        let mut retry_number = 0u32;
+        loop {
+            match job.try_claim().await {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    error!("ailake: unable to claim index job {}: {error}", job.id());
+                    return;
+                }
+            }
+
+            let heartbeat_job = job.clone();
+            let heartbeat = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                    match heartbeat_job.renew_claim().await {
+                        Ok(true) => {}
+                        Ok(false) | Err(_) => break,
+                    }
+                }
+            });
+            let result = match (&algorithm, &ivf, &multi) {
+                (IndexAlgorithm::Hnsw, None, None) => {
+                    build_and_patch_index_with_job(
+                        Arc::clone(&store),
+                        Arc::clone(&catalog),
+                        policy.clone(),
+                        table.clone(),
+                        file_path.clone(),
+                        Some(job.clone()),
+                    )
+                    .await
+                }
+                (IndexAlgorithm::IvfPq, Some((config, codebook_cell)), None) => {
+                    build_ivf_pq_and_patch_index_with_job(
+                        Arc::clone(&store),
+                        Arc::clone(&catalog),
+                        policy.clone(),
+                        table.clone(),
+                        file_path.clone(),
+                        config.clone(),
+                        Arc::clone(codebook_cell),
+                        Some(job.clone()),
+                    )
+                    .await
+                }
+                (IndexAlgorithm::MultiHnsw, None, Some((policies, embeddings))) => {
+                    build_and_patch_multi_index_with_job(
+                        Arc::clone(&store),
+                        Arc::clone(&catalog),
+                        policies.clone(),
+                        table.clone(),
+                        file_path.clone(),
+                        embeddings.clone(),
+                        Some(job.clone()),
+                    )
+                    .await
+                }
+                _ => Err(AilakeError::InvalidArgument(
+                    "invalid deferred index job configuration".into(),
+                )),
+            };
+            heartbeat.abort();
+
+            if result.is_ok() {
+                let _ = job.succeed().await;
+                let _ = job.release_claim().await;
+                return;
+            }
+
+            let error_message = result
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "unknown index build failure".into());
+            match job.is_cancel_requested().await {
+                Ok(true) => {
+                    let _ = job.mark_cancelled(&error_message).await;
+                    let _ = job.release_claim().await;
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    error!(
+                        "ailake: unable to inspect cancellation for {}: {error}",
+                        job.id()
+                    );
+                }
+            }
+
+            let retry = job.fail_or_retry(&error_message).await.unwrap_or(false);
+            if !retry {
+                error!(
+                    "ailake: deferred {:?} build failed permanently for {}: {}",
+                    algorithm, file_path, error_message
+                );
+                patch_index_failed(Arc::clone(&catalog), &table, &file_path, &error_message).await;
+                let _ = job.release_claim().await;
+                return;
+            }
+
+            let _ = job.release_claim().await;
+            retry_number = retry_number.saturating_add(1);
+            tokio::time::sleep(std::time::Duration::from_secs(1u64 << retry_number.min(4))).await;
+        }
+    });
+}
+
+/// Resume deferred index jobs belonging to `table` after a process restart.
+/// Jobs are claimed through the same cross-process lock used during normal execution,
+/// so calling this from both the CLI server and a newly opened writer is safe.
+pub async fn resume_index_jobs(
+    store: Arc<dyn Store>,
+    catalog: Arc<dyn CatalogProvider>,
+    policy: VectorStoragePolicy,
+    table: TableIdent,
+) -> AilakeResult<usize> {
+    let table_name = table_key(&table);
+    let mut resumed = 0usize;
+    let jobs = list_index_jobs(Arc::clone(&store)).await?;
+    for record in jobs.into_iter().filter(|record| record.table == table_name) {
+        if !matches!(record.status.as_str(), "queued" | "running") {
+            continue;
+        }
+        let job = handle_for(Arc::clone(&store), record.id.clone());
+        if !job.recover_after_restart().await? {
+            continue;
+        }
+        let current = job.record().await?;
+        let algorithm = current.algorithm.clone();
+        let (ivf, multi) = match algorithm {
+            IndexAlgorithm::Hnsw => (None, None),
+            IndexAlgorithm::IvfPq => {
+                let Some(config) = current.ivf_config.clone() else {
+                    job.fail_or_retry("recovered IVF-PQ job has no configuration")
+                        .await?;
+                    continue;
+                };
+                (
+                    Some((
+                        config,
+                        Arc::new(tokio::sync::OnceCell::<IvfPqCodebook>::new()),
+                    )),
+                    None,
+                )
+            }
+            IndexAlgorithm::MultiHnsw => {
+                let payload = match job.multi_payload(&current).await {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        job.fail_or_retry(&error.to_string()).await?;
+                        continue;
+                    }
+                };
+                (None, Some(payload))
+            }
+        };
+        spawn_index_job(
+            job,
+            Arc::clone(&store),
+            Arc::clone(&catalog),
+            policy.clone(),
+            table.clone(),
+            current.file_path,
+            current.algorithm,
+            ivf,
+            multi,
+        );
+        resumed += 1;
+    }
+
+    // Compatibility recovery: older deferred writes may have no job record. Create
+    // one from the catalog's Indexing entry so upgrading does not strand the shard.
+    let files = catalog.list_files(&table, None).await?;
+    let known_paths: std::collections::HashSet<String> = list_index_jobs(store.clone())
+        .await?
+        .into_iter()
+        .filter(|job| job.table == table_name)
+        .map(|job| job.file_path)
+        .collect();
+    for file in files {
+        if file.index_status != IndexStatus::Indexing || known_paths.contains(&file.path) {
+            continue;
+        }
+        let job = IndexJobHandle::create(
+            Arc::clone(&store),
+            &table,
+            &file.path,
+            IndexAlgorithm::Hnsw,
+            None,
+        )
+        .await?;
+        spawn_index_job(
+            job,
+            Arc::clone(&store),
+            Arc::clone(&catalog),
+            policy.clone(),
+            table.clone(),
+            file.path,
+            IndexAlgorithm::Hnsw,
+            None,
+            None,
+        );
+        resumed += 1;
+    }
+    Ok(resumed)
+}
+
+async fn build_and_patch_index_with_job(
+    store: Arc<dyn Store>,
+    catalog: Arc<dyn CatalogProvider>,
+    policy: VectorStoragePolicy,
+    table: TableIdent,
+    file_path: String,
+    job: Option<IndexJobHandle>,
 ) -> AilakeResult<()> {
     // Read the Parquet-only bytes already stored.
     let parquet_bytes = store.get(&file_path).await?;
     let reader = AilakeFileReader::new(parquet_bytes, &policy.column_name, policy.dim);
     let (batch, embeddings) = reader.read_parquet()?;
+    checkpoint_index_job(&job, 10).await?;
 
     // Build the full AILK file (Parquet + HNSW) — CPU-intensive; run on blocking pool
     // so the tokio async threads aren't starved when many shards build concurrently.
@@ -1342,6 +1581,7 @@ pub(crate) async fn build_and_patch_index(
     })
     .await
     .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))??;
+    checkpoint_index_job(&job, 55).await?;
 
     // Extract HNSW offsets from the newly written file.
     let full_reader = AilakeFileReader::new(full_bytes.clone(), &policy.column_name, policy.dim);
@@ -1358,11 +1598,13 @@ pub(crate) async fn build_and_patch_index(
 
     // Overwrite the Parquet-only file with the full AILK version.
     store.put(&file_path, full_bytes).await?;
+    checkpoint_index_job(&job, 70).await?;
 
     // Wait for the initial writer commit to appear (max 60 s).
     // HNSW builds can finish before the main write loop calls commit_snapshot.
     let mut committed = false;
     for _ in 0..120u32 {
+        checkpoint_index_job(&job, 75).await?;
         match catalog.load_table(&table).await {
             Ok(meta) if meta.current_snapshot_id.is_some() => {
                 committed = true;
@@ -1431,6 +1673,7 @@ pub(crate) async fn build_and_patch_index(
         }
         // Another task overwrote us — retry.
     }
+    checkpoint_index_job(&job, 95).await?;
 
     info!(
         "ailake: deferred HNSW index built for {} (offset={}, len={})",
@@ -1443,7 +1686,8 @@ pub(crate) async fn build_and_patch_index(
 ///
 /// The OnceCell guarantees that k-means training runs exactly once across all
 /// concurrent background tasks — subsequent tasks skip directly to assign+encode.
-async fn build_ivf_pq_and_patch_index(
+#[allow(clippy::too_many_arguments)]
+async fn build_ivf_pq_and_patch_index_with_job(
     store: Arc<dyn Store>,
     catalog: Arc<dyn CatalogProvider>,
     policy: VectorStoragePolicy,
@@ -1451,10 +1695,12 @@ async fn build_ivf_pq_and_patch_index(
     file_path: String,
     ivf_config: IvfPqConfig,
     codebook_cell: Arc<tokio::sync::OnceCell<IvfPqCodebook>>,
+    job: Option<IndexJobHandle>,
 ) -> AilakeResult<()> {
     let parquet_bytes = store.get(&file_path).await?;
     let reader = AilakeFileReader::new(parquet_bytes, &policy.column_name, policy.dim);
     let (batch, embeddings) = reader.read_parquet()?;
+    checkpoint_index_job(&job, 10).await?;
 
     // Get or train the shared codebook. First task trains; all others await the result.
     let codebook = codebook_cell
@@ -1469,6 +1715,7 @@ async fn build_ivf_pq_and_patch_index(
             .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))?
         })
         .await?;
+    checkpoint_index_job(&job, 45).await?;
 
     let full_bytes = tokio::task::spawn_blocking({
         let policy = policy.clone();
@@ -1482,6 +1729,7 @@ async fn build_ivf_pq_and_patch_index(
     })
     .await
     .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))??;
+    checkpoint_index_job(&job, 65).await?;
 
     let full_reader = AilakeFileReader::new(full_bytes.clone(), &policy.column_name, policy.dim);
     let header = full_reader.read_header()?;
@@ -1490,10 +1738,12 @@ async fn build_ivf_pq_and_patch_index(
     let hnsw_len = header.hnsw_len;
 
     store.put(&file_path, full_bytes).await?;
+    checkpoint_index_job(&job, 75).await?;
 
     // Wait for initial commit to appear then patch IndexStatus::Ready (max 60 s).
     let mut committed = false;
     for _ in 0..120u32 {
+        checkpoint_index_job(&job, 80).await?;
         match catalog.load_table(&table).await {
             Ok(meta) if meta.current_snapshot_id.is_some() => {
                 committed = true;
@@ -1502,6 +1752,7 @@ async fn build_ivf_pq_and_patch_index(
             _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
         }
     }
+    checkpoint_index_job(&job, 95).await?;
     if !committed {
         return Err(ailake_core::AilakeError::Store(format!(
             "deferred IVF-PQ build: no snapshot committed for {file_path} after 60 s — \
@@ -1563,24 +1814,38 @@ async fn build_ivf_pq_and_patch_index(
     Ok(())
 }
 
+async fn checkpoint_index_job(job: &Option<IndexJobHandle>, progress: u8) -> AilakeResult<()> {
+    if let Some(job) = job {
+        if job.is_cancel_requested().await? {
+            return Err(AilakeError::InvalidArgument(
+                "index job cancellation requested".into(),
+            ));
+        }
+        job.update_progress(progress).await?;
+    }
+    Ok(())
+}
+
 /// Background task: rebuild full multi-column AILK file and patch all column offsets.
 ///
 /// Reads the Parquet-only shard, calls `write_multi` with all N column embeddings
 /// (cloned from the caller), extracts per-column HNSW offsets, overwrites the file,
 /// then applies the same CAS retry loop used by single-column deferred tasks.
-async fn build_and_patch_multi_index(
+async fn build_and_patch_multi_index_with_job(
     store: Arc<dyn Store>,
     catalog: Arc<dyn CatalogProvider>,
     policies: Vec<VectorStoragePolicy>,
     table: TableIdent,
     file_path: String,
     all_embeddings: Vec<Vec<Vec<f32>>>,
+    job: Option<IndexJobHandle>,
 ) -> AilakeResult<()> {
     // Read the Parquet-only shard (primary column only).
     let parquet_bytes = store.get(&file_path).await?;
     let primary_reader =
         AilakeFileReader::new(parquet_bytes, &policies[0].column_name, policies[0].dim);
     let (batch, _) = primary_reader.read_parquet()?;
+    checkpoint_index_job(&job, 10).await?;
 
     // Build full AILK file with all N column HNSW sections on the blocking pool.
     let full_bytes = tokio::task::spawn_blocking({
@@ -1601,6 +1866,7 @@ async fn build_and_patch_multi_index(
     })
     .await
     .map_err(|e| ailake_core::AilakeError::Store(format!("spawn_blocking panic: {e}")))??;
+    checkpoint_index_job(&job, 60).await?;
 
     // Extract primary HNSW offsets.
     let primary_reader = AilakeFileReader::new(
@@ -1628,10 +1894,12 @@ async fn build_and_patch_multi_index(
 
     // Overwrite the Parquet-only shard with the full AILK file.
     store.put(&file_path, full_bytes).await?;
+    checkpoint_index_job(&job, 70).await?;
 
     // Wait for the initial writer commit to appear (max 60 s).
     let mut committed = false;
     for _ in 0..120u32 {
+        checkpoint_index_job(&job, 80).await?;
         match catalog.load_table(&table).await {
             Ok(meta) if meta.current_snapshot_id.is_some() => {
                 committed = true;
@@ -1640,6 +1908,7 @@ async fn build_and_patch_multi_index(
             _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
         }
     }
+    checkpoint_index_job(&job, 95).await?;
     if !committed {
         return Err(ailake_core::AilakeError::Store(format!(
             "deferred index build: no snapshot committed for {file_path} after 60 s — \

@@ -208,6 +208,7 @@ async fn hybrid_search_rrf_returns_top_k() {
                 .with_bm25_weight(0.4),
         ),
         column_filter: None,
+        strict_deletes: false,
     };
 
     let results = ailake_query::search(

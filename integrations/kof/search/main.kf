@@ -1,0 +1,9 @@
+// AI-Lake HTTP client example for Kof JVM/JS.
+// Start the service first:
+//   ailake serve default.docs --store ./warehouse --port 7700
+
+main() {
+    var payload = "{\"query\":[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],\"top_k\":5}"
+    var response = http.post("http://127.0.0.1:7700/search", payload)
+    println(response)
+}

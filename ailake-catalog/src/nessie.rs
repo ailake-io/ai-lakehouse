@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use ailake_core::{AilakeError, AilakeResult};
 use async_trait::async_trait;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -56,7 +57,7 @@ pub struct NessieBranch {
 // ── Internal ──────────────────────────────────────────────────────────────────
 
 struct CachedToken {
-    value: String,
+    value: SecretString,
     expires_at: Instant,
 }
 
@@ -103,10 +104,69 @@ impl NessieCatalog {
 
     // ── Auth ──────────────────────────────────────────────────────────────────
 
-    async fn get_token(&self) -> AilakeResult<Option<String>> {
+    async fn get_token(&self) -> AilakeResult<Option<SecretString>> {
         match &self.auth {
             RestCatalogAuth::None => Ok(None),
             RestCatalogAuth::Bearer(t) => Ok(Some(t.clone())),
+            RestCatalogAuth::BearerProvider(provider) => provider
+                .fetch()
+                .await
+                .map(Some)
+                .map_err(|e| AilakeError::Catalog(format!("secret provider: {e}"))),
+            RestCatalogAuth::OAuth2Provider {
+                token_endpoint,
+                client_id,
+                client_secret,
+                scope,
+            } => {
+                {
+                    let cache = self.token_cache.lock().await;
+                    if let Some(c) = &*cache {
+                        if c.expires_at > Instant::now() + Duration::from_secs(30) {
+                            return Ok(Some(c.value.clone()));
+                        }
+                    }
+                }
+                let client_secret = client_secret
+                    .fetch()
+                    .await
+                    .map_err(|e| AilakeError::Catalog(format!("secret provider: {e}")))?;
+                let mut params = vec![
+                    ("grant_type", "client_credentials"),
+                    ("client_id", client_id.as_str()),
+                    ("client_secret", client_secret.expose_secret()),
+                ];
+                let scope_str;
+                if let Some(s) = scope {
+                    scope_str = s.clone();
+                    params.push(("scope", scope_str.as_str()));
+                }
+                let resp = self
+                    .client
+                    .post(token_endpoint)
+                    .form(&params)
+                    .send()
+                    .await
+                    .map_err(|e| AilakeError::Store(e.to_string()))?;
+                if !resp.status().is_success() {
+                    return Err(AilakeError::Catalog(format!(
+                        "OAuth2 token request failed: HTTP {}",
+                        resp.status()
+                    )));
+                }
+                let token_resp: OAuthTokenResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| AilakeError::Catalog(format!("OAuth2 token parse: {e}")))?;
+                let cached = CachedToken {
+                    value: SecretString::from(token_resp.access_token),
+                    expires_at: Instant::now()
+                        + Duration::from_secs(token_resp.expires_in.unwrap_or(3600)),
+                };
+                let token = cached.value.clone();
+                *self.token_cache.lock().await = Some(cached);
+                Ok(Some(token))
+            }
             RestCatalogAuth::OAuth2 {
                 token_endpoint,
                 client_id,
@@ -124,7 +184,7 @@ impl NessieCatalog {
                 let mut params = vec![
                     ("grant_type", "client_credentials"),
                     ("client_id", client_id.as_str()),
-                    ("client_secret", client_secret.as_str()),
+                    ("client_secret", client_secret.expose_secret()),
                 ];
                 let scope_str;
                 if let Some(s) = scope {
@@ -140,9 +200,8 @@ impl NessieCatalog {
                     .map_err(|e| AilakeError::Store(e.to_string()))?;
                 if !resp.status().is_success() {
                     let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
                     return Err(AilakeError::Catalog(format!(
-                        "Nessie OAuth2 failed: HTTP {status}: {body}"
+                        "Nessie OAuth2 failed: HTTP {status}"
                     )));
                 }
                 #[derive(Deserialize)]
@@ -155,11 +214,12 @@ impl NessieCatalog {
                     .await
                     .map_err(|e| AilakeError::Catalog(format!("Nessie OAuth2 parse: {e}")))?;
                 let ttl = tr.expires_in.unwrap_or(3600);
+                let token = SecretString::from(tr.access_token);
                 *self.token_cache.lock().await = Some(CachedToken {
-                    value: tr.access_token.clone(),
+                    value: token.clone(),
                     expires_at: Instant::now() + Duration::from_secs(ttl),
                 });
-                Ok(Some(tr.access_token))
+                Ok(Some(token))
             }
         }
     }
@@ -169,7 +229,7 @@ impl NessieCatalog {
     async fn get(&self, url: &str) -> AilakeResult<reqwest::Response> {
         let mut req = self.client.get(url);
         if let Some(t) = self.get_token().await? {
-            req = req.bearer_auth(t);
+            req = req.bearer_auth(t.expose_secret());
         }
         req.send()
             .await
@@ -179,7 +239,7 @@ impl NessieCatalog {
     async fn post<T: Serialize>(&self, url: &str, body: &T) -> AilakeResult<reqwest::Response> {
         let mut req = self.client.post(url).json(body);
         if let Some(t) = self.get_token().await? {
-            req = req.bearer_auth(t);
+            req = req.bearer_auth(t.expose_secret());
         }
         req.send()
             .await
@@ -189,7 +249,7 @@ impl NessieCatalog {
     async fn delete(&self, url: &str) -> AilakeResult<reqwest::Response> {
         let mut req = self.client.delete(url);
         if let Some(t) = self.get_token().await? {
-            req = req.bearer_auth(t);
+            req = req.bearer_auth(t.expose_secret());
         }
         req.send()
             .await

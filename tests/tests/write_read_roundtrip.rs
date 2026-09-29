@@ -71,6 +71,7 @@ async fn write_10k_rows_search_top10() {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         },
         "embedding",
         dim,

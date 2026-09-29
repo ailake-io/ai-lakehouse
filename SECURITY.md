@@ -97,9 +97,12 @@ catch_ffi_panic(|params| {
 | `DefaultBodyLimit::max(32 MB)` | Axum middleware; rejects oversized bodies before handler |
 | Empty query → 400 | `handle_search` — `ApiError("query must not be empty")` before any I/O |
 | `top_k.clamp(1, 10_000)` | `handle_search` — prevents unbounded HNSW result sets |
-| Startup warning | `eprintln!("WARNING: ailake serve has no authentication …")` on start |
+| Startup warning | `eprintln!("WARNING: no authentication …")` when `--auth-token` is absent |
+| Bearer authentication | All endpoints except `/healthz` require `Authorization: Bearer …` when configured |
+| In-flight bound | At most 64 authenticated API requests per process; excess requests receive HTTP 429 |
+| Metrics/jobs | `/metrics` and `/jobs/*` are protected by the same token when authentication is enabled |
 
-> **Note:** `ailake serve` is for internal/trusted networks only. No rate limiting, no auth. Do not expose publicly without authenticating proxy (API gateway, mTLS sidecar).
+> **Note:** `ailake serve` still benefits from an API gateway or mTLS sidecar for distributed rate limiting, TLS termination and network policy. Use `--auth-token` for the process-level authentication guard.
 
 ### CLI input validation (`ailake-cli/src/`)
 
@@ -171,14 +174,14 @@ Magic byte verification: AILK header (magic `b"AILK"`), FTS header (magic `b"AFT
 | Schema patch dedup | `add_schema`/`set_current_schema` skipped when schema unchanged |
 | Partition spec dedup | `add_partition_spec` skipped when spec unchanged |
 | Snapshot null handling | `-1` sentinel treated as `null` (no snapshot) before commit requirement |
-| Token storage | Bearer token and OAuth2 client_secret held in-memory `String` (plaintext) |
+| Token storage | Bearer token and OAuth2 client_secret remain in-memory strings for API compatibility; CLI supports restrictive secret files and OAuth errors no longer include response bodies |
 
 ### Credential environment variables
 
 | Variable | Source | Risk |
 |----------|--------|------|
-| `AILAKE_REST_TOKEN` | User / CI | Bearer token in env — may leak via `/proc` or core dumps |
-| `AILAKE_REST_OAUTH_CLIENT_SECRET` | User / CI | OAuth2 secret in env |
+| `AILAKE_REST_TOKEN` | User / CI | Bearer token in env — may leak via `/proc` or core dumps; prefer `--rest-token-file` with mode 0600 |
+| `AILAKE_REST_OAUTH_CLIENT_SECRET` | User / CI | OAuth2 secret in env; prefer `--rest-oauth-client-secret-file` with mode 0600 |
 | `AILAKE_REST_OAUTH_CLIENT_ID` | User / CI | OAuth2 client ID (not secret, but identifying) |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | SDK standard | Cloud credentials via `object_store` |
 | `AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_CLIENT_*` | SDK standard | Azure credentials via `object_store` |
@@ -197,12 +200,12 @@ Magic byte verification: AILK header (magic `b"AILK"`), FTS header (magic `b"AFT
 
 | # | Severity | Gap | Location | Impact |
 |---|----------|-----|----------|--------|
-| 1 | **Critical** | `debug_assert_eq` for dim check — ineffective in release | `ailake-vec/src/distance.rs:8,33,58` | OOB read on dim mismatch in release builds; mitigated by caller-side validation |
-| 2 | **High** | No path traversal guard in `LocalStore::full_path` | `ailake-store/src/local.rs:30` | `../../etc/passwd` resolves outside root; LocalStore only for trusted paths |
-| 3 | **Medium** | No max `ipc_len` limit in `ailake_write_batch_ipc` | `ailake-jni/src/lib.rs:1044` | Malicious JNA caller can request ~16 GB allocation via `from_raw_parts` |
-| 4 | **Medium** | No rate limiting on HTTP server | `ailake-cli/src/serve.rs` | No DoS protection via request concurrency |
-| 5 | **Low** | Secrets in plaintext in-memory (REST token, OAuth2 secret) | `ailake-catalog/src/rest.rs` | Potential leak via `tracing` or core dumps |
-| 6 | **Low** | `AILAKE_REST_*` env vars not masked in CLI help/error output | `ailake-cli/src/main.rs` | Secret may appear in shell history if passed as `--rest-token` flag |
+| 1 | **Critical** | Dimension validation must remain explicit at every unsafe boundary | `ailake-vec/src/distance.rs`, `ailake-jni/src/lib.rs` | Fixed in 0.1.12: release builds now assert before SIMD access; callers still validate dimensions and convert panics at FFI boundaries |
+| 2 | **High** | LocalStore path traversal | `ailake-store/src/local.rs` | Fixed: `..` and absolute paths outside the configured root are rejected |
+| 3 | **Medium** | Unbounded `ipc_len` in `ailake_write_batch_ipc` | `ailake-jni/src/lib.rs` | Fixed: Arrow IPC payloads are capped at 512 MiB before `from_raw_parts` |
+| 4 | **Medium** | No distributed rate limiting on HTTP server | `ailake-cli/src/serve.rs` | Fixed at the process level: concurrent requests are bounded at 64; use an external gateway for distributed rate limiting |
+| 5 | **Low** | Secrets in plaintext in-memory (REST token, OAuth2 secret) | `ailake-catalog/src/rest.rs` | Partially fixed: secret files, restrictive permissions and redacted OAuth failures; in-memory API representation remains for compatibility |
+| 6 | **Low** | Inline REST secret flags visible in process listings | `ailake-cli/src/main.rs` | Partially fixed: env values are hidden in help and file-based secrets are supported; prefer env/file over inline flags |
 
 ## Disclosure history
 

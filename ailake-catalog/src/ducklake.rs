@@ -84,6 +84,7 @@ use crate::provider::{
     TableProperties,
 };
 use crate::schema_evolution::SchemaEvolution;
+use ailake_store::{LocalStore, Store};
 
 pub struct DuckLakeCatalog {
     conn: Arc<AsyncMutex<Connection>>,
@@ -664,6 +665,18 @@ impl CatalogProvider for DuckLakeCatalog {
         table: &TableIdent,
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
+        // DuckDB serializes writers within one process, but its catalog files
+        // can still be opened by another process. Serialize the two-phase
+        // lake/sidecar commit across processes as well. DuckLake is local-only
+        // in this backend, so a LocalStore lock is appropriate here.
+        let lock_store = LocalStore::new(&self.warehouse);
+        let lock_path = "catalog/.ailake-commit.lock";
+        if !lock_store.try_acquire_lock(lock_path).await? {
+            return Err(AilakeError::Catalog(
+                "DuckLake catalog is being committed by another process".into(),
+            ));
+        }
+        let result = async {
         let key = table_key(table);
         let snap_id = snapshot.snapshot_id;
         let full_table = self.qualified_table(table);
@@ -861,12 +874,20 @@ impl CatalogProvider for DuckLakeCatalog {
             Ok(()) => {
                 conn.execute_batch("COMMIT;")
                     .map_err(|e| cat_err("commit (sidecar)", e))?;
-                Ok(snap_id)
+                Ok::<SnapshotId, AilakeError>(snap_id)
             }
             Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK;");
                 Err(e)
             }
+        }
+        }
+        .await;
+        let release = lock_store.release_lock(lock_path).await;
+        match (result, release) {
+            (Ok(snapshot_id), Ok(())) => Ok(snapshot_id),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), _) => Err(error),
         }
     }
 

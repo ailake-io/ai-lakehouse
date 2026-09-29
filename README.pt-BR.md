@@ -111,6 +111,7 @@ Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
 | [`docs/specs/CLOUD_DEPLOY.md`](./docs/specs/CLOUD_DEPLOY.md) | Deploy passo-a-passo em EMR, Glue, Lambda, Dataproc, Dataflow, Databricks, HDInsight, AzureML |
 | [`docs/specs/COMPACTION.md`](./docs/specs/COMPACTION.md) | Design do job de compaction, triggers, estratégia de reconstrução do HNSW |
 | [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md) | Estratégia de testes, fixtures, matriz CI, harness de testes de compat |
+| [`docs/guides/PERFORMANCE_BENCHMARKS.md`](./docs/guides/PERFORMANCE_BENCHMARKS.md) | Benchmarks CPU, regressão de Recall@10/p95, carga HTTP, multi-writer e matriz de catálogos/GPU |
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Convenções Rust, tratamento de erros, política de unsafe, regras de testes |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | Log de ADRs — por que cada escolha-chave foi feita |
 | [`SETUP.md`](./SETUP.md) | Setup de dev local — roda a stack completa (MinIO, Nessie, testes de compat) na sua máquina |
@@ -175,6 +176,30 @@ wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/libail
 ```
 
 Veja [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) para instalação e configuração.
+
+## Integração com Kof
+
+O AI-Lake inclui um adaptador Kof validado em
+[`integrations/kof/`](./integrations/kof/). O cliente HTTP é tipado em Kof
+JVM/JS; aplicações Native usam o binding C-ABI no mesmo processo:
+
+```bash
+# Serviço local — por padrão escuta apenas em localhost
+cargo run -p ailake-cli -- --store ./warehouse serve default.docs --port 7700
+
+# Validar e executar o cliente Kof tipado (JVM ou JS)
+kof check integrations/kof/client --target jvm
+kof run integrations/kof/client/main.kf --target jvm
+
+# Validar o binding Native sobre o C-ABI
+cargo build -p ailake-jni
+kof check integrations/kof/native --target native
+```
+
+Para integrações nativas no mesmo processo, use as declarações C estáveis em
+[`ailake-jni/include/ailake.h`](./ailake-jni/include/ailake.h). O C-ABI usa
+envelopes JSON e Arrow IPC para lotes grandes; toda string retornada deve ser
+liberada com `ailake_free_string`.
 
 ## Layout do repositório
 

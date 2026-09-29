@@ -15,6 +15,7 @@ bytes        = { workspace = true }
 async-trait  = { workspace = true }
 thiserror    = { workspace = true }
 object_store = { workspace = true }
+secrecy      = { workspace = true }
 futures      = { workspace = true }
 
 [features]

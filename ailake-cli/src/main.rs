@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 mod serve;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use ailake_catalog::{
@@ -19,9 +20,21 @@ use ailake_query::{
     MigrationJob, MigrationProgress, MigrationStrategy, MultiVectorBatch, ProgressFn, SearchConfig,
     TableWriter,
 };
+#[cfg(feature = "catalog-rest")]
+use ailake_secrets::{SecretResolver, SecretResolverConfig};
 use ailake_store::{store_from_url, Store};
 use arrow_array::RecordBatch;
 use clap::{Parser, Subcommand, ValueEnum};
+use secrecy::SecretString;
+#[cfg(feature = "catalog-rest")]
+use secrecy::{zeroize::Zeroize, ExposeSecret};
+
+fn parse_secret(value: &str) -> Result<SecretString, String> {
+    if value.is_empty() {
+        return Err("secret must not be empty".into());
+    }
+    Ok(value.into())
+}
 
 #[derive(Parser)]
 #[command(
@@ -68,8 +81,30 @@ struct Cli {
 
     /// Pre-obtained Bearer token — Workload Identity, CI tokens, etc. Used
     /// when `--rest-auth bearer`.
-    #[arg(long, global = true, env = "AILAKE_REST_TOKEN")]
-    rest_token: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        env = "AILAKE_REST_TOKEN",
+        hide_env_values = true,
+        value_parser = parse_secret
+    )]
+    rest_token: Option<SecretString>,
+
+    /// Read the REST bearer token from a file instead of exposing it in the
+    /// process arguments. The file should be readable only by the service user.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "rest_token",
+        value_name = "PATH"
+    )]
+    rest_token_file: Option<PathBuf>,
+
+    /// Rotating secret reference for the REST bearer token, e.g.
+    /// `env://TOKEN`, `k8s:///var/run/secrets/ailake#token`,
+    /// `vault://kv/ailake#token`, or `aws-sm://prod/ailake#token`.
+    #[arg(long, global = true, conflicts_with_all = ["rest_token", "rest_token_file"])]
+    rest_token_ref: Option<String>,
 
     /// OAuth2 token endpoint URL. Used when `--rest-auth oauth2`.
     #[arg(long, global = true, env = "AILAKE_REST_OAUTH_TOKEN_ENDPOINT")]
@@ -80,12 +115,65 @@ struct Cli {
     rest_oauth_client_id: Option<String>,
 
     /// OAuth2 client secret. Used when `--rest-auth oauth2`.
-    #[arg(long, global = true, env = "AILAKE_REST_OAUTH_CLIENT_SECRET")]
-    rest_oauth_client_secret: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        env = "AILAKE_REST_OAUTH_CLIENT_SECRET",
+        hide_env_values = true,
+        value_parser = parse_secret
+    )]
+    rest_oauth_client_secret: Option<SecretString>,
+
+    /// Read the OAuth2 client secret from a file with mode 0600 or stricter.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "rest_oauth_client_secret",
+        value_name = "PATH"
+    )]
+    rest_oauth_client_secret_file: Option<PathBuf>,
+
+    /// Rotating secret reference for the OAuth2 client secret.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = ["rest_oauth_client_secret", "rest_oauth_client_secret_file"]
+    )]
+    rest_oauth_client_secret_ref: Option<String>,
 
     /// Optional OAuth2 scope (e.g. "https://management.azure.com/.default").
     #[arg(long, global = true, env = "AILAKE_REST_OAUTH_SCOPE")]
     rest_oauth_scope: Option<String>,
+
+    /// Vault address used by `vault://...` references.
+    #[arg(long, global = true, env = "AILAKE_VAULT_ADDR")]
+    vault_address: Option<String>,
+
+    /// Vault token used to resolve `vault://...` references.
+    #[arg(long, global = true, env = "AILAKE_VAULT_TOKEN", hide_env_values = true, value_parser = parse_secret)]
+    vault_token: Option<SecretString>,
+
+    /// File containing the Vault token. Must have mode 0600 or stricter.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "vault_token",
+        value_name = "PATH"
+    )]
+    vault_token_file: Option<PathBuf>,
+
+    /// AWS region used by `aws-sm://...` references.
+    #[arg(long, global = true, env = "AWS_REGION")]
+    secrets_aws_region: Option<String>,
+
+    /// Cache lifetime for external secrets before fetching a fresh value.
+    #[arg(
+        long,
+        global = true,
+        env = "AILAKE_SECRETS_REFRESH_SECS",
+        default_value_t = 300
+    )]
+    secrets_refresh_secs: u64,
 
     #[command(subcommand)]
     command: Commands,
@@ -268,6 +356,9 @@ enum Commands {
         /// Geometric pruning threshold (0.0–1.0; lower = more aggressive)
         #[arg(long, default_value = "0.8")]
         pruning_threshold: f32,
+        /// Fail instead of returning rows when deletion metadata cannot be read.
+        #[arg(long, default_value_t = false)]
+        strict_deletes: bool,
         /// Output format
         #[arg(long, value_enum, default_value = "text")]
         format: OutputFormat,
@@ -309,12 +400,67 @@ enum Commands {
     Serve {
         /// Table name
         table: String,
+        /// Host/interface to bind. Defaults to localhost for safer local use.
+        /// Use 0.0.0.0 explicitly for containers or trusted VPC deployments.
+        #[arg(long, default_value = "127.0.0.1", env = "AILAKE_SERVE_HOST")]
+        host: String,
         /// Port to listen on
         #[arg(long, default_value = "7700")]
         port: u16,
+        /// Optional Bearer token required by all endpoints except /healthz.
+        #[arg(
+            long,
+            env = "AILAKE_SERVE_TOKEN",
+            value_name = "TOKEN",
+            hide_env_values = true,
+            value_parser = parse_secret
+        )]
+        auth_token: Option<SecretString>,
         /// Vector column name
         #[arg(long, default_value = "embedding")]
         column: String,
+        /// Redis/Valkey URL for the shared cache (redis:// or rediss://).
+        #[arg(long, env = "AILAKE_CACHE_URL", hide_env_values = true)]
+        cache_url: Option<String>,
+        /// Global in-process cache memory limit.
+        #[arg(long, env = "AILAKE_CACHE_MAX_BYTES", default_value_t = 268_435_456)]
+        cache_max_bytes: usize,
+        /// TTL for query, metadata and index cache entries.
+        #[arg(long, env = "AILAKE_CACHE_TTL_SECS", default_value_t = 2)]
+        cache_ttl_secs: u64,
+        /// Fail search requests when deletion metadata cannot be read.
+        #[arg(long, env = "AILAKE_STRICT_DELETES", default_value_t = false)]
+        strict_deletes: bool,
+        /// Redis/Valkey URL for distributed rate limiting. Defaults to --cache-url.
+        #[arg(long, env = "AILAKE_RATE_LIMIT_URL", hide_env_values = true)]
+        rate_limit_url: Option<String>,
+        /// Fixed quota window in seconds.
+        #[arg(long, env = "AILAKE_RATE_WINDOW_SECS", default_value_t = 60)]
+        rate_window_secs: u64,
+        /// Search quota per bearer token during the window. Zero disables it.
+        #[arg(long, env = "AILAKE_SEARCH_QUOTA_TOKEN", default_value_t = 600)]
+        search_quota_token: u64,
+        /// Write/compact/job quota per bearer token during the window. Zero disables it.
+        #[arg(long, env = "AILAKE_WRITE_QUOTA_TOKEN", default_value_t = 60)]
+        write_quota_token: u64,
+        /// Search quota per trusted proxy IP during the window. Zero disables it.
+        #[arg(long, env = "AILAKE_SEARCH_QUOTA_IP", default_value_t = 1_200)]
+        search_quota_ip: u64,
+        /// Write/compact/job quota per trusted proxy IP during the window. Zero disables it.
+        #[arg(long, env = "AILAKE_WRITE_QUOTA_IP", default_value_t = 120)]
+        write_quota_ip: u64,
+        /// Trust X-Forwarded-For/X-Real-IP from an API gateway or reverse proxy.
+        #[arg(long, env = "AILAKE_TRUST_PROXY_HEADERS", default_value_t = false)]
+        trust_proxy_headers: bool,
+        /// Reject requests when Redis rate-limit storage is unavailable.
+        #[arg(long, env = "AILAKE_RATE_LIMIT_FAIL_CLOSED", default_value_t = false)]
+        rate_limit_fail_closed: bool,
+        /// Consecutive catalog/storage failures before opening the circuit.
+        #[arg(long, env = "AILAKE_CIRCUIT_FAILURE_THRESHOLD", default_value_t = 5)]
+        circuit_failure_threshold: u32,
+        /// Circuit breaker cooldown before a probe request, in seconds.
+        #[arg(long, env = "AILAKE_CIRCUIT_COOLDOWN_SECS", default_value_t = 15)]
+        circuit_cooldown_secs: u64,
     },
     /// Print table statistics
     Info {
@@ -340,6 +486,9 @@ enum Commands {
         /// Coalesce same-PK DELETE + INSERT pairs into UPDATE_BEFORE + UPDATE_AFTER.
         #[arg(long, default_value_t = false)]
         coalesce_updates: bool,
+        /// Fail instead of treating unreadable deletion vectors as empty.
+        #[arg(long, default_value_t = false)]
+        strict_deletes: bool,
         /// Output format
         #[arg(long, value_enum, default_value = "json")]
         format: CdcOutputFormat,
@@ -621,6 +770,49 @@ async fn build_ducklake_catalog(store_arg: &str) -> Result<Arc<dyn CatalogProvid
 /// REST server only manages `metadata.json`/table registration, per
 /// `ailake_catalog::rest`'s own module doc.
 #[cfg(feature = "catalog-rest")]
+fn read_secret(
+    inline: Option<&SecretString>,
+    file: Option<&std::path::Path>,
+    name: &str,
+) -> Result<Option<SecretString>, String> {
+    if inline.is_some() && file.is_some() {
+        return Err(format!(
+            "{name} cannot be supplied both inline and as a file"
+        ));
+    }
+    let value = if let Some(path) = file {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path)
+                .map_err(|e| format!("cannot inspect {name} file: {e}"))?
+                .permissions()
+                .mode()
+                & 0o077;
+            if mode != 0 {
+                return Err(format!(
+                    "{name} file permissions are too broad; use chmod 600"
+                ));
+            }
+        }
+        let mut raw =
+            std::fs::read_to_string(path).map_err(|e| format!("cannot read {name} file: {e}"))?;
+        let value = raw.trim().to_string();
+        raw.zeroize();
+        Some(value.into())
+    } else {
+        inline.cloned()
+    };
+    if value
+        .as_ref()
+        .is_some_and(|secret| secret.expose_secret().is_empty())
+    {
+        return Err(format!("{name} must not be empty"));
+    }
+    Ok(value)
+}
+
+#[cfg(feature = "catalog-rest")]
 fn build_rest_catalog(
     cli: &Cli,
     store: Arc<dyn Store>,
@@ -630,14 +822,37 @@ fn build_rest_catalog(
         .clone()
         .ok_or("--catalog rest requires --rest-uri (or AILAKE_REST_URI)")?;
 
+    let vault_token = read_secret(
+        cli.vault_token.as_ref(),
+        cli.vault_token_file.as_deref(),
+        "Vault token",
+    )?;
+    let resolver = SecretResolver::new(SecretResolverConfig {
+        vault_address: cli.vault_address.clone(),
+        vault_token,
+        aws_region: cli.secrets_aws_region.clone(),
+        refresh_after: std::time::Duration::from_secs(cli.secrets_refresh_secs.max(1)),
+    });
+
     let auth = match cli.rest_auth {
         RestAuthArg::None => RestCatalogAuth::None,
         RestAuthArg::Bearer => {
-            let token = cli
-                .rest_token
-                .clone()
-                .ok_or("--rest-auth bearer requires --rest-token (or AILAKE_REST_TOKEN)")?;
-            RestCatalogAuth::Bearer(token)
+            if let Some(reference) = cli.rest_token_ref.as_deref() {
+                let provider = resolver
+                    .rotating(reference)
+                    .map_err(|e| format!("cannot configure REST bearer secret: {e}"))?;
+                RestCatalogAuth::bearer_provider(Arc::new(provider))
+            } else {
+                let token = read_secret(
+                    cli.rest_token.as_ref(),
+                    cli.rest_token_file.as_deref(),
+                    "REST bearer token",
+                )?
+                .ok_or(
+                    "--rest-auth bearer requires --rest-token, --rest-token-file, --rest-token-ref, or AILAKE_REST_TOKEN",
+                )?;
+                RestCatalogAuth::bearer(token)
+            }
         }
         RestAuthArg::Oauth2 => {
             let token_endpoint = cli.rest_oauth_token_endpoint.clone().ok_or(
@@ -648,15 +863,29 @@ fn build_rest_catalog(
                 "--rest-auth oauth2 requires --rest-oauth-client-id \
                  (or AILAKE_REST_OAUTH_CLIENT_ID)",
             )?;
-            let client_secret = cli.rest_oauth_client_secret.clone().ok_or(
-                "--rest-auth oauth2 requires --rest-oauth-client-secret \
-                 (or AILAKE_REST_OAUTH_CLIENT_SECRET)",
-            )?;
-            RestCatalogAuth::OAuth2 {
-                token_endpoint,
-                client_id,
-                client_secret,
-                scope: cli.rest_oauth_scope.clone(),
+            if let Some(reference) = cli.rest_oauth_client_secret_ref.as_deref() {
+                let provider = resolver
+                    .rotating(reference)
+                    .map_err(|e| format!("cannot configure OAuth2 client secret: {e}"))?;
+                RestCatalogAuth::oauth2_provider(
+                    token_endpoint,
+                    client_id,
+                    Arc::new(provider),
+                    cli.rest_oauth_scope.clone(),
+                )
+            } else {
+                let client_secret = read_secret(
+                    cli.rest_oauth_client_secret.as_ref(),
+                    cli.rest_oauth_client_secret_file.as_deref(),
+                    "OAuth2 client secret",
+                )?
+                .ok_or("--rest-auth oauth2 requires --rest-oauth-client-secret, --rest-oauth-client-secret-file, --rest-oauth-client-secret-ref, or AILAKE_REST_OAUTH_CLIENT_SECRET")?;
+                RestCatalogAuth::oauth2(
+                    token_endpoint,
+                    client_id,
+                    client_secret,
+                    cli.rest_oauth_scope.clone(),
+                )
             }
         }
     };
@@ -1062,6 +1291,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             bm25_weight,
             top_k,
             pruning_threshold,
+            strict_deletes,
             format,
         } => {
             let ident = parse_table_ident(&table);
@@ -1070,7 +1300,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             if let Some(ref txt) = text {
                 let cols_str = text_columns.as_deref().unwrap_or("chunk_text");
                 let cols: Vec<&str> = cols_str.split(',').map(str::trim).collect();
-                let results = ailake_query::search_text(
+                let results = ailake_query::search_text_with_options(
                     &ident,
                     txt,
                     &cols,
@@ -1078,6 +1308,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     catalog as Arc<dyn CatalogProvider>,
                     store,
                     None,
+                    strict_deletes,
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -1168,6 +1399,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 partition_filter: None,
                 hybrid,
                 column_filter: None,
+                strict_deletes,
             };
 
             let results = ailake_query::search(
@@ -1414,8 +1646,24 @@ async fn run(cli: Cli) -> Result<(), String> {
 
         Commands::Serve {
             table,
+            host,
             port,
+            auth_token,
             column,
+            cache_url,
+            cache_max_bytes,
+            cache_ttl_secs,
+            strict_deletes,
+            rate_limit_url,
+            rate_window_secs,
+            search_quota_token,
+            write_quota_token,
+            search_quota_ip,
+            write_quota_ip,
+            trust_proxy_headers,
+            rate_limit_fail_closed,
+            circuit_failure_threshold,
+            circuit_cooldown_secs,
         } => {
             let ident = parse_table_ident(&table);
             let meta = catalog
@@ -1459,7 +1707,25 @@ async fn run(cli: Cli) -> Result<(), String> {
                 store,
                 ident,
                 policy,
-                port,
+                serve::ServeConfig {
+                    host,
+                    port,
+                    auth_token,
+                    cache_url,
+                    cache_max_bytes,
+                    cache_ttl_secs,
+                    strict_deletes,
+                    rate_limit_url,
+                    rate_window_secs,
+                    search_quota_token,
+                    write_quota_token,
+                    search_quota_ip,
+                    write_quota_ip,
+                    trust_proxy_headers,
+                    rate_limit_fail_closed,
+                    circuit_failure_threshold,
+                    circuit_cooldown_secs,
+                },
             )
             .await
         }
@@ -1580,6 +1846,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             end_snapshot,
             pk_column,
             coalesce_updates,
+            strict_deletes,
             format,
         } => {
             let ident = parse_table_ident(&table);
@@ -1588,6 +1855,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 end_snapshot_id: end_snapshot,
                 pk_columns: pk_column,
                 coalesce_updates,
+                strict_deletes,
             };
             let batch = rs_read_changes(catalog, store, &ident, config)
                 .await
