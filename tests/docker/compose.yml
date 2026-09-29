@@ -10,7 +10,7 @@ services:
       QUARKUS_HTTP_PORT: 19120
 
   localstack:
-    image: localstack/localstack:latest
+    image: localstack/localstack:3.8.1
     container_name: ailake-localstack
     ports:
       - "4566:4566"
