@@ -107,7 +107,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        catalog: [local, s3-minio, rest-iceberg]
+        catalog: [local, s3-localstack, rest-iceberg]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -118,11 +118,10 @@ jobs:
       - name: Start object-store and catalog emulators
         if: matrix.catalog != 'local'
         run: |
-          docker compose -f tests/docker/compose.yml up -d minio minio-init nessie localstack
+          docker compose -f tests/docker/compose.yml up -d nessie localstack
           for _ in $(seq 1 60); do
-            curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && break || sleep 2
+            curl -fsS http://127.0.0.1:4566/_localstack/health >/dev/null 2>&1 && break || sleep 2
           done
-          curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null
           curl -fsS http://127.0.0.1:4566/_localstack/health >/dev/null
           curl -fsS http://127.0.0.1:19120/api/v2/config >/dev/null
       - name: REST catalog compatibility smoke
