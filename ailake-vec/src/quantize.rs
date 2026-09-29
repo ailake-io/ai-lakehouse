@@ -19,19 +19,18 @@ impl Quantizer {
     }
 
     pub fn f16_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-        bytes
-            .chunks_exact(2)
-            .map(|b| f16::from_le_bytes([b[0], b[1]]).to_f32())
+        let (chunks, _) = bytes.as_chunks::<2>();
+        chunks
+            .iter()
+            .map(|b| f16::from_le_bytes(*b).to_f32())
             .collect()
     }
 
     /// Reinterpret raw little-endian F32 bytes (4 bytes/element) — the identity
     /// decode for `VectorPrecision::F32` columns, no quantization involved.
     pub fn f32_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-        bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect()
+        let (chunks, _) = bytes.as_chunks::<4>();
+        chunks.iter().map(|b| f32::from_le_bytes(*b)).collect()
     }
 
     pub fn f32_to_i8(v: &[f32]) -> (Vec<i8>, ScalingParams) {

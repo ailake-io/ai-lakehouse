@@ -433,6 +433,7 @@ fn query_active_files(
                 path: relative_path,
                 record_count: 0,
                 file_size_bytes: size as u64,
+                sequence_number: 0,
                 centroid_b64: None,
                 radius: None,
                 hnsw_offset: None,
@@ -485,6 +486,7 @@ fn row_to_entry(row: &duckdb::Row) -> duckdb::Result<DataFileEntry> {
         path,
         record_count: record_count as u64,
         file_size_bytes: file_size_bytes as u64,
+        sequence_number: 0,
         centroid_b64,
         radius: radius.map(|r| r as f32),
         hnsw_offset: hnsw_offset.map(|v| v as u64),
@@ -1064,6 +1066,7 @@ impl CatalogProvider for DuckLakeCatalog {
                     equality_ids: serde_json::from_str(&ids_json).unwrap_or_default(),
                     record_count: record_count as u64,
                     file_size_bytes: file_size_bytes as u64,
+                    sequence_number: 0,
                     inline_values: None,
                 },
             )
@@ -1145,6 +1148,7 @@ mod tests {
                 path: path.to_string(),
                 record_count,
                 file_size_bytes: 1024,
+                sequence_number: 0,
                 centroid_b64: Some("AACAPwAAAEAAAEBAAACAQA==".to_string()),
                 radius: Some(0.3),
                 hnsw_offset: Some(512),
@@ -1454,6 +1458,7 @@ mod tests {
                 equality_ids: vec![0],
                 record_count: 1,
                 file_size_bytes: 0,
+                sequence_number: 0,
                 inline_values: Some(("w".to_string(), vec!["0.5".to_string()])),
             };
             let snap2 = NewSnapshot {
@@ -1496,6 +1501,7 @@ mod tests {
                 equality_ids: vec![0],
                 record_count: 1,
                 file_size_bytes: 0,
+                sequence_number: 0,
                 inline_values: Some(("ghost_col".to_string(), vec!["x".to_string()])),
             };
             let snap2 = NewSnapshot {

@@ -30,7 +30,7 @@ use crate::provider::{
     CatalogProvider, DataFileEntry, EqualityDeleteFile, NewSnapshot, SnapshotId, TableIdent,
     TableMetadata, TableProperties,
 };
-use crate::rest::{RestCatalog, RestCatalogAuth, RestCatalogConfig};
+use crate::rest::{OAuthTokenResponse, RestCatalog, RestCatalogAuth, RestCatalogConfig};
 use crate::schema_evolution::SchemaEvolution;
 use ailake_store::Store;
 

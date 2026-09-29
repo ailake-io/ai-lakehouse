@@ -853,9 +853,9 @@ impl CatalogProvider for RestCatalog {
 // ── REST protocol types ───────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct OAuthTokenResponse {
-    access_token: String,
-    expires_in: Option<u64>,
+pub(crate) struct OAuthTokenResponse {
+    pub(crate) access_token: String,
+    pub(crate) expires_in: Option<u64>,
 }
 
 #[derive(Serialize)]

@@ -131,11 +131,12 @@ pub fn databricks_aws(
 ///
 /// ```rust,no_run
 /// use ailake_catalog::databricks::{DatabricksAuth, databricks_gcp};
+/// use secrecy::SecretString;
 ///
 /// let token = std::process::Command::new("gcloud")
 ///     .args(["auth", "print-access-token"])
 ///     .output().unwrap();
-/// let token = String::from_utf8(token.stdout).unwrap().trim().to_string();
+/// let token = SecretString::from(String::from_utf8(token.stdout).unwrap().trim().to_string());
 ///
 /// let config = databricks_gcp(
 ///     "myworkspace.gcp.databricks.com",

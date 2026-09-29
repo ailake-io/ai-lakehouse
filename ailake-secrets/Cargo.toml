@@ -20,8 +20,8 @@ thiserror  = { workspace = true }
 tokio      = { workspace = true }
 zeroize    = { workspace = true }
 reqwest    = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
-aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
-aws-sdk-secretsmanager = { version = "1", optional = true }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"], optional = true }
+aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
 aws-types = { version = "1", optional = true }
 
 [dev-dependencies]

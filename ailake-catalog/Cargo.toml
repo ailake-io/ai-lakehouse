@@ -38,8 +38,8 @@ arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
 
 # catalog-glue optional deps
-aws-sdk-glue = { version = "1", optional = true }
-aws-config   = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-glue = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-config   = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"], optional = true }
 
 # catalog-jdbc optional deps
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite", "any"], optional = true }
