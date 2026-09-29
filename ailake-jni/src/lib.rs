@@ -3978,10 +3978,8 @@ mod tests {
     fn query_bytes_decode() {
         let v = vec![1.0f32, 2.0, 3.0];
         let bytes: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let decoded: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-            .collect();
+        let (chunks, _) = bytes.as_chunks::<4>();
+        let decoded: Vec<f32> = chunks.iter().map(|b| f32::from_le_bytes(*b)).collect();
         assert_eq!(decoded, v);
     }
 

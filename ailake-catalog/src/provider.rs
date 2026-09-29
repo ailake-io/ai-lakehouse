@@ -667,15 +667,8 @@ pub fn decode_centroid(
     use base64::Engine;
     let b64 = entry.centroid_b64.as_ref()?;
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-    let values: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|b| {
-            f32::from_le_bytes(
-                b.try_into()
-                    .expect("chunks_exact(4) guarantees 4-byte slices"),
-            )
-        })
-        .collect();
+    let (chunks, _) = bytes.as_chunks::<4>();
+    let values: Vec<f32> = chunks.iter().map(|b| f32::from_le_bytes(*b)).collect();
     Some(Centroid {
         values,
         radius: entry.radius.unwrap_or(0.0),

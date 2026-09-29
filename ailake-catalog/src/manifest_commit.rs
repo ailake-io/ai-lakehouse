@@ -49,15 +49,8 @@ pub(crate) fn collect_vector_stats(files: &[DataFileEntry]) -> Vec<crate::puffin
         .filter_map(|f| {
             let b64 = f.centroid_b64.as_ref()?;
             let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-            let centroid: Vec<f32> = bytes
-                .chunks_exact(4)
-                .map(|b| {
-                    f32::from_le_bytes(
-                        b.try_into()
-                            .expect("chunks_exact(4) guarantees 4-byte slices"),
-                    )
-                })
-                .collect();
+            let (chunks, _) = bytes.as_chunks::<4>();
+            let centroid: Vec<f32> = chunks.iter().map(|b| f32::from_le_bytes(*b)).collect();
             let radius = f.radius?;
             Some(crate::puffin::VectorStatEntry {
                 path: f.path.clone(),
