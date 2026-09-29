@@ -8,7 +8,7 @@
 
 use std::{
     cell::RefCell,
-    ffi::{CStr, CString, c_char},
+    ffi::{c_char, CStr, CString},
     sync::Arc,
 };
 
@@ -21,10 +21,11 @@ use ailake_core::{
     VectorStoragePolicy,
 };
 use ailake_query::{
-    BackfillJob, Chunk, CompactionConfig, CompactionExecutor, CompactionPlanner, ContextAssembler,
-    ContextAssemblerConfig, EmbedFn, FusionMethod, MemoryDecayJob, MigrationJob, MigrationStrategy,
-    ModalQuery, SearchConfig, SearchResult, delete_rows as rs_delete_rows,
-    fetch_rows as rs_fetch_rows, search as rs_search, search_multimodal as rs_search_multimodal,
+    delete_rows as rs_delete_rows, fetch_rows as rs_fetch_rows, search as rs_search,
+    search_multimodal as rs_search_multimodal, BackfillJob, Chunk, CompactionConfig,
+    CompactionExecutor, CompactionPlanner, ContextAssembler, ContextAssemblerConfig, EmbedFn,
+    FusionMethod, MemoryDecayJob, MigrationJob, MigrationStrategy, ModalQuery, SearchConfig,
+    SearchResult,
 };
 use ailake_store::LocalStore;
 use serde::Serialize;
@@ -1917,9 +1918,9 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
 ///   FixedSizeList<Float32> → "list_float32"   (skipped silently otherwise)
 fn record_batch_to_scan_json(batch: &arrow_array::RecordBatch) -> Result<String, String> {
     use arrow_array::{
-        Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
-        Int64Array, LargeStringArray, StringArray, UInt8Array, UInt16Array, UInt32Array,
-        UInt64Array,
+        Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+        Int8Array, LargeStringArray, StringArray, UInt16Array, UInt32Array, UInt64Array,
+        UInt8Array,
     };
     use arrow_schema::DataType;
     use serde_json::{Map, Value};
@@ -4277,8 +4278,8 @@ mod tests {
         embeddings: &[Vec<f32>],
         dim: i32,
     ) -> Vec<u8> {
-        use arrow_array::Int64Array;
         use arrow_array::builder::{FixedSizeListBuilder, Float32Builder};
+        use arrow_array::Int64Array;
         use arrow_schema::{DataType, Field, Schema};
 
         let schema = Arc::new(Schema::new(vec![

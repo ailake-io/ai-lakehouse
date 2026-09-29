@@ -13,20 +13,20 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
-    Router,
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
+    Router,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::{oneshot, Semaphore};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -34,14 +34,14 @@ use ailake_cache::{
     CacheConfig, CacheKind, CacheManager, CachingStore, CircuitBreaker, CircuitBreakingStore,
     RateLimitClass, RateLimitConfig, RateLimiter,
 };
-use ailake_catalog::DataFileEntry;
 use ailake_catalog::provider::{
-    CatalogProvider, IndexStatus, NewSnapshot, SnapshotOperation, TableIdent, new_snapshot_id,
+    new_snapshot_id, CatalogProvider, IndexStatus, NewSnapshot, SnapshotOperation, TableIdent,
 };
+use ailake_catalog::DataFileEntry;
 use ailake_core::{AilakeError, VectorStoragePolicy};
 use ailake_query::{
-    CompactionConfig, CompactionExecutor, CompactionPlanner, SearchConfig, TableWriter, handle_for,
-    list_index_jobs, load_index_job, resume_index_jobs,
+    handle_for, list_index_jobs, load_index_job, resume_index_jobs, CompactionConfig,
+    CompactionExecutor, CompactionPlanner, SearchConfig, TableWriter,
 };
 use ailake_store::Store;
 
@@ -2266,13 +2266,11 @@ mod tests {
             Some(bytes::Bytes::from_static(b"cached-result"))
         );
         cache.invalidate_snapshot("default.table", 2).await;
-        assert!(
-            cache
-                .get(CacheKind::Query, "default.table", Some(1), "same-query")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(cache
+            .get(CacheKind::Query, "default.table", Some(1), "same-query")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -2338,12 +2336,10 @@ mod tests {
 
         let manager = JobManager::load(store.clone()).await.unwrap();
         assert_eq!(manager.get(&record.id).await.unwrap().id, record.id);
-        assert!(
-            store
-                .exists(&JobManager::job_path(&record.id))
-                .await
-                .unwrap()
-        );
+        assert!(store
+            .exists(&JobManager::job_path(&record.id))
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
