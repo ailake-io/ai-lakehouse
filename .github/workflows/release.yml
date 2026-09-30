@@ -312,8 +312,11 @@ jobs:
           }
           pub ailake-core
           sleep 30
+          pub ailake-secrets
+          sleep 30
           pub ailake-vec
           pub ailake-store
+          pub ailake-cache
           pub ailake-fts
           sleep 30
           pub ailake-parquet
