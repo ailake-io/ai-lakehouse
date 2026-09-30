@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-secrets"
-version     = "0.1.13"
+version     = "0.1.14"
 edition     = "2021"
 description = "Secret providers and rotating credentials for AI-Lake"
 license     = "MIT OR Apache-2.0"
