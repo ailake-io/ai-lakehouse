@@ -34,3 +34,7 @@ LAB_PLAN.md
 # graphify (local knowledge-graph tooling, machine-specific)
 graphify-out/
 .claude/
+
+# Agent skills
+.agents/
+skills-lock.json

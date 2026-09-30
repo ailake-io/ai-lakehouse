@@ -190,6 +190,7 @@ async fn main() {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         },
         "embedding",
         dim,

@@ -4,7 +4,9 @@ C-ABI cdylib that exposes the [AI-Lake](https://github.com/ThiagoLange/ai-lakeho
 
 ## Overview
 
-`ailake-jni` compiles to a single shared library (`libailake_jni.so` / `ailake_jni.dll`) that all JVM plugins load at runtime. The API uses a **JSON-envelope pattern** — callers pass a JSON request string and receive a JSON response string — making it callable from any JVM language (Scala, Kotlin, Java) without code generation.
+`ailake-jni` compiles to a single shared library (`libailake_jni.so` / `ailake_jni.dll`) that all JVM plugins load at runtime. The API uses a **JSON-envelope pattern** — callers pass a JSON request string and receive a JSON response string — making it callable from any JVM language (Scala, Kotlin, Java) or native language with a C FFI without code generation. The stable C declarations live in [`include/ailake.h`](./include/ailake.h).
+
+The same C-ABI is suitable for Kof's JVM/Native integration: use the Kof HTTP client for a remote service, or map this header through the Kof Native FFI when in-process latency is required. New clients should prefer the JSON/Arrow-IPC functions and always release returned strings with `ailake_free_string`.
 
 ## Exported C-ABI functions
 

@@ -22,6 +22,9 @@ ailake-store   = { path = "../ailake-store", version = "0.1.12", features = ["st
 ailake-catalog = { path = "../ailake-catalog", version = "0.1.12" }
 ailake-parquet = { path = "../ailake-parquet", version = "0.1.12" }
 ailake-query   = { path = "../ailake-query", version = "0.1.12" }
+ailake-secrets = { path = "../ailake-secrets", version = "0.1.12", features = ["aws-secrets-manager"] }
+ailake-cache   = { path = "../ailake-cache", version = "0.1.12", features = ["redis"] }
+async-trait    = { workspace = true }
 ailake-fts     = { workspace = true }
 bytes          = { workspace = true }
 clap           = { workspace = true }
@@ -30,6 +33,9 @@ tracing        = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde_json     = { workspace = true }
 serde          = { workspace = true }
+secrecy        = { workspace = true }
+zeroize        = "1"
+uuid           = { workspace = true }
 axum           = { workspace = true }
 arrow-array    = { workspace = true }
 arrow-schema   = { workspace = true }
@@ -38,3 +44,4 @@ parquet        = { workspace = true }
 
 [dev-dependencies]
 tempfile       = { workspace = true }
+tower          = { version = "0.5", features = ["util"] }

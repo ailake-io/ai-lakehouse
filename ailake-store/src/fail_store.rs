@@ -164,6 +164,34 @@ impl FailStore {
 
 #[async_trait]
 impl Store for FailStore {
+    async fn try_acquire_lock(&self, path: &str) -> AilakeResult<bool> {
+        self.inner.try_acquire_lock(path).await
+    }
+
+    async fn try_acquire_lock_fenced(&self, path: &str) -> AilakeResult<Option<u64>> {
+        self.inner.try_acquire_lock_fenced(path).await
+    }
+
+    async fn release_lock(&self, path: &str) -> AilakeResult<()> {
+        self.inner.release_lock(path).await
+    }
+
+    async fn release_lock_fenced(&self, path: &str, fencing_token: u64) -> AilakeResult<()> {
+        self.inner.release_lock_fenced(path, fencing_token).await
+    }
+
+    async fn renew_lock(&self, path: &str) -> AilakeResult<bool> {
+        self.inner.renew_lock(path).await
+    }
+
+    async fn renew_lock_fenced(&self, path: &str, fencing_token: u64) -> AilakeResult<bool> {
+        self.inner.renew_lock_fenced(path, fencing_token).await
+    }
+
+    async fn check_lock_fence(&self, path: &str, fencing_token: u64) -> AilakeResult<bool> {
+        self.inner.check_lock_fence(path, fencing_token).await
+    }
+
     async fn get(&self, path: &str) -> AilakeResult<Bytes> {
         if self.should_fail_get() {
             return Err(self.err());

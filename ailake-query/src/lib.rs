@@ -13,6 +13,7 @@ pub mod context_assembler;
 pub mod delete;
 pub mod dv;
 pub mod equality_delete;
+pub mod index_jobs;
 pub mod index_loader;
 pub mod mem_table;
 pub mod memory_decay;
@@ -34,13 +35,17 @@ pub use compaction::{CompactionConfig, CompactionExecutor, CompactionMode, Compa
 pub use context_assembler::{AssembledContext, Chunk, ContextAssembler, ContextAssemblerConfig};
 pub use delete::{delete_rows, delete_where, PuffinWriter};
 pub use equality_delete::EqualityDeleteFilter;
+pub use index_jobs::{
+    handle_for, list_index_jobs, load_index_job, IndexAlgorithm, IndexJobHandle, IndexJobRecord,
+};
 pub use mem_table::{MemTableConfig, MemTableWriter, WorkingMemoryBuffer, WorkingMemoryEntry};
 pub use memory_decay::MemoryDecayJob;
 pub use migration::{EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy, ProgressFn};
 pub use pruner::{BloomPruner, VectorPruner};
 pub use scanner::{
-    fetch_rows, search, search_multimodal, search_text, FusionMethod, ModalQuery, ScoreFn,
-    SearchConfig, SearchResult, SearchSession,
+    fetch_rows, search, search_multimodal, search_text, search_text_with_options, FusionMethod,
+    ModalQuery, ScoreFn, SearchConfig, SearchResult, SearchSession,
 };
 pub use schema_filler::SchemaFiller;
+pub use writer::resume_index_jobs;
 pub use writer::{MultiVectorBatch, TableWriter};

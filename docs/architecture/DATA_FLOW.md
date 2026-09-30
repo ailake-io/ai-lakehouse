@@ -318,6 +318,46 @@ No errors. No surprises. The AI-Lake footer is invisible — Parquet specificati
 
 ---
 
+## Read path — Change Data Capture (`read_changes`)
+
+CDC is a read-only operation over the existing Iceberg snapshot history. It never rewrites data files and requires no table-level flag.
+
+```
+Caller
+  │
+  │  read_changes(table, start_snapshot, end_snapshot, config)
+  ▼
+ailake-query / CdcReader
+  │
+  ├─► ailake-catalog: load start and end snapshots
+  │     → list DataFile entries in both snapshots
+  │
+  ├─► classify files
+  │     - new files (only in end snapshot) → emit surviving rows as `insert`
+  │     - removed files (only in start snapshot) → emit rows as `delete`
+  │     - common files → scan for changes via deletion vectors / equality deletes
+  │
+  ├─► for equality deletes:
+  │     - read the committed Avro delete file
+  │     - resolve each predicate against the raw data files present in both snapshots
+  │     - emit the matching old row as `delete` with the full pre-image
+  │
+  └─► optional coalescing (when coalesce_updates=True and pk_columns provided)
+        - a same-PK `delete` + `insert` within the same end snapshot
+          becomes `update_before` + `update_after`
+
+Output RecordBatch:
+  - all original table columns
+  - `_change_type`: "insert" | "delete" | "update_before" | "update_after"
+  - `_snapshot_id`: snapshot that produced the change
+  - `_sequence_number`: Iceberg sequence number of that snapshot
+  - `_commit_timestamp`: snapshot commit time (ms since epoch)
+```
+
+See `docs/specs/CDC.md` for API details and semantics.
+
+---
+
 ## Compaction flow
 
 Triggered when the snapshot accumulates many small files (default threshold: 16 files smaller than 64 MB).

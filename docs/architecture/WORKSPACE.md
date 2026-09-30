@@ -345,6 +345,7 @@ debug       = true
 | **Phase 7** | ✅ Complete | DuckDB extension (`duckdb-ailake/`), Python `fetch_data=True`, `write_batch_auto_deferred` + async (~200k vec/s), `pq_only`/`ivf_residual` in Python SDK, Airbyte CDK v3 destination connector, expanded JupyterLab demo (`01`–`13` notebooks, 11 fixture tables in `init_demo.py`), **Tantivy FTS** (`ailake-fts` crate, `AILK_FTS` section, O(log N) `search_text()`, `fts_columns` in all SDKs + JVM plugins — delivered in Phase T), **hybrid BM25+vector** (`SearchConfig::hybrid`, RRF fusion — delivered in Phase 9), **DuckLake catalog backend** (`ailake-catalog::DuckLakeCatalog`, opt-in `catalog-ducklake` feature, sidecar table for AI-Lake vector metadata over a real DuckLake attachment). |
 | **Phase 8** | ✅ Complete | Multimodal — `VectorModality` enum, `ailake.modality-<col>` Iceberg property, N generalized vector columns with independent HNSW, `write_batch_multi`, CLI `--vector-cols`, cross-modal RRF (`search_multimodal`), `MultimodalContextSchema`, Python `VectorColSpec`. Propagated to all plugins: `ailake_search_multimodal_json` C-ABI, `searchMultimodal()` Spark/Trino/Flink, `ailake_search_multimodal()` DuckDB, `SearchMultimodal()` Go SDK, `search_multimodal()` C++ SDK |
 | **Phase 9** | ✅ Complete | BM25 Hybrid Search + Agent Memory — `BM25Scorer`, `IdfStats` at write time, `SearchConfig::hybrid` (RRF + linear fusion), `search_text()` pure-lexical scan, `ailake_search_text_json` C-ABI, `ailake_search_text()` DuckDB, Flink `searchText()` + hybrid params; `ToolCallSchema`, `EpisodicMemorySchema` with recency decay, injectable `ScoreFn`, `agent_id` Iceberg identity partitioning, `WorkingMemoryBuffer`, `MemoryDecayJob`, Python `ailake.Agent` helper |
+| **Phase 10** | ✅ Complete | Change Data Capture — `read_changes` engine diffs Iceberg snapshots and emits `insert`/`delete`/`update_before`/`update_after` rows; equality-delete predicates resolved against raw data files for full pre-images; Python `ailake.read_changes()` and CLI `ailake read-changes`. See `docs/specs/CDC.md` and ADR-021. |
 
 ### Phase 1 — Local MVP ✅
 **Goal**: `cargo test --workspace` passes; can write a self-contained file and search it on local disk.
@@ -403,6 +404,11 @@ Delivered in Phase 4:
 - `SearchSession` in `ailake-query`: pre-loaded multi-query search, eliminates per-query I/O
 - [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks) (external repo): SIFT-1M benchmark (128D Euclidean, 1M vectors)
   - Results: 199k vec/s write (deferred), 1365 QPS, Recall@10 = 99.63%, p99 1.96ms
+- In-repository performance harness:
+  - `ailake-vec/benches/distance.rs` — dependency-free CPU SIMD microbenchmark with JSON output
+  - `tests/tests/performance_regression.rs` — fixed-seed Recall@10 oracle and p95 latency gate
+  - `scripts/ci/http_load.py` — dependency-free concurrent HTTP writer/search load test
+  - `scripts/ci/check_multi_process_lock.sh` — verifies exclusive `ailake serve` fencing across processes
 - HNSW performance optimizations in `ailake-index`:
   - **Neighbor prefetch**: `_mm_prefetch T0` in `search_layer` hot loop — hides random DRAM latency on x86_64
   - **SELECT-NEIGHBORS-HEURISTIC** (Algorithm 4, Malkov & Yashunin 2018): diversity-enforcing neighbor selection replaces simple nearest-M prune; improves recall@10 by ~2-5% at same throughput
@@ -451,12 +457,13 @@ Delivered in Phase 6:
 - **CI Go** (`ci-go.yml`) — `go build ./...` + `go vet ./...` for `ailake-go`
 - **CI C++** (`ci-cpp.yml`) — CMake configure + build for `ailake-cpp` (CPU-only, no CUDA)
 - **CI GPU** (`ci-gpu.yml`) — three-platform GPU tests: Windows bare-metal (existing), Linux/CUDA Docker (new, runner label `gpu-nvidia`), Linux/ROCm Docker (new, runner label `gpu-amd`). Previously Windows-only; `hardware.rs` Linux paths (`libcuda.so.1`, `libamdhip64.so`) now exercised in CI. `ci-gpu-data.yml` was merged into `ci-gpu.yml` (its sole test target `gpu_data` is a strict subset of `cargo test -p ailake-index`).
+- **Performance and load CI** (`performance.yml`) — CPU benchmark artifacts, deterministic recall/p95 regression checks, real HTTP load with concurrent writers, multi-process serve fencing, MinIO/LocalStack/Iceberg REST emulator matrix, and optional CUDA/ROCm performance runners.
 - **CI Safety** (`ci-safety.yml`) — Miri UB detection on nightly (ailake-vec, ailake-index, ailake-jni) + Loom concurrency model checking on stable (ailake-query). Runs on every PR and push.
 - **Composite action `locate-rust-windows`** (`.github/actions/locate-rust-windows/action.yml`) — reusable PowerShell action that finds `cargo.exe` on Windows self-hosted runners (toolchain dir → rustup shim → PATH). Extracts ~60-line block previously duplicated in `ci-gpu.yml` and `ci-gpu-data.yml`.
 - **GPU Docker images** (`docker/gpu-cuda/Dockerfile`, `docker/gpu-rocm/Dockerfile`, `docker-compose.gpu.yml`) — purpose-built images for reproducible local and CI GPU testing. `gpu-cuda`: `nvidia/cuda:12.6.0-runtime-ubuntu22.04` (runtime-only; no CUDA Toolkit headers needed because `ailake-index` uses libloading). `gpu-rocm`: `rocm/dev-ubuntu-22.04:6.2`. Both pre-fetch deps and pre-build test harness for fast subsequent runs. `docker-compose.gpu.yml` wires up device passthrough flags.
 - **Node.js 24 opt-in** — `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` across all 10 workflows; eliminates deprecation warnings ahead of GitHub-forced switch
 
-Manual Actions trigger order (pre-release): CI + CI Safety (parallel) → CI Go → CI C++ → Compat Heavy → Release → Publish Python / Airflow Provider / JVM Plugins (parallel). GPU CI runs in parallel with CI Go and CI C++. See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.
+Manual Actions trigger order (pre-release): CI + CI Safety + Performance CPU jobs (parallel) → CI Go → CI C++ → Compat Heavy → Release → Publish Python / Airflow Provider / JVM Plugins (parallel). GPU CI and the non-PR Performance GPU matrix run in parallel with CI Go and CI C++. See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.
 
 ### Phase 7 — DuckDB Extension + Deferred Engine + Airbyte 🚧
 
@@ -507,6 +514,19 @@ Delivered in Phase 9:
 - **Python `ailake.Agent`** — `Agent(table_path, embed_fn, agent_id)` with `remember()`, `recall()`, `log_tool_call()`, `assemble_context()`. High-level abstraction for LangChain/CrewAI/AutoGen.
 - **Demo** — `08_agents.ipynb` (26 cells), `09_hybrid_search.ipynb` (7 sections), `ailake_bm25` fixture in `init_demo.py`.
 - **Tests** — 6 BM25 integration tests in `tests/tests/hybrid_search.rs`; 4 `WorkingMemoryBuffer` unit tests; 4 `MemoryDecayJob` unit tests.
+
+### Phase 10 — Change Data Capture ✅
+
+Delivered in Phase 10 (branch `feature/ailake-cdc-format`):
+
+- **`read_changes` engine** (`ailake-query/src/cdc.rs`) — compares two Iceberg snapshots and emits a change stream. Insert detection from new data files; delete detection from removed files, V3 deletion vectors, and equality-delete Avro files.
+- **Full pre-images for equality deletes** — resolves equality-delete predicates against the raw data files present in both snapshots, so `DELETE` rows carry the complete old row. This makes coalesced `UPDATE_BEFORE` records complete.
+- **`coalesce_updates`** — with caller-provided primary-key columns, converts a same-PK `DELETE` + `INSERT` pair within one snapshot into `UPDATE_BEFORE` + `UPDATE_AFTER`.
+- **CDC envelope columns** — `_change_type`, `_snapshot_id`, `_sequence_number`, `_commit_timestamp`.
+- **Python API** — `ailake.read_changes(path, start_snapshot=..., end_snapshot=..., pk_columns=..., coalesce_updates=True)` returns `pyarrow.Table`.
+- **CLI** — `ailake read-changes default.table --start-snapshot N --end-snapshot M --pk-column id --coalesce-updates` with output formats `json`, `text`, `parquet`, `arrow`.
+- **ADR-021** — documented the decision to implement CDC as a read-only format capability with no table-level flag.
+- **Tests** — `ailake-query/tests/cdc_tests.rs` (4 Rust integration tests) and `ailake-py/tests/test_cdc.py`.
 
 ### Phase T — Tantivy per-file FTS ✅
 

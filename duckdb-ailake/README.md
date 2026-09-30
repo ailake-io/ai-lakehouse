@@ -616,7 +616,7 @@ actually running against, independent of the extension's own version.
 **Example:**
 
 ```sql
-SELECT ailake_version();  -- e.g. '0.1.9'
+SELECT ailake_version();  -- e.g. '0.1.11'
 ```
 
 ## Build

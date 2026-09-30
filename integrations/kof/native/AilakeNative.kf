@@ -1,0 +1,38 @@
+// Native Kof bindings over AI-Lake's stable C-ABI.
+// Build the JNI cdylib first:
+//   cargo build -p ailake-jni
+// Then compile this project with Kof's native host profile. The library path
+// can be changed to an absolute path or a linker-visible `ailake_jni` name.
+
+extern "./target/debug/libailake_jni.so" ailake_version(): String;
+extern "./target/debug/libailake_jni.so" ailake_ffi_abi_version(): Int;
+extern "./target/debug/libailake_jni.so" ailake_kof_search_json(String request_json): String;
+extern "./target/debug/libailake_jni.so" ailake_kof_write_batch_json(String request_json): String;
+extern "./target/debug/libailake_jni.so" ailake_kof_info_json(String request_json): String;
+extern "./target/debug/libailake_jni.so" ailake_kof_compact_json(String request_json): String;
+
+class AilakeNative {
+    version(): String {
+        return ailake_version()
+    }
+
+    abiVersion(): Int {
+        return ailake_ffi_abi_version()
+    }
+
+    search(String requestJson): String {
+        return ailake_kof_search_json(requestJson)
+    }
+
+    write(String requestJson): String {
+        return ailake_kof_write_batch_json(requestJson)
+    }
+
+    info(String requestJson): String {
+        return ailake_kof_info_json(requestJson)
+    }
+
+    compact(String requestJson): String {
+        return ailake_kof_compact_json(requestJson)
+    }
+}

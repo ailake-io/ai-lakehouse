@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use ailake_core::{AilakeError, AilakeResult};
 use object_store::gcp::GoogleCloudStorageBuilder;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::ObjectStoreBackend;
 
@@ -10,7 +11,7 @@ pub enum GcsCredentials {
     /// Path to a JSON service account key file.
     ServiceAccountFile(String),
     /// Inline JSON service account key (from secrets manager or env var).
-    ServiceAccountJson(String),
+    ServiceAccountJson(SecretString),
     /// Application Default Credentials: reads `GOOGLE_APPLICATION_CREDENTIALS` env var
     /// (path to a key file or Workload Identity Federation config), then falls back to
     /// the GCE metadata server — covers GKE Workload Identity and Cloud Run automatically.
@@ -35,7 +36,7 @@ pub fn gcs_store(config: GcsConfig, prefix: impl Into<String>) -> AilakeResult<O
             b = b.with_service_account_path(path);
         }
         GcsCredentials::ServiceAccountJson(json) => {
-            b = b.with_service_account_key(json);
+            b = b.with_service_account_key(json.expose_secret().to_owned());
         }
         GcsCredentials::ApplicationDefault => {
             // object_store reads GOOGLE_APPLICATION_CREDENTIALS automatically;

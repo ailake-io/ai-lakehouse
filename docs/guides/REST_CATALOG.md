@@ -41,8 +41,10 @@ ailake --catalog rest --rest-uri http://localhost:8181 \
 ```
 
 Flags: `--rest-uri` (required), `--rest-prefix`, `--rest-warehouse`, `--rest-auth
-none|bearer|oauth2`, `--rest-token`, `--rest-oauth-token-endpoint`,
-`--rest-oauth-client-id`, `--rest-oauth-client-secret`, `--rest-oauth-scope`. All
+none|bearer|oauth2`, `--rest-token` or `--rest-token-file`,
+`--rest-oauth-token-endpoint`, `--rest-oauth-client-id`,
+`--rest-oauth-client-secret` or `--rest-oauth-client-secret-file`,
+`--rest-oauth-scope`. Secret files must be mode 0600 or stricter on Unix. All
 have `AILAKE_REST_*` env var fallbacks (avoids putting secrets on the command line /
 in shell history). Requires the `catalog-rest` build feature
 (`cargo build --features catalog-rest`) — off by default, matching `catalog-ducklake`'s

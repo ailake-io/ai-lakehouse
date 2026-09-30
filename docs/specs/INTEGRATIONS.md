@@ -13,29 +13,33 @@ AI-Lake tables are read-compatible with any engine that supports Apache Iceberg 
 
 ## Compatibility matrix
 
-| Engine / Platform | Tabular read | Tabular write | Vector scan | Streaming ingest |
-|---|---|---|---|---|
-| **Apache Spark 3.5** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `spark-plugin/` | ✅ Structured Streaming |
-| **Apache Spark 4.0** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `spark-plugin/` (untested) | ✅ Structured Streaming |
-| **Trino 430** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `trino-plugin/` | — |
-| **Apache Flink 1.18+** | ✅ Iceberg connector | ✅ `ailake-flink` sink | ✅ `ailake-flink` source | ✅ `AilakeSinkFunction` |
-| **Apache Beam 2.56+** | ✅ Managed IcebergIO | ✅ Managed IcebergIO | via SDK direct | ✅ Streaming read/write |
-| **DuckDB 0.10+** | ✅ Iceberg extension | ✅ `duckdb-ailake/` extension | ✅ `ailake_search()` + `ailake_write_batch()` | — |
-| **PyIceberg 0.6+** | ✅ | ✅ | via SDK direct | — |
-| **AWS Athena** | ✅ Glue catalog | Limited | — | — |
-| **AWS EMR** | ✅ Spark/Trino on EMR | ✅ | ✅ | ✅ |
-| **AWS Glue ETL** | ✅ | ✅ | via SDK direct | ✅ |
-| **Azure Synapse** | ✅ Spark pool | ✅ | ✅ | ✅ |
-| **Azure Databricks** | ✅ | ✅ | ✅ | ✅ |
-| **GCP Dataproc** | ✅ Spark/Trino | ✅ | ✅ | ✅ |
-| **GCP Dataflow** | ✅ Beam IcebergIO | ✅ Beam IcebergIO | via SDK direct | ✅ |
-| **Snowflake** | ✅ Iceberg tables | Limited | — | — |
-| **Databricks (general)** | ✅ | ✅ | ✅ | ✅ |
-| **Python (`ailake-py`)** | ✅ PyArrow | ✅ `open_table` + `Table.insert` / `write_batch_auto_deferred` | ✅ `SearchQuery` fluent chain | ✅ `write_batch_auto_deferred`, `write_batch_idempotent`, async API |
-| **Go (`ailake-go`)** | ✅ AilakeReader | ✅ AilakeWriter | ✅ VectorSearch | — |
-| **C++17 (`ailake-cpp`)** | ✅ header-only | ✅ header-only | ✅ header-only | — |
+| Engine / Platform | Tabular read | Tabular write | Vector scan | Streaming ingest | CDC |
+|---|---|---|---|---|---|
+| **Apache Spark 3.5** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `spark-plugin/` | ✅ Structured Streaming | — |
+| **Apache Spark 4.0** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `spark-plugin/` (untested) | ✅ Structured Streaming | — |
+| **Trino 430** | ✅ Native Iceberg | ✅ Native Iceberg | ✅ `trino-plugin/` | — | — |
+| **Apache Flink 1.18+** | ✅ Iceberg connector | ✅ `ailake-flink` sink | ✅ `ailake-flink` source | ✅ `AilakeSinkFunction` | — |
+| **Apache Beam 2.56+** | ✅ Managed IcebergIO | ✅ Managed IcebergIO | via SDK direct | ✅ Streaming read/write | — |
+| **DuckDB 0.10+** | ✅ Iceberg extension | ✅ `duckdb-ailake/` extension | ✅ `ailake_search()` + `ailake_write_batch()` | — | — |
+| **PyIceberg 0.6+** | ✅ | ✅ | via SDK direct | — | — |
+| **AWS Athena** | ✅ Glue catalog | Limited | — | — | — |
+| **AWS EMR** | ✅ Spark/Trino on EMR | ✅ | ✅ | ✅ | — |
+| **AWS Glue ETL** | ✅ | ✅ | via SDK direct | ✅ | — |
+| **Azure Synapse** | ✅ Spark pool | ✅ | ✅ | ✅ | — |
+| **Azure Databricks** | ✅ | ✅ | ✅ | ✅ | — |
+| **GCP Dataproc** | ✅ Spark/Trino | ✅ | ✅ | ✅ | — |
+| **GCP Dataflow** | ✅ Beam IcebergIO | ✅ Beam IcebergIO | via SDK direct | ✅ | — |
+| **Snowflake** | ✅ Iceberg tables | Limited | — | — | — |
+| **Databricks (general)** | ✅ | ✅ | ✅ | ✅ | — |
+| **Python (`ailake-py`)** | ✅ PyArrow | ✅ `open_table` + `Table.insert` / `write_batch_auto_deferred` | ✅ `SearchQuery` fluent chain | ✅ `write_batch_auto_deferred`, `write_batch_idempotent`, async API | ✅ `ailake.read_changes()` |
+| **Go (`ailake-go`)** | ✅ AilakeReader | ✅ AilakeWriter | ✅ VectorSearch | — | — |
+| **C++17 (`ailake-cpp`)** | ✅ header-only | ✅ header-only | ✅ header-only | — | — |
 
 **SDK direct** = use the `ailake-py` Python SDK, `ailake-go` Go SDK, `ailake-cpp` C++ SDK, or `ailake-jni` JVM SDK to run vector search directly, outside of the engine's SQL planner.
+
+### CDC availability
+
+Change Data Capture (`read_changes`) is currently exposed only through the Rust core (`ailake_query::read_changes`), the Python SDK (`ailake.read_changes()`), and the CLI (`ailake read-changes`). It is **not** available through the JVM plugins (Spark/Trino/Flink), the DuckDB extension, the Go/C++ SDKs, or the Airflow/Airbyte connectors. Those engines can still read AI-Lake tables as standard Iceberg tables and consume CDC output produced by Python/Rust/CLI as an ordinary Iceberg or Parquet table.
 
 ---
 

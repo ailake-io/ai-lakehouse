@@ -698,6 +698,19 @@ Algoritmo: deduplica chunks similares, agrupa por documento (ordenando por `chun
   - **Limitação conhecida, não corrigida nesta fase**: `DuckLakeCatalog`'s sidecar (`main.ailake_equality_deletes`, ver Fase "DuckLake catalog backend") não guarda `sequence_number` — toda linha lida de lá cai no default `0`. Efeito: DuckLake continua no comportamento antigo (qualquer delete com `sequence_number > 0` mascara incondicionalmente) — conservador (nunca mascara de menos), não uma regressão de correção, mas não ganha o fix de "PK pode ser reusada depois de deletada" nem upsert-mesmo-commit. Requer migração de schema na tabela sidecar (`ALTER TABLE ... ADD COLUMN sequence_number`) — fora do escopo desta fase.
   - **Verificado real**: 4 testes novos em `equality_delete.rs` (`delete_does_not_mask_a_data_file_with_equal_sequence_number`, `delete_does_not_mask_a_data_file_committed_after_it`, `delete_masks_only_data_files_committed_strictly_before_it`, `multiple_delete_files_each_scoped_to_their_own_sequence_number`) + toda a suíte existente de `ailake-catalog`/`ailake-query` (58+111 testes) passando sem regressão, `cargo clippy --workspace --all-targets -- -D warnings` limpo.
 
+### Fase 23 — Change Data Capture (CDC) como capability somente-leitura do formato
+
+> **Contexto (2026-08-13)**: adicionar suporte nativo a CDC no formato AI-Lake, aproveitando o fato de que toda tabela já armazena snapshots Iceberg imutáveis. Nenhuma flag de tabela ou reescrita de dados é necessária.
+
+- [x] **Engine `read_changes`** (`ailake-query/src/cdc.rs`) — difere dois snapshots e emite `insert`/`delete`/`update_before`/`update_after` com envelope columns `_change_type`, `_snapshot_id`, `_sequence_number`, `_commit_timestamp`.
+- [x] **Pre-imagem completa em equality deletes** — resolve o predicado do arquivo Avro de delete contra os arquivos de dados brutos presentes em ambos os snapshots, então `DELETE` traz a linha antiga inteira (não só as colunas PK).
+- [x] **Suporte a V3 deletion vectors e compaction** — file replacement é tratado como `delete` dos arquivos antigos + `insert` do novo; novas posições mascaradas por DV emitem `delete`.
+- [x] **`coalesce_updates`** — com `pk_columns` fornecido pelo chamador, converte um par `DELETE`+`INSERT` de mesma PK no mesmo snapshot em `UPDATE_BEFORE`/`UPDATE_AFTER`.
+- [x] **Python API** — `ailake.read_changes(path, start_snapshot=..., end_snapshot=..., pk_columns=..., coalesce_updates=True)` retorna `pyarrow.Table`.
+- [x] **CLI** — `ailake read-changes default.table --start-snapshot N --end-snapshot M --pk-column id --coalesce-updates` com saída `json`/`text`/`parquet`/`arrow`.
+- [x] **ADR-021** — decisão documentada em `docs/contributing/DECISIONS.md`: CDC é read-only, não requer flag de tabela, e exposto inicialmente via Rust/Python/CLI.
+- [x] **Tests** — `ailake-query/tests/cdc_tests.rs` (4 testes Rust) e `ailake-py/tests/test_cdc.py`.
+
 ---
 
 ## 11. Stack Técnica — Rust

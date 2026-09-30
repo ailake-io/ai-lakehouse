@@ -10,7 +10,7 @@ operations, compaction, FTS search, and schema evolution delegate to the
 ## 1. Installation
 
 ```bash
-go get github.com/ThiagoLange/iceberg-ai-deltalakehouse/ailake-go
+go get github.com/ThiagoLange/ai-lakehouse/ailake-go
 ```
 
 **Runtime dependency for write/delete/FTS operations:**
@@ -21,6 +21,8 @@ cargo install --path ailake-cli
 # or export AILAKE_BIN=/path/to/ailake
 ```
 
+> **CDC note:** Change Data Capture (`read_changes`) is not exposed in `ailake-go`. Use the Python SDK (`ailake.read_changes()`), the Rust core, or the `ailake read-changes` CLI to produce CDC output.
+
 ---
 
 ## 2. Catalog — connecting to a table
@@ -28,7 +30,7 @@ cargo install --path ailake-cli
 All operations take a `*ailake.HadoopCatalog` pointing to the warehouse root.
 
 ```go
-import ailake "github.com/ThiagoLange/iceberg-ai-deltalakehouse/ailake-go"
+import ailake "github.com/ThiagoLange/ai-lakehouse/ailake-go"
 
 catalog := &ailake.HadoopCatalog{Warehouse: "/data/warehouse"}
 // S3 path (read metadata from local mount or use ailake CLI for writes):

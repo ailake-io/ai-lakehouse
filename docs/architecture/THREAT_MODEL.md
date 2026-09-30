@@ -24,13 +24,13 @@ STRIDE per component. Trust boundary: **every C-ABI call boundary** (JNA from JV
 | **S**poofing: caller passes wrong table/warehouse | Low | No auth at C-ABI layer — access control delegated to JVM caller |
 | **T**ampering: malicious JSON, null pointers, non-UTF-8 | Medium | Every export: null check + `catch_ffi_panic` + `CStr::to_str()` (UTF-8 validation). Returns error JSON, never UB |
 | **R**epudiation: no audit log | Low | No mitigation; callers should log at JVM layer |
-| **I**nformation disclosure: oversized IPC buffer reads beyond allocation | Medium | `ipc_len ≤ 0` check; no max cap (gap #3). Attacker controls IPC buffer content fully |
-| **D**enial of service: `query_len = 65536`, `ipc_len = i64::MAX`, `top_k = u32::MAX` | Low | `query_len` capped at 65536; IPC len rejected if ≤ 0 but no upper cap (gap #3, 16 GB theoretical); `top_k` capped at `MAX_TOP_K = 100_000` across all 5 search entry points (fixed, THR-014, see below) |
+| **I**nformation disclosure: oversized IPC buffer reads beyond allocation | Low | `ipc_len` is validated as non-negative and capped at 512 MiB before `from_raw_parts`; caller still owns the pointed-to allocation |
+| **D**enial of service: `query_len = 65536`, oversized IPC, `top_k = u32::MAX` | Low | `query_len` capped at 65536; IPC capped at 512 MiB; `top_k` capped at `MAX_TOP_K = 100_000` across all search entry points |
 | **E**levation of privilege: panic across FFI → JVM compromise | **High** | `catch_ffi_panic` on every export — panic becomes error JSON, never unwinds across FFI |
 
-### Key finding: Release-build dim mismatch (Critical)
+### Key finding: Release-build dim mismatch (Critical, fixed)
 
-`debug_assert_eq` (distance.rs:8,33,58) is compiled out in release. A JVM caller sending `query_len=128` to a table with `dim=256` produces OOB read in SIMD kernels. Mitigated by caller-side validation in `scanner.rs:218` and `writer.rs:206`, but any code path that bypasses these (e.g., direct `ailake_vector_search_json` binary API) is vulnerable.
+Distance kernels now use an unconditional assertion before SIMD dispatch. A JVM caller sending a mismatched vector receives the normal FFI error envelope through `catch_ffi_panic`; callers still validate dimensions before invoking the kernels.
 
 ### Key finding: unbounded `top_k` → process abort (High, fixed)
 
@@ -60,22 +60,20 @@ validated at the top of all 5 entry points, before any allocation-sizing math
 | Threat | Risk | Mitigation |
 |--------|------|------------|
 | **S**poofing: fake S3 endpoint | Medium | `allow_http` flag; default is HTTPS. Endpoint configured by caller |
-| **T**ampering: path traversal in `LocalStore` | **High** | `full_path()` does `root.join(path)` without canonicalization (gap #2). `../../etc/passwd` resolves outside root. Mitigation: LocalStore only for dev/test |
+| **T**ampering: path traversal in `LocalStore` | Low | `LocalStore` rejects `..` components and absolute paths outside the configured root before any filesystem operation |
 | **R**epudiation: no operation audit | Low | No mitigation |
 | **I**nformation disclosure: `file://` prefix stripping reveals local paths | Low | `strip_prefix("file://")` only — no path sanitization |
 | **D**enial of service: `get_range` with extreme offsets | Low | `object_store` handles range validation server-side |
 | **E**levation of privilege: cloud credential theft | Medium | Credentials in env vars (`AWS_*`, `AZURE_*`, `GOOGLE_*`). `object_store` handles auth; AI-Lake never logs credentials |
 
-### Key finding: LocalStore path traversal (High)
+### Key finding: LocalStore path traversal (High, fixed)
 
-`LocalStore::full_path(path)` returns `self.root.join(path)` with no `..` check. Any code path accepting user-controlled path can read/write outside the warehouse directory. This affects:
-- `ailake insert --file <path>` — write arbitrary local files
-- `SearchSession::load` — read arbitrary local files
+`LocalStore::full_path(path)` now rejects parent-directory components and absolute paths outside the configured root. Regression tests cover both forms.
 
 ### Test coverage
 
 - 10 FailStore tests: I/O error injection
-- No path traversal test in LocalStore
+- Path traversal tests in LocalStore for `../` and external `file://` paths
 
 ---
 
@@ -195,17 +193,17 @@ contention) than Loom can provide.
 
 | Threat | Risk | Mitigation |
 |--------|------|------------|
-| **S**poofing: no auth | **High** | Explicit warning on start: "no authentication". Must use authenticating proxy |
+| **S**poofing: no auth | **High** | Optional Bearer token on every endpoint except `/healthz`; startup warning when disabled. Use a gateway/mTLS for production |
 | **T**ampering: oversized body | Low | `DefaultBodyLimit::max(32 MB)` |
-| **R**epudiation: no access log | Low | No mitigation |
+| **R**epudiation: no access log | Low | Prometheus counters and request duration are exposed at `/metrics`; access-log correlation remains a deployment concern |
 | **I**nformation disclosure: error messages may reveal paths | Low | `ApiError` surfaces Rust error messages |
-| **D**enial of service: no rate limit | Medium | No mitigation (gap #4) |
+| **D**enial of service: no rate limit | Medium | 32 MB body limit and 64 in-flight request cap; distributed rate limiting still belongs at the gateway |
 | **E**levation of privilege: N/A | — | — |
 
 ### Test coverage
 
-- No dedicated security tests for serve endpoint
-- Relies on Axum framework safety
+- Health, metrics authentication, cache invalidation and auto-compaction paths are covered by dedicated server tests.
+- Full request-load and distributed rate-limit testing still belongs in deployment/CI integration tests.
 
 ---
 
@@ -224,12 +222,13 @@ contention) than Loom can provide.
 
 | ID | Severity | Component | Finding | Status |
 |----|----------|-----------|---------|--------|
-| THR-001 | **Critical** | ailake-vec | Release-build dim mismatch → OOB read in SIMD | Open. Mitigated by caller validation |
-| THR-002 | **High** | ailake-store | LocalStore path traversal | Open. Documented, not fixed |
-| THR-003 | **Medium** | ailake-jni | No max IPC len cap | Open. 16 GB theoretical max |
-| THR-004 | **Medium** | ailake-serve | No rate limiting | Open. Serve is internal-only |
-| THR-005 | **Low** | ailake-catalog | Secrets in plaintext memory | Open. No tracing of sensitive fields |
-| THR-006 | **Low** | ailake-cli | `AILAKE_REST_*` flags visible in `ps aux` | Open. Recommend env vars over flags |
+| THR-001 | **Critical** | ailake-vec | Release-build dim mismatch → OOB read in SIMD | Fixed. Unconditional assertion + FFI panic boundary |
+| THR-002 | **High** | ailake-store | LocalStore path traversal | Fixed. Root containment validation + regression tests |
+| THR-003 | **Medium** | ailake-jni | No max IPC len cap | Fixed. 512 MiB cap before slice creation |
+| THR-004 | **Medium** | ailake-serve | No distributed rate limiting | Partially fixed. 64 in-flight request cap, metrics and auth; external gateway still recommended |
+| THR-005 | **Low** | ailake-catalog | Secrets in plaintext memory | Partially fixed. Secret files, restrictive permissions and redacted OAuth failures; API compatibility still keeps strings in memory |
+| THR-006 | **Low** | ailake-cli | Inline REST secret flags visible in `ps aux` | Partially fixed. Env values hidden in help; file-based secrets recommended |
+| THR-012 | **Medium** | local catalogs | Cross-process commit race | Fixed for LocalStore-backed Hadoop and DuckLake with exclusive lock files; deferred index jobs use conditional object-store leases, while catalog commits on object stores continue to rely on REST/Nessie OCC |
 | THR-007 | **Fixed** | ailake-catalog | REST commit: sent -1 instead of null | Fixed Phase 17 |
 | THR-008 | **Fixed** | ailake-catalog | REST commit: unconditional AddSchema | Fixed Phase 17 |
 | THR-009 | **Fixed** | ailake-catalog | REST commit: AddPartitionSpec on every commit | Fixed Phase 17 |

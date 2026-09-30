@@ -40,6 +40,7 @@ Formato de Lakehouse nativo para vetores, construído sobre o Apache Iceberg Spe
 | Pruning geométrico de arquivos | ❌ | ❌ | ✅ |
 | Busca GPU (NVIDIA + AMD) | ❌ | Vendor-específico | ✅ |
 | Time-travel em vetores | ❌ | ❌ | ✅ |
+| Change Data Capture | ❌ | ❌ | ✅ |
 
 → **[Argumento técnico completo — AI-Lake vs Iceberg vs LanceDB vs DBs vetoriais externos](docs/WHY_AILAKE.md)**
 
@@ -110,6 +111,7 @@ Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
 | [`docs/specs/CLOUD_DEPLOY.md`](./docs/specs/CLOUD_DEPLOY.md) | Deploy passo-a-passo em EMR, Glue, Lambda, Dataproc, Dataflow, Databricks, HDInsight, AzureML |
 | [`docs/specs/COMPACTION.md`](./docs/specs/COMPACTION.md) | Design do job de compaction, triggers, estratégia de reconstrução do HNSW |
 | [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md) | Estratégia de testes, fixtures, matriz CI, harness de testes de compat |
+| [`docs/guides/PERFORMANCE_BENCHMARKS.md`](./docs/guides/PERFORMANCE_BENCHMARKS.md) | Benchmarks CPU, regressão de Recall@10/p95, carga HTTP, multi-writer e matriz de catálogos/GPU |
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Convenções Rust, tratamento de erros, política de unsafe, regras de testes |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | Log de ADRs — por que cada escolha-chave foi feita |
 | [`SETUP.md`](./SETUP.md) | Setup de dev local — roda a stack completa (MinIO, Nessie, testes de compat) na sua máquina |
@@ -174,6 +176,30 @@ wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/libail
 ```
 
 Veja [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) para instalação e configuração.
+
+## Integração com Kof
+
+O AI-Lake inclui um adaptador Kof validado em
+[`integrations/kof/`](./integrations/kof/). O cliente HTTP é tipado em Kof
+JVM/JS; aplicações Native usam o binding C-ABI no mesmo processo:
+
+```bash
+# Serviço local — por padrão escuta apenas em localhost
+cargo run -p ailake-cli -- --store ./warehouse serve default.docs --port 7700
+
+# Validar e executar o cliente Kof tipado (JVM ou JS)
+kof check integrations/kof/client --target jvm
+kof run integrations/kof/client/main.kf --target jvm
+
+# Validar o binding Native sobre o C-ABI
+cargo build -p ailake-jni
+kof check integrations/kof/native --target native
+```
+
+Para integrações nativas no mesmo processo, use as declarações C estáveis em
+[`ailake-jni/include/ailake.h`](./ailake-jni/include/ailake.h). O C-ABI usa
+envelopes JSON e Arrow IPC para lotes grandes; toda string retornada deve ser
+liberada com `ailake_free_string`.
 
 ## Layout do repositório
 
@@ -317,6 +343,7 @@ cargo check --workspace
 | **Fase 7** | ✅ Completa | Extensão DuckDB (`duckdb-ailake/`), leitura completa Python (`fetch_data=True`), `write_batch_auto_deferred` + async (~200k vec/s), `pq_only` / `ivf_residual` expostos no SDK Python, guia dbt (`docs/guides/DBT_INTEGRATION.md`), `partition_fields` (spec de partição Iceberg multi-coluna), `format_version=3` (tabelas Iceberg v3), `delete_where` + `evolve_schema` em todos os SDKs (Python, Go, C++, Spark, Trino, Flink, DuckDB, Airflow, Airbyte), binding `hardware_info()` Python, notebook de demo GPU (`10_gpu_demo.ipynb`), demo JupyterLab expandida (10 notebooks), **FTS Tantivy por arquivo** (crate `ailake-fts` — seção `AILK_FTS`, zstd; fast path `search_text()` O(log N); opt-in via `fts_columns` em todos os SDKs e plugins JVM), **busca híbrida BM25+vetor** (`SearchConfig::hybrid`, fusão RRF, fallback BM25 brute-force para arquivos legados), **backend de catálogo DuckLake** (`ailake-catalog::DuckLakeCatalog`, feature opt-in `catalog-ducklake`) |
 | **Fase 8** | ✅ Completa | Multimodal — enum `VectorModality`, propriedade Iceberg `ailake.modality-<col>`, N colunas vetoriais generalizadas com HNSW independente, `write_batch_multi`, CLI `--vector-cols`, `search_multimodal` (RRF cross-modal), `MultimodalContextSchema` + módulo `multimodal_columns`, Python `VectorColSpec`, notebook e fixture multimodal |
 | **Fase 9** | ✅ Completa | Memória de agentes — `ToolCallSchema` (histórico de tool calls pesquisável), `EpisodicMemorySchema` (decaimento de recência, contagem de acesso, pontuação de importância), `ScoreFn` injetável para scoring híbrido (distância × recência × importância), `partition_by`/`partition_value` para isolamento por agente via particionamento Iceberg, `partition_filter` para pruning ao nível de manifesto antes de centroide e HNSW, helper Python `ailake.Agent` (LangChain/CrewAI/AutoGen). Propagado para todos os SDKs e conectores: Spark, Trino, Flink, Go, C++, DuckDB, Airbyte, Airflow. Fix: `TableWriter::create_or_open` inicializa `part_counter` a partir da contagem de arquivos existentes. |
+| **Fase 10** | ✅ Completa | Change Data Capture — engine `read_changes` difere snapshots Iceberg e emite linhas `insert`/`delete`/`update_before`/`update_after`; predicados de equality delete resolvidos contra arquivos de dados brutos para pré-imagem completa; Python `ailake.read_changes()` e CLI `ailake read-changes`. Veja `docs/specs/CDC.md`. |
 
 ## Apoie o projeto
 

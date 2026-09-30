@@ -7,7 +7,7 @@ Zero CGO. Pure Go. Works on any platform where Go runs.
 ## Install
 
 ```bash
-go get github.com/ThiagoLange/iceberg-ai-deltalakehouse/ailake-go
+go get github.com/ThiagoLange/ai-lakehouse/ailake-go
 ```
 
 Requires Go 1.22+.
@@ -17,7 +17,7 @@ Requires Go 1.22+.
 ### Vector search (pointer results)
 
 ```go
-import ailake "github.com/ThiagoLange/iceberg-ai-deltalakehouse/ailake-go"
+import ailake "github.com/ThiagoLange/ai-lakehouse/ailake-go"
 
 catalog := &ailake.HadoopCatalog{Warehouse: "/data/warehouse"}
 

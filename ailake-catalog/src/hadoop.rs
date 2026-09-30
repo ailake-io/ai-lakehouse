@@ -142,18 +142,35 @@ impl CatalogProvider for HadoopCatalog {
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
         let _guard = self.commit_lock.lock().await;
-        let mut meta = self.load_raw_metadata(table).await?;
         let table_root = self.table_root(table);
-        let snap_id = commit_into_metadata(
-            &*self.store,
-            &table_root,
-            &self.warehouse,
-            &mut meta,
-            snapshot,
-        )
-        .await?;
-        self.save_metadata(table, &meta).await?;
-        Ok(snap_id)
+        let lock_path = format!("{table_root}/metadata/.ailake-commit.lock");
+        if !self.store.try_acquire_lock(&lock_path).await? {
+            return Err(AilakeError::Catalog(format!(
+                "table {}.{} is being committed by another process",
+                table.namespace, table.name
+            )));
+        }
+
+        let result = async {
+            let mut meta = self.load_raw_metadata(table).await?;
+            let snap_id = commit_into_metadata(
+                &*self.store,
+                &table_root,
+                &self.warehouse,
+                &mut meta,
+                snapshot,
+            )
+            .await?;
+            self.save_metadata(table, &meta).await?;
+            Ok::<SnapshotId, AilakeError>(snap_id)
+        }
+        .await;
+        let release_result = self.store.release_lock(&lock_path).await;
+        match (result, release_result) {
+            (Ok(snapshot_id), Ok(())) => Ok(snapshot_id),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), _) => Err(error),
+        }
     }
 
     async fn list_files(

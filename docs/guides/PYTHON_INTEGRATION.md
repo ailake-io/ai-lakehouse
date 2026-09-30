@@ -970,7 +970,26 @@ print(resp.choices[0].message.content)
 
 ---
 
-## 20. API reference
+## 20. Change Data Capture
+
+```python
+import ailake
+
+changes = ailake.read_changes(
+    "/warehouse/default/docs",
+    start_snapshot=snap1,
+    end_snapshot=snap2,
+    pk_columns=["doc_id"],
+    coalesce_updates=True,
+)
+# changes is a pyarrow.Table with CDC envelope columns.
+```
+
+See `docs/specs/CDC.md` for the full semantics of `insert`, `delete`, `update_before`, and `update_after`.
+
+---
+
+## 21. API reference
 
 ### Module-level functions
 
@@ -983,6 +1002,7 @@ print(resp.choices[0].message.content)
 | `search_multimodal(path, queries, top_k, ...)` | Cross-modal RRF; supports `rerank_factor` |
 | `search_with_data(path, query, top_k, ...)` | Arrow IPC bytes (full row data); full param parity with `search()` |
 | `scan(path, query, top_k, ...)` | Alias of `search_with_data` — naming parity with `ailake-go`'s `Scan()` |
+| `read_changes(path, *, start_snapshot, end_snapshot, pk_columns, coalesce_updates, catalog_opts)` | CDC change stream between two snapshots; returns `pyarrow.Table` with `_change_type`, `_snapshot_id`, `_sequence_number`, `_commit_timestamp` |
 | `assemble_context(chunks, max_tokens, ...)` | Returns `{"text", "chunk_count", "token_estimate"}`; supports `embedding` (dedup), `group_by_document`, `max_chunks_per_document` |
 | `compact(path, *, min_files, target_size_bytes, ...)` | Native binding — merges small files, no external CLI required. `target_size_bytes` default `536_870_912` |
 | `estimate(rows, dim, hnsw_m, pq_m)` | Storage estimate per precision mode — pure math, no I/O |

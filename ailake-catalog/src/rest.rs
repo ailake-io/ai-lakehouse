@@ -17,7 +17,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ailake_core::{AilakeError, AilakeResult};
+use ailake_secrets::SecretProvider;
 use async_trait::async_trait;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -32,13 +34,13 @@ use ailake_store::Store;
 // ── Public configuration types ───────────────────────────────────────────────
 
 /// Authentication strategy for the REST catalog.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum RestCatalogAuth {
     /// No authentication. Works with open Nessie / Polaris dev setups.
     None,
 
     /// Pre-obtained Bearer token. Use for Workload Identity, CI tokens, etc.
-    Bearer(String),
+    Bearer(SecretString),
 
     /// OAuth2 client credentials flow.
     /// Tokens are cached until (expiry − 30 s) to avoid clock-edge failures.
@@ -46,10 +48,94 @@ pub enum RestCatalogAuth {
         /// Token endpoint URL (e.g. "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token")
         token_endpoint: String,
         client_id: String,
-        client_secret: String,
+        client_secret: SecretString,
         /// Optional scope (e.g. "https://management.azure.com/.default")
         scope: Option<String>,
     },
+
+    /// Bearer token supplied by a rotating provider.
+    BearerProvider(Arc<dyn SecretProvider>),
+
+    /// OAuth2 client secret supplied by a rotating provider. A new client
+    /// secret is fetched whenever the cached access token expires.
+    OAuth2Provider {
+        token_endpoint: String,
+        client_id: String,
+        client_secret: Arc<dyn SecretProvider>,
+        scope: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for RestCatalogAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::Bearer(_) => f.write_str("Bearer([REDACTED])"),
+            Self::OAuth2 {
+                token_endpoint,
+                client_id,
+                scope,
+                ..
+            } => f
+                .debug_struct("OAuth2")
+                .field("token_endpoint", token_endpoint)
+                .field("client_id", client_id)
+                .field("scope", scope)
+                .field("client_secret", &"[REDACTED]")
+                .finish(),
+            Self::BearerProvider(_) => f.write_str("BearerProvider([REDACTED])"),
+            Self::OAuth2Provider {
+                token_endpoint,
+                client_id,
+                scope,
+                ..
+            } => f
+                .debug_struct("OAuth2Provider")
+                .field("token_endpoint", token_endpoint)
+                .field("client_id", client_id)
+                .field("scope", scope)
+                .field("client_secret", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+impl RestCatalogAuth {
+    pub fn bearer(token: impl Into<SecretString>) -> Self {
+        Self::Bearer(token.into())
+    }
+
+    pub fn oauth2(
+        token_endpoint: String,
+        client_id: String,
+        client_secret: impl Into<SecretString>,
+        scope: Option<String>,
+    ) -> Self {
+        Self::OAuth2 {
+            token_endpoint,
+            client_id,
+            client_secret: client_secret.into(),
+            scope,
+        }
+    }
+
+    pub fn bearer_provider(provider: Arc<dyn SecretProvider>) -> Self {
+        Self::BearerProvider(provider)
+    }
+
+    pub fn oauth2_provider(
+        token_endpoint: String,
+        client_id: String,
+        client_secret: Arc<dyn SecretProvider>,
+        scope: Option<String>,
+    ) -> Self {
+        Self::OAuth2Provider {
+            token_endpoint,
+            client_id,
+            client_secret,
+            scope,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +167,7 @@ pub struct RestCatalogConfig {
 // ── RestCatalog ───────────────────────────────────────────────────────────────
 
 struct CachedToken {
-    value: String,
+    value: SecretString,
     expires_at: Instant,
 }
 
@@ -142,10 +228,69 @@ impl RestCatalog {
 
     // ── Auth ─────────────────────────────────────────────────────────────────
 
-    async fn get_token(&self) -> AilakeResult<Option<String>> {
+    async fn get_token(&self) -> AilakeResult<Option<SecretString>> {
         match &self.config.auth {
             RestCatalogAuth::None => Ok(None),
             RestCatalogAuth::Bearer(t) => Ok(Some(t.clone())),
+            RestCatalogAuth::BearerProvider(provider) => provider
+                .fetch()
+                .await
+                .map(Some)
+                .map_err(|e| AilakeError::Catalog(format!("secret provider: {e}"))),
+            RestCatalogAuth::OAuth2Provider {
+                token_endpoint,
+                client_id,
+                client_secret,
+                scope,
+            } => {
+                {
+                    let cache = self.token_cache.lock().await;
+                    if let Some(cached) = &*cache {
+                        if cached.expires_at > Instant::now() + Duration::from_secs(30) {
+                            return Ok(Some(cached.value.clone()));
+                        }
+                    }
+                }
+                let client_secret = client_secret
+                    .fetch()
+                    .await
+                    .map_err(|e| AilakeError::Catalog(format!("secret provider: {e}")))?;
+                let mut params = vec![
+                    ("grant_type", "client_credentials"),
+                    ("client_id", client_id.as_str()),
+                    ("client_secret", client_secret.expose_secret()),
+                ];
+                let scope_str;
+                if let Some(s) = scope {
+                    scope_str = s.clone();
+                    params.push(("scope", scope_str.as_str()));
+                }
+                let resp = self
+                    .client
+                    .post(token_endpoint)
+                    .form(&params)
+                    .send()
+                    .await
+                    .map_err(|e| AilakeError::Store(e.to_string()))?;
+                if !resp.status().is_success() {
+                    return Err(AilakeError::Catalog(format!(
+                        "OAuth2 token request failed: HTTP {}",
+                        resp.status()
+                    )));
+                }
+                let token_resp: OAuthTokenResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| AilakeError::Catalog(format!("OAuth2 token parse: {e}")))?;
+                let cached = CachedToken {
+                    value: SecretString::from(token_resp.access_token),
+                    expires_at: Instant::now()
+                        + Duration::from_secs(token_resp.expires_in.unwrap_or(3600)),
+                };
+                let token = cached.value.clone();
+                *self.token_cache.lock().await = Some(cached);
+                Ok(Some(token))
+            }
             RestCatalogAuth::OAuth2 {
                 token_endpoint,
                 client_id,
@@ -164,7 +309,7 @@ impl RestCatalog {
                 let mut params = vec![
                     ("grant_type", "client_credentials"),
                     ("client_id", client_id.as_str()),
-                    ("client_secret", client_secret.as_str()),
+                    ("client_secret", client_secret.expose_secret()),
                 ];
                 let scope_str;
                 if let Some(s) = scope {
@@ -182,9 +327,8 @@ impl RestCatalog {
 
                 if !resp.status().is_success() {
                     let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
                     return Err(AilakeError::Catalog(format!(
-                        "OAuth2 token request failed: HTTP {status}: {body}"
+                        "OAuth2 token request failed: HTTP {status}"
                     )));
                 }
 
@@ -195,11 +339,12 @@ impl RestCatalog {
 
                 let ttl = token_resp.expires_in.unwrap_or(3600);
                 let cached = CachedToken {
-                    value: token_resp.access_token.clone(),
+                    value: SecretString::from(token_resp.access_token),
                     expires_at: Instant::now() + Duration::from_secs(ttl),
                 };
+                let token = cached.value.clone();
                 *self.token_cache.lock().await = Some(cached);
-                Ok(Some(token_resp.access_token))
+                Ok(Some(token))
             }
         }
     }
@@ -209,7 +354,7 @@ impl RestCatalog {
     async fn get(&self, url: &str) -> AilakeResult<reqwest::Response> {
         let mut req = self.client.get(url);
         if let Some(token) = self.get_token().await? {
-            req = req.bearer_auth(token);
+            req = req.bearer_auth(token.expose_secret());
         }
         req.send()
             .await
@@ -219,7 +364,7 @@ impl RestCatalog {
     async fn post<T: Serialize>(&self, url: &str, body: &T) -> AilakeResult<reqwest::Response> {
         let mut req = self.client.post(url).json(body);
         if let Some(token) = self.get_token().await? {
-            req = req.bearer_auth(token);
+            req = req.bearer_auth(token.expose_secret());
         }
         req.send()
             .await
@@ -229,7 +374,7 @@ impl RestCatalog {
     async fn delete(&self, url: &str) -> AilakeResult<reqwest::Response> {
         let mut req = self.client.delete(url);
         if let Some(token) = self.get_token().await? {
-            req = req.bearer_auth(token);
+            req = req.bearer_auth(token.expose_secret());
         }
         req.send()
             .await
@@ -708,9 +853,9 @@ impl CatalogProvider for RestCatalog {
 // ── REST protocol types ───────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct OAuthTokenResponse {
-    access_token: String,
-    expires_in: Option<u64>,
+pub(crate) struct OAuthTokenResponse {
+    pub(crate) access_token: String,
+    pub(crate) expires_in: Option<u64>,
 }
 
 #[derive(Serialize)]

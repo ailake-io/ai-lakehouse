@@ -23,3 +23,7 @@ rand        = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }
+
+[[bench]]
+name = "distance"
+harness = false
