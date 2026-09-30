@@ -795,11 +795,12 @@ Step 5 requires the Windows GPU runner — can run in parallel with steps 2–4.
 
 The `release` job auto-bumps the patch version before tagging — **no manual version edits required**:
 
-1. Reads the latest semver tag (`v*.*.*`) and increments the patch component (`v0.0.11` → `v0.0.12`).
-2. Updates every `Cargo.toml` (crate version + inter-crate deps) via `sed`.
-3. Commits the bump with `[skip ci]` and pushes to `main` — `[skip ci]` prevents a second workflow run.
-4. Creates the git tag and GitHub Release on the bumped commit.
-5. Runs the full publish chain sequentially.
+1. Reads the latest semver tag (`v*.*.*`) and increments its patch component.
+2. Updates every release manifest and versioned documentation example.
+3. Promotes `CHANGELOG.md`'s `[Unreleased]` section to the new version with the UTC release date, then creates a fresh `[Unreleased]` header.
+4. Commits the bump with `[skip ci]` and pushes to `main` — `[skip ci]` prevents a second workflow run.
+5. Creates the git tag and GitHub Release on the bumped commit.
+6. Runs the full publish chain sequentially.
 
 ```
 merge develop → main  (or workflow_dispatch)

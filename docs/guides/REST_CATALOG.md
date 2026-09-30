@@ -69,10 +69,10 @@ t = ailake.open_table("/path/matching/rest_warehouse", dim=1536, catalog_opts=ca
 `search_multimodal`/`migrate_embeddings`/`decay_memories`/`compact`/`delete_rows`/
 `add_column`/`rename_column`/`delete_where`/`add_vector_column`/
 `backfill_vector_column` functions. Omit it (or pass `None`) for the default —
-unchanged `HadoopCatalog` behavior. `ailake-py` has no `store_from_url` equivalent
-yet, so `path` is always a local filesystem path regardless of catalog backend — a
-separate, pre-existing gap, not closed here (S3/GCS/Azure aren't reachable from any
-Python/JNI binding today, only from `ailake-cli`).
+unchanged `HadoopCatalog` behavior. `ailake-py` and `ailake-jni` resolve
+`s3://`, `s3a://`, `gs://` and `az://` warehouse paths through the same
+`object_store` backends used by the CLI; credentials continue to come from the
+standard provider environment. Local paths keep the existing filesystem behavior.
 
 ## JNI usage (Spark / Trino / Flink)
 

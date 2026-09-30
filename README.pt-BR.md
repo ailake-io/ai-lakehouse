@@ -345,6 +345,17 @@ cargo check --workspace
 | **Fase 9** | ✅ Completa | Memória de agentes — `ToolCallSchema` (histórico de tool calls pesquisável), `EpisodicMemorySchema` (decaimento de recência, contagem de acesso, pontuação de importância), `ScoreFn` injetável para scoring híbrido (distância × recência × importância), `partition_by`/`partition_value` para isolamento por agente via particionamento Iceberg, `partition_filter` para pruning ao nível de manifesto antes de centroide e HNSW, helper Python `ailake.Agent` (LangChain/CrewAI/AutoGen). Propagado para todos os SDKs e conectores: Spark, Trino, Flink, Go, C++, DuckDB, Airbyte, Airflow. Fix: `TableWriter::create_or_open` inicializa `part_counter` a partir da contagem de arquivos existentes. |
 | **Fase 10** | ✅ Completa | Change Data Capture — engine `read_changes` difere snapshots Iceberg e emite linhas `insert`/`delete`/`update_before`/`update_after`; predicados de equality delete resolvidos contra arquivos de dados brutos para pré-imagem completa; Python `ailake.read_changes()` e CLI `ailake read-changes`. Veja `docs/specs/CDC.md`. |
 
+### Operação de produção
+
+As capacidades operacionais da versão atual estão documentadas em guias
+dedicados: [`CACHE.md`](./docs/guides/CACHE.md) (cache local e Redis/Valkey),
+[`DISTRIBUTED_COORDINATION.md`](./docs/guides/DISTRIBUTED_COORDINATION.md)
+(multi-writer e fencing), [`SECRETS.md`](./docs/guides/SECRETS.md),
+[`DELETE_INTEGRITY.md`](./docs/guides/DELETE_INTEGRITY.md),
+[`RATE_LIMITING.md`](./docs/guides/RATE_LIMITING.md),
+[`PERFORMANCE_BENCHMARKS.md`](./docs/guides/PERFORMANCE_BENCHMARKS.md) e
+[`RELEASES.md`](./docs/guides/RELEASES.md).
+
 ## Apoie o projeto
 
 Se o AI-Lake é útil pra você, considera [apoiar via GitHub Sponsors](https://github.com/sponsors/ThiagoLange) — financia o desenvolvimento e manutenção contínua.

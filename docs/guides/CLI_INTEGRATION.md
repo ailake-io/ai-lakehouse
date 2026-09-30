@@ -41,7 +41,7 @@ cargo build --release -p ailake-cli --features catalog-rest
 ```
 
 ```bash
-ailake --version   # ailake 0.1.11
+ailake --version   # ailake 0.1.12
 ailake --help      # full command list
 ```
 

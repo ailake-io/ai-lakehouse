@@ -372,6 +372,10 @@ Subject line: ≤ 72 characters, imperative mood, no trailing period.
 
 Update `CHANGELOG.md` under `[Unreleased]` for every user-visible change before pushing. Defer nothing — the changelog entry is part of the commit.
 
+The release workflow promotes `[Unreleased]` automatically when it creates the
+next tag. See [`docs/guides/RELEASES.md`](./docs/guides/RELEASES.md) for the
+versioning policy and release checklist.
+
 ---
 
 ## Pull request workflow
@@ -421,7 +425,7 @@ feat(ailake-index): add IVF-PQ adaptive nlist selection
 ### What happens after merge
 
 - `develop` receives the PR.
-- When ready for release, maintainers update CHANGELOG, run CI and Compat Heavy, then merge to `main` — `release.yml` fires automatically, auto-bumps the patch version in all `Cargo.toml` files, creates the git tag, and publishes crates, JVM plugins, Airflow provider, and Python wheels in a sequential chain. No manual version edits needed (see [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md#manual-actions-trigger-order-pre-release)).
+- When ready for release, maintainers update CHANGELOG, run CI and Compat Heavy, then merge to `main` — `release.yml` fires automatically, promotes `[Unreleased]`, auto-bumps the patch version in all release manifests, creates the git tag, and publishes crates, JVM plugins, Airflow provider, and Python wheels in a sequential chain. No manual version edits needed (see [`docs/guides/RELEASES.md`](./docs/guides/RELEASES.md)).
 
 ---
 
