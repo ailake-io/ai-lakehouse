@@ -103,16 +103,14 @@ pub struct TableWriter {
     policy: VectorStoragePolicy,
     table: TableIdent,
     part_counter: Arc<AtomicU32>,
-    /// Unix-epoch milliseconds captured at writer construction; embedded in
-    /// every part path (`data/part-<session_ts>-NNNNN.parquet`) so file names
-    /// are unique across writer sessions. A plain per-session counter alone
-    /// reused names once compaction shrank the table's file count — and under
-    /// the DuckLake catalog the retired file the name collides with still
-    /// exists physically AND is still registered (retirement is a row-DELETE,
-    /// not a deregistration), so the colliding `store.put` rewrote a
-    /// registered file in place — the exact corruption
-    /// `supports_in_place_rewrite() == false` exists to prevent.
-    session_ts: u128,
+    /// UUID captured at writer construction; embedded in every part path
+    /// (`data/part-<session_id>-NNNNN.parquet`) so file names are unique across
+    /// processes, restarts, and writers created in the same millisecond. A
+    /// timestamp plus per-session counter is not sufficient: concurrent HTTP
+    /// writers can be constructed in the same millisecond and otherwise reuse
+    /// `part-...-00000.parquet`, overwriting a file registered by a sibling
+    /// writer.
+    session_id: String,
     pending_files: Vec<DataFileEntry>,
     parent_snapshot_id: Option<SnapshotId>,
     /// Arrow schema captured from the first write_batch call; used to populate
@@ -150,10 +148,7 @@ impl TableWriter {
             policy,
             table,
             part_counter: Arc::new(AtomicU32::new(0)),
-            session_ts: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_else(|e| e.duration())
-                .as_millis(),
+            session_id: uuid::Uuid::new_v4().simple().to_string(),
             pending_files: Vec::new(),
             parent_snapshot_id: None,
             captured_schema: None,
@@ -384,13 +379,12 @@ impl TableWriter {
     }
 
     /// Next data-file path for this writer session:
-    /// `data/part-<session_ts>-NNNNN.parquet`. The session timestamp keeps
-    /// names unique across sessions (see the `session_ts` field doc for the
-    /// compaction-then-insert collision this prevents); the counter keeps them
-    /// unique within one.
+    /// `data/part-<session_id>-NNNNN.parquet`. The UUID keeps names unique
+    /// across concurrent writer sessions; the counter keeps them unique within
+    /// one session.
     fn next_part_path(&self) -> String {
         let part_num = self.part_counter.fetch_add(1, Ordering::SeqCst);
-        format!("data/part-{}-{:05}.parquet", self.session_ts, part_num)
+        format!("data/part-{}-{:05}.parquet", self.session_id, part_num)
     }
 
     /// Deferred writes persist a Parquet-only file first and later patch the
@@ -1030,7 +1024,7 @@ impl TableWriter {
         table: TableIdent,
         format_version: u8,
     ) -> AilakeResult<Self> {
-        // Part-path uniqueness across sessions comes from `session_ts` in the
+        // Part-path uniqueness across sessions comes from the UUID in the
         // file name (see `next_part_path`), not from seeding the counter with
         // the current file count — that seed was wrong anyway: compaction
         // shrinks the count, making a later writer reuse a retired file's name.
@@ -2330,7 +2324,7 @@ mod tests {
     /// (`list_files().len()`) made a post-compaction writer reuse a retired
     /// part's name — under DuckLake that file still exists physically and is
     /// still registered, so the colliding put rewrote a registered file in
-    /// place. `session_ts` in the path prevents the reuse structurally.
+    /// place. The UUID session id in the path prevents the reuse structurally.
     #[tokio::test]
     async fn part_paths_unique_across_sessions_after_compaction() {
         use ailake_catalog::{
@@ -2345,6 +2339,23 @@ mod tests {
         let catalog: std::sync::Arc<dyn CatalogProvider> =
             std::sync::Arc::new(HadoopCatalog::new(std::sync::Arc::clone(&store), ""));
         let ident = TableIdent::new("default", "t");
+
+        // Writers created in the same millisecond must still receive distinct
+        // first-part paths; this is the concurrency case that timestamps alone
+        // cannot distinguish.
+        let writer_a = TableWriter::new(
+            catalog.clone(),
+            store.clone(),
+            policy("embedding", 4),
+            ident.clone(),
+        );
+        let writer_b = TableWriter::new(
+            catalog.clone(),
+            store.clone(),
+            policy("embedding", 4),
+            ident.clone(),
+        );
+        assert_ne!(writer_a.next_part_path(), writer_b.next_part_path());
 
         let schema =
             std::sync::Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));

@@ -160,8 +160,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          runners_json="$(gh api --paginate --slurp \
-            "repos/${REPOSITORY}/actions/runners?per_page=100")"
+          # Listing repository runners requires permissions that the default
+          # GITHUB_TOKEN may not have (notably on public repositories). A
+          # denied/temporarily unavailable listing must not fail CI: it means
+          # that GPU execution cannot be scheduled, so the GPU matrix is empty.
+          if ! runners_json="$(gh api --paginate --slurp \
+            "repos/${REPOSITORY}/actions/runners?per_page=100" 2>&1)"; then
+            echo "::warning::Unable to list self-hosted runners; skipping GPU jobs."
+            runners_json='[]'
+          fi
           matrix="$(jq -c '
             [.[].runners[]
               | select(.status == "online" and .busy == false)
