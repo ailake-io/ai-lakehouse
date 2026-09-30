@@ -1,0 +1,12 @@
+main() {
+    var client = AilakeClient("http://127.0.0.1:7700")
+    client.configure(15, 2, 5)
+    // For protected deployments, call client.setBearerToken(token) before
+    // the authenticated endpoints.
+    var health = client.health()
+    println(health.ok)
+    var info = client.info()
+    println(info.table)
+    var response = client.search("[1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]", 5)
+    println(response.results)
+}

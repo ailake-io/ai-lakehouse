@@ -92,6 +92,7 @@ async fn pruning_eliminates_distant_file() {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         },
         "embedding",
         4,

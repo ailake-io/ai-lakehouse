@@ -125,6 +125,9 @@ pub struct SearchConfig {
     /// applied against columns only materialized later by `SchemaFiller`
     /// (schema-evolution defaults). `None` disables pushdown (default).
     pub column_filter: Option<ailake_core::ColumnFilter>,
+    /// When `true`, failures while loading deletion vectors or equality-delete
+    /// files abort the query instead of risking visibility of deleted rows.
+    pub strict_deletes: bool,
 }
 
 impl Default for SearchConfig {
@@ -138,6 +141,7 @@ impl Default for SearchConfig {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         }
     }
 }
@@ -299,18 +303,24 @@ pub async fn search(
 
     // Phase H: load equality delete filter for this snapshot.
     // Reads delete manifests from the catalog and downloads each equality delete Avro file.
-    // Empty filter is a no-op. On error: warn and continue with empty filter (data visible).
+    // In strict mode, an unreadable delete manifest/file is a hard error.
     let eq_del_filter = match catalog.list_equality_deletes(table, None).await {
         Ok(edfs) if !edfs.is_empty() => {
             match EqualityDeleteFilter::from_files(&store, &edfs).await {
                 Ok(f) => f,
+                Err(e) if config.strict_deletes => return Err(e),
                 Err(e) => {
                     warn!("ailake: equality delete filter build failed: {e} — rows may appear");
                     EqualityDeleteFilter::empty()
                 }
             }
         }
-        _ => EqualityDeleteFilter::empty(),
+        Ok(_) => EqualityDeleteFilter::empty(),
+        Err(e) if config.strict_deletes => return Err(e),
+        Err(e) => {
+            warn!("ailake: equality delete metadata load failed: {e} — rows may appear");
+            EqualityDeleteFilter::empty()
+        }
     };
 
     // Compute candidate pool: hybrid needs a larger pool for BM25 re-ranking.
@@ -561,6 +571,9 @@ async fn search_one_file(
                 Some(bm)
             }
             Err(e) => {
+                if config.strict_deletes {
+                    return Err(e);
+                }
                 warn!(
                     "ailake: DV fetch failed for '{}': {e} — deleted rows may appear",
                     file_entry.path
@@ -952,6 +965,7 @@ pub async fn search_multimodal(
             partition_filter: config.partition_filter.clone(),
             hybrid: None,
             column_filter: config.column_filter.clone(),
+            strict_deletes: config.strict_deletes,
         };
         let results = search(
             table,
@@ -1385,6 +1399,31 @@ pub async fn search_text(
     store: Arc<dyn Store>,
     partition_filter: Option<&str>,
 ) -> AilakeResult<Vec<SearchResult>> {
+    search_text_with_options(
+        table,
+        query_text,
+        text_columns,
+        top_k,
+        catalog,
+        store,
+        partition_filter,
+        false,
+    )
+    .await
+}
+
+/// Text search with explicit deletion-integrity policy.
+#[allow(clippy::too_many_arguments)]
+pub async fn search_text_with_options(
+    table: &TableIdent,
+    query_text: &str,
+    text_columns: &[&str],
+    top_k: usize,
+    catalog: Arc<dyn CatalogProvider>,
+    store: Arc<dyn Store>,
+    partition_filter: Option<&str>,
+    strict_deletes: bool,
+) -> AilakeResult<Vec<SearchResult>> {
     use arrow_array::cast::AsArray;
 
     if text_columns.is_empty() {
@@ -1435,13 +1474,19 @@ pub async fn search_text(
         Ok(edfs) if !edfs.is_empty() => {
             match EqualityDeleteFilter::from_files(&store, &edfs).await {
                 Ok(f) => f,
+                Err(e) if strict_deletes => return Err(e),
                 Err(e) => {
                     warn!("ailake: equality delete filter build failed in search_text: {e}");
                     EqualityDeleteFilter::empty()
                 }
             }
         }
-        _ => EqualityDeleteFilter::empty(),
+        Ok(_) => EqualityDeleteFilter::empty(),
+        Err(e) if strict_deletes => return Err(e),
+        Err(e) => {
+            warn!("ailake: equality delete metadata load failed in search_text: {e}");
+            EqualityDeleteFilter::empty()
+        }
     };
 
     let mut results: Vec<SearchResult> = Vec::new();
@@ -1824,6 +1869,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strict_search_fails_before_serving_rows_when_dv_is_unreadable() {
+        let dir = TempDir::new().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let file = DataFileEntry {
+            path: "data/missing.parquet".into(),
+            deletion_vector: Some(ailake_catalog::provider::DeletionVector {
+                path: "metadata/missing.dvd".into(),
+                offset: 0,
+                length: 16,
+                cardinality: 1,
+            }),
+            ..Default::default()
+        };
+        let metadata = TableMetadata {
+            table_uuid: "test".into(),
+            format_version: 3,
+            location: "warehouse/default/table".into(),
+            properties: std::collections::HashMap::new(),
+            current_snapshot_id: None,
+            current_statistics_path: None,
+            schema_fields: vec![],
+            equality_delete_files: vec![],
+            partition_spec: None,
+        };
+        let config = SearchConfig {
+            strict_deletes: true,
+            ..SearchConfig::default()
+        };
+        let result = search_one_file(
+            &file,
+            &[1.0],
+            1,
+            VectorMetric::Cosine,
+            &metadata,
+            &config,
+            "embedding",
+            1,
+            &store,
+            &EqualityDeleteFilter::empty(),
+            false,
+        )
+        .await;
+        assert!(result.is_err(), "strict deletion handling must fail closed");
+    }
+
+    #[tokio::test]
     async fn column_filter_preserves_row_identity_on_indexed_path() {
         // The critical correctness property: row_ids returned under a
         // column_filter must still be the TRUE file-relative row ids (usable
@@ -1857,6 +1948,7 @@ mod tests {
                 "category",
                 ailake_core::FilterValue::Str("even".to_string()),
             )),
+            strict_deletes: false,
         };
 
         let results = search(
@@ -1906,6 +1998,7 @@ mod tests {
                 "category",
                 ailake_core::FilterValue::Str("even".to_string()),
             )),
+            strict_deletes: false,
         };
 
         let results = search(
@@ -1955,6 +2048,7 @@ mod tests {
                 "category",
                 ailake_core::FilterValue::Str("nonexistent".to_string()),
             )),
+            strict_deletes: false,
         };
 
         let results = search(
@@ -2079,6 +2173,7 @@ mod tests {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         };
 
         let results = search(
@@ -2138,6 +2233,7 @@ mod tests {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         };
         let fast_results = search(
             &table,
@@ -2164,6 +2260,7 @@ mod tests {
                 ailake_core::FilterOp::Gte,
                 ailake_core::FilterValue::I64(0),
             )),
+            strict_deletes: false,
         };
         let slow_results = search(
             &table,
@@ -2211,6 +2308,7 @@ mod tests {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         };
 
         let results = search(
@@ -2250,6 +2348,7 @@ mod tests {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         };
 
         let results = search(
@@ -2298,6 +2397,7 @@ mod tests {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         };
         let cfg_rerank = SearchConfig {
             top_k: 2,
@@ -2308,6 +2408,7 @@ mod tests {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         };
 
         let plain = search(
@@ -2377,6 +2478,7 @@ mod tests {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         };
 
         let results =
@@ -2493,6 +2595,7 @@ mod tests {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         };
 
         let results =
@@ -2552,6 +2655,7 @@ mod tests {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         };
         let results = search(
             &table,
@@ -2619,6 +2723,7 @@ mod tests {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
+            strict_deletes: false,
         };
         let results = search(
             &table,

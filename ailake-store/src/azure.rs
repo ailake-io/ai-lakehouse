@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use ailake_core::{AilakeError, AilakeResult};
 use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::ObjectStoreBackend;
 
@@ -12,16 +13,16 @@ pub enum AzureCredentials {
     ClientSecret {
         tenant_id: String,
         client_id: String,
-        client_secret: String,
+        client_secret: SecretString,
     },
     /// Azure Managed Identity.
     /// `client_id = None` → system-assigned; `Some(id)` → user-assigned.
     ManagedIdentity { client_id: Option<String> },
     /// Storage account access key — dev / admin use only.
-    AccessKey(String),
+    AccessKey(SecretString),
     /// SAS token string (e.g. `"sv=2021-10-04&ss=b&..."`).
     /// object_store parses the query-pair format internally.
-    SasToken(String),
+    SasToken(SecretString),
     /// Azure CLI (`az login`) — local development.
     AzureCli,
 }
@@ -51,7 +52,11 @@ pub fn azure_store(
             client_id,
             client_secret,
         } => {
-            b = b.with_client_secret_authorization(client_id, client_secret, tenant_id);
+            b = b.with_client_secret_authorization(
+                client_id,
+                client_secret.expose_secret().to_owned(),
+                tenant_id,
+            );
         }
         AzureCredentials::ManagedIdentity { client_id } => {
             if let Some(id) = client_id {
@@ -61,11 +66,11 @@ pub fn azure_store(
             // System-assigned: no fields needed; builder falls to ImdsManagedIdentityProvider.
         }
         AzureCredentials::AccessKey(key) => {
-            b = b.with_access_key(key);
+            b = b.with_access_key(key.expose_secret().to_owned());
         }
         AzureCredentials::SasToken(token) => {
             // with_config(SasKey, …) lets object_store parse the raw query-pair string.
-            b = b.with_config(AzureConfigKey::SasKey, token);
+            b = b.with_config(AzureConfigKey::SasKey, token.expose_secret().to_owned());
         }
         AzureCredentials::AzureCli => {
             b = b.with_use_azure_cli(true);

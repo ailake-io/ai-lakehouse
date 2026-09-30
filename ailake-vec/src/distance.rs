@@ -5,7 +5,7 @@ use half::f16;
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(
+    assert_eq!(
         a.len(),
         b.len(),
         "dot_product: dimension mismatch {} vs {}",
@@ -30,7 +30,7 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 }
 
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(
+    assert_eq!(
         a.len(),
         b.len(),
         "euclidean_distance: dimension mismatch {} vs {}",
@@ -55,7 +55,7 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
 }
 
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(
+    assert_eq!(
         a.len(),
         b.len(),
         "cosine_distance: dimension mismatch {} vs {}",
@@ -98,7 +98,7 @@ pub fn exact_distance(metric: VectorMetric, a: &[f32], b: &[f32]) -> f32 {
 // loop that dominates HNSW graph traversal on dim=128 vectors.
 
 pub fn cosine_distance_f16(a: &[f32], b: &[f16]) -> f32 {
-    debug_assert_eq!(
+    assert_eq!(
         a.len(),
         b.len(),
         "cosine_distance_f16: dimension mismatch {} vs {}",
@@ -119,7 +119,7 @@ pub fn cosine_distance_f16(a: &[f32], b: &[f16]) -> f32 {
 }
 
 pub fn euclidean_distance_f16(a: &[f32], b: &[f16]) -> f32 {
-    debug_assert_eq!(
+    assert_eq!(
         a.len(),
         b.len(),
         "euclidean_distance_f16: dimension mismatch {} vs {}",
@@ -140,7 +140,7 @@ pub fn euclidean_distance_f16(a: &[f32], b: &[f16]) -> f32 {
 }
 
 pub fn dot_product_f16(a: &[f32], b: &[f16]) -> f32 {
-    debug_assert_eq!(
+    assert_eq!(
         a.len(),
         b.len(),
         "dot_product_f16: dimension mismatch {} vs {}",

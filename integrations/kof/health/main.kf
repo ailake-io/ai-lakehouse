@@ -1,0 +1,7 @@
+// Minimal AI-Lake/Kof connectivity check.
+// Run with: kof run integrations/kof/health
+
+main() {
+    var response = http.get("http://127.0.0.1:7700/healthz")
+    println(response)
+}

@@ -136,6 +136,7 @@ async fn cdc_insert_between_snapshots() {
             end_snapshot_id: Some(snap2),
             pk_columns: vec!["id".to_string()],
             coalesce_updates: false,
+            strict_deletes: false,
         },
     )
     .await
@@ -204,6 +205,7 @@ async fn cdc_delete_via_equality_delete() {
             end_snapshot_id: Some(snap2),
             pk_columns: vec!["id".to_string()],
             coalesce_updates: false,
+            strict_deletes: false,
         },
     )
     .await
@@ -248,6 +250,7 @@ async fn cdc_no_changes_between_same_snapshot() {
             end_snapshot_id: Some(snap1),
             pk_columns: vec![],
             coalesce_updates: false,
+            strict_deletes: false,
         },
     )
     .await
@@ -313,6 +316,7 @@ async fn cdc_coalesce_update() {
             end_snapshot_id: Some(snap2),
             pk_columns: vec!["id".to_string()],
             coalesce_updates: true,
+            strict_deletes: false,
         },
     )
     .await

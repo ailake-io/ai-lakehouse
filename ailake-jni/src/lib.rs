@@ -7,6 +7,7 @@
 //! The cdylib is loaded by the connector via JNA (System.loadLibrary is not required).
 
 use std::{
+    cell::RefCell,
     ffi::{c_char, CStr, CString},
     sync::Arc,
 };
@@ -29,6 +30,18 @@ use ailake_query::{
 use ailake_store::LocalStore;
 use serde::Serialize;
 use tracing::{debug, error, info, warn};
+
+/// Maximum Arrow IPC payload accepted by the C-ABI. This is deliberately
+/// enforced before `from_raw_parts` so an untrusted JNA/Kof caller cannot ask
+/// the process to address an effectively unbounded buffer.
+pub const MAX_IPC_BYTES: i64 = 512 * 1024 * 1024;
+
+/// Stable C-ABI contract version. Increment only when an exported signature or
+/// ownership rule changes incompatibly.
+#[no_mangle]
+pub extern "C" fn ailake_ffi_abi_version() -> u32 {
+    1
+}
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -169,7 +182,7 @@ fn resolve_catalog(
                         .rest_token
                         .clone()
                         .ok_or("rest_auth=\"bearer\" requires \"rest_token\"")?;
-                    RestCatalogAuth::Bearer(token)
+                    RestCatalogAuth::bearer(token)
                 }
                 "oauth2" => {
                     let token_endpoint = opts
@@ -184,12 +197,12 @@ fn resolve_catalog(
                         .rest_oauth_client_secret
                         .clone()
                         .ok_or("rest_auth=\"oauth2\" requires \"rest_oauth_client_secret\"")?;
-                    RestCatalogAuth::OAuth2 {
+                    RestCatalogAuth::oauth2(
                         token_endpoint,
                         client_id,
                         client_secret,
-                        scope: opts.rest_oauth_scope.clone(),
-                    }
+                        opts.rest_oauth_scope.clone(),
+                    )
                 }
                 other => return Err(format!("unknown rest_auth: {other}")),
             };
@@ -262,6 +275,7 @@ fn do_search(
         partition_filter,
         hybrid,
         column_filter: None,
+        strict_deletes: false,
     };
     rt().block_on(rs_search(
         &table, &query, config, vec_col, dim, catalog, store,
@@ -337,6 +351,63 @@ fn cstr_json(s: String) -> *mut c_char {
                 .unwrap()
         })
         .into_raw()
+}
+
+// Kof's native FFI converts a returned `char*` into a managed String, but its
+// generic conversion cannot call a library-specific deallocator afterwards.
+// These borrowed adapters take ownership of the normal C-ABI result, retain it
+// in thread-local storage until the next call on the same thread, and return a
+// pointer that Kof can copy without leaking or freeing with the wrong allocator.
+thread_local! {
+    static KOF_RESPONSE: RefCell<Option<CString>> = const { RefCell::new(None) };
+}
+
+fn kof_borrowed_response(raw: *mut c_char) -> *const c_char {
+    let value = if raw.is_null() {
+        CString::new(r#"{"ok":false,"error":"null C-ABI response"}"#).unwrap()
+    } else {
+        // All normal C-ABI JSON responses are allocated by CString::into_raw.
+        unsafe { CString::from_raw(raw) }
+    };
+    KOF_RESPONSE.with(|slot| {
+        *slot.borrow_mut() = Some(value);
+        slot.borrow()
+            .as_ref()
+            .map_or(std::ptr::null(), |response| response.as_ptr())
+    })
+}
+
+/// Kof-safe borrowed JSON response adapters. The Kof binding copies the
+/// response immediately; callers must not pass these pointers to
+/// `ailake_free_string`.
+///
+/// # Safety
+/// `request_json` must be either null or a valid NUL-terminated UTF-8 C string,
+/// matching the contract of the delegated JSON C-ABI function.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_kof_search_json(request_json: *const c_char) -> *const c_char {
+    kof_borrowed_response(unsafe { ailake_search_json(request_json) })
+}
+
+/// # Safety
+/// `request_json` must be either null or a valid NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_kof_write_batch_json(request_json: *const c_char) -> *const c_char {
+    kof_borrowed_response(unsafe { ailake_write_batch_json(request_json) })
+}
+
+/// # Safety
+/// `request_json` must be either null or a valid NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_kof_info_json(request_json: *const c_char) -> *const c_char {
+    kof_borrowed_response(unsafe { ailake_info_json(request_json) })
+}
+
+/// # Safety
+/// `request_json` must be either null or a valid NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn ailake_kof_compact_json(request_json: *const c_char) -> *const c_char {
+    kof_borrowed_response(unsafe { ailake_compact_json(request_json) })
 }
 
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -734,13 +805,13 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         };
         if req.ids.len() != req.embeddings.len() {
             warn!(
-            "ailake_write_batch_json: ids.len()={} != embeddings.len()={} warehouse={} table={}.{}",
-            req.ids.len(),
-            req.embeddings.len(),
-            req.warehouse,
-            req.namespace,
-            req.table,
-        );
+                "ailake_write_batch_json: ids.len()={} != embeddings.len()={} warehouse={} table={}.{}",
+                req.ids.len(),
+                req.embeddings.len(),
+                req.warehouse,
+                req.namespace,
+                req.table,
+            );
             return cstr_err_json("ids.len() != embeddings.len()");
         }
         debug!(
@@ -1087,6 +1158,12 @@ pub unsafe extern "C" fn ailake_write_batch_ipc(
         if ipc_len < 0 {
             return cstr_err_json("negative ipc_len");
         }
+        if ipc_len > MAX_IPC_BYTES {
+            return cstr_err_json(format!(
+                "ipc_len exceeds maximum of {} bytes",
+                MAX_IPC_BYTES
+            ));
+        }
         let raw: &[u8] = unsafe { std::slice::from_raw_parts(ipc_bytes, ipc_len as usize) };
         let mut reader =
             match arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(raw), None) {
@@ -1111,7 +1188,7 @@ pub unsafe extern "C" fn ailake_write_batch_ipc(
                 return cstr_err_json(format!(
                     "vector column '{}' not found in IPC batch schema",
                     opts.vec_col
-                ))
+                ));
             }
         };
         let embeddings =
@@ -1351,7 +1428,12 @@ pub unsafe extern "C" fn ailake_write_batch_multi_json(request_json: *const c_ch
             if vc.embeddings.len() != req.ids.len() {
                 warn!(
                     "ailake_write_batch_multi_json: ids.len()={} != embeddings.len()={} for column='{}' warehouse={} table={}.{}",
-                    req.ids.len(), vc.embeddings.len(), vc.col, req.warehouse, req.namespace, req.table,
+                    req.ids.len(),
+                    vc.embeddings.len(),
+                    vc.col,
+                    req.warehouse,
+                    req.namespace,
+                    req.table,
                 );
                 return cstr_err_json(format!(
                     "ids.len() != embeddings.len() for vector column '{}'",
@@ -1487,7 +1569,10 @@ pub unsafe extern "C" fn ailake_write_batch_multi_json(request_json: *const c_ch
             Ok(snap) => {
                 info!(
                     "ailake_write_batch_multi_json: committed snapshot_id={} table={}.{} columns={}",
-                    snap, req.namespace, req.table, req.vector_columns.len()
+                    snap,
+                    req.namespace,
+                    req.table,
+                    req.vector_columns.len()
                 );
                 serde_json::to_string(&Resp {
                     ok: true,
@@ -3592,7 +3677,7 @@ pub unsafe extern "C" fn ailake_backfill_vector_column_json(
                 return cstr_err_json(format!(
                     "column '{}' not found — call ailake_add_vector_column_json first",
                     req.column
-                ))
+                ));
             }
         };
         let metric = parse_metric(
@@ -3893,10 +3978,8 @@ mod tests {
     fn query_bytes_decode() {
         let v = vec![1.0f32, 2.0, 3.0];
         let bytes: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let decoded: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-            .collect();
+        let (chunks, _) = bytes.as_chunks::<4>();
+        let decoded: Vec<f32> = chunks.iter().map(|b| f32::from_le_bytes(*b)).collect();
         assert_eq!(decoded, v);
     }
 
@@ -3926,6 +4009,11 @@ mod tests {
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         assert_eq!(json, "[]");
         unsafe { ailake_free_string(ptr) };
+    }
+
+    #[test]
+    fn ffi_abi_version_is_stable() {
+        assert_eq!(ailake_ffi_abi_version(), 1);
     }
 
     // ── L1: partition_fields + format_version in write_batch_json ────────────
@@ -4394,6 +4482,17 @@ mod tests {
         let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         unsafe { ailake_free_string(ptr) };
         assert!(json.contains("negative"), "got: {json}");
+    }
+
+    #[test]
+    fn write_batch_ipc_max_len_guard() {
+        let opts = std::ffi::CString::new(r#"{"warehouse":"/x","table":"t","dim":4}"#).unwrap();
+        let buf = [0u8; 1];
+        let ptr = unsafe { ailake_write_batch_ipc(buf.as_ptr(), MAX_IPC_BYTES + 1, opts.as_ptr()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        unsafe { ailake_free_string(ptr) };
+        assert!(json.contains("maximum"), "got: {json}");
     }
 
     // ── Proptest: FFI fuzzing ─────────────────────────────────────

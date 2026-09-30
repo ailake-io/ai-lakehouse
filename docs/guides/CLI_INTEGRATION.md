@@ -41,7 +41,7 @@ cargo build --release -p ailake-cli --features catalog-rest
 ```
 
 ```bash
-ailake --version   # ailake 0.1.11
+ailake --version   # ailake 0.1.12
 ailake --help      # full command list
 ```
 
@@ -416,6 +416,13 @@ curl -s -X POST http://localhost:7700/write -H 'Content-Type: application/json' 
 ```
 Request bodies are capped at 32 MB (`MAX_BODY_BYTES`); `top_k` is capped at 10,000
 (`MAX_TOP_K`) regardless of what's requested.
+
+For production-style validation, run the real server with concurrent writers
+and searches using [`scripts/ci/http_load.py`](../../scripts/ci/http_load.py).
+The process-level lease check is available in
+[`scripts/ci/check_multi_process_lock.sh`](../../scripts/ci/check_multi_process_lock.sh),
+and the complete CPU/GPU/catalog workflow is documented in
+[`PERFORMANCE_BENCHMARKS.md`](./PERFORMANCE_BENCHMARKS.md).
 
 ---
 

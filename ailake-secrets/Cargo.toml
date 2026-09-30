@@ -1,0 +1,28 @@
+[package]
+name        = "ailake-secrets"
+version     = "0.1.12"
+edition     = "2021"
+description = "Secret providers and rotating credentials for AI-Lake"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/ThiagoLange/ai-lakehouse"
+
+[features]
+default = ["vault", "kubernetes"]
+vault = ["dep:reqwest"]
+kubernetes = []
+aws-secrets-manager = ["dep:aws-config", "dep:aws-sdk-secretsmanager", "dep:aws-types"]
+
+[dependencies]
+async-trait = { workspace = true }
+secrecy    = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }
+zeroize    = { workspace = true }
+reqwest    = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"], optional = true }
+aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-types = { version = "1", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

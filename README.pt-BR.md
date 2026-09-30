@@ -111,6 +111,7 @@ Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
 | [`docs/specs/CLOUD_DEPLOY.md`](./docs/specs/CLOUD_DEPLOY.md) | Deploy passo-a-passo em EMR, Glue, Lambda, Dataproc, Dataflow, Databricks, HDInsight, AzureML |
 | [`docs/specs/COMPACTION.md`](./docs/specs/COMPACTION.md) | Design do job de compaction, triggers, estratégia de reconstrução do HNSW |
 | [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md) | Estratégia de testes, fixtures, matriz CI, harness de testes de compat |
+| [`docs/guides/PERFORMANCE_BENCHMARKS.md`](./docs/guides/PERFORMANCE_BENCHMARKS.md) | Benchmarks CPU, regressão de Recall@10/p95, carga HTTP, multi-writer e matriz de catálogos/GPU |
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Convenções Rust, tratamento de erros, política de unsafe, regras de testes |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | Log de ADRs — por que cada escolha-chave foi feita |
 | [`SETUP.md`](./SETUP.md) | Setup de dev local — roda a stack completa (MinIO, Nessie, testes de compat) na sua máquina |
@@ -175,6 +176,30 @@ wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/libail
 ```
 
 Veja [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) para instalação e configuração.
+
+## Integração com Kof
+
+O AI-Lake inclui um adaptador Kof validado em
+[`integrations/kof/`](./integrations/kof/). O cliente HTTP é tipado em Kof
+JVM/JS; aplicações Native usam o binding C-ABI no mesmo processo:
+
+```bash
+# Serviço local — por padrão escuta apenas em localhost
+cargo run -p ailake-cli -- --store ./warehouse serve default.docs --port 7700
+
+# Validar e executar o cliente Kof tipado (JVM ou JS)
+kof check integrations/kof/client --target jvm
+kof run integrations/kof/client/main.kf --target jvm
+
+# Validar o binding Native sobre o C-ABI
+cargo build -p ailake-jni
+kof check integrations/kof/native --target native
+```
+
+Para integrações nativas no mesmo processo, use as declarações C estáveis em
+[`ailake-jni/include/ailake.h`](./ailake-jni/include/ailake.h). O C-ABI usa
+envelopes JSON e Arrow IPC para lotes grandes; toda string retornada deve ser
+liberada com `ailake_free_string`.
 
 ## Layout do repositório
 
@@ -319,6 +344,17 @@ cargo check --workspace
 | **Fase 8** | ✅ Completa | Multimodal — enum `VectorModality`, propriedade Iceberg `ailake.modality-<col>`, N colunas vetoriais generalizadas com HNSW independente, `write_batch_multi`, CLI `--vector-cols`, `search_multimodal` (RRF cross-modal), `MultimodalContextSchema` + módulo `multimodal_columns`, Python `VectorColSpec`, notebook e fixture multimodal |
 | **Fase 9** | ✅ Completa | Memória de agentes — `ToolCallSchema` (histórico de tool calls pesquisável), `EpisodicMemorySchema` (decaimento de recência, contagem de acesso, pontuação de importância), `ScoreFn` injetável para scoring híbrido (distância × recência × importância), `partition_by`/`partition_value` para isolamento por agente via particionamento Iceberg, `partition_filter` para pruning ao nível de manifesto antes de centroide e HNSW, helper Python `ailake.Agent` (LangChain/CrewAI/AutoGen). Propagado para todos os SDKs e conectores: Spark, Trino, Flink, Go, C++, DuckDB, Airbyte, Airflow. Fix: `TableWriter::create_or_open` inicializa `part_counter` a partir da contagem de arquivos existentes. |
 | **Fase 10** | ✅ Completa | Change Data Capture — engine `read_changes` difere snapshots Iceberg e emite linhas `insert`/`delete`/`update_before`/`update_after`; predicados de equality delete resolvidos contra arquivos de dados brutos para pré-imagem completa; Python `ailake.read_changes()` e CLI `ailake read-changes`. Veja `docs/specs/CDC.md`. |
+
+### Operação de produção
+
+As capacidades operacionais da versão atual estão documentadas em guias
+dedicados: [`CACHE.md`](./docs/guides/CACHE.md) (cache local e Redis/Valkey),
+[`DISTRIBUTED_COORDINATION.md`](./docs/guides/DISTRIBUTED_COORDINATION.md)
+(multi-writer e fencing), [`SECRETS.md`](./docs/guides/SECRETS.md),
+[`DELETE_INTEGRITY.md`](./docs/guides/DELETE_INTEGRITY.md),
+[`RATE_LIMITING.md`](./docs/guides/RATE_LIMITING.md),
+[`PERFORMANCE_BENCHMARKS.md`](./docs/guides/PERFORMANCE_BENCHMARKS.md) e
+[`RELEASES.md`](./docs/guides/RELEASES.md).
 
 ## Apoie o projeto
 

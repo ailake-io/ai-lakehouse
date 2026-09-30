@@ -110,6 +110,14 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 | [`docs/specs/CLOUD_DEPLOY.md`](./docs/specs/CLOUD_DEPLOY.md) | Step-by-step deployment on EMR, Glue, Lambda, Dataproc, Dataflow, Databricks, HDInsight, AzureML |
 | [`docs/specs/COMPACTION.md`](./docs/specs/COMPACTION.md) | Compaction job design, triggers, HNSW rebuild strategy |
 | [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md) | Test strategy, fixtures, CI matrix, compat test harness |
+| [`docs/guides/PERFORMANCE_BENCHMARKS.md`](./docs/guides/PERFORMANCE_BENCHMARKS.md) | CPU benchmarks, Recall@10/p95 regression, HTTP load, multi-writer and catalog/GPU CI matrix |
+| [`docs/guides/CACHE.md`](./docs/guides/CACHE.md) | Local/Redis/Valkey cache, snapshot invalidation and metrics |
+| [`docs/guides/DISTRIBUTED_COORDINATION.md`](./docs/guides/DISTRIBUTED_COORDINATION.md) | Leases, fencing tokens, shared job registry and multi-writer coordination |
+| [`docs/guides/SECRETS.md`](./docs/guides/SECRETS.md) | SecretString, external providers and credential rotation |
+| [`docs/guides/DELETE_INTEGRITY.md`](./docs/guides/DELETE_INTEGRITY.md) | Strict fail-closed handling for deletion vectors and equality deletes |
+| [`docs/guides/RATE_LIMITING.md`](./docs/guides/RATE_LIMITING.md) | Distributed rate limiting, quotas and circuit breakers |
+| [`docs/guides/RELEASES.md`](./docs/guides/RELEASES.md) | Automatic versioning and release checklist |
+| [`integrations/kof/README.md`](./integrations/kof/README.md) | Typed HTTP and native C-ABI integration with Kof |
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Rust conventions, error handling, unsafe policy, testing rules |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | ADR log — why each key choice was made |
 | [`SETUP.md`](./SETUP.md) | Local dev setup — run the full stack (MinIO, Nessie, compat tests) on your machine |
@@ -174,6 +182,30 @@ wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/libail
 ```
 
 See [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) for installation and configuration.
+
+## Kof integration
+
+AI-Lake includes a tested Kof HTTP adapter in [`integrations/kof/`](./integrations/kof/).
+The HTTP client is typed on Kof JVM/JS; Native applications use the stable C-ABI
+binding for in-process calls, keeping both paths independent from Rust internals:
+
+```bash
+# Local service (binds to localhost by default)
+cargo run -p ailake-cli -- --store ./warehouse serve default.docs --port 7700
+
+# Validate and run the typed Kof client (JVM or JS)
+kof check integrations/kof/client --target jvm
+kof run integrations/kof/client/main.kf --target jvm
+
+# Validate the Native C-ABI binding
+cargo build -p ailake-jni
+kof check integrations/kof/native --target native
+```
+
+For in-process native integrations, use the stable C declarations in
+[`ailake-jni/include/ailake.h`](./ailake-jni/include/ailake.h). The C-ABI uses
+versioned JSON envelopes and Arrow IPC for large batches; every returned string
+must be released with `ailake_free_string`.
 
 ## Repository layout
 

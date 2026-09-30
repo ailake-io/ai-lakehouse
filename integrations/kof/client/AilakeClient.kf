@@ -1,0 +1,140 @@
+// Production-oriented typed client for the AI-Lake HTTP service.
+// Typed nested DTOs target Kof JVM and JS; Native uses the C-ABI adapter in
+// integrations/kof/native because its JSON decoder currently rejects nested
+// DTO fields.
+
+class HealthResponse(Bool ok) {}
+
+class SearchResult(Int rank, Long row_id, Double distance, String file_path) {}
+
+class SearchResponse(List<SearchResult> results) {}
+
+class WriteResponse(Long snapshot_id, Int rows) {}
+
+class CompactResponse(String message, Int compacted_files) {}
+
+class InfoResponse(
+    String table,
+    String location,
+    String vector_column,
+    String vector_dim,
+    String vector_metric,
+    Int files,
+    Int indexed_files,
+    Int failed_files,
+    Long rows,
+    Long size_bytes,
+    Long? snapshot_id
+) {}
+
+class Job(
+    String id,
+    String kind,
+    String status,
+    Long created_at,
+    Long updated_at,
+    String? error,
+    String? result,
+    Bool cancel_requested
+) {}
+
+class JobPage(
+    List<Job> items,
+    Int offset,
+    Int limit,
+    Int total,
+    Bool has_more
+) {}
+
+class IndexJob(
+    String id,
+    String table,
+    String file_path,
+    String algorithm,
+    String status,
+    Int progress,
+    Int attempts,
+    Long created_at,
+    Long updated_at,
+    String? error,
+    Bool cancel_requested
+) {}
+
+class IndexJobPage(
+    List<IndexJob> items,
+    Int offset,
+    Int limit,
+    Int total,
+    Bool has_more
+) {}
+
+class AilakeClient(String baseUrl) {
+    static String CLIENT_VERSION = "0.1.0"
+
+    setBearerToken(String token): void {
+        bearerToken = token
+    }
+
+    configure(Int timeoutSeconds, Int retries, Int circuitTrips): void {
+        http.timeout(timeoutSeconds)
+        http.retry(retries)
+        http.circuit(circuitTrips)
+    }
+
+    health(): HealthResponse {
+        return json.decode<HealthResponse>(http.get(url("/healthz"), headers()))
+    }
+
+    ready(): HealthResponse {
+        return json.decode<HealthResponse>(http.get(url("/readyz"), headers()))
+    }
+
+    info(): InfoResponse {
+        return json.decode<InfoResponse>(http.get(url("/info"), headers()))
+    }
+
+    search(String queryJson, Int topK): SearchResponse {
+        var request = "{\"query\":" + queryJson + ",\"top_k\":" + topK.toString() + "}"
+        return json.decode<SearchResponse>(http.post(url("/search"), request, headers()))
+    }
+
+    searchJson(String payload): String {
+        return http.post(url("/search"), payload, headers())
+    }
+
+    write(String payload): WriteResponse {
+        return json.decode<WriteResponse>(http.post(url("/write"), payload, headers()))
+    }
+
+    compact(Int minFiles, Int targetSize): CompactResponse {
+        var payload = "{\"min_files\":" + minFiles.toString() + ",\"target_size\":" + targetSize.toString() + "}"
+        return json.decode<CompactResponse>(http.post(url("/compact"), payload, headers()))
+    }
+
+    listJobsPage(Int offset, Int limit): JobPage {
+        var body = http.get(url("/jobs?offset=" + offset.toString() + "&limit=" + limit.toString()), headers())
+        return json.decode<JobPage>(body)
+    }
+
+    listIndexJobsPage(Int offset, Int limit): IndexJobPage {
+        var body = http.get(url("/index-jobs?offset=" + offset.toString() + "&limit=" + limit.toString()), headers())
+        return json.decode<IndexJobPage>(body)
+    }
+
+    private url(String path): String {
+        if (baseUrl.endsWith("/")) {
+            return baseUrl.substring(0, baseUrl.length() - 1) + path
+        }
+        return baseUrl + path
+    }
+
+    private headers(): String {
+        var value = "Accept: application/json\nContent-Type: application/json\nX-Ailake-Client-Version: " + CLIENT_VERSION
+        if (bearerToken != null && bearerToken != "") {
+            return value + "\nAuthorization: Bearer " + bearerToken
+        }
+        return value
+    }
+
+    String? bearerToken
+}

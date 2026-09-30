@@ -26,6 +26,10 @@ ailake-jni ───────────────────────
 
 **Rule**: `ailake-core` has zero internal dependencies. Every other crate may depend on `ailake-core`. `ailake-query` depends on all data-plane crates.
 
+The production control plane is kept in small, optional-facing crates: the CLI
+composes `ailake-cache` and `ailake-secrets`, while storage/catalog crates remain
+usable without the HTTP server.
+
 ## Crate responsibilities
 
 ### `ailake-core`
@@ -211,6 +215,19 @@ Query planning and execution. The integration layer — depends on all data-plan
   - Applies `max_tokens` budget (4 chars ≈ 1 token)
   - Returns `AssembledContext { text: XML, chunk_count, token_estimate }`
 
+### `ailake-secrets`
+Credential resolution and lifecycle management for catalog and storage clients.
+Secrets are represented as `secrecy::SecretString`, temporary file buffers are
+zeroized, and providers can refresh references from environment variables,
+mounted files, Kubernetes Secrets, Vault or AWS Secrets Manager.
+
+### `ailake-cache`
+Bounded production cache and traffic-control primitives used by `ailake serve`:
+local query/metadata/index LRU partitions, optional Redis/Valkey mirroring,
+snapshot-scoped invalidation, token/IP quotas, and catalog/storage circuit
+breakers. The cache is an acceleration layer; jobs, leases and fencing state
+remain in the durable coordination registry.
+
 ### `ailake-py`
 PyO3 extension module (`cdylib`). Thin async-to-sync bridge — all logic lives in other crates. Built with `maturin`; distributed via PyPI as `ailake`.
 
@@ -254,12 +271,15 @@ members = [
     "ailake-jni",
     "ailake-py",
     "ailake-fts",
+    "ailake-secrets",
+    "ailake-cache",
 ]
 
 [workspace.dependencies]
 # Core
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
+secrecy     = "0.10"
 uuid        = { version = "1", features = ["v4", "serde"] }
 thiserror   = "1"
 bytes       = "1"
@@ -269,6 +289,7 @@ async-trait = "0.1"
 # Async
 tokio       = { version = "1", features = ["rt-multi-thread", "io-util", "fs", "sync", "time", "macros"] }
 futures     = "0.3"
+redis       = { version = "0.27", default-features = false, features = ["tokio-comp", "script"] }
 
 # Data
 parquet      = { version = "52", features = ["async"] }
@@ -298,6 +319,7 @@ libloading  = "0.8"
 # Compression
 lz4_flex    = "0.11"
 zstd        = "0.13"
+zeroize     = "1"
 
 # Bindings
 # Note: reqwest is NOT in workspace deps — ailake-catalog declares it inline
@@ -404,6 +426,11 @@ Delivered in Phase 4:
 - `SearchSession` in `ailake-query`: pre-loaded multi-query search, eliminates per-query I/O
 - [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks) (external repo): SIFT-1M benchmark (128D Euclidean, 1M vectors)
   - Results: 199k vec/s write (deferred), 1365 QPS, Recall@10 = 99.63%, p99 1.96ms
+- In-repository performance harness:
+  - `ailake-vec/benches/distance.rs` — dependency-free CPU SIMD microbenchmark with JSON output
+  - `tests/tests/performance_regression.rs` — fixed-seed Recall@10 oracle and p95 latency gate
+  - `scripts/ci/http_load.py` — dependency-free concurrent HTTP writer/search load test
+  - `scripts/ci/check_multi_process_lock.sh` — verifies exclusive `ailake serve` fencing across processes
 - HNSW performance optimizations in `ailake-index`:
   - **Neighbor prefetch**: `_mm_prefetch T0` in `search_layer` hot loop — hides random DRAM latency on x86_64
   - **SELECT-NEIGHBORS-HEURISTIC** (Algorithm 4, Malkov & Yashunin 2018): diversity-enforcing neighbor selection replaces simple nearest-M prune; improves recall@10 by ~2-5% at same throughput
@@ -452,12 +479,13 @@ Delivered in Phase 6:
 - **CI Go** (`ci-go.yml`) — `go build ./...` + `go vet ./...` for `ailake-go`
 - **CI C++** (`ci-cpp.yml`) — CMake configure + build for `ailake-cpp` (CPU-only, no CUDA)
 - **CI GPU** (`ci-gpu.yml`) — three-platform GPU tests: Windows bare-metal (existing), Linux/CUDA Docker (new, runner label `gpu-nvidia`), Linux/ROCm Docker (new, runner label `gpu-amd`). Previously Windows-only; `hardware.rs` Linux paths (`libcuda.so.1`, `libamdhip64.so`) now exercised in CI. `ci-gpu-data.yml` was merged into `ci-gpu.yml` (its sole test target `gpu_data` is a strict subset of `cargo test -p ailake-index`).
+- **Performance and load CI** (`performance.yml`) — CPU benchmark artifacts, deterministic recall/p95 regression checks, real HTTP load with concurrent writers, multi-process serve fencing, MinIO/LocalStack/Iceberg REST emulator matrix, and optional CUDA/ROCm performance runners.
 - **CI Safety** (`ci-safety.yml`) — Miri UB detection on nightly (ailake-vec, ailake-index, ailake-jni) + Loom concurrency model checking on stable (ailake-query). Runs on every PR and push.
 - **Composite action `locate-rust-windows`** (`.github/actions/locate-rust-windows/action.yml`) — reusable PowerShell action that finds `cargo.exe` on Windows self-hosted runners (toolchain dir → rustup shim → PATH). Extracts ~60-line block previously duplicated in `ci-gpu.yml` and `ci-gpu-data.yml`.
 - **GPU Docker images** (`docker/gpu-cuda/Dockerfile`, `docker/gpu-rocm/Dockerfile`, `docker-compose.gpu.yml`) — purpose-built images for reproducible local and CI GPU testing. `gpu-cuda`: `nvidia/cuda:12.6.0-runtime-ubuntu22.04` (runtime-only; no CUDA Toolkit headers needed because `ailake-index` uses libloading). `gpu-rocm`: `rocm/dev-ubuntu-22.04:6.2`. Both pre-fetch deps and pre-build test harness for fast subsequent runs. `docker-compose.gpu.yml` wires up device passthrough flags.
 - **Node.js 24 opt-in** — `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` across all 10 workflows; eliminates deprecation warnings ahead of GitHub-forced switch
 
-Manual Actions trigger order (pre-release): CI + CI Safety (parallel) → CI Go → CI C++ → Compat Heavy → Release → Publish Python / Airflow Provider / JVM Plugins (parallel). GPU CI runs in parallel with CI Go and CI C++. See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.
+Manual Actions trigger order (pre-release): CI + CI Safety + Performance CPU jobs (parallel) → CI Go → CI C++ → Compat Heavy → Release → Publish Python / Airflow Provider / JVM Plugins (parallel). GPU CI and the non-PR Performance GPU matrix run in parallel with CI Go and CI C++. See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.
 
 ### Phase 7 — DuckDB Extension + Deferred Engine + Airbyte 🚧
 
@@ -521,6 +549,23 @@ Delivered in Phase 10 (branch `feature/ailake-cdc-format`):
 - **CLI** — `ailake read-changes default.table --start-snapshot N --end-snapshot M --pk-column id --coalesce-updates` with output formats `json`, `text`, `parquet`, `arrow`.
 - **ADR-021** — documented the decision to implement CDC as a read-only format capability with no table-level flag.
 - **Tests** — `ailake-query/tests/cdc_tests.rs` (4 Rust integration tests) and `ailake-py/tests/test_cdc.py`.
+
+### Phase 11 — Production operations, Kof and performance CI ✅
+
+Delivered in the current release window:
+
+- Durable compaction and deferred HNSW/IVF-PQ index jobs with retries,
+  progress, cancellation and crash recovery.
+- Conditional object-store leases, fencing tokens, shared job registry and
+  exclusive multi-process `ailake serve` coordination for S3, GCS and Azure.
+- `SecretString`-based credential handling with zeroization, AWS Secrets
+  Manager, Vault, Kubernetes Secrets and refreshable references.
+- Local/Redis/Valkey cache, snapshot invalidation, global memory bounds,
+  token/IP quotas and catalog/storage circuit breakers.
+- Opt-in strict delete integrity and production-oriented typed Kof HTTP/native
+  bindings.
+- Automated CPU benchmark, Recall@10/p95, HTTP load, multi-writer and catalog
+  emulator coverage in `performance.yml`.
 
 ### Phase T — Tantivy per-file FTS ✅
 

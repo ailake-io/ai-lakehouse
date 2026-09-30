@@ -84,6 +84,7 @@ use crate::provider::{
     TableProperties,
 };
 use crate::schema_evolution::SchemaEvolution;
+use ailake_store::{LocalStore, Store};
 
 pub struct DuckLakeCatalog {
     conn: Arc<AsyncMutex<Connection>>,
@@ -432,6 +433,7 @@ fn query_active_files(
                 path: relative_path,
                 record_count: 0,
                 file_size_bytes: size as u64,
+                sequence_number: 0,
                 centroid_b64: None,
                 radius: None,
                 hnsw_offset: None,
@@ -484,6 +486,7 @@ fn row_to_entry(row: &duckdb::Row) -> duckdb::Result<DataFileEntry> {
         path,
         record_count: record_count as u64,
         file_size_bytes: file_size_bytes as u64,
+        sequence_number: 0,
         centroid_b64,
         radius: radius.map(|r| r as f32),
         hnsw_offset: hnsw_offset.map(|v| v as u64),
@@ -664,6 +667,18 @@ impl CatalogProvider for DuckLakeCatalog {
         table: &TableIdent,
         snapshot: NewSnapshot,
     ) -> AilakeResult<SnapshotId> {
+        // DuckDB serializes writers within one process, but its catalog files
+        // can still be opened by another process. Serialize the two-phase
+        // lake/sidecar commit across processes as well. DuckLake is local-only
+        // in this backend, so a LocalStore lock is appropriate here.
+        let lock_store = LocalStore::new(&self.warehouse);
+        let lock_path = "catalog/.ailake-commit.lock";
+        if !lock_store.try_acquire_lock(lock_path).await? {
+            return Err(AilakeError::Catalog(
+                "DuckLake catalog is being committed by another process".into(),
+            ));
+        }
+        let result = async {
         let key = table_key(table);
         let snap_id = snapshot.snapshot_id;
         let full_table = self.qualified_table(table);
@@ -861,12 +876,20 @@ impl CatalogProvider for DuckLakeCatalog {
             Ok(()) => {
                 conn.execute_batch("COMMIT;")
                     .map_err(|e| cat_err("commit (sidecar)", e))?;
-                Ok(snap_id)
+                Ok::<SnapshotId, AilakeError>(snap_id)
             }
             Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK;");
                 Err(e)
             }
+        }
+        }
+        .await;
+        let release = lock_store.release_lock(lock_path).await;
+        match (result, release) {
+            (Ok(snapshot_id), Ok(())) => Ok(snapshot_id),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), _) => Err(error),
         }
     }
 
@@ -1043,6 +1066,7 @@ impl CatalogProvider for DuckLakeCatalog {
                     equality_ids: serde_json::from_str(&ids_json).unwrap_or_default(),
                     record_count: record_count as u64,
                     file_size_bytes: file_size_bytes as u64,
+                    sequence_number: 0,
                     inline_values: None,
                 },
             )
@@ -1124,6 +1148,7 @@ mod tests {
                 path: path.to_string(),
                 record_count,
                 file_size_bytes: 1024,
+                sequence_number: 0,
                 centroid_b64: Some("AACAPwAAAEAAAEBAAACAQA==".to_string()),
                 radius: Some(0.3),
                 hnsw_offset: Some(512),
@@ -1433,6 +1458,7 @@ mod tests {
                 equality_ids: vec![0],
                 record_count: 1,
                 file_size_bytes: 0,
+                sequence_number: 0,
                 inline_values: Some(("w".to_string(), vec!["0.5".to_string()])),
             };
             let snap2 = NewSnapshot {
@@ -1475,6 +1501,7 @@ mod tests {
                 equality_ids: vec![0],
                 record_count: 1,
                 file_size_bytes: 0,
+                sequence_number: 0,
                 inline_values: Some(("ghost_col".to_string(), vec!["x".to_string()])),
             };
             let snap2 = NewSnapshot {

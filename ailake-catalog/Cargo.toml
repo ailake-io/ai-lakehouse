@@ -18,8 +18,10 @@ catalog-ducklake = ["dep:duckdb"]
 [dependencies]
 ailake-core  = { path = "../ailake-core", version = "0.1.12" }
 ailake-store = { path = "../ailake-store", version = "0.1.12" }
+ailake-secrets = { path = "../ailake-secrets", version = "0.1.12", default-features = false }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
+secrecy      = { workspace = true }
 tokio        = { workspace = true }
 tracing      = { workspace = true }
 async-trait  = { workspace = true }
@@ -36,8 +38,8 @@ arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
 
 # catalog-glue optional deps
-aws-sdk-glue = { version = "1", optional = true }
-aws-config   = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-glue = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-config   = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"], optional = true }
 
 # catalog-jdbc optional deps
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite", "any"], optional = true }

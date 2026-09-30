@@ -155,14 +155,10 @@ impl AilakeFileReader {
             });
         }
 
-        let values: Vec<f32> = centroid_data[..dim * 4]
-            .chunks_exact(4)
-            .map(|b| {
-                f32::from_le_bytes(
-                    b.try_into()
-                        .expect("chunks_exact(4) guarantees 4-byte slices"),
-                )
-            })
+        let (value_chunks, _) = centroid_data[..dim * 4].as_chunks::<4>();
+        let values: Vec<f32> = value_chunks
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
         let radius = f32::from_le_bytes(
             centroid_data[dim * 4..]

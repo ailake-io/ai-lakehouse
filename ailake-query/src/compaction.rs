@@ -15,7 +15,8 @@ use arrow_schema::SchemaRef;
 use bytes::Bytes;
 use futures::future::try_join_all;
 
-use crate::writer::build_and_patch_index;
+use crate::index_jobs::{IndexAlgorithm, IndexJobHandle};
+use crate::writer::spawn_index_job;
 
 /// Index strategy for the merged file produced by compaction.
 #[derive(Debug, Clone, Default)]
@@ -688,20 +689,31 @@ impl CompactionExecutor {
         entry.batch_id = DataFileEntry::merge_batch_ids(files);
         entry.column_stats = column_stats;
 
-        // Spawn background index build; errors are logged, not propagated.
+        // Persist and spawn the background index build. The job survives process
+        // restart and is retried by the same runner used by deferred writes.
         let store = self.store.clone();
         let policy = self.policy.clone();
         let table_id = table.clone();
         let fp = output_path.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = build_and_patch_index(store, catalog, policy, table_id, fp).await {
-                error!(
-                    "ailake: compaction deferred HNSW build failed — file indexed as \
-                     Parquet-only until next compaction rebuilds the index: {}",
-                    e
-                );
-            }
-        });
+        let job = IndexJobHandle::create(
+            self.store.clone(),
+            table,
+            output_path,
+            IndexAlgorithm::Hnsw,
+            None,
+        )
+        .await?;
+        spawn_index_job(
+            job,
+            store,
+            catalog,
+            policy,
+            table_id,
+            fp,
+            IndexAlgorithm::Hnsw,
+            None,
+            None,
+        );
 
         Ok(entry)
     }
@@ -787,7 +799,7 @@ impl CompactionExecutor {
     /// Use for large tables where inline HNSW rebuild blocks too long.
     ///
     /// Note: FTS index is **not** rebuilt in deferred mode — `compact_deferred` writes
-    /// Parquet-only immediately and the background task (`build_and_patch_index`) only
+    /// Parquet-only immediately and the background index job only
     /// builds the HNSW/IVF-PQ index. Use `run` (synchronous) when FTS preservation
     /// on compaction is required.
     pub async fn run_deferred(
