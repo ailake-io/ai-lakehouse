@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Operação de produção para `ailake serve`** — jobs de compactação e indexação agora têm registro persistente, progresso, retry, cancelamento e recuperação após crash; a construção deferred de HNSW/IVF-PQ segue o mesmo ciclo durável. Locks condicionais/leases para S3, GCS e Azure, fencing tokens e registry compartilhado evitam que múltiplas instâncias concorram pela mesma tabela ou percam atualizações de jobs.
+- **Cache compartilhado e controle de tráfego** — novo cache local + Redis/Valkey para consultas, metadados e índices, com invalidação por snapshot, limite global de memória e métricas de hits, misses, eviction e uso. O servidor também oferece rate limiting por bearer token/IP, quotas separadas para leitura e escrita e circuit breakers para catálogo e object storage.
+- **Secrets protegidos e rotativos** — credenciais percorrem o núcleo Rust como `SecretString`, com buffers temporários zerados; referências `env://`, arquivos montados, Kubernetes Secrets, Vault e AWS Secrets Manager podem ser renovadas sem reiniciar o processo.
+- **Integridade estrita de deletes** — `strict_deletes = true`/`--strict-deletes` habilita comportamento fail-closed para falhas ao ler deletion vectors ou equality deletes, evitando que dados potencialmente excluídos sejam retornados silenciosamente.
+- **Integração Kof** — cliente HTTP com DTOs tipados, Bearer, timeout/retry, circuit breaker, paginação e identificação de versão; bindings nativos usam o C-ABI estável e envelopes JSON versionados.
+- **CI de performance e carga** — benchmarks de CPU, regressões determinísticas de Recall@10/p95, carga HTTP com múltiplos escritores, fencing entre processos, matriz de catálogos/emuladores e fallback GPU passaram a ser automatizados em `.github/workflows/performance.yml`.
+
+### Changed
+
+- **Catálogos e conectores** — suporte ampliado a listas nested profundas, chaves Parquet adicionais, optimistic concurrency para Delta/Iceberg e operações paginadas/autenticadas no catálogo REST Iceberg.
+- **Release e documentação** — a promoção para a próxima versão continua automática a partir da última tag, agora também finalizando a seção `[Unreleased]` do changelog e preservando um novo cabeçalho vazio para o ciclo seguinte.
+
+### Fixed
+
+- **CI e toolchains atuais** — removidos os padrões de chunks incompatíveis com os lint gates recentes do Rust, corrigidos os smoke tests de catálogo para a imagem Community do LocalStack e eliminadas dependências/fluxos de CI que causavam falsos negativos em auditoria e compatibilidade.
+
 ## [0.1.12] — 2026-08-13
 
 ### Added

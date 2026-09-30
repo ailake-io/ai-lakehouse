@@ -197,13 +197,13 @@ contention) than Loom can provide.
 | **T**ampering: oversized body | Low | `DefaultBodyLimit::max(32 MB)` |
 | **R**epudiation: no access log | Low | Prometheus counters and request duration are exposed at `/metrics`; access-log correlation remains a deployment concern |
 | **I**nformation disclosure: error messages may reveal paths | Low | `ApiError` surfaces Rust error messages |
-| **D**enial of service: no rate limit | Medium | 32 MB body limit and 64 in-flight request cap; distributed rate limiting still belongs at the gateway |
+| **D**enial of service: request flooding | Medium | 32 MB body limit, 64 in-flight request cap, and optional Redis/Valkey rate limiting by bearer token/IP with separate read/write quotas; keep gateway/mTLS controls for internet-facing deployments |
 | **E**levation of privilege: N/A | — | — |
 
 ### Test coverage
 
 - Health, metrics authentication, cache invalidation and auto-compaction paths are covered by dedicated server tests.
-- Full request-load and distributed rate-limit testing still belongs in deployment/CI integration tests.
+- HTTP load, multi-writer fencing, cache invalidation and rate-limit decisions are exercised by server tests and `performance.yml`; production deployments should still validate gateway behavior and real Redis/Valkey failure policy.
 
 ---
 
@@ -225,9 +225,9 @@ contention) than Loom can provide.
 | THR-001 | **Critical** | ailake-vec | Release-build dim mismatch → OOB read in SIMD | Fixed. Unconditional assertion + FFI panic boundary |
 | THR-002 | **High** | ailake-store | LocalStore path traversal | Fixed. Root containment validation + regression tests |
 | THR-003 | **Medium** | ailake-jni | No max IPC len cap | Fixed. 512 MiB cap before slice creation |
-| THR-004 | **Medium** | ailake-serve | No distributed rate limiting | Partially fixed. 64 in-flight request cap, metrics and auth; external gateway still recommended |
-| THR-005 | **Low** | ailake-catalog | Secrets in plaintext memory | Partially fixed. Secret files, restrictive permissions and redacted OAuth failures; API compatibility still keeps strings in memory |
-| THR-006 | **Low** | ailake-cli | Inline REST secret flags visible in `ps aux` | Partially fixed. Env values hidden in help; file-based secrets recommended |
+| THR-004 | **Medium** | ailake-serve | Distributed rate limiting unavailable | Fixed in-process and with Redis/Valkey backend; trust proxy headers is opt-in and an external gateway remains recommended |
+| THR-005 | **Low** | ailake-catalog | Secret material exposure | Mitigated. Provider inputs use `SecretString`; temporary buffers are zeroized and errors/debug output redact secret contents |
+| THR-006 | **Low** | ailake-cli | Inline REST secret flags visible in `ps aux` | Mitigated. Use `env://`, mounted files, Vault, Kubernetes Secrets or AWS Secrets Manager references; direct flags remain compatibility-only |
 | THR-012 | **Medium** | local catalogs | Cross-process commit race | Fixed for LocalStore-backed Hadoop and DuckLake with exclusive lock files; deferred index jobs use conditional object-store leases, while catalog commits on object stores continue to rely on REST/Nessie OCC |
 | THR-007 | **Fixed** | ailake-catalog | REST commit: sent -1 instead of null | Fixed Phase 17 |
 | THR-008 | **Fixed** | ailake-catalog | REST commit: unconditional AddSchema | Fixed Phase 17 |

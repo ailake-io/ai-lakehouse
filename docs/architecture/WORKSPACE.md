@@ -26,6 +26,10 @@ ailake-jni ───────────────────────
 
 **Rule**: `ailake-core` has zero internal dependencies. Every other crate may depend on `ailake-core`. `ailake-query` depends on all data-plane crates.
 
+The production control plane is kept in small, optional-facing crates: the CLI
+composes `ailake-cache` and `ailake-secrets`, while storage/catalog crates remain
+usable without the HTTP server.
+
 ## Crate responsibilities
 
 ### `ailake-core`
@@ -211,6 +215,19 @@ Query planning and execution. The integration layer — depends on all data-plan
   - Applies `max_tokens` budget (4 chars ≈ 1 token)
   - Returns `AssembledContext { text: XML, chunk_count, token_estimate }`
 
+### `ailake-secrets`
+Credential resolution and lifecycle management for catalog and storage clients.
+Secrets are represented as `secrecy::SecretString`, temporary file buffers are
+zeroized, and providers can refresh references from environment variables,
+mounted files, Kubernetes Secrets, Vault or AWS Secrets Manager.
+
+### `ailake-cache`
+Bounded production cache and traffic-control primitives used by `ailake serve`:
+local query/metadata/index LRU partitions, optional Redis/Valkey mirroring,
+snapshot-scoped invalidation, token/IP quotas, and catalog/storage circuit
+breakers. The cache is an acceleration layer; jobs, leases and fencing state
+remain in the durable coordination registry.
+
 ### `ailake-py`
 PyO3 extension module (`cdylib`). Thin async-to-sync bridge — all logic lives in other crates. Built with `maturin`; distributed via PyPI as `ailake`.
 
@@ -254,12 +271,15 @@ members = [
     "ailake-jni",
     "ailake-py",
     "ailake-fts",
+    "ailake-secrets",
+    "ailake-cache",
 ]
 
 [workspace.dependencies]
 # Core
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
+secrecy     = "0.10"
 uuid        = { version = "1", features = ["v4", "serde"] }
 thiserror   = "1"
 bytes       = "1"
@@ -269,6 +289,7 @@ async-trait = "0.1"
 # Async
 tokio       = { version = "1", features = ["rt-multi-thread", "io-util", "fs", "sync", "time", "macros"] }
 futures     = "0.3"
+redis       = { version = "0.27", default-features = false, features = ["tokio-comp", "script"] }
 
 # Data
 parquet      = { version = "52", features = ["async"] }
@@ -298,6 +319,7 @@ libloading  = "0.8"
 # Compression
 lz4_flex    = "0.11"
 zstd        = "0.13"
+zeroize     = "1"
 
 # Bindings
 # Note: reqwest is NOT in workspace deps — ailake-catalog declares it inline
@@ -527,6 +549,23 @@ Delivered in Phase 10 (branch `feature/ailake-cdc-format`):
 - **CLI** — `ailake read-changes default.table --start-snapshot N --end-snapshot M --pk-column id --coalesce-updates` with output formats `json`, `text`, `parquet`, `arrow`.
 - **ADR-021** — documented the decision to implement CDC as a read-only format capability with no table-level flag.
 - **Tests** — `ailake-query/tests/cdc_tests.rs` (4 Rust integration tests) and `ailake-py/tests/test_cdc.py`.
+
+### Phase 11 — Production operations, Kof and performance CI ✅
+
+Delivered in the current release window:
+
+- Durable compaction and deferred HNSW/IVF-PQ index jobs with retries,
+  progress, cancellation and crash recovery.
+- Conditional object-store leases, fencing tokens, shared job registry and
+  exclusive multi-process `ailake serve` coordination for S3, GCS and Azure.
+- `SecretString`-based credential handling with zeroization, AWS Secrets
+  Manager, Vault, Kubernetes Secrets and refreshable references.
+- Local/Redis/Valkey cache, snapshot invalidation, global memory bounds,
+  token/IP quotas and catalog/storage circuit breakers.
+- Opt-in strict delete integrity and production-oriented typed Kof HTTP/native
+  bindings.
+- Automated CPU benchmark, Recall@10/p95, HTTP load, multi-writer and catalog
+  emulator coverage in `performance.yml`.
 
 ### Phase T — Tantivy per-file FTS ✅
 

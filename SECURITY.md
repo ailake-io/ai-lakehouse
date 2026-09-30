@@ -102,7 +102,7 @@ catch_ffi_panic(|params| {
 | In-flight bound | At most 64 authenticated API requests per process; excess requests receive HTTP 429 |
 | Metrics/jobs | `/metrics` and `/jobs/*` are protected by the same token when authentication is enabled |
 
-> **Note:** `ailake serve` still benefits from an API gateway or mTLS sidecar for distributed rate limiting, TLS termination and network policy. Use `--auth-token` for the process-level authentication guard.
+> **Note:** `ailake serve` supports distributed rate limiting through Redis/Valkey (`--rate-limit-url`, or `--cache-url` by default), with separate token/IP quotas. An API gateway or mTLS sidecar is still recommended for TLS termination and network policy. Use `--auth-token` for bearer authentication.
 
 ### CLI input validation (`ailake-cli/src/`)
 
@@ -154,8 +154,8 @@ Magic byte verification: AILK header (magic `b"AILK"`), FTS header (magic `b"AFT
 | Predicate pushdown | `scanner.rs:628` | `matching_row_ids()` — empty filter set skips file entirely |
 | Concurrent search | `scanner.rs:368` | `try_join_all` over surviving files; no shared mutable state (per-file `FileSearchOutcome`) |
 | Foreign file warning | `scanner.rs:681` | Files without AILK footer detected; falls back to flat scan O(N), search still correct but degraded |
-| Safe DV failure | `scanner.rs:545` | Deletion vector parse failure → `warn!` + continue (shows deleted rows rather than fails the search) |
-| Safe eq-delete failure | `scanner.rs:296` | Equality delete file parse failure → `warn!` + continue |
+| Safe DV failure | `scanner.rs:545` | Default mode logs a deletion vector parse failure and continues; `strict_deletes` switches to fail-closed behavior |
+| Safe eq-delete failure | `scanner.rs:296` | Default mode logs an equality delete file parse failure and continues; `strict_deletes` switches to fail-closed behavior |
 | BM25 vocab cap | `bm25.rs:28` | `MAX_VOCAB = 50_000` terms; lowest-DF terms pruned after merge |
 | BM25 weight clamp | `bm25.rs:221` | `w.clamp(0.0, 1.0)` |
 | MemTable flush limits | `mem_table.rs:20` | 64 MiB / 100k rows default |
@@ -174,7 +174,7 @@ Magic byte verification: AILK header (magic `b"AILK"`), FTS header (magic `b"AFT
 | Schema patch dedup | `add_schema`/`set_current_schema` skipped when schema unchanged |
 | Partition spec dedup | `add_partition_spec` skipped when spec unchanged |
 | Snapshot null handling | `-1` sentinel treated as `null` (no snapshot) before commit requirement |
-| Token storage | Bearer token and OAuth2 client_secret remain in-memory strings for API compatibility; CLI supports restrictive secret files and OAuth errors no longer include response bodies |
+| Token storage | Bearer token and OAuth2 client_secret use `secrecy::SecretString`; CLI supports env/file/Kubernetes/Vault/AWS Secrets Manager references and OAuth errors do not include response bodies |
 
 ### Credential environment variables
 
@@ -203,9 +203,9 @@ Magic byte verification: AILK header (magic `b"AILK"`), FTS header (magic `b"AFT
 | 1 | **Critical** | Dimension validation must remain explicit at every unsafe boundary | `ailake-vec/src/distance.rs`, `ailake-jni/src/lib.rs` | Fixed in 0.1.12: release builds now assert before SIMD access; callers still validate dimensions and convert panics at FFI boundaries |
 | 2 | **High** | LocalStore path traversal | `ailake-store/src/local.rs` | Fixed: `..` and absolute paths outside the configured root are rejected |
 | 3 | **Medium** | Unbounded `ipc_len` in `ailake_write_batch_ipc` | `ailake-jni/src/lib.rs` | Fixed: Arrow IPC payloads are capped at 512 MiB before `from_raw_parts` |
-| 4 | **Medium** | No distributed rate limiting on HTTP server | `ailake-cli/src/serve.rs` | Fixed at the process level: concurrent requests are bounded at 64; use an external gateway for distributed rate limiting |
-| 5 | **Low** | Secrets in plaintext in-memory (REST token, OAuth2 secret) | `ailake-catalog/src/rest.rs` | Partially fixed: secret files, restrictive permissions and redacted OAuth failures; in-memory API representation remains for compatibility |
-| 6 | **Low** | Inline REST secret flags visible in process listings | `ailake-cli/src/main.rs` | Partially fixed: env values are hidden in help and file-based secrets are supported; prefer env/file over inline flags |
+| 4 | **Medium** | Distributed rate limiting on HTTP server | `ailake-cli/src/serve.rs`, `ailake-cache/src/lib.rs` | Fixed with local or Redis/Valkey-backed token/IP quotas; trust proxy headers is opt-in and an external gateway remains recommended |
+| 5 | **Low** | Secret material exposure (REST token, OAuth2 secret) | `ailake-secrets/src/lib.rs`, `ailake-catalog/src/rest.rs` | Mitigated with `SecretString`, zeroization and redacted errors; use an external provider and short refresh intervals for rotation |
+| 6 | **Low** | Inline REST secret flags visible in process listings | `ailake-cli/src/main.rs` | Mitigated: prefer `env://`, mounted files, Vault, Kubernetes Secrets or AWS Secrets Manager references; direct flags remain compatibility-only |
 
 ## Disclosure history
 

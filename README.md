@@ -111,6 +111,13 @@ See [`tests/docker/`](./tests/docker/) for compose file details.
 | [`docs/specs/COMPACTION.md`](./docs/specs/COMPACTION.md) | Compaction job design, triggers, HNSW rebuild strategy |
 | [`docs/contributing/TESTING.md`](./docs/contributing/TESTING.md) | Test strategy, fixtures, CI matrix, compat test harness |
 | [`docs/guides/PERFORMANCE_BENCHMARKS.md`](./docs/guides/PERFORMANCE_BENCHMARKS.md) | CPU benchmarks, Recall@10/p95 regression, HTTP load, multi-writer and catalog/GPU CI matrix |
+| [`docs/guides/CACHE.md`](./docs/guides/CACHE.md) | Local/Redis/Valkey cache, snapshot invalidation and metrics |
+| [`docs/guides/DISTRIBUTED_COORDINATION.md`](./docs/guides/DISTRIBUTED_COORDINATION.md) | Leases, fencing tokens, shared job registry and multi-writer coordination |
+| [`docs/guides/SECRETS.md`](./docs/guides/SECRETS.md) | SecretString, external providers and credential rotation |
+| [`docs/guides/DELETE_INTEGRITY.md`](./docs/guides/DELETE_INTEGRITY.md) | Strict fail-closed handling for deletion vectors and equality deletes |
+| [`docs/guides/RATE_LIMITING.md`](./docs/guides/RATE_LIMITING.md) | Distributed rate limiting, quotas and circuit breakers |
+| [`docs/guides/RELEASES.md`](./docs/guides/RELEASES.md) | Automatic versioning and release checklist |
+| [`integrations/kof/README.md`](./integrations/kof/README.md) | Typed HTTP and native C-ABI integration with Kof |
 | [`docs/contributing/CODING_STANDARDS.md`](./docs/contributing/CODING_STANDARDS.md) | Rust conventions, error handling, unsafe policy, testing rules |
 | [`docs/contributing/DECISIONS.md`](./docs/contributing/DECISIONS.md) | ADR log — why each key choice was made |
 | [`SETUP.md`](./SETUP.md) | Local dev setup — run the full stack (MinIO, Nessie, compat tests) on your machine |
