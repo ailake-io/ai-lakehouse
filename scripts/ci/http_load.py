@@ -52,6 +52,7 @@ def main() -> int:
     parser.add_argument("--write-batch-size", type=int, default=4)
     parser.add_argument("--dim", type=int, default=32)
     parser.add_argument("--max-p95-ms", type=float, default=500.0)
+    parser.add_argument("--search-ready-timeout", type=float, default=30.0)
     parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("perf/http-load.json"))
     args = parser.parse_args()
 
@@ -84,6 +85,25 @@ def main() -> int:
             "POST",
             "/search",
             {"query": vector(index, args.dim), "top_k": 5, "pruning_threshold": 1.0},
+        )
+
+    # A write returns after the snapshot is committed, but index publication
+    # and catalog visibility can briefly lag behind that commit. Probe the
+    # actual search endpoint before starting concurrent load so the test
+    # measures serving rather than the indexing visibility window.
+    ready_deadline = time.monotonic() + args.search_ready_timeout
+    ready_status = None
+    ready_body = ""
+    while time.monotonic() < ready_deadline:
+        ready_status, _, ready_body = search_one(0)
+        if ready_status == 200:
+            break
+        time.sleep(0.5)
+    else:
+        excerpt = ready_body.replace("\n", " ")[:500]
+        raise SystemExit(
+            "search endpoint did not become ready within "
+            f"{args.search_ready_timeout:.1f}s (HTTP {ready_status}): {excerpt}"
         )
 
     started = time.perf_counter()
