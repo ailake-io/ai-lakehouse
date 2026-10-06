@@ -231,7 +231,7 @@ impl Store for LocalStore {
                     .strip_prefix(&root)
                     .map_err(|e| AilakeError::Store(e.to_string()))?
                     .to_string_lossy()
-                    .to_string();
+                    .replace(std::path::MAIN_SEPARATOR, "/");
                 entries.push(rel);
             }
         }
