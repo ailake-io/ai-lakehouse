@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.14] — 2026-09-30
+
+## [0.1.13] — 2026-09-30
+
 ### Added
 
 - **Operação de produção para `ailake serve`** — jobs de compactação e indexação agora têm registro persistente, progresso, retry, cancelamento e recuperação após crash; a construção deferred de HNSW/IVF-PQ segue o mesmo ciclo durável. Locks condicionais/leases para S3, GCS e Azure, fencing tokens e registry compartilhado evitam que múltiplas instâncias concorram pela mesma tabela ou percam atualizações de jobs.
