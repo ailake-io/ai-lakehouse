@@ -173,7 +173,11 @@ impl Store for LocalStore {
         let full = self.full_path(path)?;
         // Keep the lock file itself in place: unlinking it while held lets a
         // second process create and lock a different inode at the same path.
-        self.locks.lock().await.remove(&full);
+        let mut locks = self.locks.lock().await;
+        if let Some(file) = locks.get(&full) {
+            file.unlock()?;
+        }
+        locks.remove(&full);
         Ok(())
     }
 
@@ -392,12 +396,15 @@ mod tests {
     #[tokio::test]
     async fn rejects_absolute_path_outside_root() {
         let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
         let store = LocalStore::new(dir.path());
+        let outside_file = outside.path().join("ailake-outside.bin");
         let error = store
-            .put("file:///tmp/ailake-outside.bin", Bytes::from("nope"))
+            .put(outside_file.to_str().unwrap(), Bytes::from("nope"))
             .await
             .unwrap_err();
         assert!(error.to_string().contains("escapes LocalStore root"));
+        assert!(!outside_file.exists());
     }
 
     #[cfg(unix)]
