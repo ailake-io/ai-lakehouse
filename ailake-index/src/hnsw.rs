@@ -46,6 +46,29 @@ trait DistFn: Copy + 'static {
     fn dist_f16(a: &[f32], b: &[f16]) -> f32;
 }
 
+/// Keep only the best `k` entries while avoiding a full O(n log n) sort.
+fn select_top_k(results: &mut Vec<(RowId, f32)>, k: usize) {
+    if k == 0 {
+        results.clear();
+        return;
+    }
+    let compare = |a: &(RowId, f32), b: &(RowId, f32)| {
+        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+    };
+    if results.len() > k {
+        results.select_nth_unstable_by(k, compare);
+        results.truncate(k);
+    }
+    results.sort_unstable_by(compare);
+}
+
+fn trim_top_k_buffer(results: &mut Vec<(RowId, f32)>, k: usize) {
+    let limit = k.saturating_mul(2).max(k.saturating_add(1));
+    if results.len() >= limit {
+        select_top_k(results, k);
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CosineDist;
 #[derive(Clone, Copy)]
@@ -527,10 +550,7 @@ impl HnswIndex {
                         let v = &self.flat_vecs[idx * dim..(idx + 1) * dim];
                         *dist = NormalizedCosineDist::dist(&q_norm, v);
                     }
-                    candidates.sort_unstable_by(|a, b| {
-                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    candidates.truncate(top_k);
+                    select_top_k(&mut candidates, top_k);
                     candidates
                 } else {
                     self.search_typed::<NormalizedCosineDist>(&q_norm, top_k, ef)
@@ -605,17 +625,25 @@ impl HnswIndex {
     }
 
     fn brute_force_typed<M: DistFn>(&self, query: &[f32], top_k: usize) -> Vec<(RowId, f32)> {
+        if top_k == 0 {
+            return Vec::new();
+        }
         let dim = self.dim as usize;
         let n = self.row_ids.len();
-        let mut results: Vec<(RowId, f32)> = (0..n)
+        let mut results = (0..n)
             .into_par_iter()
-            .map(|i| {
+            .fold(Vec::new, |mut best, i| {
                 let v = &self.flat_vecs[i * dim..(i + 1) * dim];
-                (RowId::new(self.row_ids[i]), M::dist(query, v))
+                best.push((RowId::new(self.row_ids[i]), M::dist(query, v)));
+                trim_top_k_buffer(&mut best, top_k);
+                best
             })
-            .collect();
-        results.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(top_k);
+            .reduce(Vec::new, |mut left, mut right| {
+                left.append(&mut right);
+                select_top_k(&mut left, top_k);
+                left
+            });
+        select_top_k(&mut results, top_k);
         results
     }
 
@@ -1056,6 +1084,46 @@ fn random_level(rng: &mut impl Rng, ml: f64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_k_selection_keeps_sorted_smallest_distances() {
+        let mut results = vec![
+            (RowId::new(0), 8.0),
+            (RowId::new(1), 1.0),
+            (RowId::new(2), 5.0),
+            (RowId::new(3), 2.0),
+        ];
+        select_top_k(&mut results, 2);
+        assert_eq!(results, vec![(RowId::new(1), 1.0), (RowId::new(3), 2.0)]);
+        select_top_k(&mut results, 0);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn brute_force_fallback_keeps_exact_smallest_results() {
+        let vectors: Vec<Vec<f32>> = (0..256)
+            .map(|i| {
+                let x = i as f32 / 256.0;
+                vec![x.cos(), x.sin(), (x * 3.0).cos(), (x * 3.0).sin()]
+            })
+            .collect();
+        let query = vec![1.0, 0.0, 1.0, 0.0];
+        let mut index = make_index(vectors.clone());
+        index.neighbors.clear();
+
+        let mut expected: Vec<_> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, vector)| (RowId::new(i as u64), CosineDist::dist(&query, vector)))
+            .collect();
+        expected.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+        let actual = index.search(&query, 7, 50);
+        assert_eq!(actual.len(), 7);
+        for (got, want) in actual.iter().zip(expected.iter()) {
+            assert_eq!(got.0, want.0);
+            assert!((got.1 - want.1).abs() < 1e-6);
+        }
+    }
 
     fn make_index(vecs: Vec<Vec<f32>>) -> HnswIndex {
         let mut b = HnswBuilder::new(

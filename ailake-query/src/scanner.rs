@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use std::sync::Arc;
 
-use futures::future::try_join_all;
+use futures::{StreamExt, TryStreamExt};
 use rayon::prelude::*;
 use tracing::{debug, error, warn};
 
@@ -141,7 +141,7 @@ impl Default for SearchConfig {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
-            strict_deletes: false,
+            strict_deletes: true,
         }
     }
 }
@@ -377,27 +377,44 @@ pub async fn search(
     // Fetch + search each surviving file concurrently instead of one at a time —
     // the dominant cost per file is a network round-trip (`store.get`), so this
     // overlaps their latencies instead of serializing them. `try_join_all` runs
-    // all of them concurrently on the current task (no OS-thread parallelism,
-    // no `tokio::spawn`); at the post-pruning scale this operates on (dozens of
-    // files, see `VectorPruner` — geometric pruning is designed to cut a
-    // 10k-file table down to ~50-100 survivors before this point), that's the
-    // right trade-off: no bound needed, and no per-task spawn overhead.
-    let outcomes: Vec<FileSearchOutcome> = try_join_all(surviving_files.iter().map(|file_entry| {
-        search_one_file(
-            file_entry,
-            query,
-            candidate_k,
-            metric,
-            &table_meta,
-            &config,
-            vector_column,
-            dim,
-            &store,
-            &eq_del_filter,
-            use_hybrid,
-        )
-    }))
-    .await?;
+    // up to a fixed number concurrently on the current task (no OS-thread
+    // parallelism, no `tokio::spawn`). This overlaps store latency while
+    // bounding open requests and in-flight file/index buffers when pruning is
+    // disabled or a table has many surviving files.
+    const MAX_CONCURRENT_FILE_SEARCHES: usize = 32;
+    let shared_query: Arc<[f32]> = Arc::from(query);
+    let shared_table_meta = Arc::new(table_meta);
+    let shared_config = Arc::new(config);
+    let shared_deletes = Arc::new(eq_del_filter);
+    let vector_column = vector_column.to_owned();
+    let outcomes: Vec<FileSearchOutcome> =
+        futures::stream::iter(surviving_files.iter().cloned().map(|file_entry| {
+            let query = Arc::clone(&shared_query);
+            let table_meta = Arc::clone(&shared_table_meta);
+            let config = Arc::clone(&shared_config);
+            let store = Arc::clone(&store);
+            let eq_del_filter = Arc::clone(&shared_deletes);
+            let vector_column = vector_column.clone();
+            async move {
+                search_one_file(
+                    &file_entry,
+                    &query,
+                    candidate_k,
+                    metric,
+                    &table_meta,
+                    &config,
+                    &vector_column,
+                    dim,
+                    &store,
+                    &eq_del_filter,
+                    use_hybrid,
+                )
+                .await
+            }
+        }))
+        .buffered(MAX_CONCURRENT_FILE_SEARCHES)
+        .try_collect()
+        .await?;
 
     for outcome in outcomes {
         match outcome.flat_scan {
@@ -427,15 +444,16 @@ pub async fn search(
     }
 
     // Hybrid BM25 fusion: applied after all HNSW candidates are collected.
-    if let Some(ref h) = config.hybrid {
+    if let Some(ref h) = shared_config.hybrid {
         let empty_stats = crate::bm25::IdfStats::default();
         let stats = bm25_stats.as_ref().unwrap_or(&empty_stats);
         let scorer = crate::bm25::BM25Scorer::new(stats);
 
         // Compute BM25 scores before sorting so they stay positionally aligned.
+        let query_terms = crate::bm25::tokenize(&h.query_text);
         let bm25_scores_pre: Vec<f32> = raw_candidates
             .iter()
-            .map(|(_, _, _, text)| scorer.score(&h.query_text, text))
+            .map(|(_, _, _, text)| scorer.score_tokens(&query_terms, text))
             .collect();
 
         // Zip BM25 scores into candidates so they sort together — avoids index mismatch
@@ -500,13 +518,25 @@ pub async fn search(
         }
 
         // For RRF: lower (more negative) = better; for Linear: lower = better. Same convention.
-        all_results.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        select_search_top_k(&mut all_results, shared_config.top_k);
     } else {
-        all_results.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        select_search_top_k(&mut all_results, shared_config.top_k);
     }
 
-    all_results.truncate(config.top_k);
     Ok(all_results)
+}
+
+fn select_search_top_k(results: &mut Vec<SearchResult>, k: usize) {
+    let compare = |a: &SearchResult, b: &SearchResult| a.distance.total_cmp(&b.distance);
+    if k == 0 {
+        results.clear();
+        return;
+    }
+    if results.len() > k {
+        results.select_nth_unstable_by(k, compare);
+        results.truncate(k);
+    }
+    results.sort_unstable_by(compare);
 }
 
 /// Why this file fell back to a flat (exact, O(N)) scan instead of HNSW —
@@ -1059,14 +1089,42 @@ fn flat_search(
     top_k: usize,
     metric: VectorMetric,
 ) -> Vec<(RowId, f32)> {
-    let mut results: Vec<(RowId, f32)> = raw
-        .iter()
+    if top_k == 0 {
+        return Vec::new();
+    }
+    let mut results = raw
+        .par_iter()
         .enumerate()
-        .map(|(i, v)| (RowId::new(i as u64), exact_distance(metric, query, v)))
-        .collect();
-    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(top_k);
+        .fold(Vec::new, |mut best, (i, vector)| {
+            best.push((RowId::new(i as u64), exact_distance(metric, query, vector)));
+            trim_search_top_k_buffer(&mut best, top_k);
+            best
+        })
+        .reduce(Vec::new, |mut left, mut right| {
+            left.append(&mut right);
+            select_distance_top_k(&mut left, top_k);
+            left
+        });
+    select_distance_top_k(&mut results, top_k);
     results
+}
+
+fn select_distance_top_k(results: &mut Vec<(RowId, f32)>, k: usize) {
+    let compare = |a: &(RowId, f32), b: &(RowId, f32)| {
+        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+    };
+    if results.len() > k {
+        results.select_nth_unstable_by(k, compare);
+        results.truncate(k);
+    }
+    results.sort_unstable_by(compare);
+}
+
+fn trim_search_top_k_buffer(results: &mut Vec<(RowId, f32)>, k: usize) {
+    let limit = k.saturating_mul(2).max(k.saturating_add(1));
+    if results.len() >= limit {
+        select_distance_top_k(results, k);
+    }
 }
 
 fn parse_metric(s: &str) -> VectorMetric {
@@ -1407,12 +1465,13 @@ pub async fn search_text(
         catalog,
         store,
         partition_filter,
-        false,
+        true,
     )
     .await
 }
 
-/// Text search with explicit deletion-integrity policy.
+/// Text search with an explicit deletion-integrity policy. The convenience
+/// [`search_text`] function enables fail-closed handling by default.
 #[allow(clippy::too_many_arguments)]
 pub async fn search_text_with_options(
     table: &TableIdent,
@@ -1777,6 +1836,67 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[test]
+    fn search_defaults_to_fail_closed_delete_handling() {
+        assert!(SearchConfig::default().strict_deletes);
+    }
+
+    #[test]
+    fn final_selection_returns_sorted_top_k_only() {
+        let mut results = vec![
+            SearchResult {
+                row_id: RowId::new(0),
+                distance: 5.0,
+                file_path: "a".into(),
+            },
+            SearchResult {
+                row_id: RowId::new(1),
+                distance: 1.0,
+                file_path: "b".into(),
+            },
+            SearchResult {
+                row_id: RowId::new(2),
+                distance: 3.0,
+                file_path: "c".into(),
+            },
+        ];
+        select_search_top_k(&mut results, 2);
+        assert_eq!(
+            results.iter().map(|r| r.distance).collect::<Vec<_>>(),
+            vec![1.0, 3.0]
+        );
+        select_search_top_k(&mut results, 0);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn flat_search_keeps_sorted_top_k_across_parallel_chunks() {
+        let vectors: Vec<Vec<f32>> = (0..257)
+            .map(|i| {
+                let x = i as f32 / 257.0;
+                vec![x.cos(), x.sin(), (x * 2.0).cos()]
+            })
+            .collect();
+        let query = [1.0, 0.0, 1.0];
+        let results = flat_search(&vectors, &query, 5, VectorMetric::Cosine);
+        let mut expected: Vec<_> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, vector)| {
+                (
+                    RowId::new(i as u64),
+                    exact_distance(VectorMetric::Cosine, &query, vector),
+                )
+            })
+            .collect();
+        expected.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+        assert_eq!(results.len(), 5);
+        for (got, want) in results.iter().zip(expected.iter()) {
+            assert_eq!(got.0, want.0);
+            assert!((got.1 - want.1).abs() < 1e-6);
+        }
+    }
 
     fn make_policy(dim: u32) -> VectorStoragePolicy {
         VectorStoragePolicy {

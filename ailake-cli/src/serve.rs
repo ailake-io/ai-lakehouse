@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1787,6 +1788,7 @@ pub(crate) async fn run(
         circuit_failure_threshold,
         circuit_cooldown_secs,
     } = config;
+    validate_bind_auth(&host, auth_token.is_some())?;
     let table_meta = catalog
         .load_table(&table)
         .await
@@ -1974,6 +1976,22 @@ pub(crate) async fn run(
     result
 }
 
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn validate_bind_auth(host: &str, has_auth: bool) -> Result<(), String> {
+    if !has_auth && !is_loopback_host(host) {
+        return Err(format!(
+            "refusing to bind unauthenticated server to non-loopback host '{host}'; configure --auth-token or bind to localhost"
+        ));
+    }
+    Ok(())
+}
+
 fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/search", post(handle_search))
@@ -1999,6 +2017,19 @@ fn build_router(state: Arc<AppState>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unauthenticated_bind_is_limited_to_loopback_hosts() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("0.0.0.0"));
+        assert!(!is_loopback_host("192.168.1.10"));
+        assert!(!is_loopback_host("example.internal"));
+        assert!(validate_bind_auth("127.0.0.1", false).is_ok());
+        assert!(validate_bind_auth("0.0.0.0", true).is_ok());
+        assert!(validate_bind_auth("0.0.0.0", false).is_err());
+    }
     use ailake_catalog::HadoopCatalog;
     use ailake_core::{VectorMetric, VectorPrecision};
     use ailake_query::TableWriter;

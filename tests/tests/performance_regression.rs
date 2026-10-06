@@ -51,7 +51,7 @@ async fn cpu_search_recall_and_p95_are_regression_safe() {
     let catalog: Arc<dyn CatalogProvider> =
         Arc::new(HadoopCatalog::new(Arc::clone(&store), "warehouse"));
     let table = TableIdent::new("default", "performance_regression");
-    let dim = 32u32;
+    let dim = 128u32;
     let policy = VectorStoragePolicy {
         column_name: "embedding".into(),
         dim,
@@ -71,7 +71,7 @@ async fn cpu_search_recall_and_p95_are_regression_safe() {
         partition_fields: vec![],
     };
 
-    let (batch, vectors) = fixtures::generate_batch(2_000, dim as usize);
+    let (batch, vectors) = fixtures::generate_batch(10_000, dim as usize);
     let mut writer = TableWriter::create_or_open(
         Arc::clone(&catalog),
         Arc::clone(&store),
@@ -84,27 +84,44 @@ async fn cpu_search_recall_and_p95_are_regression_safe() {
     writer.write_batch(&batch, &vectors).await.unwrap();
     writer.commit().await.unwrap();
 
-    let queries = [0usize, 137, 511, 999, 1_337, 1_999];
+    let query_indices: Vec<usize> = (0..32).map(|i| (i * 313) % vectors.len()).collect();
     let top_k = 10usize;
-    let mut latencies = Vec::with_capacity(queries.len());
+    let search_config = SearchConfig {
+        top_k,
+        ef_search: 50,
+        pruning_threshold: f32::INFINITY,
+        rerank_factor: None,
+        score_fn: None,
+        partition_filter: None,
+        hybrid: None,
+        column_filter: None,
+        strict_deletes: true,
+    };
+
+    // Warm the catalog, object store and index path before collecting latency samples.
+    for &query_index in query_indices.iter().take(4) {
+        search(
+            &table,
+            &vectors[query_index],
+            search_config.clone(),
+            "embedding",
+            dim,
+            Arc::clone(&catalog),
+            Arc::clone(&store),
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut latencies = Vec::with_capacity(query_indices.len());
     let mut hits = 0usize;
-    for &query_index in &queries {
+    for &query_index in &query_indices {
         let query = &vectors[query_index];
         let started = Instant::now();
         let results = search(
             &table,
             query,
-            SearchConfig {
-                top_k,
-                ef_search: 50,
-                pruning_threshold: f32::INFINITY,
-                rerank_factor: None,
-                score_fn: None,
-                partition_filter: None,
-                hybrid: None,
-                column_filter: None,
-                strict_deletes: false,
-            },
+            search_config.clone(),
             "embedding",
             dim,
             Arc::clone(&catalog),
@@ -119,7 +136,7 @@ async fn cpu_search_recall_and_p95_are_regression_safe() {
         hits += actual.intersection(&expected).count();
     }
 
-    let recall = hits as f64 / (queries.len() * top_k) as f64;
+    let recall = hits as f64 / (query_indices.len() * top_k) as f64;
     let p95_ms = percentile_ms(&mut latencies, 0.95);
     let min_recall = std::env::var("AILAKE_MIN_RECALL")
         .ok()
@@ -132,7 +149,7 @@ async fn cpu_search_recall_and_p95_are_regression_safe() {
 
     println!(
         "PERF_RECALL_JSON={{\"recall_at_10\":{recall:.6},\"p95_ms\":{p95_ms:.3},\"queries\":{},\"rows\":{}}}",
-        queries.len(),
+        query_indices.len(),
         vectors.len()
     );
     assert!(

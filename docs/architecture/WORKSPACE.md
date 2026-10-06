@@ -562,8 +562,10 @@ Delivered in the current release window:
   Manager, Vault, Kubernetes Secrets and refreshable references.
 - Local/Redis/Valkey cache, snapshot invalidation, global memory bounds,
   token/IP quotas and catalog/storage circuit breakers.
-- Opt-in strict delete integrity and production-oriented typed Kof HTTP/native
-  bindings.
+- Fail-closed delete integrity by default in Rust search and CLI. Python/JNI
+  bindings still opt into permissive handling, and `SearchSession` does not
+  apply deletes; see `docs/guides/DELETE_INTEGRITY.md` for the remaining work.
+- Production-oriented typed Kof HTTP/native bindings.
 - Automated CPU benchmark, Recall@10/p95, HTTP load, multi-writer and catalog
   emulator coverage in `performance.yml`.
 

@@ -115,7 +115,7 @@ validated at the top of all 5 entry points, before any allocation-sizing math
 | **T**ampering: corrupt HNSW blob → panic | **High** | All offsets use `checked_add`; out-of-bounds → `NotAnAilakeFile` error. 7 corruption tests |
 | **R**epudiation: N/A | — | — |
 | **I**nformation disclosure: malformed centroid → wrong pruning | Low | Centroid parse validated (`InvalidCentroidLength`). Missing centroid → conservative (keep file) |
-| **D**enial of service: extremely large HNSW blob | Low | Blob size bounded by `u64`; reader validates against file length |
+| **D**enial of service: oversized index/FTS payload | Medium | Index ranges are checked against file length; FTS rejects declared payloads over 1 GiB. That FTS ceiling is still large and payloads are materialized in memory |
 | **E**levation of privilege: N/A | — | — |
 
 ### Key finding: Release dim mismatch (Critical, see §1)
@@ -143,6 +143,15 @@ undefined behavior in release builds. Fixed: `from_bytes` now validates
 - 3 `HnswSerializer::from_bytes` bounds-validation tests (out-of-bounds neighbor,
   out-of-bounds entry_point, flat_vecs length mismatch)
 
+### Remaining payload limits
+
+The 1 GiB FTS payload ceiling prevents unbounded declared lengths but can still
+allow a very large allocation for one file. BM25 stats decoding limits compressed
+and decompressed payload sizes to 16 MiB and 64 MiB, respectively, but the store
+read materializes the compressed object before that check. Consider lower,
+configurable limits and bounded/range reads before accepting untrusted or
+multi-tenant data.
+
 ---
 
 ## 5. Query Engine (`ailake-query`)
@@ -154,7 +163,7 @@ undefined behavior in release builds. Fixed: `from_bytes` now validates
 | **S**poofing: wrong table/warehouse | Low | Caller provides identifiers; no auth |
 | **T**ampering: malicious `ScoreFn` | Low | `ScoreFn` is Rust closure, not user-supplied at runtime; only configured at compile time |
 | **R**epudiation: N/A | — | Search is stateless |
-| **I**nformation disclosure: equality delete file read failure | Low | `warn!` + continue — shows deleted rows rather than failing. Deliberate: safety over correctness |
+| **I**nformation disclosure / stale results: delete file read failure | Medium | Rust `SearchConfig` and CLI search/serve fail closed by default. Python/JNI currently set `strict_deletes: false`; `SearchSession` does not apply deletes. See `DELETE_INTEGRITY.md` |
 | **D**enial of service: `top_k = 100000`, no geometric pruning | Low | `ef_search.clamp(1, 100000)`. Files without centroid always included (no pruning) |
 | **E**levation of privilege: N/A | — | — |
 
@@ -166,6 +175,13 @@ undefined behavior in release builds. Fixed: `from_bytes` now validates
 - Dimension mismatch rejection test
 - 41 unit tests (scanner, writer, compaction, pruner, bm25, mem_table)
 - 3 Loom models (`ailake-query/src/loom_tests.rs`) — see coverage gap below
+
+### Remaining query-integrity work
+
+Expose strict delete handling in Python and JNI instead of hardcoding
+`strict_deletes: false`, and define delete visibility for `SearchSession`. The
+CDC reader also has its own `strict_deletes` setting and remains permissive by
+default. These paths are documented in `docs/guides/DELETE_INTEGRITY.md`.
 
 ### Known gap: Loom models don't cover the JNI lock+block_on pattern (Open)
 
@@ -193,17 +209,27 @@ contention) than Loom can provide.
 
 | Threat | Risk | Mitigation |
 |--------|------|------------|
-| **S**poofing: no auth | **High** | Optional Bearer token on every endpoint except `/healthz`; startup warning when disabled. Use a gateway/mTLS for production |
+| **S**poofing: unauthorized HTTP access | Medium | Defaults to loopback; refuses non-loopback bind without `--auth-token`/`AILAKE_SERVE_TOKEN`. Bearer token required on all routes except public `/healthz` |
 | **T**ampering: oversized body | Low | `DefaultBodyLimit::max(32 MB)` |
 | **R**epudiation: no access log | Low | Prometheus counters and request duration are exposed at `/metrics`; access-log correlation remains a deployment concern |
 | **I**nformation disclosure: error messages may reveal paths | Low | `ApiError` surfaces Rust error messages |
-| **D**enial of service: request flooding | Medium | 32 MB body limit, 64 in-flight request cap, and optional Redis/Valkey rate limiting by bearer token/IP with separate read/write quotas; keep gateway/mTLS controls for internet-facing deployments |
+| **D**enial of service: request flooding | Medium | 32 MB body limit, 64 in-flight HTTP request cap, per-search fan-out cap of 32 files, and optional Redis/Valkey quotas. Fan-out is not a process-wide semaphore; worst-case file tasks can multiply across requests. Rate limiting is fail-open unless `--rate-limit-fail-closed` is set |
 | **E**levation of privilege: N/A | — | — |
 
 ### Test coverage
 
 - Health, metrics authentication, cache invalidation and auto-compaction paths are covered by dedicated server tests.
 - HTTP load, multi-writer fencing, cache invalidation and rate-limit decisions are exercised by server tests and `performance.yml`; production deployments should still validate gateway behavior and real Redis/Valkey failure policy.
+
+### Remaining deployment controls
+
+The server uses plain HTTP; the bearer token is not encrypted in transit by the
+server itself. Terminate TLS at a trusted reverse proxy or gateway for remote
+traffic. The token is one shared credential with no per-user identity or roles,
+and bearer comparison is not constant-time. Keep `/healthz` reachable only where
+its public status response is acceptable. Add a process-wide file-I/O budget and
+consider fail-closed rate limiting for deployments where quota enforcement is a
+security boundary.
 
 ---
 

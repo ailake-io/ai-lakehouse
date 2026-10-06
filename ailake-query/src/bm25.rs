@@ -16,6 +16,7 @@
 //! OCC). Compaction rebuilds stats accurately from all surviving data files.
 
 use std::collections::HashMap;
+use std::io::Read;
 
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +29,9 @@ const B: f32 = 0.75;
 const MAX_VOCAB: usize = 50_000;
 /// Minimum term length to index.
 const MIN_TERM_LEN: usize = 2;
+/// Bounds compressed and expanded table statistics loaded during a hybrid query.
+pub const MAX_BM25_STATS_COMPRESSED_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_BM25_STATS_DECOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
 
 /// Tokenize text into lowercase alphanumeric terms, dropping single-char tokens.
 pub fn tokenize(text: &str) -> Vec<String> {
@@ -105,9 +109,27 @@ impl IdfStats {
 
     /// Deserialize from zstd-compressed bincode bytes.
     pub fn from_bytes(bytes: &[u8]) -> AilakeResult<Self> {
-        let raw = zstd::decode_all(bytes).map_err(AilakeError::Io)?;
+        if bytes.len() > MAX_BM25_STATS_COMPRESSED_BYTES {
+            return Err(AilakeError::InvalidArgument(format!(
+                "BM25 stats blob exceeds compressed size limit of {MAX_BM25_STATS_COMPRESSED_BYTES} bytes"
+            )));
+        }
+        let raw = decompress_limited(bytes, MAX_BM25_STATS_DECOMPRESSED_BYTES)?;
         bincode::deserialize(&raw).map_err(|e| AilakeError::Bincode(e.to_string()))
     }
+}
+
+fn decompress_limited(bytes: &[u8], max_bytes: usize) -> AilakeResult<Vec<u8>> {
+    let decoder = zstd::stream::read::Decoder::new(bytes).map_err(AilakeError::Io)?;
+    let mut limited = decoder.take(max_bytes.saturating_add(1) as u64);
+    let mut raw = Vec::with_capacity(max_bytes.min(1024 * 1024));
+    limited.read_to_end(&mut raw).map_err(AilakeError::Io)?;
+    if raw.len() > max_bytes {
+        return Err(AilakeError::InvalidArgument(format!(
+            "BM25 stats payload exceeds decompressed size limit of {max_bytes} bytes"
+        )));
+    }
+    Ok(raw)
 }
 
 /// BM25 scorer backed by global [`IdfStats`].
@@ -123,6 +145,13 @@ impl<'a> BM25Scorer<'a> {
     /// Score `doc_text` against `query_text`. Returns BM25 score (higher = more relevant).
     pub fn score(&self, query_text: &str, doc_text: &str) -> f32 {
         let query_terms = tokenize(query_text);
+        self.score_tokens(&query_terms, doc_text)
+    }
+
+    /// Score a document when the query has already been tokenized.
+    /// Hybrid search reuses the same query for every candidate, so tokenizing it
+    /// once avoids repeated allocations proportional to the candidate count.
+    pub fn score_tokens(&self, query_terms: &[String], doc_text: &str) -> f32 {
         if query_terms.is_empty() {
             return 0.0;
         }
@@ -137,7 +166,7 @@ impl<'a> BM25Scorer<'a> {
         }
 
         let mut score = 0.0f32;
-        for term in &query_terms {
+        for term in query_terms {
             let tf = tf_map.get(term.as_str()).copied().unwrap_or(0) as f32;
             if tf == 0.0 {
                 continue;
@@ -152,7 +181,10 @@ impl<'a> BM25Scorer<'a> {
 
     /// Compute BM25 scores for a slice of document texts. Returns parallel scores.
     pub fn score_batch(&self, query_text: &str, docs: &[&str]) -> Vec<f32> {
-        docs.iter().map(|doc| self.score(query_text, doc)).collect()
+        let query_terms = tokenize(query_text);
+        docs.iter()
+            .map(|doc| self.score_tokens(&query_terms, doc))
+            .collect()
     }
 }
 
@@ -335,6 +367,17 @@ mod tests {
     }
 
     #[test]
+    fn pretokenized_query_matches_regular_score() {
+        let mut stats = IdfStats::default();
+        stats.merge_batch(&["rust systems programming", "python data science"]);
+        let scorer = BM25Scorer::new(&stats);
+        let query = "Rust programming";
+        let tokens = tokenize(query);
+        let doc = "systems programming with Rust";
+        assert_eq!(scorer.score(query, doc), scorer.score_tokens(&tokens, doc));
+    }
+
+    #[test]
     fn idf_stats_roundtrip() {
         let mut stats = IdfStats::default();
         stats.merge_batch(&["hello world foo bar", "foo baz qux"]);
@@ -343,6 +386,22 @@ mod tests {
         assert_eq!(restored.doc_count, stats.doc_count);
         assert_eq!(restored.term_df["foo"], 2);
         assert_eq!(restored.term_df["hello"], 1);
+    }
+
+    #[test]
+    fn decompression_limit_rejects_oversized_payload() {
+        let compressed = zstd::encode_all(&b"0123456789abcdef"[..], 1).unwrap();
+        let error = decompress_limited(&compressed, 8).unwrap_err();
+        assert!(error.to_string().contains("decompressed size limit"));
+    }
+
+    #[test]
+    fn compressed_size_limit_rejects_large_blob() {
+        let bytes = vec![0; MAX_BM25_STATS_COMPRESSED_BYTES + 1];
+        assert!(IdfStats::from_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("compressed size limit"));
     }
 
     #[test]

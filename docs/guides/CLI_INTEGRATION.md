@@ -170,7 +170,7 @@ ailake search docs.chunks --store ./lake --query "0.1,..." --top-k 2 --format js
 | `--query` / `--query-file` | comma-separated floats, or a path to a little-endian f32 binary file |
 | `--hybrid-text` + `--query`/`--query-file` | enables BM25+vector fusion; `--bm25-weight` (default `0.5`) controls the RRF balance |
 | `--pruning-threshold` | geometric pruning aggressiveness (0.0–1.0, lower = more files pruned; default `0.8`) |
-| `--top-k` | capped at `ailake_core::MAX_TOP_K` (100,000) — a value above that is rejected with an error rather than risking an unbounded-allocation crash (same limit shared by every binding — Python, Go, C++, and the JNI C-ABI boundary used by Spark/Trino/Flink) |
+| `--top-k` | capped at `ailake_core::MAX_TOP_K` (100,000) — a value above that is rejected with an error rather than risking an unbounded-allocation crash |
 
 The CLI's `search` is pointer-only (row_id/distance/file_path) — it does not fetch full
 row data (no-JOIN full-row fetch, `ailake_scan_json`, is exposed via the SDKs and the
@@ -386,12 +386,12 @@ crate or an SDK.
 ailake serve docs.chunks --store ./lake --port 7700
 ```
 ```
-ailake server listening on http://0.0.0.0:7700
-WARNING: no authentication — expose only on a trusted network or behind an authenticating proxy
+ailake server listening on http://127.0.0.1:7700
 ```
 
-> **Security**: no authentication. Localhost/VPC-internal/sidecar deployments only — put
-> an authenticating reverse proxy (nginx + mTLS, API gateway) in front for anything else.
+> **Security**: the server defaults to localhost. Binding to a non-loopback host
+> requires `--auth-token` (or `AILAKE_SERVE_TOKEN`). For public deployments, also
+> place it behind an authenticating reverse proxy or API gateway.
 
 | Endpoint | Method | Request body | Response |
 |---|---|---|---|

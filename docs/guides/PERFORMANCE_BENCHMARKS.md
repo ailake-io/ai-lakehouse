@@ -7,8 +7,10 @@ matrix jobs run on pushes, nightly builds or manual dispatch.
 
 ## CPU microbenchmark
 
-The dependency-free vector-distance benchmark reports nanoseconds per
-operation for 128, 768 and 1536 dimensions:
+The dependency-free vector-distance benchmark reports median nanoseconds per
+operation for cosine, Euclidean and dot-product kernels at 128, 768 and 1536
+dimensions. Each case warms up and records seven timed samples, including the
+sample range:
 
 ```bash
 cargo bench -p ailake-vec --bench distance
@@ -33,8 +35,11 @@ runner measurement.
 
 ## Recall and search latency
 
-The deterministic integration test writes 2,000 normalized vectors, compares
-HNSW results with an exact brute-force oracle and measures p95 search latency:
+The deterministic integration test writes 10,000 128-dimensional vectors,
+runs four warm-up queries, compares 32 HNSW queries with an exact brute-force
+oracle and measures p95 search latency. On the current development machine the
+debug run took about 103 seconds; expect the duration to vary with hardware and
+build cache state:
 
 ```bash
 AILAKE_MIN_RECALL=0.95 AILAKE_MAX_P95_MS=500 \
@@ -45,6 +50,31 @@ The test uses a fixed fixture and seed, emits `PERF_RECALL_JSON=...` and fails
 when Recall@10 or p95 exceeds the configured limit. Larger SIFT-1M comparisons
 remain in the external [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks)
 repository and should be used for release reports, not every pull request.
+
+### Coverage boundaries and next performance work
+
+These checks do not yet provide a full production performance profile:
+
+- The recall/p95 case uses one local table at 10,000 rows and 128 dimensions.
+  It does not measure large multi-file/cloud scans, cold-cache behavior, peak
+  memory, or concurrent searches across many shards.
+- The distance benchmark measures kernels. The workflow stores its output but
+  does not supply a persistent same-runner baseline to
+  `compare_benchmark.py`, so it is not currently a kernel regression gate.
+- A search limits concurrent file reads to 32, while HTTP serve accepts up to
+  64 requests concurrently. That bounds each request but can still permit a
+  large aggregate of file tasks. A process-wide, store-aware I/O semaphore or
+  load-adaptive budget is the clearest next scalability improvement.
+- Bounded top-K reduces intermediate result memory, but brute-force fallback
+  remains O(rows × dimensions); it should remain a fallback for small or
+  unindexed shards, with compaction/reindexing monitored operationally.
+- Parquet delete filtering reuses footer metadata, but still opens readers for
+  surviving row groups. Further batching should follow measurements on realistic
+  files rather than assumed gains.
+
+For the HTTP harness, also vary request concurrency, file count, object-store
+latency and table size; report p95/p99 and memory alongside QPS. Keep benchmark
+baselines tied to the same runner and compiler profile.
 
 ## Real HTTP load and concurrent writers
 

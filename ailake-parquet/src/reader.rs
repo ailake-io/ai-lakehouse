@@ -12,7 +12,9 @@ use arrow_array::{
 };
 use arrow_schema::{ArrowError, DataType, Schema};
 use bytes::Bytes;
-use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
+use parquet::arrow::arrow_reader::{
+    ArrowPredicateFn, ArrowReaderMetadata, ParquetRecordBatchReaderBuilder, RowFilter,
+};
 use parquet::arrow::ProjectionMask;
 use parquet::file::statistics::Statistics;
 
@@ -398,8 +400,12 @@ impl ParquetVectorReader {
     /// batch-boundary bookkeeping needed, since each row group is read via its
     /// own single-group reader).
     pub fn matching_row_ids(&self, filter: &ColumnFilter) -> AilakeResult<HashSet<u64>> {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(self.bytes.clone())
+        let reader_metadata = ArrowReaderMetadata::load(&self.bytes, Default::default())
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
+        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+            self.bytes.clone(),
+            reader_metadata.clone(),
+        );
 
         let schema_descr = builder.parquet_schema();
         let col_idx = (0..schema_descr.num_columns())
@@ -430,8 +436,10 @@ impl ParquetVectorReader {
         let mut matches = HashSet::new();
         for group in surviving_groups {
             let base = base_offsets[group];
-            let group_builder = ParquetRecordBatchReaderBuilder::try_new(self.bytes.clone())
-                .map_err(|e| AilakeError::Parquet(e.to_string()))?;
+            let group_builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+                self.bytes.clone(),
+                reader_metadata.clone(),
+            );
             let projection = ProjectionMask::leaves(group_builder.parquet_schema(), [col_idx]);
             let reader = group_builder
                 .with_row_groups(vec![group])
