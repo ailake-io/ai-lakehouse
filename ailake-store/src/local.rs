@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 use ailake_core::{AilakeError, AilakeResult};
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::Mutex;
 
 use crate::store::Store;
 
 pub struct LocalStore {
     root: PathBuf,
+    // Keep the OS lock handles alive until release_lock or process exit.
+    locks: Mutex<HashMap<PathBuf, std::fs::File>>,
 }
 
 impl LocalStore {
@@ -25,7 +28,10 @@ impl LocalStore {
             .and_then(|s| s.strip_prefix("file://"))
             .map(PathBuf::from)
             .unwrap_or_else(|| path.to_path_buf());
-        Self { root: clean }
+        Self {
+            root: clean,
+            locks: Mutex::new(HashMap::new()),
+        }
     }
 
     fn full_path(&self, path: &str) -> AilakeResult<PathBuf> {
@@ -50,12 +56,44 @@ impl LocalStore {
         };
         let root = normalize_path(&self.root);
         let candidate = normalize_path(&candidate);
-        if !candidate.starts_with(&root) {
+        // Lexical prefix checks alone can be bypassed by a symlink inside the
+        // store root. Resolve the nearest existing ancestor so new files are
+        // checked too, then append only the still-missing suffix.
+        let canonical_root = canonicalize_with_missing_suffix(&root).unwrap_or(root.clone());
+        let mut ancestor = candidate.as_path();
+        let mut suffix = Vec::new();
+        loop {
+            if let Ok(metadata) = std::fs::symlink_metadata(ancestor) {
+                if metadata.file_type().is_symlink() {
+                    return Err(AilakeError::InvalidArgument(format!(
+                        "symlinks are not allowed in LocalStore paths: {path}"
+                    )));
+                }
+                break;
+            }
+            let Some(name) = ancestor.file_name() else {
+                break;
+            };
+            suffix.push(name.to_os_string());
+            let Some(parent) = ancestor.parent() else {
+                break;
+            };
+            ancestor = parent;
+        }
+        let resolved = canonicalize_with_missing_suffix(ancestor)
+            .map(|mut path| {
+                for part in suffix.iter().rev() {
+                    path.push(part);
+                }
+                path
+            })
+            .unwrap_or(candidate.clone());
+        if !candidate.starts_with(&root) || !resolved.starts_with(&canonical_root) {
             return Err(AilakeError::InvalidArgument(format!(
                 "path escapes LocalStore root: {path}"
             )));
         }
-        Ok(candidate)
+        Ok(resolved)
     }
 
     /// Validate an Iceberg table location before a write starts. Relative
@@ -65,6 +103,20 @@ impl LocalStore {
     pub fn validate_location(&self, location: &str) -> AilakeResult<()> {
         self.full_path(location).map(|_| ())
     }
+}
+
+fn canonicalize_with_missing_suffix(path: &Path) -> Option<PathBuf> {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while std::fs::symlink_metadata(ancestor).is_err() {
+        suffix.push(ancestor.file_name()?.to_os_string());
+        ancestor = ancestor.parent()?;
+    }
+    let mut resolved = std::fs::canonicalize(ancestor).ok()?;
+    for part in suffix.iter().rev() {
+        resolved.push(part);
+    }
+    Some(resolved)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -92,88 +144,46 @@ impl Store for LocalStore {
         if let Some(parent) = full.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        match tokio::fs::OpenOptions::new()
+        let mut locks = self.locks.lock().await;
+        if locks.contains_key(&full) {
+            return Ok(false);
+        }
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(false)
             .open(&full)
-            .await
-        {
-            Ok(mut file) => {
-                let owner = format!("pid={}\n", std::process::id());
-                file.write_all(owner.as_bytes()).await?;
+            .await?;
+        let mut file = file.into_std().await;
+        match file.try_lock() {
+            Ok(()) => {
+                use std::io::Write;
+                file.set_len(0)?;
+                writeln!(file, "pid={}", std::process::id())?;
+                locks.insert(full, file);
                 Ok(true)
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                // A crashed process must not permanently wedge a table. Locks
-                // owned by a dead local process are immediately stale; locks
-                // without a readable PID retain the five-minute safety valve.
-                let owner_dead = tokio::fs::read_to_string(&full)
-                    .await
-                    .ok()
-                    .and_then(|contents| {
-                        contents
-                            .lines()
-                            .find_map(|line| line.strip_prefix("pid=")?.parse::<u32>().ok())
-                    })
-                    .map(|pid| {
-                        pid != std::process::id()
-                            && !std::path::Path::new(&format!("/proc/{pid}")).exists()
-                    })
-                    .unwrap_or(false);
-                let stale = tokio::fs::metadata(&full)
-                    .await
-                    .and_then(|meta| meta.modified())
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| age > std::time::Duration::from_secs(300));
-                if owner_dead || stale {
-                    let _ = tokio::fs::remove_file(&full).await;
-                    return self.try_acquire_lock(path).await;
-                }
-                Ok(false)
-            }
-            Err(error) => Err(error.into()),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
         }
     }
 
     async fn release_lock(&self, path: &str) -> AilakeResult<()> {
         let full = self.full_path(path)?;
-        let owned = tokio::fs::read_to_string(&full)
-            .await
-            .ok()
-            .and_then(|contents| {
-                contents
-                    .lines()
-                    .find_map(|line| line.strip_prefix("pid=")?.parse::<u32>().ok())
-            })
-            .is_some_and(|pid| pid == std::process::id());
-        if !owned {
-            return Ok(());
+        // Keep the lock file itself in place: unlinking it while held lets a
+        // second process create and lock a different inode at the same path.
+        let mut locks = self.locks.lock().await;
+        if let Some(file) = locks.get(&full) {
+            file.unlock()?;
         }
-        match tokio::fs::remove_file(full).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
-        }
+        locks.remove(&full);
+        Ok(())
     }
 
     async fn renew_lock(&self, path: &str) -> AilakeResult<bool> {
         let full = self.full_path(path)?;
-        let contents = match tokio::fs::read_to_string(&full).await {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error.into()),
-        };
-        let owned = contents.lines().any(|line| {
-            line.strip_prefix("pid=")
-                .and_then(|value| value.parse::<u32>().ok())
-                .is_some_and(|pid| pid == std::process::id())
-        });
-        if !owned {
-            return Ok(false);
-        }
-        tokio::fs::write(full, format!("pid={}\n", std::process::id())).await?;
-        Ok(true)
+        Ok(self.locks.lock().await.contains_key(&full))
     }
 
     async fn get(&self, path: &str) -> AilakeResult<Bytes> {
@@ -210,16 +220,18 @@ impl Store for LocalStore {
         if !dir.exists() {
             return Ok(vec![]);
         }
+        let root = canonicalize_with_missing_suffix(&normalize_path(&self.root))
+            .unwrap_or_else(|| normalize_path(&self.root));
         let mut entries = Vec::new();
         let mut read_dir = tokio::fs::read_dir(&dir).await?;
         while let Some(entry) = read_dir.next_entry().await? {
             let path = entry.path();
             if path.is_file() {
                 let rel = path
-                    .strip_prefix(&self.root)
+                    .strip_prefix(&root)
                     .map_err(|e| AilakeError::Store(e.to_string()))?
                     .to_string_lossy()
-                    .to_string();
+                    .replace(std::path::MAIN_SEPARATOR, "/");
                 entries.push(rel);
             }
         }
@@ -300,6 +312,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commit_lock_is_exclusive_across_store_instances() {
+        let dir = TempDir::new().unwrap();
+        let first = LocalStore::new(dir.path());
+        let second = LocalStore::new(dir.path());
+        assert!(first.try_acquire_lock("metadata/table.lock").await.unwrap());
+        assert!(!second
+            .try_acquire_lock("metadata/table.lock")
+            .await
+            .unwrap());
+        first.release_lock("metadata/table.lock").await.unwrap();
+        assert!(second
+            .try_acquire_lock("metadata/table.lock")
+            .await
+            .unwrap());
+        second.release_lock("metadata/table.lock").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_lock_is_exclusive_across_processes() {
+        let dir = TempDir::new().unwrap();
+        let store = LocalStore::new(dir.path());
+        assert!(store
+            .try_acquire_lock("metadata/process.lock")
+            .await
+            .unwrap());
+        run_lock_probe(dir.path(), false);
+        store.release_lock("metadata/process.lock").await.unwrap();
+        run_lock_probe(dir.path(), true);
+    }
+
+    #[tokio::test]
+    async fn commit_lock_process_probe() {
+        let Ok(root) = std::env::var("AILAKE_LOCK_PROBE_ROOT") else {
+            return;
+        };
+        let expected = std::env::var("AILAKE_LOCK_PROBE_EXPECTED")
+            .map(|value| value == "true")
+            .unwrap_or(false);
+        let store = LocalStore::new(root);
+        let acquired = store
+            .try_acquire_lock("metadata/process.lock")
+            .await
+            .unwrap();
+        assert_eq!(acquired, expected);
+        if acquired {
+            store.release_lock("metadata/process.lock").await.unwrap();
+        }
+    }
+
+    fn run_lock_probe(root: &Path, expected: bool) {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "local::tests::commit_lock_process_probe"])
+            .env("AILAKE_LOCK_PROBE_ROOT", root)
+            .env("AILAKE_LOCK_PROBE_EXPECTED", expected.to_string())
+            .status()
+            .unwrap();
+        assert!(status.success(), "lock probe process failed: {status}");
+    }
+
+    #[tokio::test]
     async fn dead_process_lock_is_recovered_immediately() {
         let dir = TempDir::new().unwrap();
         let store = LocalStore::new(dir.path());
@@ -324,11 +396,54 @@ mod tests {
     #[tokio::test]
     async fn rejects_absolute_path_outside_root() {
         let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
         let store = LocalStore::new(dir.path());
+        let outside_file = outside.path().join("ailake-outside.bin");
         let error = store
-            .put("file:///tmp/ailake-outside.bin", Bytes::from("nope"))
+            .put(outside_file.to_str().unwrap(), Bytes::from("nope"))
             .await
             .unwrap_err();
         assert!(error.to_string().contains("escapes LocalStore root"));
+        assert!(!outside_file.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        symlink(outside.path(), root.path().join("outside-link")).unwrap();
+        let store = LocalStore::new(root.path());
+        let error = store
+            .put("outside-link/escaped.bin", Bytes::from("nope"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("symlinks are not allowed"));
+        assert!(!outside.path().join("escaped.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn creates_files_under_a_not_yet_existing_root() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("new-root");
+        let store = LocalStore::new(&root);
+        store
+            .put("nested/file.bin", Bytes::from("ok"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("nested/file.bin").await.unwrap(),
+            Bytes::from("ok")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_supports_a_relative_store_root() {
+        let dir = TempDir::new_in(".").unwrap();
+        let store = LocalStore::new(dir.path());
+        store.put("data/a.bin", Bytes::from("ok")).await.unwrap();
+        assert_eq!(store.list("data").await.unwrap(), vec!["data/a.bin"]);
     }
 }

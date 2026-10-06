@@ -17,6 +17,7 @@ async-trait  = { workspace = true }
 bytes        = { workspace = true }
 redis        = { workspace = true, optional = true }
 serde_json   = { workspace = true }
+sha2         = { workspace = true }
 tokio        = { workspace = true }
 
 [dev-dependencies]

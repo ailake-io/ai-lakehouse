@@ -13,6 +13,8 @@ use tantivy::Directory;
 pub const BLOB_MAGIC: [u8; 4] = *b"AFTS";
 const BLOB_VERSION: u16 = 1;
 const FLAG_ZSTD: u16 = 0x0001;
+/// Upper bound for a single FTS index payload after decompression.
+pub const MAX_FTS_PAYLOAD_BYTES: u64 = 1 << 30;
 
 /// Serialize all managed files from `dir` into a zstd-compressed blob.
 ///
@@ -76,8 +78,18 @@ pub fn blob_to_ram_dir(blob: &[u8]) -> AilakeResult<tantivy::directory::RamDirec
             &blob[0..4]
         )));
     }
-    let _version = u16::from_le_bytes([blob[4], blob[5]]);
+    let version = u16::from_le_bytes([blob[4], blob[5]]);
+    if version != BLOB_VERSION {
+        return Err(AilakeError::Fts(format!(
+            "unsupported FTS blob version: {version}"
+        )));
+    }
     let flags = u16::from_le_bytes([blob[6], blob[7]]);
+    if flags & !FLAG_ZSTD != 0 {
+        return Err(AilakeError::Fts(format!(
+            "unsupported FTS blob flags: {flags:#06x}"
+        )));
+    }
     let num_files = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]) as usize;
     // Guard against crafted blobs that would cause excessive allocation.
     const MAX_FTS_FILES: usize = 65_536;
@@ -89,6 +101,7 @@ pub fn blob_to_ram_dir(blob: &[u8]) -> AilakeResult<tantivy::directory::RamDirec
 
     let mut pos = 12usize;
     let mut entries: Vec<(String, u64, u64)> = Vec::with_capacity(num_files);
+    let mut expected_payload_len = 0u64;
     for _ in 0..num_files {
         if pos + 4 > blob.len() {
             return Err(AilakeError::Fts("truncated file table".into()));
@@ -110,15 +123,33 @@ pub fn blob_to_ram_dir(blob: &[u8]) -> AilakeResult<tantivy::directory::RamDirec
         let off = u64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap());
         let len = u64::from_le_bytes(blob[pos + 8..pos + 16].try_into().unwrap());
         pos += 16;
+        expected_payload_len = expected_payload_len.max(
+            off.checked_add(len)
+                .ok_or_else(|| AilakeError::Fts("file table payload range overflow".into()))?,
+        );
         entries.push((name, off, len));
     }
 
+    if expected_payload_len > MAX_FTS_PAYLOAD_BYTES {
+        return Err(AilakeError::Fts(format!(
+            "FTS payload claims {expected_payload_len} bytes (max {MAX_FTS_PAYLOAD_BYTES})"
+        )));
+    }
+    let expected_payload_len: usize = expected_payload_len
+        .try_into()
+        .map_err(|_| AilakeError::Fts("FTS payload length does not fit this platform".into()))?;
     let payload = if flags & FLAG_ZSTD != 0 {
-        zstd::decode_all(&blob[pos..])
+        zstd::bulk::decompress(&blob[pos..], expected_payload_len)
             .map_err(|e| AilakeError::Fts(format!("zstd decompress: {e}")))?
     } else {
         blob[pos..].to_vec()
     };
+    if payload.len() != expected_payload_len {
+        return Err(AilakeError::Fts(format!(
+            "FTS payload length mismatch: expected {expected_payload_len}, got {}",
+            payload.len()
+        )));
+    }
 
     let dir = tantivy::directory::RamDirectory::create();
     for (name, off, len) in entries {
@@ -178,6 +209,34 @@ mod tests {
         blob[0..4].copy_from_slice(b"XXXX");
         let err = blob_to_ram_dir(&blob).unwrap_err();
         assert!(err.to_string().contains("magic"));
+    }
+
+    #[test]
+    fn rejects_unsupported_blob_version_and_flags() {
+        let mut blob = make_header(0);
+        blob[4..6].copy_from_slice(&(BLOB_VERSION + 1).to_le_bytes());
+        let err = blob_to_ram_dir(&blob).unwrap_err();
+        assert!(err.to_string().contains("unsupported FTS blob version"));
+
+        let mut blob = make_header(0);
+        blob[6..8].copy_from_slice(&(FLAG_ZSTD | 0x0002).to_le_bytes());
+        let err = blob_to_ram_dir(&blob).unwrap_err();
+        assert!(err.to_string().contains("unsupported FTS blob flags"));
+    }
+
+    #[test]
+    fn rejects_zstd_payload_larger_than_file_table_claim() {
+        let mut blob = make_header(1);
+        let name = b"index.bin";
+        blob.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        blob.extend_from_slice(name);
+        blob.extend_from_slice(&0u64.to_le_bytes());
+        blob.extend_from_slice(&1u64.to_le_bytes());
+        let oversized = vec![0u8; 1024 * 1024];
+        blob.extend_from_slice(&zstd::encode_all(&oversized[..], 1).unwrap());
+
+        let err = blob_to_ram_dir(&blob).unwrap_err();
+        assert!(err.to_string().contains("zstd decompress"));
     }
 
     #[test]
