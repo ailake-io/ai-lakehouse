@@ -1,6 +1,6 @@
 plugins {
-    kotlin("jvm") version "1.9.23"
-    id("com.github.johnrengelman.shadow") version "8.1.1"
+    alias(ailakeLibs.plugins.kotlinJvm)
+    alias(ailakeLibs.plugins.shadow)
 }
 
 group = "io.ailake"
@@ -26,7 +26,7 @@ dependencies {
     implementation("org.slf4j:slf4j-api:2.0.9")
 
     // JNA — bundled in the plugin fat-jar
-    implementation("net.java.dev.jna:jna:5.14.0")
+    implementation(ailakeLibs.jna)
 
     // Jackson for JSON parsing of native results
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.15.2")

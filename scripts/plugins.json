@@ -1,0 +1,182 @@
+{
+  "plugins": [
+    {
+      "id": "spark",
+      "name": "Spark",
+      "directory": "spark-plugin",
+      "targets": [
+        {
+          "file": "spark-plugin/build.gradle.kts",
+          "pattern": "(?m)^version = \"[^\"]+\"$",
+          "replacement": "version = \"{version}\"",
+          "version_pattern": "(?m)^version = \"([^\"]+)\"$"
+        }
+      ],
+      "test": [
+        "gradle",
+        "-p",
+        "spark-plugin",
+        "test",
+        "--no-daemon",
+        "--no-configuration-cache"
+      ]
+    },
+    {
+      "id": "trino",
+      "name": "Trino",
+      "directory": "trino-plugin",
+      "targets": [
+        {
+          "file": "trino-plugin/build.gradle.kts",
+          "pattern": "(?m)^version = \"[^\"]+\"$",
+          "replacement": "version = \"{version}\"",
+          "version_pattern": "(?m)^version = \"([^\"]+)\"$"
+        }
+      ],
+      "test": [
+        "gradle",
+        "-p",
+        "trino-plugin",
+        "test",
+        "--no-daemon",
+        "--no-configuration-cache"
+      ]
+    },
+    {
+      "id": "flink",
+      "name": "Flink",
+      "directory": "ailake-flink",
+      "targets": [
+        {
+          "file": "ailake-flink/build.gradle.kts",
+          "pattern": "(?m)^version = \"[^\"]+\"$",
+          "replacement": "version = \"{version}\"",
+          "version_pattern": "(?m)^version = \"([^\"]+)\"$"
+        }
+      ],
+      "test": [
+        "gradle",
+        "-p",
+        "ailake-flink",
+        "test",
+        "--no-daemon",
+        "--no-configuration-cache"
+      ]
+    },
+    {
+      "id": "airflow",
+      "name": "Airflow provider",
+      "directory": "airflow-providers-ailake",
+      "targets": [
+        {
+          "file": "airflow-providers-ailake/pyproject.toml",
+          "pattern": "(?m)^version = \"[^\"]+\"$",
+          "replacement": "version = \"{version}\"",
+          "version_pattern": "(?m)^version = \"([^\"]+)\"$"
+        }
+      ],
+      "test": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests",
+        "-q"
+      ],
+      "test_directory": "airflow-providers-ailake"
+    },
+    {
+      "id": "airbyte",
+      "name": "Airbyte destination",
+      "directory": "airbyte-destination-ailake",
+      "targets": [
+        {
+          "file": "airbyte-destination-ailake/pyproject.toml",
+          "pattern": "(?m)^version = \"[^\"]+\"$",
+          "replacement": "version = \"{version}\"",
+          "version_pattern": "(?m)^version = \"([^\"]+)\"$"
+        },
+        {
+          "file": "airbyte-destination-ailake/Dockerfile",
+          "pattern": "(?m)^LABEL io\\.airbyte\\.version=\"[^\"]+\"$",
+          "replacement": "LABEL io.airbyte.version=\"{version}\"",
+          "version_pattern": "(?m)^LABEL io\\.airbyte\\.version=\"([^\"]+)\"$"
+        }
+      ],
+      "test": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests",
+        "-q"
+      ],
+      "test_directory": "airbyte-destination-ailake"
+    },
+    {
+      "id": "duckdb",
+      "name": "DuckDB extension",
+      "directory": "duckdb-ailake",
+      "targets": [
+        {
+          "file": "duckdb-ailake/CMakeLists.txt",
+          "pattern": "(?m)^project\\(duckdb_ailake VERSION [^ )]+",
+          "replacement": "project(duckdb_ailake VERSION {version}",
+          "version_pattern": "(?m)^project\\(duckdb_ailake VERSION ([^ )]+)"
+        }
+      ],
+      "test": [
+        "python3",
+        "-m",
+        "pytest",
+        "test",
+        "-q"
+      ],
+      "test_directory": "duckdb-ailake"
+    },
+    {
+      "id": "cpp",
+      "name": "C++ SDK",
+      "directory": "ailake-cpp",
+      "targets": [
+        {
+          "file": "ailake-cpp/CMakeLists.txt",
+          "pattern": "(?m)^project\\(ailake-cpp VERSION [^ )]+",
+          "replacement": "project(ailake-cpp VERSION {version}",
+          "version_pattern": "(?m)^project\\(ailake-cpp VERSION ([^ )]+)"
+        }
+      ],
+      "test": [
+        "ctest",
+        "--test-dir",
+        "${BUILD_DIR}",
+        "--output-on-failure"
+      ],
+      "configure": [
+        "cmake",
+        "-S",
+        "ailake-cpp",
+        "-B",
+        "${BUILD_DIR}"
+      ],
+      "build": [
+        "cmake",
+        "--build",
+        "${BUILD_DIR}",
+        "--parallel"
+      ]
+    },
+    {
+      "id": "go",
+      "name": "Go SDK",
+      "directory": "ailake-go",
+      "targets": [],
+      "test": [
+        "go",
+        "test",
+        "./...",
+        "-timeout",
+        "120s"
+      ],
+      "test_directory": "ailake-go"
+    }
+  ]
+}

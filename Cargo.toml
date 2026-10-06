@@ -62,6 +62,7 @@ libloading  = "0.8"
 # Compression
 lz4_flex    = "0.11"
 zstd        = "0.13"
+sha2        = "0.10"
 
 
 # Bindings
@@ -88,7 +89,7 @@ lto           = "thin"
 codegen-units = 1
 opt-level     = 3
 strip         = "symbols"
-panic         = "abort"
+panic         = "unwind"
 
 [profile.bench]
 inherits    = "release"

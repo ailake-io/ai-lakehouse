@@ -8,7 +8,7 @@ COPY airbyte_destination_ailake/ ./airbyte_destination_ailake/
 
 RUN pip install --no-cache-dir ".[openai,cohere]"
 
-LABEL io.airbyte.version="0.0.1"
+LABEL io.airbyte.version="0.1.12"
 LABEL io.airbyte.name="destination-ailake"
 
 ENTRYPOINT ["airbyte-destination-ailake"]

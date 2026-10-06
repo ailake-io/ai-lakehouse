@@ -23,6 +23,9 @@
 | Compat (Python/DuckDB) | `tests/compat/` | `ci.yml` — every PR | PyArrow, DuckDB, PyIceberg, ailake-py SDK |
 | Compat (Spark/Trino/JVM) | `tests/compat/` + Gradle | `compat-heavy.yml` — push to main + weekly | Spark+Iceberg, Trino+REST, Flink/Spark/Trino JVM plugins |
 
+Plugin version targets, shared JVM dependency pins, and maintenance commands are
+documented in [`PLUGIN_MAINTENANCE.md`](PLUGIN_MAINTENANCE.md).
+
 ---
 
 ## JVM plugin tests (Kotlin/Scala) — the "native lib absent" trap

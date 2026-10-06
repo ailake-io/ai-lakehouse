@@ -15,6 +15,7 @@ use ailake_core::{AilakeError, AilakeResult};
 use ailake_store::Store;
 use async_trait::async_trait;
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 #[cfg(feature = "redis")]
@@ -320,6 +321,10 @@ impl RateLimiter {
 
         let mut state = self.local.lock().await;
         let now = Instant::now();
+        // A caller can present a new token/IP on every request. Reap expired
+        // identities on the hot path so the local fallback stays bounded by
+        // identities seen during the active window rather than process uptime.
+        state.retain(|_, window| now.duration_since(window.started) < self.config.window);
         let mut denied = None;
         for (key, limit) in &dimensions {
             let window = state.entry(key.clone()).or_insert(LocalRateWindow {
@@ -362,16 +367,9 @@ impl RateLimiter {
 }
 
 fn digest(value: &str) -> String {
-    // Do not use `DefaultHasher` here: its per-process random seed would make
-    // the same token/IP produce different Redis keys in different instances.
-    // FNV-1a is sufficient for namespacing opaque identifiers and keeps the
-    // raw bearer token/IP out of Redis without adding a crypto dependency.
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in value.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
+    // A stable cryptographic digest gives every server the same Redis key and
+    // prevents chosen inputs from cheaply colliding with another identity.
+    format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
 #[cfg(feature = "redis")]
@@ -1042,6 +1040,8 @@ mod tests {
     fn rate_limit_digest_is_stable() {
         assert_eq!(digest("token-a"), digest("token-a"));
         assert_ne!(digest("token-a"), digest("token-b"));
+        assert_eq!(digest("token-a").len(), 64);
+        assert!(!digest("token-a").contains("token-a"));
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 plugins {
     scala
-    id("com.github.johnrengelman.shadow") version "8.1.1"
+    alias(ailakeLibs.plugins.shadow)
 }
 
 group = "io.ailake"
@@ -36,7 +36,7 @@ dependencies {
     compileOnly("org.apache.arrow:arrow-vector:$arrowVersion")
 
     // JNA — bundled in the plugin jar (Spark does not provide it)
-    implementation("net.java.dev.jna:jna:5.14.0")
+    implementation(ailakeLibs.jna)
 
     // Jackson — provided by Spark at runtime; compileOnly avoids bundling it.
     // Using direct import instead of Class.forName to fail fast if unavailable.

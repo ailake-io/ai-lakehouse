@@ -1,0 +1,11 @@
+[versions]
+kotlin = "1.9.23"
+shadow = "8.1.1"
+jna = "5.14.0"
+
+[libraries]
+jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
+
+[plugins]
+kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+shadow = { id = "com.github.johnrengelman.shadow", version.ref = "shadow" }
