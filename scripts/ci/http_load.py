@@ -39,11 +39,11 @@ def request(base_url: str, method: str, path: str, payload: dict | None = None) 
 
 def request_search_with_admission_retry(
     base_url: str, payload: dict, max_retries: int = 40
-) -> tuple[int, float, str, int]:
+) -> tuple[int, float, str, float, int]:
     started = time.perf_counter()
     retries = 0
     while True:
-        status, _, text = request(base_url, "POST", "/search", payload)
+        status, response_latency_ms, text = request(base_url, "POST", "/search", payload)
         if status != 429:
             break
         retries += 1
@@ -57,7 +57,7 @@ def request_search_with_admission_retry(
         jitter = (time.perf_counter_ns() % 7) / 1000.0
         time.sleep(delay + jitter)
     elapsed_ms = (time.perf_counter() - started) * 1000.0
-    return status, elapsed_ms, text, retries
+    return status, response_latency_ms, text, elapsed_ms, retries
 
 
 def vector(index: int, dim: int) -> list[float]:
@@ -170,18 +170,22 @@ def main() -> int:
     search_retry_lock = threading.Lock()
     search_admission_retries = [0]
 
-    def search_one(index: int) -> tuple[int, float, str]:
+    def search_one(index: int) -> tuple[int, float, str, float]:
         payload = {
             "query": vector(index, args.dim),
             "top_k": 5,
             "pruning_threshold": 1.0,
         }
-        status, elapsed_ms, text, retries = request_search_with_admission_retry(
-            base_url, payload
-        )
+        (
+            status,
+            response_latency_ms,
+            text,
+            end_to_end_latency_ms,
+            retries,
+        ) = request_search_with_admission_retry(base_url, payload)
         with search_retry_lock:
             search_admission_retries[0] += retries
-        return status, elapsed_ms, text
+        return status, response_latency_ms, text, end_to_end_latency_ms
 
     # A write returns after the snapshot is committed, but index publication
     # and catalog visibility can briefly lag behind that commit. Probe the
@@ -192,7 +196,7 @@ def main() -> int:
     ready_body = ""
     first_search_latency_ms = None
     while time.monotonic() < ready_deadline:
-        ready_status, ready_latency_ms, ready_body = search_one(0)
+        ready_status, ready_latency_ms, ready_body, _ = search_one(0)
         if ready_status == 200:
             first_search_latency_ms = ready_latency_ms
             break
@@ -228,6 +232,7 @@ def main() -> int:
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     search_errors = [result for result in searches if result[0] != 200]
     latencies = [result[1] for result in searches]
+    end_to_end_latencies = [result[3] for result in searches]
     p50 = percentile(latencies, 0.50)
     p95 = percentile(latencies, 0.95)
     p99 = percentile(latencies, 0.99)
@@ -247,11 +252,19 @@ def main() -> int:
         "search_admission_retries": search_admission_retries[0],
         "elapsed_ms": elapsed_ms,
         "qps": args.requests / max(elapsed_ms / 1000.0, 0.001),
+        # `latency_ms` measures the final HTTP attempt. The separate end-to-end
+        # metric includes client backoff while retrying server admission 429s.
         "latency_ms": {
             "p50": p50,
             "p95": p95,
             "p99": p99,
             "mean": statistics.mean(latencies),
+        },
+        "end_to_end_latency_ms": {
+            "p50": percentile(end_to_end_latencies, 0.50),
+            "p95": percentile(end_to_end_latencies, 0.95),
+            "p99": percentile(end_to_end_latencies, 0.99),
+            "mean": statistics.mean(end_to_end_latencies),
         },
     }
     if rss_samples:
