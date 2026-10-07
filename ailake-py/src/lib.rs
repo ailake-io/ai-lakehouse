@@ -1003,6 +1003,7 @@ fn search_with_data(
 /// Returns a `pyarrow.Table` serialized as Arrow IPC bytes. The Python wrapper
 /// deserializes it automatically.
 #[pyfunction]
+#[allow(clippy::too_many_arguments)]
 #[pyo3(name = "read_changes", signature = (path, start_snapshot=None, end_snapshot=None, pk_columns=None, coalesce_updates=false, catalog_opts=None, strict_deletes=true))]
 fn read_changes_py(
     py: Python<'_>,
