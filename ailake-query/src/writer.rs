@@ -466,9 +466,6 @@ impl TableWriter {
         // Store the file
         self.store.put(&file_path, file_bytes.clone()).await?;
 
-        // Compute centroid for catalog entry
-        let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
-
         // Read back the HNSW offsets from the written file
         let reader = ailake_file::AilakeFileReader::new(
             file_bytes,
@@ -477,6 +474,8 @@ impl TableWriter {
         );
         let header = reader.read_header()?;
         let ailk_start = reader.ailk_offset()?;
+        // Reuse the centroid already computed and serialized by AilakeFileWriter.
+        let centroid = reader.get_centroid()?;
         let hnsw_abs_offset = ailk_start + header.hnsw_offset;
         let hnsw_len = header.hnsw_len;
 
@@ -605,8 +604,6 @@ impl TableWriter {
 
         self.store.put(&file_path, file_bytes.clone()).await?;
 
-        let centroid = compute_centroid_and_radius(embeddings, self.policy.metric);
-
         let reader = ailake_file::AilakeFileReader::new(
             file_bytes,
             &self.policy.column_name,
@@ -614,6 +611,7 @@ impl TableWriter {
         );
         let header = reader.read_header()?;
         let ailk_start = reader.ailk_offset()?;
+        let centroid = reader.get_centroid()?;
         let index_abs_offset = ailk_start + header.hnsw_offset;
         let index_len = header.hnsw_len;
 
@@ -692,9 +690,6 @@ impl TableWriter {
         self.store.put(&file_path, file_bytes.clone()).await?;
 
         // Primary centroid for pruning
-        let primary_centroid =
-            compute_centroid_and_radius(columns[0].embeddings, primary_policy.metric);
-
         // Read primary AILK header for offsets
         let reader = ailake_file::AilakeFileReader::new(
             file_bytes.clone(),
@@ -702,6 +697,7 @@ impl TableWriter {
             primary_policy.dim,
         );
         let primary_ailk_start = reader.ailk_offset()?;
+        let primary_centroid = reader.get_centroid()?;
         let primary_header = {
             use ailake_file::HEADER_SIZE;
             let start = primary_ailk_start as usize;
@@ -724,7 +720,12 @@ impl TableWriter {
                     .map_err(|_| AilakeError::NotAnAilakeFile)?;
                 ailake_file::AilakeHeader::from_bytes(hdr_bytes)?
             };
-            let col_centroid = compute_centroid_and_radius(col.embeddings, col.policy.metric);
+            let col_reader = ailake_file::AilakeFileReader::new(
+                file_bytes.clone(),
+                &col.policy.column_name,
+                col.policy.dim,
+            );
+            let col_centroid = col_reader.get_centroid()?;
             extra.push(ExtraVectorIndex {
                 column: col.policy.column_name.clone(),
                 dim: col.policy.dim,

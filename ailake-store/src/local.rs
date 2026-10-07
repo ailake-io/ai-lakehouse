@@ -11,6 +11,8 @@ use tokio::sync::Mutex;
 
 use crate::store::Store;
 
+const MAX_LOCAL_RANGE_BYTES: u64 = 256 * 1024 * 1024;
+
 pub struct LocalStore {
     root: PathBuf,
     // Keep the OS lock handles alive until release_lock or process exit.
@@ -199,9 +201,27 @@ impl Store for LocalStore {
             )));
         }
         let mut file = tokio::fs::File::open(self.full_path(path)?).await?;
+        let file_len = file.metadata().await?.len();
+        if range.end > file_len {
+            return Err(AilakeError::InvalidArgument(format!(
+                "byte range {}..{} exceeds file size {file_len}",
+                range.start, range.end
+            )));
+        }
+        if range.end - range.start > MAX_LOCAL_RANGE_BYTES {
+            return Err(AilakeError::InvalidArgument(format!(
+                "byte range exceeds the {MAX_LOCAL_RANGE_BYTES} byte limit"
+            )));
+        }
+        let len = usize::try_from(range.end - range.start).map_err(|_| {
+            AilakeError::InvalidArgument("byte range is too large for this platform".into())
+        })?;
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(len).map_err(|_| {
+            AilakeError::InvalidArgument("byte range is too large to allocate".into())
+        })?;
+        buf.resize(len, 0);
         file.seek(std::io::SeekFrom::Start(range.start)).await?;
-        let len = (range.end - range.start) as usize;
-        let mut buf = vec![0u8; len];
         file.read_exact(&mut buf).await?;
         Ok(Bytes::from(buf))
     }
@@ -277,6 +297,19 @@ mod tests {
         store.put("test.bin", data).await.unwrap();
         let partial = store.get_range("test.bin", 4..8).await.unwrap();
         assert_eq!(partial.as_ref(), b"efgh");
+    }
+
+    #[tokio::test]
+    async fn get_range_rejects_ranges_past_eof_before_allocating() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStore::new(dir.path());
+        store
+            .put("small.bin", Bytes::from_static(b"abc"))
+            .await
+            .unwrap();
+
+        let error = store.get_range("small.bin", 0..u64::MAX).await.unwrap_err();
+        assert!(error.to_string().contains("exceeds file size"));
     }
 
     #[tokio::test]

@@ -414,8 +414,10 @@ curl -s -X POST http://localhost:7700/write -H 'Content-Type: application/json' 
   -d '{"texts":["new chunk a","new chunk b"],"embeddings":[[0.05,...],[0.06,...]]}'
 # {"snapshot_id":1783973839931261,"rows":2}
 ```
-Request bodies are capped at 32 MB (`MAX_BODY_BYTES`); `top_k` is capped at 10,000
-(`MAX_TOP_K`) regardless of what's requested.
+Request bodies are capped at 8 MB (`MAX_BODY_BYTES`) and at most 16 requests are
+admitted concurrently. Search vectors are limited to 65,536 dimensions; write
+batches are limited to 4,096 rows and 16,384 dimensions per embedding. `top_k` is
+capped at 10,000 (`MAX_TOP_K`) regardless of what's requested.
 
 When Redis/Valkey rate limiting is configured, requests fail closed if its
 storage is unavailable. `--rate-limit-fail-open` (or

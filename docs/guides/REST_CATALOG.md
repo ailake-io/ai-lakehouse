@@ -21,6 +21,15 @@ but for a local-filesystem `Store` it should point at the same physical director
 `Store` writes to, or reads will fail to find the files the catalog thinks exist
 there (see "Known limitations" below).
 
+REST requests use a 30-second total timeout by default. JSON response bodies are
+limited to 64 MiB and error details are truncated to 8 KiB. Rust callers can use
+`RestCatalog::with_request_timeout(config, store, timeout)` to choose another
+per-request timeout; values below 1 ms are raised to 1 ms.
+When authentication is configured, remote catalog and OAuth token endpoints must
+use HTTPS. Plain HTTP is allowed for loopback development endpoints such as
+`localhost`. Namespace and table identifiers are encoded as individual URL path
+segments.
+
 ## Auth strategies
 
 ```rust
