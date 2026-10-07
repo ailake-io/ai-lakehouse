@@ -87,7 +87,7 @@ validated at the top of all 5 entry points, before any allocation-sizing math
 | **T**ampering: malicious metadata from server | Medium | OCC (optimistic concurrency control) — 5 retries on `CommitFailedException`. Schema comparison before `AddSchema` |
 | **R**epudiation: no audit | Low | Iceberg snapshot history provides immutable audit trail |
 | **I**nformation disclosure: token in env/logs | Low | `AILAKE_REST_TOKEN`, `AILAKE_REST_OAUTH_CLIENT_SECRET` in env. CLI flags visible in `ps aux`. No masking |
-| **D**enial of service: slow catalog responses | Low | No timeout configuration exposed; Tokio runtime handles timeouts at OS level |
+| **D**enial of service: slow or oversized catalog responses | Low | Each REST request has a 30-second total timeout; JSON responses are capped at 64 MiB and error details at 8 KiB |
 | **E**levation of privilege: OAuth2 token reuse | Low | Token refresh handled by client; scope limited by server |
 
 ### Known bugs (fixed in Phase 17)
@@ -100,6 +100,7 @@ validated at the top of all 5 entry points, before any allocation-sizing math
 ### Test coverage
 
 - 9 unit tests (URL construction, auth parsing, config building)
+- REST request timeout and response-size limits have regression tests.
 - 2 live tests (`#[ignore]` by default, require `apache/iceberg-rest-fixture` container)
 - Round-trip create→insert→commit→search verified via `ailake-py` against live container
 
@@ -208,10 +209,10 @@ contention) than Loom can provide.
 | Threat | Risk | Mitigation |
 |--------|------|------------|
 | **S**poofing: unauthorized HTTP access | Medium | Defaults to loopback; refuses non-loopback bind without `--auth-token`/`AILAKE_SERVE_TOKEN`. Bearer token required on all routes except public `/healthz` |
-| **T**ampering: oversized body | Low | `DefaultBodyLimit::max(32 MB)` |
+| **T**ampering: oversized body | Low | `DefaultBodyLimit::max(8 MB)`; search/write payload dimensions and write row count are bounded; authentication and the in-flight permit are checked before body extraction |
 | **R**epudiation: no access log | Low | Prometheus counters and request duration are exposed at `/metrics`; access-log correlation remains a deployment concern |
 | **I**nformation disclosure: error messages may reveal paths | Low | `ApiError` surfaces Rust error messages |
-| **D**enial of service: request flooding | Low | 32 MB body limit, 64 in-flight HTTP request cap, per-search fan-out cap of 32 files, process-wide estimated 512 MiB file-search budget weighted by manifest size, and optional Redis/Valkey quotas. Rate limiting fails closed by default when configured; `--rate-limit-fail-open` opts out |
+| **D**enial of service: request flooding | Low | 8 MB body limit, 16 requests admitted before body extraction, bounded vector dimensions and write rows, per-search fan-out cap of 32 files, process-wide estimated 512 MiB file-search budget weighted by manifest size, and optional Redis/Valkey quotas. Rate limiting fails closed by default when configured; `--rate-limit-fail-open` opts out |
 | **E**levation of privilege: N/A | — | — |
 
 ### Test coverage

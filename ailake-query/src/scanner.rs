@@ -316,6 +316,57 @@ pub async fn search(
     catalog: Arc<dyn CatalogProvider>,
     store: Arc<dyn Store>,
 ) -> AilakeResult<Vec<SearchResult>> {
+    search_inner(
+        table,
+        query,
+        config,
+        vector_column,
+        dim,
+        catalog,
+        store,
+        None,
+    )
+    .await
+}
+
+/// Search using table metadata already loaded by the caller. The HTTP server
+/// uses this after reading the current snapshot for query-cache validation, so
+/// a cache miss does not fetch the same table metadata a second time.
+#[allow(clippy::too_many_arguments)]
+pub async fn search_with_table_metadata(
+    table: &TableIdent,
+    query: &[f32],
+    config: SearchConfig,
+    vector_column: &str,
+    dim: u32,
+    catalog: Arc<dyn CatalogProvider>,
+    store: Arc<dyn Store>,
+    table_meta: TableMetadata,
+) -> AilakeResult<Vec<SearchResult>> {
+    search_inner(
+        table,
+        query,
+        config,
+        vector_column,
+        dim,
+        catalog,
+        store,
+        Some(table_meta),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn search_inner(
+    table: &TableIdent,
+    query: &[f32],
+    config: SearchConfig,
+    vector_column: &str,
+    dim: u32,
+    catalog: Arc<dyn CatalogProvider>,
+    store: Arc<dyn Store>,
+    table_meta: Option<TableMetadata>,
+) -> AilakeResult<Vec<SearchResult>> {
     if config.top_k > ailake_core::MAX_TOP_K {
         return Err(AilakeError::InvalidArgument(format!(
             "top_k {} exceeds maximum supported value ({})",
@@ -327,7 +378,10 @@ pub async fn search(
     let all_files = catalog.list_files(table, None).await?;
 
     // Determine vector metric from table metadata for correct distance computation
-    let table_meta = catalog.load_table(table).await?;
+    let table_meta = match table_meta {
+        Some(metadata) => metadata,
+        None => catalog.load_table(table).await?,
+    };
 
     // Validate query dim against the column's stored dim.
     // Primary column: use `ailake.vector-dim`. Secondary columns: use `ailake.dim-<col>`.
@@ -470,20 +524,12 @@ pub async fn search(
 
     // raw_candidates: (row_id, vec_dist, file_path, bm25_text) for hybrid re-ranking.
     // Only populated when use_hybrid = true; otherwise all_results is populated directly.
-    let mut raw_candidates: Vec<(RowId, f32, String, String)> = Vec::new();
-    let mut all_results: Vec<SearchResult> = Vec::new();
-
     // Observability for the flat-scan fallback below: `deferred` counts files still
     // being indexed by our own deferred-write path (expected, transient). `unexpected`
     // counts files with no AI-Lake index that are NOT in that state — most likely
     // rewritten by a generic Iceberg engine (Spark/Trino OPTIMIZE, DuckDB) with no
     // knowledge of AI-Lake. Those files still return correct results (flat scan is
     // exact), just O(N) instead of O(log N), and silently forever unless recompacted.
-    let mut flat_scan_deferred = 0usize;
-    let mut flat_scan_unexpected = 0usize;
-    let mut flat_scan_rows = 0u64;
-    let mut flat_scan_elapsed_micros = 0u64;
-
     // Fetch + search each surviving file concurrently instead of one at a time —
     // the dominant cost per file is a network round-trip (`store.get`), so this
     // overlaps their latencies instead of serializing them. `try_join_all` runs
@@ -496,50 +542,66 @@ pub async fn search(
     let shared_config = Arc::new(config);
     let shared_deletes = Arc::new(eq_del_filter);
     let vector_column = vector_column.to_owned();
-    let outcomes: Vec<FileSearchOutcome> =
-        futures::stream::iter(surviving_files.iter().cloned().map(|file_entry| {
-            let query = Arc::clone(&shared_query);
-            let table_meta = Arc::clone(&shared_table_meta);
-            let config = Arc::clone(&shared_config);
-            let store = Arc::clone(&store);
-            let eq_del_filter = Arc::clone(&shared_deletes);
-            let vector_column = vector_column.clone();
-            let process_limit = process_file_search_limit();
-            async move {
-                let _permit =
-                    acquire_file_search_budget(process_limit, file_entry.file_size_bytes).await?;
-                search_one_file(
-                    &file_entry,
-                    &query,
-                    candidate_k,
-                    metric,
-                    &table_meta,
-                    &config,
-                    &vector_column,
-                    dim,
-                    &store,
-                    &eq_del_filter,
-                    use_hybrid,
-                )
-                .await
-            }
-        }))
-        .buffered(MAX_CONCURRENT_FILE_SEARCHES)
-        .try_collect()
-        .await?;
-
-    for outcome in outcomes {
-        match outcome.flat_scan {
-            Some(FlatScanKind::Deferred) => flat_scan_deferred += 1,
-            Some(FlatScanKind::Unexpected) => flat_scan_unexpected += 1,
-            None => {}
+    let aggregation_top_k = shared_config.top_k;
+    let (
+        flat_scan_deferred,
+        flat_scan_unexpected,
+        flat_scan_rows,
+        flat_scan_elapsed_micros,
+        mut all_results,
+        raw_candidates,
+    ) = futures::stream::iter(surviving_files.iter().cloned().map(|file_entry| {
+        let query = Arc::clone(&shared_query);
+        let table_meta = Arc::clone(&shared_table_meta);
+        let config = Arc::clone(&shared_config);
+        let store = Arc::clone(&store);
+        let eq_del_filter = Arc::clone(&shared_deletes);
+        let vector_column = vector_column.clone();
+        let process_limit = process_file_search_limit();
+        async move {
+            let _permit =
+                acquire_file_search_budget(process_limit, file_entry.file_size_bytes).await?;
+            search_one_file(
+                &file_entry,
+                &query,
+                candidate_k,
+                metric,
+                &table_meta,
+                &config,
+                &vector_column,
+                dim,
+                &store,
+                &eq_del_filter,
+                use_hybrid,
+            )
+            .await
         }
-        flat_scan_rows = flat_scan_rows.saturating_add(outcome.flat_scan_rows);
-        flat_scan_elapsed_micros =
-            flat_scan_elapsed_micros.saturating_add(outcome.flat_scan_elapsed_micros);
-        all_results.extend(outcome.results);
-        raw_candidates.extend(outcome.candidates);
-    }
+    }))
+    .buffered(MAX_CONCURRENT_FILE_SEARCHES)
+    .try_fold(
+        (0usize, 0usize, 0u64, 0u64, Vec::new(), Vec::new()),
+        |(mut deferred, mut unexpected, mut rows, mut elapsed, mut results, mut candidates),
+         outcome| async move {
+            match outcome.flat_scan {
+                Some(FlatScanKind::Deferred) => deferred += 1,
+                Some(FlatScanKind::Unexpected) => unexpected += 1,
+                None => {}
+            }
+            rows = rows.saturating_add(outcome.flat_scan_rows);
+            elapsed = elapsed.saturating_add(outcome.flat_scan_elapsed_micros);
+            results.extend(outcome.results);
+            candidates.extend(outcome.candidates);
+            // Non-hybrid ranking is already final per row, so discard losers
+            // incrementally instead of retaining candidate_k for every file.
+            // Hybrid ranking needs its global score range/ranks and keeps the
+            // full candidate pool until fusion is complete.
+            if !use_hybrid {
+                select_search_top_k(&mut results, aggregation_top_k);
+            }
+            Ok((deferred, unexpected, rows, elapsed, results, candidates))
+        },
+    )
+    .await?;
 
     FLAT_SCAN_DEFERRED_FILES.fetch_add(flat_scan_deferred as u64, Ordering::Relaxed);
     FLAT_SCAN_UNEXPECTED_FILES.fetch_add(flat_scan_unexpected as u64, Ordering::Relaxed);
@@ -2287,7 +2349,8 @@ mod tests {
             strict_deletes: false,
         };
 
-        let results = search(
+        let table_meta = catalog.load_table(&table).await.unwrap();
+        let results = search_with_table_metadata(
             &table,
             &query,
             config,
@@ -2295,6 +2358,7 @@ mod tests {
             dim as u32,
             catalog,
             store,
+            table_meta,
         )
         .await
         .unwrap();

@@ -43,8 +43,9 @@ pub use memory_decay::MemoryDecayJob;
 pub use migration::{EmbedFn, MigrationJob, MigrationProgress, MigrationStrategy, ProgressFn};
 pub use pruner::{BloomPruner, VectorPruner};
 pub use scanner::{
-    fetch_rows, search, search_multimodal, search_text, search_text_with_options, FusionMethod,
-    ModalQuery, ScoreFn, SearchConfig, SearchResult, SearchSession,
+    fetch_rows, search, search_multimodal, search_text, search_text_with_options,
+    search_with_table_metadata, FusionMethod, ModalQuery, ScoreFn, SearchConfig, SearchResult,
+    SearchSession,
 };
 pub use schema_filler::SchemaFiller;
 pub use writer::resume_index_jobs;

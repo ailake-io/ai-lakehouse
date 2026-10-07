@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 use ailake_core::{AilakeError, AilakeResult};
 use ailake_secrets::SecretProvider;
 use async_trait::async_trait;
+use bytes::{Bytes, BytesMut};
 use secrecy::{ExposeSecret, SecretString};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -30,6 +32,31 @@ use crate::provider::{
 };
 use crate::schema_evolution::SchemaEvolution;
 use ailake_store::Store;
+
+const DEFAULT_REST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_REST_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_REST_ERROR_BODY_BYTES: usize = 8 * 1024;
+const MAX_OAUTH_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
+
+fn token_expiry(expires_in: Option<u64>) -> Instant {
+    let ttl = expires_in.unwrap_or(3600).min(MAX_OAUTH_TOKEN_TTL_SECS);
+    Instant::now()
+        .checked_add(Duration::from_secs(ttl))
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(MAX_OAUTH_TOKEN_TTL_SECS))
+}
+
+fn encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
 
 // ── Public configuration types ───────────────────────────────────────────────
 
@@ -174,6 +201,7 @@ struct CachedToken {
 pub struct RestCatalog {
     config: RestCatalogConfig,
     client: reqwest::Client,
+    request_timeout: Duration,
     token_cache: Mutex<Option<CachedToken>>,
     /// Store backend used to write/read manifest JSON files.
     store: Arc<dyn Store>,
@@ -181,9 +209,20 @@ pub struct RestCatalog {
 
 impl RestCatalog {
     pub fn new(config: RestCatalogConfig, store: Arc<dyn Store>) -> Self {
+        Self::with_request_timeout(config, store, DEFAULT_REST_REQUEST_TIMEOUT)
+    }
+
+    /// Construct a REST catalog with an explicit total timeout for each HTTP
+    /// request, including OAuth token exchanges.
+    pub fn with_request_timeout(
+        config: RestCatalogConfig,
+        store: Arc<dyn Store>,
+        request_timeout: Duration,
+    ) -> Self {
         Self {
             config,
             client: reqwest::Client::new(),
+            request_timeout: request_timeout.max(Duration::from_millis(1)),
             token_cache: Mutex::new(None),
             store,
         }
@@ -194,13 +233,17 @@ impl RestCatalog {
     fn base_url(&self) -> String {
         let uri = self.config.uri.trim_end_matches('/');
         match &self.config.prefix {
-            Some(p) if !p.is_empty() => format!("{uri}/v1/{p}"),
+            Some(p) if !p.is_empty() => format!("{uri}/v1/{}", encode_path_segment(p)),
             _ => format!("{uri}/v1"),
         }
     }
 
     fn namespace_tables_url(&self, ns: &str) -> String {
-        format!("{}/namespaces/{}/tables", self.base_url(), ns)
+        format!(
+            "{}/namespaces/{}/tables",
+            self.base_url(),
+            encode_path_segment(ns)
+        )
     }
 
     fn namespaces_url(&self) -> String {
@@ -211,9 +254,30 @@ impl RestCatalog {
         format!(
             "{}/namespaces/{}/tables/{}",
             self.base_url(),
-            table.namespace,
-            table.name
+            encode_path_segment(&table.namespace),
+            encode_path_segment(&table.name)
         )
+    }
+
+    fn ensure_secure_auth_url(&self, endpoint: &str) -> AilakeResult<()> {
+        if matches!(&self.config.auth, RestCatalogAuth::None) {
+            return Ok(());
+        }
+        let parsed = reqwest::Url::parse(endpoint).map_err(|error| {
+            AilakeError::InvalidArgument(format!("invalid catalog URL: {error}"))
+        })?;
+        let loopback = parsed.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if parsed.scheme() != "https" && !loopback {
+            return Err(AilakeError::InvalidArgument(
+                "catalog authentication requires HTTPS for non-loopback URLs".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn table_storage_root(&self, table: &TableIdent) -> String {
@@ -243,6 +307,7 @@ impl RestCatalog {
                 client_secret,
                 scope,
             } => {
+                self.ensure_secure_auth_url(token_endpoint)?;
                 {
                     let cache = self.token_cache.lock().await;
                     if let Some(cached) = &*cache {
@@ -268,6 +333,7 @@ impl RestCatalog {
                 let resp = self
                     .client
                     .post(token_endpoint)
+                    .timeout(self.request_timeout)
                     .form(&params)
                     .send()
                     .await
@@ -278,14 +344,11 @@ impl RestCatalog {
                         resp.status()
                     )));
                 }
-                let token_resp: OAuthTokenResponse = resp
-                    .json()
-                    .await
-                    .map_err(|e| AilakeError::Catalog(format!("OAuth2 token parse: {e}")))?;
+                let token_resp: OAuthTokenResponse =
+                    Self::parse_json(resp, "OAuth2 token response").await?;
                 let cached = CachedToken {
                     value: SecretString::from(token_resp.access_token),
-                    expires_at: Instant::now()
-                        + Duration::from_secs(token_resp.expires_in.unwrap_or(3600)),
+                    expires_at: token_expiry(token_resp.expires_in),
                 };
                 let token = cached.value.clone();
                 *self.token_cache.lock().await = Some(cached);
@@ -297,6 +360,7 @@ impl RestCatalog {
                 client_secret,
                 scope,
             } => {
+                self.ensure_secure_auth_url(token_endpoint)?;
                 {
                     let cache = self.token_cache.lock().await;
                     if let Some(cached) = &*cache {
@@ -320,6 +384,7 @@ impl RestCatalog {
                 let resp = self
                     .client
                     .post(token_endpoint)
+                    .timeout(self.request_timeout)
                     .form(&params)
                     .send()
                     .await
@@ -332,15 +397,12 @@ impl RestCatalog {
                     )));
                 }
 
-                let token_resp: OAuthTokenResponse = resp
-                    .json()
-                    .await
-                    .map_err(|e| AilakeError::Catalog(format!("OAuth2 token parse: {e}")))?;
+                let token_resp: OAuthTokenResponse =
+                    Self::parse_json(resp, "OAuth2 token response").await?;
 
-                let ttl = token_resp.expires_in.unwrap_or(3600);
                 let cached = CachedToken {
                     value: SecretString::from(token_resp.access_token),
-                    expires_at: Instant::now() + Duration::from_secs(ttl),
+                    expires_at: token_expiry(token_resp.expires_in),
                 };
                 let token = cached.value.clone();
                 *self.token_cache.lock().await = Some(cached);
@@ -352,7 +414,8 @@ impl RestCatalog {
     // ── HTTP helpers ─────────────────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> AilakeResult<reqwest::Response> {
-        let mut req = self.client.get(url);
+        self.ensure_secure_auth_url(url)?;
+        let mut req = self.client.get(url).timeout(self.request_timeout);
         if let Some(token) = self.get_token().await? {
             req = req.bearer_auth(token.expose_secret());
         }
@@ -362,7 +425,12 @@ impl RestCatalog {
     }
 
     async fn post<T: Serialize>(&self, url: &str, body: &T) -> AilakeResult<reqwest::Response> {
-        let mut req = self.client.post(url).json(body);
+        self.ensure_secure_auth_url(url)?;
+        let mut req = self
+            .client
+            .post(url)
+            .timeout(self.request_timeout)
+            .json(body);
         if let Some(token) = self.get_token().await? {
             req = req.bearer_auth(token.expose_secret());
         }
@@ -372,7 +440,8 @@ impl RestCatalog {
     }
 
     async fn delete(&self, url: &str) -> AilakeResult<reqwest::Response> {
-        let mut req = self.client.delete(url);
+        self.ensure_secure_auth_url(url)?;
+        let mut req = self.client.delete(url).timeout(self.request_timeout);
         if let Some(token) = self.get_token().await? {
             req = req.bearer_auth(token.expose_secret());
         }
@@ -381,12 +450,69 @@ impl RestCatalog {
             .map_err(|e| AilakeError::Store(e.to_string()))
     }
 
+    async fn parse_json<T: DeserializeOwned>(
+        resp: reqwest::Response,
+        ctx: &str,
+    ) -> AilakeResult<T> {
+        let body = Self::read_limited_body(resp, MAX_REST_RESPONSE_BYTES, ctx).await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| AilakeError::Catalog(format!("{ctx} parse: {error}")))
+    }
+
+    async fn read_limited_body(
+        mut resp: reqwest::Response,
+        max_bytes: usize,
+        ctx: &str,
+    ) -> AilakeResult<Bytes> {
+        if resp
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(AilakeError::Catalog(format!(
+                "{ctx}: response exceeds {max_bytes} byte limit"
+            )));
+        }
+
+        let mut body = BytesMut::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|error| AilakeError::Catalog(format!("{ctx} body read: {error}")))?
+        {
+            if body.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(AilakeError::Catalog(format!(
+                    "{ctx}: response exceeds {max_bytes} byte limit"
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body.freeze())
+    }
+
+    async fn read_error_body(mut resp: reqwest::Response) -> String {
+        let mut body = BytesMut::new();
+        let mut truncated = false;
+        while let Ok(Some(chunk)) = resp.chunk().await {
+            let remaining = MAX_REST_ERROR_BODY_BYTES.saturating_sub(body.len());
+            body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            if chunk.len() > remaining || body.len() == MAX_REST_ERROR_BODY_BYTES {
+                truncated = true;
+                break;
+            }
+        }
+        let mut text = String::from_utf8_lossy(&body).into_owned();
+        if truncated {
+            text.push_str("… [truncated]");
+        }
+        text
+    }
+
     async fn require_ok(resp: reqwest::Response, ctx: &str) -> AilakeResult<reqwest::Response> {
         if resp.status().is_success() {
             return Ok(resp);
         }
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = Self::read_error_body(resp).await;
         Err(AilakeError::Catalog(format!(
             "{ctx}: HTTP {status}: {body}"
         )))
@@ -412,7 +538,7 @@ impl RestCatalog {
             return Ok(());
         }
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = Self::read_error_body(resp).await;
         Err(AilakeError::Catalog(format!(
             "ensure_namespace('{ns}'): HTTP {status}: {body}"
         )))
@@ -422,10 +548,7 @@ impl RestCatalog {
     async fn load_metadata(&self, table: &TableIdent) -> AilakeResult<IcebergMetadata> {
         let resp = self.get(&self.table_url(table)).await?;
         let resp = Self::require_ok(resp, "load_metadata").await?;
-        let result: LoadTableResult = resp
-            .json()
-            .await
-            .map_err(|e| AilakeError::Catalog(format!("load_metadata parse: {e}")))?;
+        let result: LoadTableResult = Self::parse_json(resp, "load_metadata").await?;
         Ok(result.metadata)
     }
 }
@@ -507,10 +630,7 @@ impl CatalogProvider for RestCatalog {
     async fn load_table(&self, name: &TableIdent) -> AilakeResult<TableMetadata> {
         let resp = self.get(&self.table_url(name)).await?;
         let resp = Self::require_ok(resp, "load_table").await?;
-        let result: LoadTableResult = resp
-            .json()
-            .await
-            .map_err(|e| AilakeError::Catalog(format!("load_table parse: {e}")))?;
+        let result: LoadTableResult = Self::parse_json(resp, "load_table").await?;
         Ok(result.metadata.to_table_metadata())
     }
 
@@ -534,10 +654,7 @@ impl CatalogProvider for RestCatalog {
         for attempt in 0..MAX_RETRIES {
             let resp = self.get(&self.table_url(table)).await?;
             let resp = Self::require_ok(resp, "commit_snapshot (read current state)").await?;
-            let result: LoadTableResult = resp
-                .json()
-                .await
-                .map_err(|e| AilakeError::Catalog(format!("commit_snapshot parse: {e}")))?;
+            let result: LoadTableResult = Self::parse_json(resp, "commit_snapshot").await?;
             let meta = result.metadata;
             // Iceberg's on-disk sentinel for "no current snapshot" is the literal
             // integer -1 (`current-snapshot-id: -1` in metadata.json for a
@@ -717,7 +834,7 @@ impl CatalogProvider for RestCatalog {
                     tokio::time::sleep(std::time::Duration::from_millis(50 << attempt)).await;
                     continue;
                 }
-                let body = resp.text().await.unwrap_or_default();
+                let body = Self::read_error_body(resp).await;
                 return Err(AilakeError::Catalog(format!(
                     "commit_snapshot: {MAX_RETRIES} retries exhausted (concurrent modification): {body}"
                 )));
@@ -753,10 +870,7 @@ impl CatalogProvider for RestCatalog {
     ) -> AilakeResult<i32> {
         let resp = self.get(&self.table_url(table)).await?;
         let resp = Self::require_ok(resp, "evolve_schema (read current state)").await?;
-        let result: LoadTableResult = resp
-            .json()
-            .await
-            .map_err(|e| AilakeError::Catalog(format!("evolve_schema parse: {e}")))?;
+        let result: LoadTableResult = Self::parse_json(resp, "evolve_schema").await?;
         let meta = &result.metadata;
 
         let current_schema = meta
@@ -1022,6 +1136,63 @@ mod tests {
         assert_eq!(c.base_url(), "https://catalog.example.com/v1/main");
     }
 
+    #[tokio::test]
+    async fn response_body_limit_rejects_oversized_catalog_response() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 32\r\nConnection: close\r\n\r\n01234567890123456789012345678901",
+                )
+                .await
+                .unwrap();
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        let error = RestCatalog::read_limited_body(response, 16, "test response")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("16 byte limit"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rest_requests_use_the_configured_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        });
+
+        let store = Arc::new(LocalStore::new("/tmp"));
+        let rest = RestCatalog::with_request_timeout(
+            RestCatalogConfig {
+                uri: format!("http://{address}"),
+                prefix: None,
+                warehouse: None,
+                auth: RestCatalogAuth::None,
+            },
+            store,
+            Duration::from_millis(50),
+        );
+        let started = Instant::now();
+        let error = rest.get(&format!("http://{address}/")).await.unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "request should time out promptly, got: {error}"
+        );
+        server.abort();
+    }
+
     #[test]
     fn table_url_format() {
         let c = catalog(Some("main"));
@@ -1039,6 +1210,38 @@ mod tests {
             c.namespace_tables_url("prod"),
             "https://catalog.example.com/v1/namespaces/prod/tables"
         );
+    }
+
+    #[test]
+    fn rest_path_components_are_percent_encoded() {
+        let c = catalog(Some("branch/main"));
+        let tbl = TableIdent::new("space name", "docs?x=1");
+        assert_eq!(
+            c.table_url(&tbl),
+            "https://catalog.example.com/v1/branch%2Fmain/namespaces/space%20name/tables/docs%3Fx%3D1"
+        );
+    }
+
+    #[test]
+    fn oauth_expiration_is_bounded_for_untrusted_ttl() {
+        let expiration = token_expiry(Some(u64::MAX));
+        assert!(expiration <= Instant::now() + Duration::from_secs(MAX_OAUTH_TOKEN_TTL_SECS + 1));
+        assert!(expiration > Instant::now());
+    }
+
+    #[test]
+    fn authenticated_remote_catalog_requires_https() {
+        let mut c = catalog(None);
+        c.config.auth = RestCatalogAuth::Bearer(SecretString::from("test-token"));
+        assert!(c
+            .ensure_secure_auth_url("http://catalog.example.com/v1")
+            .is_err());
+        assert!(c
+            .ensure_secure_auth_url("https://catalog.example.com/v1")
+            .is_ok());
+        assert!(c
+            .ensure_secure_auth_url("http://localhost:19120/v1")
+            .is_ok());
     }
 
     #[test]
