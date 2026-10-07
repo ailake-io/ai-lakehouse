@@ -57,7 +57,10 @@ These checks do not yet provide a full production performance profile:
 
 - The recall/p95 case uses one local table at 10,000 rows and 128 dimensions.
   It does not measure large multi-file/cloud scans, cold-cache behavior, peak
-  memory, or concurrent searches across many shards.
+  memory across a large data set, or concurrent searches across many large
+  shards. The HTTP smoke now records server RSS while exercising 64 concurrent
+  searches over 32 small files, but it is not a substitute for a large-data
+  memory profile.
 - The distance benchmark measures kernels. Pull request runs compare with the
   base branch on the same runner and use a 25% tolerance; push, scheduled and
   manual runs validate the output schema without a baseline comparison.
@@ -96,8 +99,10 @@ python3 scripts/ci/http_load.py \
 ```
 
 The harness performs concurrent `/write` requests, then concurrent `/search`
-requests, and records QPS, mean, p50, p95 and p99. It fails on non-2xx
-responses or when p95 exceeds `--max-p95-ms`.
+requests, and records QPS, mean, p50, p95 and p99. `--write-rounds` increases
+the number of files before search. When `--server-pid` is provided, it samples
+the server RSS during the run and records start, peak and end values in the JSON
+artifact. It fails on non-2xx responses or when p95 exceeds `--max-p95-ms`.
 
 The multi-process fencing check confirms that a second `ailake serve` instance
 cannot acquire the same table lease:

@@ -104,7 +104,12 @@ jobs:
             sleep 0.5
           done
           curl -fsS http://127.0.0.1:7700/healthz >/dev/null
-          python3 scripts/ci/http_load.py --base-url http://127.0.0.1:7700 --output perf/http-load.json
+          python3 scripts/ci/http_load.py \
+            --base-url http://127.0.0.1:7700 \
+            --requests 128 --concurrency 64 \
+            --write-workers 8 --write-rounds 4 \
+            --server-pid "$(cat perf/serve.pid)" \
+            --output perf/http-load.json
           kill "$(cat perf/serve.pid)"
       - name: Verify multi-process serve fencing
         run: bash scripts/ci/check_multi_process_lock.sh target/release/ailake /tmp/ailake-performance default.load

@@ -42,6 +42,18 @@ fn file_search_budget_units(file_size_bytes: u64) -> u32 {
         .min(u64::from(PROCESS_FILE_SEARCH_BUDGET_UNITS)) as u32
 }
 
+async fn acquire_file_search_budget(
+    limit: Arc<Semaphore>,
+    file_size_bytes: u64,
+) -> AilakeResult<tokio::sync::OwnedSemaphorePermit> {
+    limit
+        .acquire_many_owned(file_search_budget_units(file_size_bytes))
+        .await
+        .map_err(|_| {
+            AilakeError::InvalidArgument("process-wide file-search limit is closed".into())
+        })
+}
+
 async fn load_bm25_stats(store: &dyn Store, path: &str) -> crate::bm25::IdfStats {
     let size = match store.file_size(path).await {
         Ok(size) => size,
@@ -452,16 +464,9 @@ pub async fn search(
             let eq_del_filter = Arc::clone(&shared_deletes);
             let vector_column = vector_column.clone();
             let process_limit = process_file_search_limit();
-            let budget_units = file_search_budget_units(file_entry.file_size_bytes);
             async move {
-                let _permit = process_limit
-                    .acquire_many_owned(budget_units)
-                    .await
-                    .map_err(|_| {
-                        AilakeError::InvalidArgument(
-                            "process-wide file-search limit is closed".into(),
-                        )
-                    })?;
+                let _permit =
+                    acquire_file_search_budget(process_limit, file_entry.file_size_bytes).await?;
                 search_one_file(
                     &file_entry,
                     &query,
@@ -1919,6 +1924,37 @@ mod tests {
         assert_eq!(
             file_search_budget_units(u64::MAX),
             PROCESS_FILE_SEARCH_BUDGET_UNITS
+        );
+    }
+
+    #[tokio::test]
+    async fn large_file_search_reserves_the_shared_budget_until_completion() {
+        let budget = Arc::new(Semaphore::new(PROCESS_FILE_SEARCH_BUDGET_UNITS as usize));
+        let large_file_permit = acquire_file_search_budget(
+            Arc::clone(&budget),
+            FILE_SEARCH_BUDGET_QUANTUM_BYTES * u64::from(PROCESS_FILE_SEARCH_BUDGET_UNITS),
+        )
+        .await
+        .unwrap();
+        assert_eq!(budget.available_permits(), 0);
+
+        let small_budget = Arc::clone(&budget);
+        let pending = tokio::spawn(async move {
+            acquire_file_search_budget(small_budget, FILE_SEARCH_BUDGET_QUANTUM_BYTES).await
+        });
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished());
+
+        drop(large_file_permit);
+        let small_file_permit = pending.await.unwrap().unwrap();
+        assert_eq!(
+            budget.available_permits(),
+            PROCESS_FILE_SEARCH_BUDGET_UNITS as usize - 1
+        );
+        drop(small_file_permit);
+        assert_eq!(
+            budget.available_permits(),
+            PROCESS_FILE_SEARCH_BUDGET_UNITS as usize
         );
     }
 
