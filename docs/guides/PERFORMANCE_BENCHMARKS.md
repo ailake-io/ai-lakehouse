@@ -61,10 +61,11 @@ These checks do not yet provide a full production performance profile:
 - The distance benchmark measures kernels. Pull request runs compare with the
   base branch on the same runner and use a 25% tolerance; push, scheduled and
   manual runs validate the output schema without a baseline comparison.
-- A search limits concurrent file reads to 32, while HTTP serve accepts up to
-  64 requests concurrently. A process-wide semaphore now caps active file
-  searches at 128; this limit is fixed and not yet weighted by object size,
-  backend latency or memory pressure.
+- A search limits its file fan-out to 32, while HTTP serve accepts up to 64
+  requests concurrently. A process-wide semaphore now budgets file searches by
+  manifest size in 16 MiB units, up to an estimated 512 MiB in aggregate. The
+  budget is fixed and does not account for backend latency or actual decoded
+  memory; a single file larger than the budget runs alone.
 - Bounded top-K reduces intermediate result memory, but brute-force fallback
   remains O(rows × dimensions); it should remain a fallback for small or
   unindexed shards, with compaction/reindexing monitored operationally.

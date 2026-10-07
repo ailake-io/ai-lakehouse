@@ -211,7 +211,7 @@ contention) than Loom can provide.
 | **T**ampering: oversized body | Low | `DefaultBodyLimit::max(32 MB)` |
 | **R**epudiation: no access log | Low | Prometheus counters and request duration are exposed at `/metrics`; access-log correlation remains a deployment concern |
 | **I**nformation disclosure: error messages may reveal paths | Low | `ApiError` surfaces Rust error messages |
-| **D**enial of service: request flooding | Low | 32 MB body limit, 64 in-flight HTTP request cap, per-search fan-out cap of 32 files, process-wide file-search cap of 128, and optional Redis/Valkey quotas. Rate limiting fails closed by default when configured; `--rate-limit-fail-open` opts out |
+| **D**enial of service: request flooding | Low | 32 MB body limit, 64 in-flight HTTP request cap, per-search fan-out cap of 32 files, process-wide estimated 512 MiB file-search budget weighted by manifest size, and optional Redis/Valkey quotas. Rate limiting fails closed by default when configured; `--rate-limit-fail-open` opts out |
 | **E**levation of privilege: N/A | — | — |
 
 ### Test coverage

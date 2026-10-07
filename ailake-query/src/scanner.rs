@@ -22,14 +22,24 @@ use crate::pruner::{BloomPruner, VectorPruner};
 use crate::schema_filler::SchemaFiller;
 
 const MAX_CONCURRENT_FILE_SEARCHES: usize = 32;
-const MAX_PROCESS_FILE_SEARCHES: usize = 128;
+const FILE_SEARCH_BUDGET_QUANTUM_BYTES: u64 = 16 * 1024 * 1024;
+const PROCESS_FILE_SEARCH_BUDGET_UNITS: u32 = 32;
 static PROCESS_FILE_SEARCH_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 fn process_file_search_limit() -> Arc<Semaphore> {
     Arc::clone(
         PROCESS_FILE_SEARCH_LIMIT
-            .get_or_init(|| Arc::new(Semaphore::new(MAX_PROCESS_FILE_SEARCHES))),
+            .get_or_init(|| Arc::new(Semaphore::new(PROCESS_FILE_SEARCH_BUDGET_UNITS as usize))),
     )
+}
+
+fn file_search_budget_units(file_size_bytes: u64) -> u32 {
+    file_size_bytes
+        .saturating_add(FILE_SEARCH_BUDGET_QUANTUM_BYTES - 1)
+        .checked_div(FILE_SEARCH_BUDGET_QUANTUM_BYTES)
+        .unwrap_or(0)
+        .max(1)
+        .min(u64::from(PROCESS_FILE_SEARCH_BUDGET_UNITS)) as u32
 }
 
 async fn load_bm25_stats(store: &dyn Store, path: &str) -> crate::bm25::IdfStats {
@@ -425,9 +435,9 @@ pub async fn search(
     // the dominant cost per file is a network round-trip (`store.get`), so this
     // overlaps their latencies instead of serializing them. `try_join_all` runs
     // up to a fixed number concurrently on the current task (no OS-thread
-    // parallelism, no `tokio::spawn`). This overlaps store latency while
-    // bounding open requests and in-flight file/index buffers when pruning is
-    // disabled or a table has many surviving files.
+    // parallelism, no `tokio::spawn`). A process-wide weighted semaphore
+    // budgets in-flight work using manifest file size, while this per-query
+    // buffer keeps one broad query from flooding that shared budget.
     let shared_query: Arc<[f32]> = Arc::from(query);
     let shared_table_meta = Arc::new(table_meta);
     let shared_config = Arc::new(config);
@@ -442,10 +452,16 @@ pub async fn search(
             let eq_del_filter = Arc::clone(&shared_deletes);
             let vector_column = vector_column.clone();
             let process_limit = process_file_search_limit();
+            let budget_units = file_search_budget_units(file_entry.file_size_bytes);
             async move {
-                let _permit = process_limit.acquire_owned().await.map_err(|_| {
-                    AilakeError::InvalidArgument("process-wide file-search limit is closed".into())
-                })?;
+                let _permit = process_limit
+                    .acquire_many_owned(budget_units)
+                    .await
+                    .map_err(|_| {
+                        AilakeError::InvalidArgument(
+                            "process-wide file-search limit is closed".into(),
+                        )
+                    })?;
                 search_one_file(
                     &file_entry,
                     &query,
@@ -1881,6 +1897,29 @@ mod tests {
     #[test]
     fn search_defaults_to_fail_closed_delete_handling() {
         assert!(SearchConfig::default().strict_deletes);
+    }
+
+    #[test]
+    fn process_file_search_budget_scales_with_file_size() {
+        assert_eq!(file_search_budget_units(0), 1);
+        assert_eq!(
+            file_search_budget_units(FILE_SEARCH_BUDGET_QUANTUM_BYTES),
+            1
+        );
+        assert_eq!(
+            file_search_budget_units(FILE_SEARCH_BUDGET_QUANTUM_BYTES + 1),
+            2
+        );
+        assert_eq!(
+            file_search_budget_units(
+                FILE_SEARCH_BUDGET_QUANTUM_BYTES * u64::from(PROCESS_FILE_SEARCH_BUDGET_UNITS)
+            ),
+            PROCESS_FILE_SEARCH_BUDGET_UNITS
+        );
+        assert_eq!(
+            file_search_budget_units(u64::MAX),
+            PROCESS_FILE_SEARCH_BUDGET_UNITS
+        );
     }
 
     #[test]

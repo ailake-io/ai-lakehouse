@@ -420,8 +420,9 @@ Request bodies are capped at 32 MB (`MAX_BODY_BYTES`); `top_k` is capped at 10,0
 When Redis/Valkey rate limiting is configured, requests fail closed if its
 storage is unavailable. `--rate-limit-fail-open` (or
 `AILAKE_RATE_LIMIT_FAIL_OPEN=1`) explicitly opts out of that behavior. Search
-fan-out is capped at 32 files per request and 128 active file searches across
-the process.
+fan-out is capped at 32 files per request. Across the process, active file
+searches share an estimated 512 MiB budget, weighted by manifest file size in
+16 MiB units; an individual file larger than the budget runs alone.
 
 For production-style validation, run the real server with concurrent writers
 and searches using [`scripts/ci/http_load.py`](../../scripts/ci/http_load.py).
