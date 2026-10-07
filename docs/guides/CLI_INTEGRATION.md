@@ -170,7 +170,7 @@ ailake search docs.chunks --store ./lake --query "0.1,..." --top-k 2 --format js
 | `--query` / `--query-file` | comma-separated floats, or a path to a little-endian f32 binary file |
 | `--hybrid-text` + `--query`/`--query-file` | enables BM25+vector fusion; `--bm25-weight` (default `0.5`) controls the RRF balance |
 | `--pruning-threshold` | geometric pruning aggressiveness (0.0–1.0, lower = more files pruned; default `0.8`) |
-| `--top-k` | capped at `ailake_core::MAX_TOP_K` (100,000) — a value above that is rejected with an error rather than risking an unbounded-allocation crash (same limit shared by every binding — Python, Go, C++, and the JNI C-ABI boundary used by Spark/Trino/Flink) |
+| `--top-k` | capped at `ailake_core::MAX_TOP_K` (100,000) — a value above that is rejected with an error rather than risking an unbounded-allocation crash |
 
 The CLI's `search` is pointer-only (row_id/distance/file_path) — it does not fetch full
 row data (no-JOIN full-row fetch, `ailake_scan_json`, is exposed via the SDKs and the
@@ -386,12 +386,12 @@ crate or an SDK.
 ailake serve docs.chunks --store ./lake --port 7700
 ```
 ```
-ailake server listening on http://0.0.0.0:7700
-WARNING: no authentication — expose only on a trusted network or behind an authenticating proxy
+ailake server listening on http://127.0.0.1:7700
 ```
 
-> **Security**: no authentication. Localhost/VPC-internal/sidecar deployments only — put
-> an authenticating reverse proxy (nginx + mTLS, API gateway) in front for anything else.
+> **Security**: the server defaults to localhost. Binding to a non-loopback host
+> requires `--auth-token` (or `AILAKE_SERVE_TOKEN`). For public deployments, also
+> place it behind an authenticating reverse proxy or API gateway.
 
 | Endpoint | Method | Request body | Response |
 |---|---|---|---|
@@ -414,8 +414,17 @@ curl -s -X POST http://localhost:7700/write -H 'Content-Type: application/json' 
   -d '{"texts":["new chunk a","new chunk b"],"embeddings":[[0.05,...],[0.06,...]]}'
 # {"snapshot_id":1783973839931261,"rows":2}
 ```
-Request bodies are capped at 32 MB (`MAX_BODY_BYTES`); `top_k` is capped at 10,000
-(`MAX_TOP_K`) regardless of what's requested.
+Request bodies are capped at 8 MB (`MAX_BODY_BYTES`) and at most 16 requests are
+admitted concurrently. Search vectors are limited to 65,536 dimensions; write
+batches are limited to 4,096 rows and 16,384 dimensions per embedding. `top_k` is
+capped at 10,000 (`MAX_TOP_K`) regardless of what's requested.
+
+When Redis/Valkey rate limiting is configured, requests fail closed if its
+storage is unavailable. `--rate-limit-fail-open` (or
+`AILAKE_RATE_LIMIT_FAIL_OPEN=1`) explicitly opts out of that behavior. Search
+fan-out is capped at 32 files per request. Across the process, active file
+searches share an estimated 512 MiB budget, weighted by manifest file size in
+16 MiB units; an individual file larger than the budget runs alone.
 
 For production-style validation, run the real server with concurrent writers
 and searches using [`scripts/ci/http_load.py`](../../scripts/ci/http_load.py).

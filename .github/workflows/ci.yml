@@ -13,6 +13,18 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  plugin-registry:
+    name: plugin registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m unittest scripts.test_plugins
+      - run: python scripts/plugins.py check
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
@@ -70,6 +82,20 @@ jobs:
           fi
           # shellcheck disable=SC2086
           cargo test --workspace --lib --bins $EXCLUDE
+
+  local-store-platform:
+    name: local store locks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test filesystem paths and process locks
+        run: cargo test -p ailake-store -- --nocapture
 
   integration:
     name: integration

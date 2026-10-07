@@ -1,6 +1,6 @@
 plugins {
-    kotlin("jvm") version "1.9.23"
-    id("com.github.johnrengelman.shadow") version "8.1.1"
+    alias(ailakeLibs.plugins.kotlinJvm)
+    alias(ailakeLibs.plugins.shadow)
 }
 
 group = "io.ailake"
@@ -22,7 +22,7 @@ dependencies {
     compileOnly("org.apache.flink:flink-java:$flinkVersion")
 
     // JNA — bundled in the fat-jar (Flink does not provide it)
-    implementation("net.java.dev.jna:jna:5.14.0")
+    implementation(ailakeLibs.jna)
 
     // Jackson for JSON parsing of native results
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.16.1")

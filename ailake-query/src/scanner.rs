@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
-use futures::future::try_join_all;
+use futures::{StreamExt, TryStreamExt};
 use rayon::prelude::*;
 use tracing::{debug, error, warn};
 
@@ -15,10 +16,126 @@ use ailake_store::Store;
 use ailake_vec::exact_distance;
 use arrow_array::{Array, RecordBatch};
 use bytes::Bytes;
+use tokio::sync::Semaphore;
 
 use crate::equality_delete::EqualityDeleteFilter;
 use crate::pruner::{BloomPruner, VectorPruner};
 use crate::schema_filler::SchemaFiller;
+
+const MAX_CONCURRENT_FILE_SEARCHES: usize = 32;
+const FILE_SEARCH_BUDGET_QUANTUM_BYTES: u64 = 16 * 1024 * 1024;
+const PROCESS_FILE_SEARCH_BUDGET_UNITS: u32 = 32;
+static PROCESS_FILE_SEARCH_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static FLAT_SCAN_DEFERRED_FILES: AtomicU64 = AtomicU64::new(0);
+static FLAT_SCAN_UNEXPECTED_FILES: AtomicU64 = AtomicU64::new(0);
+static FLAT_SCAN_ROWS: AtomicU64 = AtomicU64::new(0);
+static FLAT_SCAN_ELAPSED_MICROS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FlatScanStats {
+    pub deferred_files_total: u64,
+    pub unexpected_files_total: u64,
+    pub rows_total: u64,
+    pub elapsed_micros_total: u64,
+}
+
+/// Process-wide totals for completed flat-scan fallbacks, suitable for
+/// monitoring whether deferred or unexpected shards are accumulating.
+pub fn flat_scan_stats() -> FlatScanStats {
+    FlatScanStats {
+        deferred_files_total: FLAT_SCAN_DEFERRED_FILES.load(Ordering::Relaxed),
+        unexpected_files_total: FLAT_SCAN_UNEXPECTED_FILES.load(Ordering::Relaxed),
+        rows_total: FLAT_SCAN_ROWS.load(Ordering::Relaxed),
+        elapsed_micros_total: FLAT_SCAN_ELAPSED_MICROS.load(Ordering::Relaxed),
+    }
+}
+
+fn process_file_search_limit() -> Arc<Semaphore> {
+    Arc::clone(
+        PROCESS_FILE_SEARCH_LIMIT
+            .get_or_init(|| Arc::new(Semaphore::new(PROCESS_FILE_SEARCH_BUDGET_UNITS as usize))),
+    )
+}
+
+fn file_search_budget_units(file_size_bytes: u64) -> u32 {
+    file_size_bytes
+        .saturating_add(FILE_SEARCH_BUDGET_QUANTUM_BYTES - 1)
+        .checked_div(FILE_SEARCH_BUDGET_QUANTUM_BYTES)
+        .unwrap_or(0)
+        .max(1)
+        .min(u64::from(PROCESS_FILE_SEARCH_BUDGET_UNITS)) as u32
+}
+
+/// Return the maximum semaphore reservation represented by a set of manifest
+/// files, in bytes. This reports the same file-size estimate used by search;
+/// it is not a bound on decoded or process resident memory.
+pub fn estimate_file_search_budget_bytes(file_sizes: impl IntoIterator<Item = u64>) -> u64 {
+    let units = file_sizes
+        .into_iter()
+        .map(file_search_budget_units)
+        .fold(0u32, |total, units| {
+            total
+                .saturating_add(units)
+                .min(PROCESS_FILE_SEARCH_BUDGET_UNITS)
+        });
+    u64::from(units) * FILE_SEARCH_BUDGET_QUANTUM_BYTES
+}
+
+async fn acquire_file_search_budget(
+    limit: Arc<Semaphore>,
+    file_size_bytes: u64,
+) -> AilakeResult<tokio::sync::OwnedSemaphorePermit> {
+    limit
+        .acquire_many_owned(file_search_budget_units(file_size_bytes))
+        .await
+        .map_err(|_| {
+            AilakeError::InvalidArgument("process-wide file-search limit is closed".into())
+        })
+}
+
+async fn load_bm25_stats(store: &dyn Store, path: &str) -> crate::bm25::IdfStats {
+    let size = match store.file_size(path).await {
+        Ok(size) => size,
+        Err(error) => {
+            debug!("ailake: BM25 stats size unavailable at '{path}': {error}");
+            return crate::bm25::IdfStats::default();
+        }
+    };
+    if size > crate::bm25::MAX_BM25_STATS_COMPRESSED_BYTES as u64 {
+        warn!("ailake: BM25 stats at '{path}' exceed the compressed size limit; using empty corpus IDF");
+        return crate::bm25::IdfStats::default();
+    }
+    match store.get_range(path, 0..size).await {
+        Ok(bytes) => match crate::bm25::IdfStats::from_bytes(&bytes) {
+            Ok(stats) => stats,
+            Err(error) => {
+                warn!("ailake: invalid BM25 stats at '{path}': {error}; using empty corpus IDF");
+                crate::bm25::IdfStats::default()
+            }
+        },
+        Err(error) => {
+            debug!("ailake: BM25 stats not found at '{path}': {error}; using empty corpus IDF");
+            crate::bm25::IdfStats::default()
+        }
+    }
+}
+
+fn ensure_search_session_snapshot_is_delete_free(
+    files: &[DataFileEntry],
+    equality_deletes: &[ailake_catalog::EqualityDeleteFile],
+) -> AilakeResult<()> {
+    if files.iter().any(|file| file.deletion_vector.is_some()) {
+        return Err(AilakeError::InvalidArgument(
+            "SearchSession does not support snapshots with deletion vectors; use search()".into(),
+        ));
+    }
+    if !equality_deletes.is_empty() {
+        return Err(AilakeError::InvalidArgument(
+            "SearchSession does not support snapshots with equality deletes; use search()".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// Injectable per-result scoring function for hybrid ranking.
 ///
@@ -141,7 +258,7 @@ impl Default for SearchConfig {
             partition_filter: None,
             hybrid: None,
             column_filter: None,
-            strict_deletes: false,
+            strict_deletes: true,
         }
     }
 }
@@ -199,6 +316,57 @@ pub async fn search(
     catalog: Arc<dyn CatalogProvider>,
     store: Arc<dyn Store>,
 ) -> AilakeResult<Vec<SearchResult>> {
+    search_inner(
+        table,
+        query,
+        config,
+        vector_column,
+        dim,
+        catalog,
+        store,
+        None,
+    )
+    .await
+}
+
+/// Search using table metadata already loaded by the caller. The HTTP server
+/// uses this after reading the current snapshot for query-cache validation, so
+/// a cache miss does not fetch the same table metadata a second time.
+#[allow(clippy::too_many_arguments)]
+pub async fn search_with_table_metadata(
+    table: &TableIdent,
+    query: &[f32],
+    config: SearchConfig,
+    vector_column: &str,
+    dim: u32,
+    catalog: Arc<dyn CatalogProvider>,
+    store: Arc<dyn Store>,
+    table_meta: TableMetadata,
+) -> AilakeResult<Vec<SearchResult>> {
+    search_inner(
+        table,
+        query,
+        config,
+        vector_column,
+        dim,
+        catalog,
+        store,
+        Some(table_meta),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn search_inner(
+    table: &TableIdent,
+    query: &[f32],
+    config: SearchConfig,
+    vector_column: &str,
+    dim: u32,
+    catalog: Arc<dyn CatalogProvider>,
+    store: Arc<dyn Store>,
+    table_meta: Option<TableMetadata>,
+) -> AilakeResult<Vec<SearchResult>> {
     if config.top_k > ailake_core::MAX_TOP_K {
         return Err(AilakeError::InvalidArgument(format!(
             "top_k {} exceeds maximum supported value ({})",
@@ -210,7 +378,10 @@ pub async fn search(
     let all_files = catalog.list_files(table, None).await?;
 
     // Determine vector metric from table metadata for correct distance computation
-    let table_meta = catalog.load_table(table).await?;
+    let table_meta = match table_meta {
+        Some(metadata) => metadata,
+        None => catalog.load_table(table).await?,
+    };
 
     // Validate query dim against the column's stored dim.
     // Primary column: use `ailake.vector-dim`. Secondary columns: use `ailake.dim-<col>`.
@@ -345,16 +516,7 @@ pub async fn search(
                 .get(crate::bm25::BM25_STATS_PATH_PROP)
                 .map(String::as_str)
                 .unwrap_or(crate::bm25::BM25_STATS_FILE);
-            match store.get(stats_path).await {
-                Ok(bytes) => crate::bm25::IdfStats::from_bytes(&bytes).ok(),
-                Err(_) => {
-                    debug!(
-                        "ailake: BM25 stats not found at '{}' — falling back to empty corpus IDF",
-                        stats_path
-                    );
-                    None
-                }
-            }
+            Some(load_bm25_stats(store.as_ref(), stats_path).await)
         }
     } else {
         None
@@ -362,80 +524,124 @@ pub async fn search(
 
     // raw_candidates: (row_id, vec_dist, file_path, bm25_text) for hybrid re-ranking.
     // Only populated when use_hybrid = true; otherwise all_results is populated directly.
-    let mut raw_candidates: Vec<(RowId, f32, String, String)> = Vec::new();
-    let mut all_results: Vec<SearchResult> = Vec::new();
-
     // Observability for the flat-scan fallback below: `deferred` counts files still
     // being indexed by our own deferred-write path (expected, transient). `unexpected`
     // counts files with no AI-Lake index that are NOT in that state — most likely
     // rewritten by a generic Iceberg engine (Spark/Trino OPTIMIZE, DuckDB) with no
     // knowledge of AI-Lake. Those files still return correct results (flat scan is
     // exact), just O(N) instead of O(log N), and silently forever unless recompacted.
-    let mut flat_scan_deferred = 0usize;
-    let mut flat_scan_unexpected = 0usize;
-
     // Fetch + search each surviving file concurrently instead of one at a time —
     // the dominant cost per file is a network round-trip (`store.get`), so this
     // overlaps their latencies instead of serializing them. `try_join_all` runs
-    // all of them concurrently on the current task (no OS-thread parallelism,
-    // no `tokio::spawn`); at the post-pruning scale this operates on (dozens of
-    // files, see `VectorPruner` — geometric pruning is designed to cut a
-    // 10k-file table down to ~50-100 survivors before this point), that's the
-    // right trade-off: no bound needed, and no per-task spawn overhead.
-    let outcomes: Vec<FileSearchOutcome> = try_join_all(surviving_files.iter().map(|file_entry| {
-        search_one_file(
-            file_entry,
-            query,
-            candidate_k,
-            metric,
-            &table_meta,
-            &config,
-            vector_column,
-            dim,
-            &store,
-            &eq_del_filter,
-            use_hybrid,
-        )
+    // up to a fixed number concurrently on the current task (no OS-thread
+    // parallelism, no `tokio::spawn`). A process-wide weighted semaphore
+    // budgets in-flight work using manifest file size, while this per-query
+    // buffer keeps one broad query from flooding that shared budget.
+    let shared_query: Arc<[f32]> = Arc::from(query);
+    let shared_table_meta = Arc::new(table_meta);
+    let shared_config = Arc::new(config);
+    let shared_deletes = Arc::new(eq_del_filter);
+    let vector_column = vector_column.to_owned();
+    let aggregation_top_k = shared_config.top_k;
+    let (
+        flat_scan_deferred,
+        flat_scan_unexpected,
+        flat_scan_rows,
+        flat_scan_elapsed_micros,
+        mut all_results,
+        raw_candidates,
+    ) = futures::stream::iter(surviving_files.iter().cloned().map(|file_entry| {
+        let query = Arc::clone(&shared_query);
+        let table_meta = Arc::clone(&shared_table_meta);
+        let config = Arc::clone(&shared_config);
+        let store = Arc::clone(&store);
+        let eq_del_filter = Arc::clone(&shared_deletes);
+        let vector_column = vector_column.clone();
+        let process_limit = process_file_search_limit();
+        async move {
+            let _permit =
+                acquire_file_search_budget(process_limit, file_entry.file_size_bytes).await?;
+            search_one_file(
+                &file_entry,
+                &query,
+                candidate_k,
+                metric,
+                &table_meta,
+                &config,
+                &vector_column,
+                dim,
+                &store,
+                &eq_del_filter,
+                use_hybrid,
+            )
+            .await
+        }
     }))
+    .buffered(MAX_CONCURRENT_FILE_SEARCHES)
+    .try_fold(
+        (0usize, 0usize, 0u64, 0u64, Vec::new(), Vec::new()),
+        |(mut deferred, mut unexpected, mut rows, mut elapsed, mut results, mut candidates),
+         outcome| async move {
+            match outcome.flat_scan {
+                Some(FlatScanKind::Deferred) => deferred += 1,
+                Some(FlatScanKind::Unexpected) => unexpected += 1,
+                None => {}
+            }
+            rows = rows.saturating_add(outcome.flat_scan_rows);
+            elapsed = elapsed.saturating_add(outcome.flat_scan_elapsed_micros);
+            results.extend(outcome.results);
+            candidates.extend(outcome.candidates);
+            // Non-hybrid ranking is already final per row, so discard losers
+            // incrementally instead of retaining candidate_k for every file.
+            // Hybrid ranking needs its global score range/ranks and keeps the
+            // full candidate pool until fusion is complete.
+            if !use_hybrid {
+                select_search_top_k(&mut results, aggregation_top_k);
+            }
+            Ok((deferred, unexpected, rows, elapsed, results, candidates))
+        },
+    )
     .await?;
 
-    for outcome in outcomes {
-        match outcome.flat_scan {
-            Some(FlatScanKind::Deferred) => flat_scan_deferred += 1,
-            Some(FlatScanKind::Unexpected) => flat_scan_unexpected += 1,
-            None => {}
-        }
-        all_results.extend(outcome.results);
-        raw_candidates.extend(outcome.candidates);
-    }
+    FLAT_SCAN_DEFERRED_FILES.fetch_add(flat_scan_deferred as u64, Ordering::Relaxed);
+    FLAT_SCAN_UNEXPECTED_FILES.fetch_add(flat_scan_unexpected as u64, Ordering::Relaxed);
+    FLAT_SCAN_ROWS.fetch_add(flat_scan_rows, Ordering::Relaxed);
+    FLAT_SCAN_ELAPSED_MICROS.fetch_add(flat_scan_elapsed_micros, Ordering::Relaxed);
 
     if flat_scan_unexpected > 0 {
         warn!(
             "ailake: search degraded — {}/{} files scanned without an AI-Lake index \
              (unexpected — likely external rewrites; {} more in expected deferred-indexing \
-             state). Run compaction to restore O(log N) search on affected files",
+             state), {} rows read in {:.3} ms of flat-scan work. Run compaction to restore \
+             indexed search on affected files",
             flat_scan_unexpected,
             surviving_files.len(),
-            flat_scan_deferred
+            flat_scan_deferred,
+            flat_scan_rows,
+            flat_scan_elapsed_micros as f64 / 1_000.0
         );
     } else if flat_scan_deferred > 0 {
         debug!(
-            "ailake: search — {}/{} files scanned via flat fallback (deferred indexing)",
+            "ailake: search — {}/{} files scanned via flat fallback (deferred indexing), \
+             {} rows read in {:.3} ms of flat-scan work",
             flat_scan_deferred,
-            surviving_files.len()
+            surviving_files.len(),
+            flat_scan_rows,
+            flat_scan_elapsed_micros as f64 / 1_000.0
         );
     }
 
     // Hybrid BM25 fusion: applied after all HNSW candidates are collected.
-    if let Some(ref h) = config.hybrid {
+    if let Some(ref h) = shared_config.hybrid {
         let empty_stats = crate::bm25::IdfStats::default();
         let stats = bm25_stats.as_ref().unwrap_or(&empty_stats);
         let scorer = crate::bm25::BM25Scorer::new(stats);
 
         // Compute BM25 scores before sorting so they stay positionally aligned.
+        let query_terms = crate::bm25::tokenize(&h.query_text);
         let bm25_scores_pre: Vec<f32> = raw_candidates
             .iter()
-            .map(|(_, _, _, text)| scorer.score(&h.query_text, text))
+            .map(|(_, _, _, text)| scorer.score_tokens(&query_terms, text))
             .collect();
 
         // Zip BM25 scores into candidates so they sort together — avoids index mismatch
@@ -500,13 +706,25 @@ pub async fn search(
         }
 
         // For RRF: lower (more negative) = better; for Linear: lower = better. Same convention.
-        all_results.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        select_search_top_k(&mut all_results, shared_config.top_k);
     } else {
-        all_results.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        select_search_top_k(&mut all_results, shared_config.top_k);
     }
 
-    all_results.truncate(config.top_k);
     Ok(all_results)
+}
+
+fn select_search_top_k(results: &mut Vec<SearchResult>, k: usize) {
+    let compare = |a: &SearchResult, b: &SearchResult| a.distance.total_cmp(&b.distance);
+    if k == 0 {
+        results.clear();
+        return;
+    }
+    if results.len() > k {
+        results.select_nth_unstable_by(k, compare);
+        results.truncate(k);
+    }
+    results.sort_unstable_by(compare);
 }
 
 /// Why this file fell back to a flat (exact, O(N)) scan instead of HNSW —
@@ -530,6 +748,8 @@ struct FileSearchOutcome {
     /// Populated when hybrid search is on: (row_id, vector distance, file path, text).
     candidates: Vec<(RowId, f32, String, String)>,
     flat_scan: Option<FlatScanKind>,
+    flat_scan_rows: u64,
+    flat_scan_elapsed_micros: u64,
 }
 
 /// Fetches, index-searches (or flat-scans), and filters a single file — the
@@ -718,10 +938,17 @@ async fn search_one_file(
                 }
             }
         }
+        let flat_scan_started = std::time::Instant::now();
         let (raw_batch, raw_vectors) = reader.read_parquet()?;
         // Phase G: inject columns added via schema evolution with initial_default values.
         let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
-        for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
+        let flat_results = flat_search(&raw_vectors, query, candidate_k, metric);
+        outcome.flat_scan_rows = raw_vectors.len() as u64;
+        outcome.flat_scan_elapsed_micros = flat_scan_started
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        for (row_id, distance) in flat_results {
             // Skip rows marked as deleted by a V3 Deletion Vector.
             if dv_bitmap
                 .as_ref()
@@ -1059,14 +1286,42 @@ fn flat_search(
     top_k: usize,
     metric: VectorMetric,
 ) -> Vec<(RowId, f32)> {
-    let mut results: Vec<(RowId, f32)> = raw
-        .iter()
+    if top_k == 0 {
+        return Vec::new();
+    }
+    let mut results = raw
+        .par_iter()
         .enumerate()
-        .map(|(i, v)| (RowId::new(i as u64), exact_distance(metric, query, v)))
-        .collect();
-    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(top_k);
+        .fold(Vec::new, |mut best, (i, vector)| {
+            best.push((RowId::new(i as u64), exact_distance(metric, query, vector)));
+            trim_search_top_k_buffer(&mut best, top_k);
+            best
+        })
+        .reduce(Vec::new, |mut left, mut right| {
+            left.append(&mut right);
+            select_distance_top_k(&mut left, top_k);
+            left
+        });
+    select_distance_top_k(&mut results, top_k);
     results
+}
+
+fn select_distance_top_k(results: &mut Vec<(RowId, f32)>, k: usize) {
+    let compare = |a: &(RowId, f32), b: &(RowId, f32)| {
+        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+    };
+    if results.len() > k {
+        results.select_nth_unstable_by(k, compare);
+        results.truncate(k);
+    }
+    results.sort_unstable_by(compare);
+}
+
+fn trim_search_top_k_buffer(results: &mut Vec<(RowId, f32)>, k: usize) {
+    let limit = k.saturating_mul(2).max(k.saturating_add(1));
+    if results.len() >= limit {
+        select_distance_top_k(results, k);
+    }
 }
 
 fn parse_metric(s: &str) -> VectorMetric {
@@ -1083,11 +1338,9 @@ fn parse_metric(s: &str) -> VectorMetric {
 /// Useful for benchmarks and servers that issue many queries against the same
 /// snapshot. Avoids re-loading and re-deserializing indexes on every call.
 ///
-/// **Deleted rows are NOT filtered here**: unlike [`search`]/[`search_text`],
-/// this session does not load deletion vectors or equality delete files —
-/// rows removed via `delete_rows`/`delete_where` still appear in results.
-/// Use [`search`] when delete visibility matters; this type trades that for
-/// raw throughput on static snapshots (its benchmark use case).
+/// Delete-bearing snapshots are rejected during loading. This preserves the
+/// session's preloaded search path while preventing it from silently returning
+/// deleted rows; use [`search`] or [`search_text`] for tables with deletes.
 pub struct SearchSession {
     shards: Vec<LoadedShard>,
     metric: VectorMetric,
@@ -1117,6 +1370,8 @@ impl SearchSession {
         load_raw: bool,
     ) -> AilakeResult<Self> {
         let all_files = catalog.list_files(table, None).await?;
+        let equality_deletes = catalog.list_equality_deletes(table, None).await?;
+        ensure_search_session_snapshot_is_delete_free(&all_files, &equality_deletes)?;
         let table_meta = catalog.load_table(table).await?;
         let metric = parse_metric(
             table_meta
@@ -1407,12 +1662,13 @@ pub async fn search_text(
         catalog,
         store,
         partition_filter,
-        false,
+        true,
     )
     .await
 }
 
-/// Text search with explicit deletion-integrity policy.
+/// Text search with an explicit deletion-integrity policy. The convenience
+/// [`search_text`] function enables fail-closed handling by default.
 #[allow(clippy::too_many_arguments)]
 pub async fn search_text_with_options(
     table: &TableIdent,
@@ -1457,16 +1713,7 @@ pub async fn search_text_with_options(
         .get(crate::bm25::BM25_STATS_PATH_PROP)
         .map(String::as_str)
         .unwrap_or(crate::bm25::BM25_STATS_FILE);
-    let stats = match store.get(stats_path).await {
-        Ok(bytes) => crate::bm25::IdfStats::from_bytes(&bytes).unwrap_or_default(),
-        Err(_) => {
-            debug!(
-                "ailake: BM25 stats not found at '{}' — using empty corpus IDF",
-                stats_path
-            );
-            crate::bm25::IdfStats::default()
-        }
-    };
+    let stats = load_bm25_stats(store.as_ref(), stats_path).await;
     let scorer = crate::bm25::BM25Scorer::new(&stats);
 
     // Phase H: equality delete filter for search_text results.
@@ -1778,6 +2025,157 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
+    #[test]
+    fn search_defaults_to_fail_closed_delete_handling() {
+        assert!(SearchConfig::default().strict_deletes);
+    }
+
+    #[test]
+    fn process_file_search_budget_scales_with_file_size() {
+        assert_eq!(file_search_budget_units(0), 1);
+        assert_eq!(
+            file_search_budget_units(FILE_SEARCH_BUDGET_QUANTUM_BYTES),
+            1
+        );
+        assert_eq!(
+            file_search_budget_units(FILE_SEARCH_BUDGET_QUANTUM_BYTES + 1),
+            2
+        );
+        assert_eq!(
+            file_search_budget_units(
+                FILE_SEARCH_BUDGET_QUANTUM_BYTES * u64::from(PROCESS_FILE_SEARCH_BUDGET_UNITS)
+            ),
+            PROCESS_FILE_SEARCH_BUDGET_UNITS
+        );
+        assert_eq!(
+            file_search_budget_units(u64::MAX),
+            PROCESS_FILE_SEARCH_BUDGET_UNITS
+        );
+    }
+
+    #[test]
+    fn estimated_file_search_budget_rounds_each_file_and_caps_at_process_limit() {
+        assert_eq!(estimate_file_search_budget_bytes([]), 0);
+        assert_eq!(
+            estimate_file_search_budget_bytes([1, 1, 1]),
+            3 * FILE_SEARCH_BUDGET_QUANTUM_BYTES
+        );
+        assert_eq!(
+            estimate_file_search_budget_bytes(std::iter::repeat_n(
+                FILE_SEARCH_BUDGET_QUANTUM_BYTES,
+                64,
+            )),
+            u64::from(PROCESS_FILE_SEARCH_BUDGET_UNITS) * FILE_SEARCH_BUDGET_QUANTUM_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn large_file_search_reserves_the_shared_budget_until_completion() {
+        let budget = Arc::new(Semaphore::new(PROCESS_FILE_SEARCH_BUDGET_UNITS as usize));
+        let large_file_permit = acquire_file_search_budget(
+            Arc::clone(&budget),
+            FILE_SEARCH_BUDGET_QUANTUM_BYTES * u64::from(PROCESS_FILE_SEARCH_BUDGET_UNITS),
+        )
+        .await
+        .unwrap();
+        assert_eq!(budget.available_permits(), 0);
+
+        let small_budget = Arc::clone(&budget);
+        let pending = tokio::spawn(async move {
+            acquire_file_search_budget(small_budget, FILE_SEARCH_BUDGET_QUANTUM_BYTES).await
+        });
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished());
+
+        drop(large_file_permit);
+        let small_file_permit = pending.await.unwrap().unwrap();
+        assert_eq!(
+            budget.available_permits(),
+            PROCESS_FILE_SEARCH_BUDGET_UNITS as usize - 1
+        );
+        drop(small_file_permit);
+        assert_eq!(
+            budget.available_permits(),
+            PROCESS_FILE_SEARCH_BUDGET_UNITS as usize
+        );
+    }
+
+    #[test]
+    fn search_session_rejects_delete_bearing_snapshots() {
+        assert!(ensure_search_session_snapshot_is_delete_free(&[], &[]).is_ok());
+        let file = DataFileEntry {
+            deletion_vector: Some(ailake_catalog::provider::DeletionVector {
+                path: "metadata/deletes.dv".into(),
+                offset: 0,
+                length: 1,
+                cardinality: 1,
+            }),
+            ..Default::default()
+        };
+        assert!(ensure_search_session_snapshot_is_delete_free(&[file], &[]).is_err());
+        assert!(ensure_search_session_snapshot_is_delete_free(
+            &[],
+            &[ailake_catalog::EqualityDeleteFile::default()]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn final_selection_returns_sorted_top_k_only() {
+        let mut results = vec![
+            SearchResult {
+                row_id: RowId::new(0),
+                distance: 5.0,
+                file_path: "a".into(),
+            },
+            SearchResult {
+                row_id: RowId::new(1),
+                distance: 1.0,
+                file_path: "b".into(),
+            },
+            SearchResult {
+                row_id: RowId::new(2),
+                distance: 3.0,
+                file_path: "c".into(),
+            },
+        ];
+        select_search_top_k(&mut results, 2);
+        assert_eq!(
+            results.iter().map(|r| r.distance).collect::<Vec<_>>(),
+            vec![1.0, 3.0]
+        );
+        select_search_top_k(&mut results, 0);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn flat_search_keeps_sorted_top_k_across_parallel_chunks() {
+        let vectors: Vec<Vec<f32>> = (0..257)
+            .map(|i| {
+                let x = i as f32 / 257.0;
+                vec![x.cos(), x.sin(), (x * 2.0).cos()]
+            })
+            .collect();
+        let query = [1.0, 0.0, 1.0];
+        let results = flat_search(&vectors, &query, 5, VectorMetric::Cosine);
+        let mut expected: Vec<_> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, vector)| {
+                (
+                    RowId::new(i as u64),
+                    exact_distance(VectorMetric::Cosine, &query, vector),
+                )
+            })
+            .collect();
+        expected.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+        assert_eq!(results.len(), 5);
+        for (got, want) in results.iter().zip(expected.iter()) {
+            assert_eq!(got.0, want.0);
+            assert!((got.1 - want.1).abs() < 1e-6);
+        }
+    }
+
     fn make_policy(dim: u32) -> VectorStoragePolicy {
         VectorStoragePolicy {
             column_name: "embedding".to_string(),
@@ -1951,7 +2349,8 @@ mod tests {
             strict_deletes: false,
         };
 
-        let results = search(
+        let table_meta = catalog.load_table(&table).await.unwrap();
+        let results = search_with_table_metadata(
             &table,
             &query,
             config,
@@ -1959,6 +2358,7 @@ mod tests {
             dim as u32,
             catalog,
             store,
+            table_meta,
         )
         .await
         .unwrap();

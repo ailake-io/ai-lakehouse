@@ -23,6 +23,9 @@
 | Compat (Python/DuckDB) | `tests/compat/` | `ci.yml` — every PR | PyArrow, DuckDB, PyIceberg, ailake-py SDK |
 | Compat (Spark/Trino/JVM) | `tests/compat/` + Gradle | `compat-heavy.yml` — push to main + weekly | Spark+Iceberg, Trino+REST, Flink/Spark/Trino JVM plugins |
 
+Plugin version targets, shared JVM dependency pins, and maintenance commands are
+documented in [`PLUGIN_MAINTENANCE.md`](PLUGIN_MAINTENANCE.md).
+
 ---
 
 ## JVM plugin tests (Kotlin/Scala) — the "native lib absent" trap
@@ -551,9 +554,11 @@ Scripts:
 ### In-repository CI checks
 
 The performance workflow is `.github/workflows/performance.yml`. It runs the
-CPU benchmark, deterministic recall/latency checks, real HTTP load with
-concurrent writers, process-level serve fencing, and a catalog emulator
-matrix. See [`docs/guides/PERFORMANCE_BENCHMARKS.md`](../guides/PERFORMANCE_BENCHMARKS.md)
+CPU benchmark, deterministic recall/fallback checks with simulated object-read
+latency, a 64-shard HTTP load with RSS and reservation estimates, an S3-compatible
+read profile, shared Redis rate-limit checks, process-level serve fencing and
+the catalog emulator matrix. See
+[`docs/guides/PERFORMANCE_BENCHMARKS.md`](../guides/PERFORMANCE_BENCHMARKS.md)
 for commands and thresholds.
 
 ```bash
@@ -565,7 +570,9 @@ AILAKE_MIN_RECALL=0.95 AILAKE_MAX_P95_MS=500 \
 ```
 
 The HTTP harness measures QPS, mean, p50, p95 and p99 while exercising
-concurrent `/write` and `/search` requests. The Rust `concurrent_writes`
+concurrent `/write` and `/search` requests. The S3-compatible profile reports
+object reads and bytes; the Redis test verifies shared quotas across limiter
+instances. The Rust `concurrent_writes`
 suite remains the catalog correctness gate, and
 `check_multi_process_lock.sh` verifies that two `ailake serve` processes
 cannot own the same table simultaneously.
@@ -627,7 +634,7 @@ SIMD information.
 | `compat-pyiceberg` | `write_fixture` + `pip install pyiceberg[pyarrow]` + `check_pyiceberg.py` | PyIceberg `StaticTable.scan()` |
 | `test-airflow-provider` | `pip install apache-airflow pytest` + `pytest tests/` | Airflow provider unit tests (2.x/3.x) |
 | `compat-ailake-py` | `maturin build` (Python 3.12) + `check_ailake_py.py` | Python SDK write→search→assemble_context; `fts_text_columns` write + `search_text()` (Tantivy fast path); `search_multimodal` RRF |
-| `performance.yml` | CPU benchmark, Recall@10/p95, HTTP load, multi-writer and catalog matrix | Performance artifacts and regression gates; GPU matrix on non-PR triggers |
+| `performance.yml` | CPU benchmark, indexed/flat Recall@10 and p95, latency simulation, 64-shard HTTP/RSS load, S3-compatible reads, Redis quota sharing, catalog matrix | Performance artifacts and regression gates; GPU matrix on non-PR triggers |
 
 ### `ci-gpu.yml` — manual dispatch (`workflow_dispatch`)
 

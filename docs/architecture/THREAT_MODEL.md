@@ -87,7 +87,7 @@ validated at the top of all 5 entry points, before any allocation-sizing math
 | **T**ampering: malicious metadata from server | Medium | OCC (optimistic concurrency control) — 5 retries on `CommitFailedException`. Schema comparison before `AddSchema` |
 | **R**epudiation: no audit | Low | Iceberg snapshot history provides immutable audit trail |
 | **I**nformation disclosure: token in env/logs | Low | `AILAKE_REST_TOKEN`, `AILAKE_REST_OAUTH_CLIENT_SECRET` in env. CLI flags visible in `ps aux`. No masking |
-| **D**enial of service: slow catalog responses | Low | No timeout configuration exposed; Tokio runtime handles timeouts at OS level |
+| **D**enial of service: slow or oversized catalog responses | Low | Each REST request has a 30-second total timeout; JSON responses are capped at 64 MiB and error details at 8 KiB |
 | **E**levation of privilege: OAuth2 token reuse | Low | Token refresh handled by client; scope limited by server |
 
 ### Known bugs (fixed in Phase 17)
@@ -100,6 +100,7 @@ validated at the top of all 5 entry points, before any allocation-sizing math
 ### Test coverage
 
 - 9 unit tests (URL construction, auth parsing, config building)
+- REST request timeout and response-size limits have regression tests.
 - 2 live tests (`#[ignore]` by default, require `apache/iceberg-rest-fixture` container)
 - Round-trip create→insert→commit→search verified via `ailake-py` against live container
 
@@ -115,7 +116,7 @@ validated at the top of all 5 entry points, before any allocation-sizing math
 | **T**ampering: corrupt HNSW blob → panic | **High** | All offsets use `checked_add`; out-of-bounds → `NotAnAilakeFile` error. 7 corruption tests |
 | **R**epudiation: N/A | — | — |
 | **I**nformation disclosure: malformed centroid → wrong pruning | Low | Centroid parse validated (`InvalidCentroidLength`). Missing centroid → conservative (keep file) |
-| **D**enial of service: extremely large HNSW blob | Low | Blob size bounded by `u64`; reader validates against file length |
+| **D**enial of service: oversized index/FTS payload | Low | Index ranges are checked against file length; FTS rejects uncompressed payloads over 64 MiB |
 | **E**levation of privilege: N/A | — | — |
 
 ### Key finding: Release dim mismatch (Critical, see §1)
@@ -143,6 +144,13 @@ undefined behavior in release builds. Fixed: `from_bytes` now validates
 - 3 `HnswSerializer::from_bytes` bounds-validation tests (out-of-bounds neighbor,
   out-of-bounds entry_point, flat_vecs length mismatch)
 
+### Remaining payload limits
+
+FTS bounds uncompressed payload allocation to 64 MiB. BM25 stats reads first
+check the object size and use a bounded range read; compressed and decompressed
+limits are 16 MiB and 64 MiB. The limits are currently fixed constants rather
+than deployment settings.
+
 ---
 
 ## 5. Query Engine (`ailake-query`)
@@ -154,7 +162,7 @@ undefined behavior in release builds. Fixed: `from_bytes` now validates
 | **S**poofing: wrong table/warehouse | Low | Caller provides identifiers; no auth |
 | **T**ampering: malicious `ScoreFn` | Low | `ScoreFn` is Rust closure, not user-supplied at runtime; only configured at compile time |
 | **R**epudiation: N/A | — | Search is stateless |
-| **I**nformation disclosure: equality delete file read failure | Low | `warn!` + continue — shows deleted rows rather than failing. Deliberate: safety over correctness |
+| **I**nformation disclosure / stale results: delete file read failure | Low | Rust, CLI, Python and JNI fail closed by default. `SearchSession` rejects snapshots with deletes. Explicit permissive options remain available where supported; see `DELETE_INTEGRITY.md` |
 | **D**enial of service: `top_k = 100000`, no geometric pruning | Low | `ef_search.clamp(1, 100000)`. Files without centroid always included (no pruning) |
 | **E**levation of privilege: N/A | — | — |
 
@@ -164,8 +172,15 @@ undefined behavior in release builds. Fixed: `from_bytes` now validates
 - Compaction recall parity test
 - Concurrent stress test (1 compactor + 4 searchers, 5 passes)
 - Dimension mismatch rejection test
-- 41 unit tests (scanner, writer, compaction, pruner, bm25, mem_table)
+- Scanner, writer, compaction, pruner, BM25 and delete-integrity unit tests
 - 3 Loom models (`ailake-query/src/loom_tests.rs`) — see coverage gap below
+
+### Remaining query-integrity work
+
+The CDC reader has its own `strict_deletes` setting; its library default remains
+permissive for compatibility. Use the strict option in CLI/Python when required.
+`SearchSession` rejects snapshots with delete metadata instead of silently
+returning stale rows.
 
 ### Known gap: Loom models don't cover the JNI lock+block_on pattern (Open)
 
@@ -193,17 +208,24 @@ contention) than Loom can provide.
 
 | Threat | Risk | Mitigation |
 |--------|------|------------|
-| **S**poofing: no auth | **High** | Optional Bearer token on every endpoint except `/healthz`; startup warning when disabled. Use a gateway/mTLS for production |
-| **T**ampering: oversized body | Low | `DefaultBodyLimit::max(32 MB)` |
+| **S**poofing: unauthorized HTTP access | Medium | Defaults to loopback; refuses non-loopback bind without `--auth-token`/`AILAKE_SERVE_TOKEN`. Bearer token required on all routes except public `/healthz` |
+| **T**ampering: oversized body | Low | `DefaultBodyLimit::max(8 MB)`; search/write payload dimensions and write row count are bounded; authentication and the in-flight permit are checked before body extraction |
 | **R**epudiation: no access log | Low | Prometheus counters and request duration are exposed at `/metrics`; access-log correlation remains a deployment concern |
 | **I**nformation disclosure: error messages may reveal paths | Low | `ApiError` surfaces Rust error messages |
-| **D**enial of service: request flooding | Medium | 32 MB body limit, 64 in-flight request cap, and optional Redis/Valkey rate limiting by bearer token/IP with separate read/write quotas; keep gateway/mTLS controls for internet-facing deployments |
+| **D**enial of service: request flooding | Low | 8 MB body limit, 16 requests admitted before body extraction, bounded vector dimensions and write rows, per-search fan-out cap of 32 files, process-wide estimated 512 MiB file-search budget weighted by manifest size, and optional Redis/Valkey quotas. Rate limiting fails closed by default when configured; `--rate-limit-fail-open` opts out |
 | **E**levation of privilege: N/A | — | — |
 
 ### Test coverage
 
 - Health, metrics authentication, cache invalidation and auto-compaction paths are covered by dedicated server tests.
-- HTTP load, multi-writer fencing, cache invalidation and rate-limit decisions are exercised by server tests and `performance.yml`; production deployments should still validate gateway behavior and real Redis/Valkey failure policy.
+- HTTP load, multi-writer fencing, cache invalidation and rate-limit decisions are exercised by server tests and `performance.yml`. Redis outage tests verify both fail-closed and fail-open behavior. Proxy headers are ignored unless explicitly trusted, and accepted client addresses must parse as IPs; configure the gateway to overwrite forwarding headers and prevent direct access to the server. `/metrics` exposes cumulative fallback file/row/time counters for alerting. Production deployments should still validate gateway behavior and Redis/Valkey policy in their own network.
+
+### Remaining deployment controls
+
+The server uses plain HTTP; the bearer token is not encrypted in transit by the
+server itself. Terminate TLS at a trusted reverse proxy or gateway for remote
+traffic. The token is one shared credential with no per-user identity or roles.
+Keep `/healthz` reachable only where its public status response is acceptable.
 
 ---
 

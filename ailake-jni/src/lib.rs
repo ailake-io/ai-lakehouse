@@ -8,7 +8,7 @@
 
 use std::{
     cell::RefCell,
-    ffi::{c_char, CStr, CString},
+    ffi::{c_char, CString},
     sync::Arc,
 };
 
@@ -35,6 +35,27 @@ use tracing::{debug, error, info, warn};
 /// enforced before `from_raw_parts` so an untrusted JNA/Kof caller cannot ask
 /// the process to address an effectively unbounded buffer.
 pub const MAX_IPC_BYTES: i64 = 512 * 1024 * 1024;
+/// Maximum NUL-terminated JSON request accepted by the native C-ABI.
+pub const MAX_FFI_JSON_BYTES: usize = 64 * 1024 * 1024;
+const MAX_TABLE_URI_BYTES: usize = 4 * 1024;
+
+/// Read a valid C string without scanning more than the configured request cap.
+///
+/// # Safety
+/// `ptr` must point to readable memory containing a NUL byte within
+/// `max_bytes + 1` bytes, or be null.
+unsafe fn bounded_cstr_utf8<'a>(ptr: *const c_char, max_bytes: usize) -> Result<&'a str, String> {
+    if ptr.is_null() {
+        return Err("null C string pointer".into());
+    }
+    for len in 0..=max_bytes {
+        if unsafe { ptr.cast::<u8>().add(len).read() } == 0 {
+            let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
+            return std::str::from_utf8(bytes).map_err(|error| error.to_string());
+        }
+    }
+    Err(format!("C string exceeds maximum of {max_bytes} bytes"))
+}
 
 /// Stable C-ABI contract version. Increment only when an exported signature or
 /// ownership rule changes incompatibly.
@@ -254,6 +275,7 @@ fn do_search(
     text_column: &str,
     bm25_weight: f32,
     pruning_threshold: f32,
+    strict_deletes: bool,
     catalog_opts: &CatalogOpts,
 ) -> ailake_core::AilakeResult<Vec<SearchResult>> {
     let store: Arc<dyn ailake_store::Store> =
@@ -275,7 +297,7 @@ fn do_search(
         partition_filter,
         hybrid,
         column_filter: None,
-        strict_deletes: false,
+        strict_deletes,
     };
     rt().block_on(rs_search(
         &table, &query, config, vec_col, dim, catalog, store,
@@ -485,7 +507,7 @@ pub unsafe extern "C" fn ailake_vector_search_json(
                 "top_k {top_k} exceeds maximum supported value ({MAX_TOP_K})"
             ));
         }
-        let uri = match unsafe { CStr::from_ptr(table_uri) }.to_str() {
+        let uri = match unsafe { bounded_cstr_utf8(table_uri, MAX_TABLE_URI_BYTES) } {
             Ok(s) => s.to_string(),
             Err(e) => return cstr_err_json(format!("invalid UTF-8 in table_uri: {e}")),
         };
@@ -505,6 +527,7 @@ pub unsafe extern "C" fn ailake_vector_search_json(
             "chunk_text",
             0.5,
             f32::INFINITY,
+            true,
             &CatalogOpts::default(),
         ) {
             Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
@@ -571,6 +594,8 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
             bm25_weight: f32,
             #[serde(default)]
             pruning_threshold: Option<f32>,
+            #[serde(default = "default_strict_deletes")]
+            strict_deletes: bool,
         }
         fn default_ns() -> String {
             "default".into()
@@ -590,11 +615,14 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         fn default_bm25_weight() -> f32 {
             0.5
         }
+        fn default_strict_deletes() -> bool {
+            true
+        }
 
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => {
                 warn!("ailake_search_json: invalid UTF-8 in request_json: {}", e);
@@ -637,6 +665,7 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
             &text_column,
             bm25_weight,
             pruning_threshold,
+            req.strict_deletes,
             &req.catalog_opts,
         ) {
             Ok(v) => v,
@@ -786,7 +815,7 @@ pub unsafe extern "C" fn ailake_write_batch_json(request_json: *const c_char) ->
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => {
                 warn!(
@@ -1137,7 +1166,7 @@ pub unsafe extern "C" fn ailake_write_batch_ipc(
         if opts_json.is_null() {
             return cstr_err_json("null opts_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(opts_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(opts_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => {
                 warn!("ailake_write_batch_ipc: invalid UTF-8 in opts_json: {}", e);
@@ -1404,7 +1433,7 @@ pub unsafe extern "C" fn ailake_write_batch_multi_json(request_json: *const c_ch
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => {
                 warn!(
@@ -1661,7 +1690,7 @@ pub unsafe extern "C" fn ailake_search_text_json(request_json: *const c_char) ->
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -1788,12 +1817,17 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
             top_k: u32,
             #[serde(default)]
             partition_filter: Option<String>,
+            #[serde(default = "default_strict_deletes_multi")]
+            strict_deletes: bool,
         }
         fn default_ns_multi() -> String {
             "default".into()
         }
         fn default_topk_multi() -> u32 {
             10
+        }
+        fn default_strict_deletes_multi() -> bool {
+            true
         }
 
         #[derive(serde::Serialize)]
@@ -1811,7 +1845,7 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -1861,6 +1895,7 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
         let config = SearchConfig {
             top_k: req.top_k as usize,
             partition_filter: req.partition_filter,
+            strict_deletes: req.strict_deletes,
             ..Default::default()
         };
 
@@ -2181,6 +2216,8 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
             ef_search: u32,
             #[serde(default)]
             partition_filter: Option<String>,
+            #[serde(default = "scan_default_strict_deletes")]
+            strict_deletes: bool,
         }
         fn scan_default_ns() -> String {
             "default".into()
@@ -2194,11 +2231,14 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         fn scan_default_ef() -> u32 {
             50
         }
+        fn scan_default_strict_deletes() -> bool {
+            true
+        }
 
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -2235,6 +2275,7 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
             "",
             0.0,
             f32::INFINITY,
+            req.strict_deletes,
             &req.catalog_opts,
         ) {
             Ok(v) => v,
@@ -2331,7 +2372,7 @@ pub unsafe extern "C" fn ailake_info_json(request_json: *const c_char) -> *mut c
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -2487,7 +2528,7 @@ pub unsafe extern "C" fn ailake_delete_where_json(request_json: *const c_char) -
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -2623,7 +2664,7 @@ pub unsafe extern "C" fn ailake_evolve_schema_json(request_json: *const c_char) 
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -2746,7 +2787,7 @@ pub unsafe extern "C" fn ailake_compact_json(request_json: *const c_char) -> *mu
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -2964,7 +3005,7 @@ pub unsafe extern "C" fn ailake_create_table_json(request_json: *const c_char) -
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -3172,7 +3213,7 @@ pub unsafe extern "C" fn ailake_decay_memories_json(request_json: *const c_char)
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -3312,7 +3353,7 @@ pub unsafe extern "C" fn ailake_migrate_json(request_json: *const c_char) -> *mu
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -3419,7 +3460,7 @@ pub unsafe extern "C" fn ailake_delete_rows_json(request_json: *const c_char) ->
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -3527,7 +3568,7 @@ pub unsafe extern "C" fn ailake_add_vector_column_json(request_json: *const c_ch
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -3641,7 +3682,7 @@ pub unsafe extern "C" fn ailake_backfill_vector_column_json(
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -3766,7 +3807,7 @@ pub unsafe extern "C" fn ailake_estimate_json(request_json: *const c_char) -> *m
         if request_json.is_null() {
             return cstr_err_json("null request_json");
         }
-        let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        let json_str = match unsafe { bounded_cstr_utf8(request_json, MAX_FFI_JSON_BYTES) } {
             Ok(s) => s,
             Err(e) => return cstr_err_json(e),
         };
@@ -3868,6 +3909,30 @@ pub unsafe extern "C" fn ailake_estimate_json(request_json: *const c_char) -> *m
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CStr;
+
+    #[test]
+    fn bounded_c_string_rejects_over_limit_inputs() {
+        let within_limit = CString::new("1234").unwrap();
+        assert_eq!(
+            unsafe { bounded_cstr_utf8(within_limit.as_ptr(), 4) }.unwrap(),
+            "1234"
+        );
+
+        let too_long = CString::new("12345").unwrap();
+        let error = unsafe { bounded_cstr_utf8(too_long.as_ptr(), 4) }.unwrap_err();
+        assert!(error.contains("maximum of 4 bytes"));
+    }
+
+    #[test]
+    fn bounded_c_string_rejects_null_and_invalid_utf8() {
+        assert!(unsafe { bounded_cstr_utf8(std::ptr::null(), 4) }
+            .unwrap_err()
+            .contains("null"));
+
+        let invalid_utf8 = CString::new(vec![0xff]).unwrap();
+        assert!(unsafe { bounded_cstr_utf8(invalid_utf8.as_ptr(), 4) }.is_err());
+    }
 
     // ── store_for_warehouse ───────────────────────────────────────────────────
     //

@@ -121,17 +121,9 @@ jobs:
           # (all artifacts share one version number). ailake-py's own
           # pyproject.toml is excluded: it's `dynamic = ["version"]`, sourced
           # from ailake-py/Cargo.toml by maturin, already covered above.
-          for GRADLE in spark-plugin/build.gradle.kts trino-plugin/build.gradle.kts \
-                        ailake-flink/build.gradle.kts; do
-            sed -i "s/^version = \"$OLD_VERSION\"/version = \"$NEW_VERSION\"/" "$GRADLE"
-          done
-          for CMAKE in duckdb-ailake/CMakeLists.txt ailake-cpp/CMakeLists.txt; do
-            sed -i -E "s/(project\([a-zA-Z0-9_-]+ VERSION )$OLD_VERSION/\1$NEW_VERSION/" "$CMAKE"
-          done
-          for PYPROJECT in airflow-providers-ailake/pyproject.toml \
-                          airbyte-destination-ailake/pyproject.toml; do
-            sed -i "s/^version = \"$OLD_VERSION\"/version = \"$NEW_VERSION\"/" "$PYPROJECT"
-          done
+          # Plugin version targets live in scripts/plugins.json so new plugins
+          # need one registry entry instead of edits to this release workflow.
+          python3 scripts/plugins.py update --all --version "$NEW_VERSION"
 
           # Promote the accumulated release notes before tagging. Keep a fresh
           # [Unreleased] section at the top so the next development cycle has
@@ -192,12 +184,9 @@ jobs:
               docs/architecture/WORKSPACE.md
           fi
 
-          git add $(find . -name "Cargo.toml" -not -path "*/target/*") \
-            spark-plugin/build.gradle.kts trino-plugin/build.gradle.kts ailake-flink/build.gradle.kts \
-            duckdb-ailake/CMakeLists.txt ailake-cpp/CMakeLists.txt \
-            airflow-providers-ailake/pyproject.toml airbyte-destination-ailake/pyproject.toml \
-            docs/architecture/WORKSPACE.md CHANGELOG.md \
-            $DOC_FILES
+          # The release job starts from a clean checkout, so stage all tracked
+          # version, changelog, and documentation changes together.
+          git add -u
           git diff --cached --quiet || \
             git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
           git pull --rebase origin main

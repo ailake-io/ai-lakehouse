@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use ailake_core::{AilakeError, AilakeResult};
-use object_store::aws::AmazonS3Builder;
+use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::ObjectStoreBackend;
@@ -47,7 +47,10 @@ pub fn s3_store(config: S3Config, prefix: impl Into<String>) -> AilakeResult<Obj
 
     b = b
         .with_bucket_name(&config.bucket)
-        .with_region(&config.region);
+        .with_region(&config.region)
+        // The object-store backend uses conditional writes to acquire and renew
+        // catalog leases. S3 requires this capability to be enabled explicitly.
+        .with_conditional_put(S3ConditionalPut::ETagMatch);
 
     if let Some(ep) = &config.endpoint {
         b = b.with_endpoint(ep);

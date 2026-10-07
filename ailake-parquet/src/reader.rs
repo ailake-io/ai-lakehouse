@@ -12,7 +12,9 @@ use arrow_array::{
 };
 use arrow_schema::{ArrowError, DataType, Schema};
 use bytes::Bytes;
-use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
+use parquet::arrow::arrow_reader::{
+    ArrowPredicateFn, ArrowReaderMetadata, ParquetRecordBatchReaderBuilder, RowFilter,
+};
 use parquet::arrow::ProjectionMask;
 use parquet::file::statistics::Statistics;
 
@@ -394,12 +396,16 @@ impl ParquetVectorReader {
     /// Cheaper than `read_all_filtered` for this use case too: only the filter
     /// column is decoded (via `.with_projection`), and whole row groups proven
     /// not to match by statistics are skipped row-group-by-row-group, tracking
-    /// each survivor's true base offset from `ParquetMetaData` directly (no
-    /// batch-boundary bookkeeping needed, since each row group is read via its
-    /// own single-group reader).
+    /// each survivor's true base offset from `ParquetMetaData` directly. All
+    /// surviving groups share one projected reader to avoid rebuilding a
+    /// reader for every row group.
     pub fn matching_row_ids(&self, filter: &ColumnFilter) -> AilakeResult<HashSet<u64>> {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(self.bytes.clone())
+        let reader_metadata = ArrowReaderMetadata::load(&self.bytes, Default::default())
             .map_err(|e| AilakeError::Parquet(e.to_string()))?;
+        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+            self.bytes.clone(),
+            reader_metadata.clone(),
+        );
 
         let schema_descr = builder.parquet_schema();
         let col_idx = (0..schema_descr.num_columns())
@@ -410,10 +416,13 @@ impl ParquetVectorReader {
 
         let metadata = builder.metadata();
         let mut base_offsets = Vec::with_capacity(metadata.num_row_groups());
+        let mut row_group_rows = Vec::with_capacity(metadata.num_row_groups());
         let mut running = 0u64;
         for i in 0..metadata.num_row_groups() {
             base_offsets.push(running);
-            running += metadata.row_group(i).num_rows() as u64;
+            let rows = metadata.row_group(i).num_rows() as u64;
+            row_group_rows.push(rows);
+            running += rows;
         }
 
         let surviving_groups: Vec<usize> = (0..metadata.num_row_groups())
@@ -427,30 +436,42 @@ impl ParquetVectorReader {
             })
             .collect();
 
-        let mut matches = HashSet::new();
-        for group in surviving_groups {
-            let base = base_offsets[group];
-            let group_builder = ParquetRecordBatchReaderBuilder::try_new(self.bytes.clone())
-                .map_err(|e| AilakeError::Parquet(e.to_string()))?;
-            let projection = ProjectionMask::leaves(group_builder.parquet_schema(), [col_idx]);
-            let reader = group_builder
-                .with_row_groups(vec![group])
-                .with_projection(projection)
-                .build()
-                .map_err(|e| AilakeError::Parquet(e.to_string()))?;
+        if surviving_groups.is_empty() {
+            return Ok(HashSet::new());
+        }
 
-            let mut local_offset = 0u64;
-            for batch in reader {
-                let batch = batch.map_err(|e| AilakeError::Parquet(e.to_string()))?;
-                let col = batch.column(0);
-                for i in 0..col.len() {
-                    if let Some(cell) = extract_cell(col.as_ref(), i) {
-                        if compare(filter.op, &cell, &filter.value) {
-                            matches.insert(base + local_offset + i as u64);
-                        }
+        let projection = ProjectionMask::leaves(builder.parquet_schema(), [col_idx]);
+        let reader = builder
+            .with_row_groups(surviving_groups.clone())
+            .with_projection(projection)
+            .build()
+            .map_err(|e| AilakeError::Parquet(e.to_string()))?;
+
+        let mut matches = HashSet::new();
+        let mut selected_group_index = 0usize;
+        let mut offset_in_group = 0u64;
+        for batch in reader {
+            let batch = batch.map_err(|e| AilakeError::Parquet(e.to_string()))?;
+            let col = batch.column(0);
+            for i in 0..col.len() {
+                while selected_group_index < surviving_groups.len()
+                    && offset_in_group >= row_group_rows[surviving_groups[selected_group_index]]
+                {
+                    selected_group_index += 1;
+                    offset_in_group = 0;
+                }
+                let Some(&group) = surviving_groups.get(selected_group_index) else {
+                    return Err(AilakeError::Parquet(
+                        "projected reader returned more rows than selected row groups".into(),
+                    ));
+                };
+                let row_id = base_offsets[group] + offset_in_group;
+                if let Some(cell) = extract_cell(col.as_ref(), i) {
+                    if compare(filter.op, &cell, &filter.value) {
+                        matches.insert(row_id);
                     }
                 }
-                local_offset += col.len() as u64;
+                offset_in_group += 1;
             }
         }
         Ok(matches)
@@ -733,6 +754,8 @@ mod tests {
 
     fn write_filter_fixture() -> Bytes {
         use arrow_array::{Int32Array, StringArray};
+        use parquet::arrow::arrow_writer::ArrowWriter;
+        use parquet::file::properties::WriterProperties;
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new("category", DataType::Utf8, false),
@@ -749,7 +772,23 @@ mod tests {
         .unwrap();
         let embs: Vec<Vec<f32>> = (0..5).map(|i| vec![i as f32, 0.0, 0.0, 0.0]).collect();
         let writer = ParquetVectorWriter::new(make_policy(4));
-        writer.write_batch(&batch, &embs).unwrap().0
+        let bytes = writer.write_batch(&batch, &embs).unwrap().0;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let schema = reader.schema();
+        let properties = WriterProperties::builder()
+            .set_max_row_group_size(2)
+            .build();
+        let mut output = Vec::new();
+        let mut row_group_writer =
+            ArrowWriter::try_new(&mut output, schema, Some(properties)).unwrap();
+        for batch in reader {
+            row_group_writer.write(&batch.unwrap()).unwrap();
+        }
+        row_group_writer.close().unwrap();
+        Bytes::from(output)
     }
 
     #[test]
@@ -827,6 +866,23 @@ mod tests {
         let filter = ColumnFilter::eq("category", FilterValue::Str("sports".to_string()));
         let ids = reader.matching_row_ids(&filter).unwrap();
         let mut ids: Vec<u64> = ids.into_iter().collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 4]);
+    }
+
+    #[test]
+    fn matching_row_ids_batches_surviving_row_groups_and_skips_middle_group() {
+        let bytes = write_filter_fixture();
+        let metadata = ArrowReaderMetadata::load(&bytes, Default::default()).unwrap();
+        assert_eq!(metadata.metadata().num_row_groups(), 3);
+
+        let reader = ParquetVectorReader::new(bytes, "embedding");
+        let filter = ColumnFilter::eq("category", FilterValue::Str("sports".to_string()));
+        let mut ids: Vec<u64> = reader
+            .matching_row_ids(&filter)
+            .unwrap()
+            .into_iter()
+            .collect();
         ids.sort_unstable();
         assert_eq!(ids, vec![1, 4]);
     }

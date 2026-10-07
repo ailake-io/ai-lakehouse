@@ -214,7 +214,7 @@ df = table.search(query, top_k=10, fetch_data=True).to_pandas()
 
 `fetch_data=True` reads each matching Parquet file once and uses `arrow_select::take` to extract only the matched rows — no full table scan.
 
-### `search(path, query, top_k=10, fetch_data=False, partition_filter=None, score_fn=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None) → SearchQuery`
+### `search(path, query, top_k=10, fetch_data=False, partition_filter=None, score_fn=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None, strict_deletes=True) → SearchQuery`
 
 Module-level search returning the same chainable `SearchQuery`.
 
@@ -224,6 +224,7 @@ Module-level search returning the same chainable `SearchQuery`.
 - `ef_search` — HNSW search pool size. Larger = higher recall, slower. Default `None` = table default (50).
 - `rerank_factor` — when set, fetches `top_k * rerank_factor` HNSW candidates and reranks with exact F32 distances — corrects PQ approximation error on IVF-PQ-indexed tables. Default `None` = off. Also honored by `search_with_data`/`scan` and `search_multimodal`.
 - `score_fn` — re-ranking callable `(distance: float, row: Any) -> float`. Requires `fetch_data=True`.
+- `strict_deletes` — fail if deletion metadata cannot be loaded (default `True`). Set to `False` only when stale deleted rows are acceptable. Also supported by `search_multimodal`, `search_with_data`/`scan`, and `read_changes`.
 - `top_k` is capped at `ailake_core::MAX_TOP_K` (100,000) — a value above that raises `ValueError` rather than risking an unbounded-allocation crash (`search()` runs in-process, so this protects the embedding host process itself, not just a subprocess). Same limit applies to `search_text()` and `search_multimodal()`.
 
 ### `VectorColSpec(column, dim, metric="cosine", modality=None, precision="f16", pre_normalize=False, hnsw_m=None, hnsw_ef_construction=None)`
@@ -507,7 +508,7 @@ hits = ailake.search_text(path, "query", text_columns=["chunk_text", "document_t
 
 Alias for `search_with_data` — same capability as ailake-go's `Scan()` and ailake-jni's `ailake_scan_json` (search + full-row fetch in one call, no JOIN needed against a separately-registered table). See `search_with_data` below.
 
-### `read_changes(path, *, start_snapshot=None, end_snapshot=None, pk_columns=None, coalesce_updates=False, catalog_opts=None) → pyarrow.Table`
+### `read_changes(path, *, start_snapshot=None, end_snapshot=None, pk_columns=None, coalesce_updates=False, catalog_opts=None, strict_deletes=True) → pyarrow.Table`
 
 Change Data Capture: read the change stream between two Iceberg snapshots. Returns a `pyarrow.Table` with the original columns plus `_change_type`, `_snapshot_id`, `_sequence_number`, and `_commit_timestamp`.
 

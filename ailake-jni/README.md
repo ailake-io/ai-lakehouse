@@ -222,9 +222,15 @@ Cross-modal vector search with Reciprocal Rank Fusion. Accepts N column queries 
     { "col": "image_embedding", "query": [0.3,  0.4, "..."], "weight": 0.3, "dim": 0 }
   ],
   "top_k":            10,
+  "strict_deletes":   true,
   "partition_filter": "agent-42"
 }
 ```
+
+`strict_deletes` defaults to `true` for `ailake_search_json`,
+`ailake_search_multimodal_json`, and `ailake_scan_json`. The text search endpoint
+is always strict. Set the option to `false` only when the caller accepts
+potentially stale rows if deletion metadata cannot be read.
 
 `dim: 0` means auto-detect from table metadata. `partition_filter` is optional — restricts to files with a matching `partition_value` (Phase 9). Each `col` is a vector column name; if the column is the table's primary column, its main HNSW index is used; otherwise the secondary index from `extra_vector_indexes` in the file manifest is used.
 

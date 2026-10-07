@@ -13,13 +13,15 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -273,6 +275,7 @@ impl ServerMetrics {
         catalog_open: bool,
         storage_open: bool,
     ) -> String {
+        let flat_scan = ailake_query::scanner::flat_scan_stats();
         format!(
             "# TYPE ailake_http_requests_total counter\n\
              ailake_http_requests_total {}\n\
@@ -288,6 +291,14 @@ impl ServerMetrics {
              ailake_http_write_total {}\n\
              # TYPE ailake_http_compact_total counter\n\
              ailake_http_compact_total {}\n\
+             # TYPE ailake_search_flat_scan_deferred_files_total counter\n\
+             ailake_search_flat_scan_deferred_files_total {}\n\
+             # TYPE ailake_search_flat_scan_unexpected_files_total counter\n\
+             ailake_search_flat_scan_unexpected_files_total {}\n\
+             # TYPE ailake_search_flat_scan_rows_total counter\n\
+             ailake_search_flat_scan_rows_total {}\n\
+             # TYPE ailake_search_flat_scan_elapsed_micros_total counter\n\
+             ailake_search_flat_scan_elapsed_micros_total {}\n\
              # TYPE ailake_cache_hits_total counter\n\
              ailake_cache_hits_total {}\n\
              # TYPE ailake_cache_misses_total counter\n\
@@ -335,6 +346,10 @@ impl ServerMetrics {
             self.search_total.load(Ordering::Relaxed),
             self.write_total.load(Ordering::Relaxed),
             self.compact_total.load(Ordering::Relaxed),
+            flat_scan.deferred_files_total,
+            flat_scan.unexpected_files_total,
+            flat_scan.rows_total,
+            flat_scan.elapsed_micros_total,
             cache.hits_total,
             cache.misses_total,
             cache.inserts_total,
@@ -764,7 +779,7 @@ fn cache_scope(table: &TableIdent) -> String {
     format!("{}.{}", table.namespace, table.name)
 }
 
-fn query_cache_identity(body: &str) -> String {
+fn query_cache_identity(body: &[u8]) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     body.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
@@ -893,8 +908,23 @@ type ApiResult<T> = Result<T, ApiError>;
 // ---------------------------------------------------------------------------
 
 const MAX_TOP_K: usize = 10_000;
-const MAX_BODY_BYTES: usize = 32 * 1024 * 1024; // 32 MB
-const MAX_INFLIGHT_REQUESTS: usize = 64;
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024; // 8 MB per request
+const MAX_INFLIGHT_REQUESTS: usize = 16;
+const MAX_QUERY_DIMENSIONS: usize = 65_536;
+const MAX_WRITE_ROWS: usize = 4_096;
+const MAX_WRITE_DIMENSIONS: usize = 16_384;
+
+fn bearer_token_matches(expected: &str, provided: &str) -> bool {
+    let expected = expected.as_bytes();
+    let provided = provided.as_bytes();
+    let mut difference = expected.len() ^ provided.len();
+    for index in 0..expected.len().max(provided.len()) {
+        difference |= usize::from(
+            expected.get(index).copied().unwrap_or(0) ^ provided.get(index).copied().unwrap_or(0),
+        );
+    }
+    difference == 0
+}
 
 #[derive(Clone, Copy)]
 enum RateLimitRequestClass {
@@ -914,35 +944,23 @@ fn client_ip(headers: &HeaderMap, trust_proxy_headers: bool) -> Option<String> {
     if !trust_proxy_headers {
         return None;
     }
-    headers
-        .get("x-forwarded-for")
-        .or_else(|| headers.get("x-real-ip"))
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    let parse_header = |name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .and_then(|value| value.parse::<IpAddr>().ok())
+            .map(|address| address.to_string())
+    };
+    parse_header("x-forwarded-for").or_else(|| parse_header("x-real-ip"))
 }
 
-async fn authorize_and_acquire(
+async fn check_rate_limit(
     state: &AppState,
     headers: &HeaderMap,
     class: RateLimitRequestClass,
-) -> ApiResult<tokio::sync::OwnedSemaphorePermit> {
-    if let Some(expected) = &state.auth_token {
-        let valid = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| {
-                value
-                    .strip_prefix("Bearer ")
-                    .is_some_and(|token| token == expected.expose_secret())
-            })
-            .unwrap_or(false);
-        if !valid {
-            return Err(ApiError::unauthorized());
-        }
-    }
+) -> ApiResult<()> {
     let rate_class = match class {
         RateLimitRequestClass::Search => Some(RateLimitClass::Search),
         RateLimitRequestClass::Write => Some(RateLimitClass::Write),
@@ -960,11 +978,33 @@ async fn authorize_and_acquire(
             return Err(ApiError::rate_limited(decision.retry_after_secs));
         }
     }
-    state
-        .inflight
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ApiError::too_many_requests())
+    Ok(())
+}
+
+/// Authenticate and reserve capacity before downstream extractors read request
+/// bodies. This keeps unauthenticated or excess requests from occupying large
+/// body buffers before the handler-level work limit takes effect.
+async fn guard_request(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Some(expected) = &state.auth_token {
+        let valid = request
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|provided| bearer_token_matches(expected.expose_secret(), provided));
+        if !valid {
+            return ApiError::unauthorized().into_response();
+        }
+    }
+
+    let Ok(_permit) = state.inflight.clone().try_acquire_owned() else {
+        return ApiError::too_many_requests().into_response();
+    };
+    next.run(request).await
 }
 
 #[derive(Deserialize)]
@@ -1042,6 +1082,7 @@ struct InfoResponse {
     failed_files: usize,
     rows: u64,
     size_bytes: u64,
+    estimated_search_budget_bytes: u64,
     snapshot_id: Option<i64>,
 }
 
@@ -1052,15 +1093,20 @@ struct InfoResponse {
 async fn handle_search(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: String,
+    body: bytes::Bytes,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "search");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Search).await?;
-    let req: SearchRequest = serde_json::from_str(&body)
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Search).await?;
+    let req: SearchRequest = serde_json::from_slice(&body)
         .map_err(|e| ApiError::bad_request(format!("invalid JSON: {e}")))?;
 
     if req.query.is_empty() {
         return Err(ApiError::bad_request("query must not be empty"));
+    }
+    if req.query.len() > MAX_QUERY_DIMENSIONS {
+        return Err(ApiError::bad_request(format!(
+            "query dimensions exceed the maximum of {MAX_QUERY_DIMENSIONS}"
+        )));
     }
     // Read the current catalog snapshot before consulting the query cache. The
     // snapshot id is part of the key, so writes from another process cannot
@@ -1098,7 +1144,7 @@ async fn handle_search(
         strict_deletes: state.strict_deletes,
     };
 
-    let results = ailake_query::search(
+    let results = ailake_query::search_with_table_metadata(
         &state.table,
         &req.query,
         config,
@@ -1106,6 +1152,7 @@ async fn handle_search(
         dim,
         Arc::clone(&state.catalog) as Arc<dyn CatalogProvider>,
         Arc::clone(&state.store),
+        meta,
     )
     .await
     .map_err(ApiError::from)?;
@@ -1223,12 +1270,18 @@ async fn probe_and_auto_compact(state: &AppState) -> Result<(), String> {
 async fn handle_write(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: String,
+    body: bytes::Bytes,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "write");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Write).await?;
-    let req: WriteRequest = serde_json::from_str(&body)
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
+    let req: WriteRequest = serde_json::from_slice(&body)
         .map_err(|e| ApiError::bad_request(format!("invalid JSON: {e}")))?;
+
+    if req.texts.len() > MAX_WRITE_ROWS {
+        return Err(ApiError::bad_request(format!(
+            "write row count exceeds the maximum of {MAX_WRITE_ROWS}"
+        )));
+    }
 
     if req.texts.len() != req.embeddings.len() {
         return Err(ApiError::bad_request(format!(
@@ -1237,13 +1290,24 @@ async fn handle_write(
             req.embeddings.len()
         )));
     }
+    if let Some((row, embedding)) = req
+        .embeddings
+        .iter()
+        .enumerate()
+        .find(|(_, embedding)| embedding.is_empty() || embedding.len() > MAX_WRITE_DIMENSIONS)
+    {
+        return Err(ApiError::bad_request(format!(
+            "embedding at row {row} must contain 1..={MAX_WRITE_DIMENSIONS} dimensions (got {})",
+            embedding.len()
+        )));
+    }
 
     let schema = std::sync::Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
         "text",
         arrow_schema::DataType::Utf8,
         false,
     )]));
-    let text_arr = arrow_array::StringArray::from(req.texts.clone());
+    let text_arr = arrow_array::StringArray::from(req.texts);
     let batch = arrow_array::RecordBatch::try_new(schema, vec![std::sync::Arc::new(text_arr)])
         .map_err(|e| ApiError::bad_request(format!("RecordBatch error: {e}")))?;
 
@@ -1285,7 +1349,7 @@ async fn handle_compact(
     body: String,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "compact");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Write).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
     let req: CompactRequest = if body.trim().is_empty() {
         CompactRequest::default()
     } else {
@@ -1380,7 +1444,7 @@ async fn handle_info(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "info");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Other).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Other).await?;
     let meta = load_table_cached(&state).await?;
     let files = state
         .catalog
@@ -1391,6 +1455,9 @@ async fn handle_info(
     let file_count = files.len();
     let row_count: u64 = files.iter().map(|f| f.record_count).sum();
     let size_bytes: u64 = files.iter().map(|f| f.file_size_bytes).sum();
+    let estimated_search_budget_bytes = ailake_query::scanner::estimate_file_search_budget_bytes(
+        files.iter().map(|file| file.file_size_bytes),
+    );
     let ready = files
         .iter()
         .filter(|f| f.index_status == IndexStatus::Ready)
@@ -1427,6 +1494,7 @@ async fn handle_info(
         failed_files: failed,
         rows: row_count,
         size_bytes,
+        estimated_search_budget_bytes,
         snapshot_id: meta.current_snapshot_id,
     };
     request_metrics.success();
@@ -1442,7 +1510,7 @@ async fn handle_ready(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "ready");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Other).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Other).await?;
     let _ = load_table_cached(&state).await?;
     request_metrics.success();
     Ok((StatusCode::OK, r#"{"ok":true}"#))
@@ -1453,7 +1521,7 @@ async fn handle_metrics(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "metrics");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Other).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Other).await?;
     let body = state.metrics.render(
         MAX_INFLIGHT_REQUESTS,
         state.cache.stats().await,
@@ -1478,7 +1546,7 @@ async fn handle_submit_compact(
     body: String,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "compact");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Write).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
     let req: CompactRequest = if body.trim().is_empty() {
         CompactRequest::default()
     } else {
@@ -1553,7 +1621,7 @@ async fn handle_job(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "job");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Other).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Other).await?;
     let job = state.jobs.get(&job_id).await.ok_or_else(|| ApiError {
         status: StatusCode::NOT_FOUND,
         message: format!("job not found: {job_id}"),
@@ -1569,7 +1637,7 @@ async fn handle_jobs(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "jobs");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Other).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Other).await?;
     let jobs = state.jobs.list().await;
     if query.offset.is_some() || query.limit.is_some() {
         let total = jobs.len();
@@ -1603,7 +1671,7 @@ async fn handle_cancel_job(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "job");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Write).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
     let job = state
         .jobs
         .cancel(&job_id)
@@ -1627,7 +1695,7 @@ async fn handle_retry_job(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "job");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Write).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
     let job = state
         .jobs
         .retry(&job_id)
@@ -1653,7 +1721,7 @@ async fn handle_index_jobs(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "index-jobs");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Other).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Other).await?;
     let jobs = list_index_jobs(Arc::clone(&state.store))
         .await
         .map_err(ApiError::from)?;
@@ -1689,7 +1757,7 @@ async fn handle_index_job(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "index-job");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Other).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Other).await?;
     let job = load_index_job(Arc::clone(&state.store), &job_id)
         .await
         .map_err(|error| ApiError {
@@ -1707,7 +1775,7 @@ async fn handle_cancel_index_job(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "index-job");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Write).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
     let job = handle_for(Arc::clone(&state.store), job_id);
     let record = job.request_cancel().await.map_err(|error| ApiError {
         status: if error.to_string().contains("No such file") {
@@ -1731,7 +1799,7 @@ async fn handle_retry_index_job(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "index-job");
-    let _permit = authorize_and_acquire(&state, &headers, RateLimitRequestClass::Write).await?;
+    check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
     let job = handle_for(Arc::clone(&state.store), job_id);
     let record = job.retry().await.map_err(|error| ApiError {
         status: if error.to_string().contains("No such file") {
@@ -1787,6 +1855,7 @@ pub(crate) async fn run(
         circuit_failure_threshold,
         circuit_cooldown_secs,
     } = config;
+    validate_bind_auth(&host, auth_token.is_some())?;
     let table_meta = catalog
         .load_table(&table)
         .await
@@ -1974,14 +2043,29 @@ pub(crate) async fn run(
     result
 }
 
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn validate_bind_auth(host: &str, has_auth: bool) -> Result<(), String> {
+    if !has_auth && !is_loopback_host(host) {
+        return Err(format!(
+            "refusing to bind unauthenticated server to non-loopback host '{host}'; configure --auth-token or bind to localhost"
+        ));
+    }
+    Ok(())
+}
+
 fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let api = Router::new()
         .route("/search", post(handle_search))
         .route("/write", post(handle_write))
         .route("/compact", post(handle_compact))
         .route("/info", get(handle_info))
         .route("/metrics", get(handle_metrics))
-        .route("/healthz", get(handle_health))
         .route("/readyz", get(handle_ready))
         .route("/jobs/compact", post(handle_submit_compact))
         .route("/jobs", get(handle_jobs))
@@ -1993,12 +2077,52 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/index-jobs/:job_id/cancel", post(handle_cancel_index_job))
         .route("/index-jobs/:job_id", get(handle_index_job))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            guard_request,
+        ))
+        .with_state(state);
+
+    Router::new()
+        .route("/healthz", get(handle_health))
+        .merge(api)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bearer_tokens_match_without_early_byte_exit() {
+        assert!(bearer_token_matches("secret-token", "secret-token"));
+        assert!(!bearer_token_matches("secret-token", "secret-tokeN"));
+        assert!(!bearer_token_matches("secret-token", "short"));
+    }
+
+    #[test]
+    fn unauthenticated_bind_is_limited_to_loopback_hosts() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("0.0.0.0"));
+        assert!(!is_loopback_host("192.168.1.10"));
+        assert!(!is_loopback_host("example.internal"));
+        assert!(validate_bind_auth("127.0.0.1", false).is_ok());
+        assert!(validate_bind_auth("0.0.0.0", true).is_ok());
+        assert!(validate_bind_auth("0.0.0.0", false).is_err());
+    }
+
+    #[test]
+    fn proxy_ip_headers_are_opt_in_and_must_contain_an_ip_address() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.7, 10.0.0.2".parse().unwrap());
+        assert_eq!(client_ip(&headers, false), None);
+        assert_eq!(client_ip(&headers, true).as_deref(), Some("203.0.113.7"));
+
+        headers.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
+        headers.insert("x-real-ip", "2001:db8::1".parse().unwrap());
+        assert_eq!(client_ip(&headers, true).as_deref(), Some("2001:db8::1"));
+    }
     use ailake_catalog::HadoopCatalog;
     use ailake_core::{VectorMetric, VectorPrecision};
     use ailake_query::TableWriter;
@@ -2243,6 +2367,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("ailake_search_flat_scan_unexpected_files_total"));
+        assert!(body.contains("ailake_search_flat_scan_elapsed_micros_total"));
+    }
+
+    #[tokio::test]
+    async fn request_guard_runs_before_body_parsing_and_capacity_is_reserved_early() {
+        let dir = TempDir::new().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let mut state = test_state(catalog, store);
+        state.auth_token = Some("test-token".into());
+        state.inflight = Arc::new(Semaphore::new(0));
+        let app = build_router(Arc::new(state));
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/write")
+                    .body(Body::from("{"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let overloaded = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/write")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from("{"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(overloaded.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
