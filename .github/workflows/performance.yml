@@ -33,14 +33,31 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        if: github.event_name == 'pull_request'
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: baseline
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Run base-branch vector benchmark
+        if: github.event_name == 'pull_request'
+        working-directory: baseline
+        run: |
+          mkdir -p ../perf
+          CARGO_TARGET_DIR=../target cargo bench --quiet -p ailake-vec --bench distance -- --json > ../perf/cpu-distance-baseline.json
       - name: Run structured vector benchmark
         run: |
           mkdir -p perf
           cargo bench --quiet -p ailake-vec --bench distance -- --json > perf/cpu-distance.json
       - name: Validate benchmark result
-        run: python3 scripts/ci/compare_benchmark.py perf/cpu-distance.json
+        run: |
+          if [[ -f perf/cpu-distance-baseline.json ]]; then
+            python3 scripts/ci/compare_benchmark.py perf/cpu-distance.json \
+              --baseline perf/cpu-distance-baseline.json --max-regression 0.25
+          else
+            python3 scripts/ci/compare_benchmark.py perf/cpu-distance.json
+          fi
       - name: Upload CPU benchmark
         if: always()
         uses: actions/upload-artifact@v4

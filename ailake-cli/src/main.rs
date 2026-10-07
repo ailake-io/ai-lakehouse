@@ -461,6 +461,9 @@ enum Commands {
         /// Reject requests when Redis rate-limit storage is unavailable.
         #[arg(long, env = "AILAKE_RATE_LIMIT_FAIL_CLOSED", default_value_t = false)]
         rate_limit_fail_closed: bool,
+        /// Allow requests when Redis/Valkey rate-limit storage is unavailable.
+        #[arg(long, env = "AILAKE_RATE_LIMIT_FAIL_OPEN", default_value_t = false)]
+        rate_limit_fail_open: bool,
         /// Consecutive catalog/storage failures before opening the circuit.
         #[arg(long, env = "AILAKE_CIRCUIT_FAILURE_THRESHOLD", default_value_t = 5)]
         circuit_failure_threshold: u32,
@@ -1669,6 +1672,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             write_quota_ip,
             trust_proxy_headers,
             rate_limit_fail_closed,
+            rate_limit_fail_open,
             circuit_failure_threshold,
             circuit_cooldown_secs,
         } => {
@@ -1729,7 +1733,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     search_quota_ip,
                     write_quota_ip,
                     trust_proxy_headers,
-                    rate_limit_fail_closed,
+                    rate_limit_fail_closed: rate_limit_fail_closed || !rate_limit_fail_open,
                     circuit_failure_threshold,
                     circuit_cooldown_secs,
                 },

@@ -58,19 +58,22 @@ These checks do not yet provide a full production performance profile:
 - The recall/p95 case uses one local table at 10,000 rows and 128 dimensions.
   It does not measure large multi-file/cloud scans, cold-cache behavior, peak
   memory, or concurrent searches across many shards.
-- The distance benchmark measures kernels. The workflow stores its output but
-  does not supply a persistent same-runner baseline to
-  `compare_benchmark.py`, so it is not currently a kernel regression gate.
+- The distance benchmark measures kernels. Pull request runs compare with the
+  base branch on the same runner and use a 25% tolerance; push, scheduled and
+  manual runs validate the output schema without a baseline comparison.
 - A search limits concurrent file reads to 32, while HTTP serve accepts up to
-  64 requests concurrently. That bounds each request but can still permit a
-  large aggregate of file tasks. A process-wide, store-aware I/O semaphore or
-  load-adaptive budget is the clearest next scalability improvement.
+  64 requests concurrently. A process-wide semaphore now caps active file
+  searches at 128; this limit is fixed and not yet weighted by object size,
+  backend latency or memory pressure.
 - Bounded top-K reduces intermediate result memory, but brute-force fallback
   remains O(rows × dimensions); it should remain a fallback for small or
   unindexed shards, with compaction/reindexing monitored operationally.
 - Parquet delete filtering reuses footer metadata, but still opens readers for
   surviving row groups. Further batching should follow measurements on realistic
   files rather than assumed gains.
+- FTS payloads are capped at 64 MiB and BM25 stats use a size check plus bounded
+  range read. These limits are fixed constants; tuning them by workload remains
+  a follow-up if real indexes approach those ceilings.
 
 For the HTTP harness, also vary request concurrency, file count, object-store
 latency and table size; report p95/p99 and memory alongside QPS. Keep benchmark

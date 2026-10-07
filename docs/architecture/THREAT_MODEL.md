@@ -115,7 +115,7 @@ validated at the top of all 5 entry points, before any allocation-sizing math
 | **T**ampering: corrupt HNSW blob → panic | **High** | All offsets use `checked_add`; out-of-bounds → `NotAnAilakeFile` error. 7 corruption tests |
 | **R**epudiation: N/A | — | — |
 | **I**nformation disclosure: malformed centroid → wrong pruning | Low | Centroid parse validated (`InvalidCentroidLength`). Missing centroid → conservative (keep file) |
-| **D**enial of service: oversized index/FTS payload | Medium | Index ranges are checked against file length; FTS rejects declared payloads over 1 GiB. That FTS ceiling is still large and payloads are materialized in memory |
+| **D**enial of service: oversized index/FTS payload | Low | Index ranges are checked against file length; FTS rejects uncompressed payloads over 64 MiB |
 | **E**levation of privilege: N/A | — | — |
 
 ### Key finding: Release dim mismatch (Critical, see §1)
@@ -145,12 +145,10 @@ undefined behavior in release builds. Fixed: `from_bytes` now validates
 
 ### Remaining payload limits
 
-The 1 GiB FTS payload ceiling prevents unbounded declared lengths but can still
-allow a very large allocation for one file. BM25 stats decoding limits compressed
-and decompressed payload sizes to 16 MiB and 64 MiB, respectively, but the store
-read materializes the compressed object before that check. Consider lower,
-configurable limits and bounded/range reads before accepting untrusted or
-multi-tenant data.
+FTS bounds uncompressed payload allocation to 64 MiB. BM25 stats reads first
+check the object size and use a bounded range read; compressed and decompressed
+limits are 16 MiB and 64 MiB. The limits are currently fixed constants rather
+than deployment settings.
 
 ---
 
@@ -163,7 +161,7 @@ multi-tenant data.
 | **S**poofing: wrong table/warehouse | Low | Caller provides identifiers; no auth |
 | **T**ampering: malicious `ScoreFn` | Low | `ScoreFn` is Rust closure, not user-supplied at runtime; only configured at compile time |
 | **R**epudiation: N/A | — | Search is stateless |
-| **I**nformation disclosure / stale results: delete file read failure | Medium | Rust `SearchConfig` and CLI search/serve fail closed by default. Python/JNI currently set `strict_deletes: false`; `SearchSession` does not apply deletes. See `DELETE_INTEGRITY.md` |
+| **I**nformation disclosure / stale results: delete file read failure | Low | Rust, CLI, Python and JNI fail closed by default. `SearchSession` rejects snapshots with deletes. Explicit permissive options remain available where supported; see `DELETE_INTEGRITY.md` |
 | **D**enial of service: `top_k = 100000`, no geometric pruning | Low | `ef_search.clamp(1, 100000)`. Files without centroid always included (no pruning) |
 | **E**levation of privilege: N/A | — | — |
 
@@ -173,15 +171,15 @@ multi-tenant data.
 - Compaction recall parity test
 - Concurrent stress test (1 compactor + 4 searchers, 5 passes)
 - Dimension mismatch rejection test
-- 41 unit tests (scanner, writer, compaction, pruner, bm25, mem_table)
+- Scanner, writer, compaction, pruner, BM25 and delete-integrity unit tests
 - 3 Loom models (`ailake-query/src/loom_tests.rs`) — see coverage gap below
 
 ### Remaining query-integrity work
 
-Expose strict delete handling in Python and JNI instead of hardcoding
-`strict_deletes: false`, and define delete visibility for `SearchSession`. The
-CDC reader also has its own `strict_deletes` setting and remains permissive by
-default. These paths are documented in `docs/guides/DELETE_INTEGRITY.md`.
+The CDC reader has its own `strict_deletes` setting; its library default remains
+permissive for compatibility. Use the strict option in CLI/Python when required.
+`SearchSession` rejects snapshots with delete metadata instead of silently
+returning stale rows.
 
 ### Known gap: Loom models don't cover the JNI lock+block_on pattern (Open)
 
@@ -213,7 +211,7 @@ contention) than Loom can provide.
 | **T**ampering: oversized body | Low | `DefaultBodyLimit::max(32 MB)` |
 | **R**epudiation: no access log | Low | Prometheus counters and request duration are exposed at `/metrics`; access-log correlation remains a deployment concern |
 | **I**nformation disclosure: error messages may reveal paths | Low | `ApiError` surfaces Rust error messages |
-| **D**enial of service: request flooding | Medium | 32 MB body limit, 64 in-flight HTTP request cap, per-search fan-out cap of 32 files, and optional Redis/Valkey quotas. Fan-out is not a process-wide semaphore; worst-case file tasks can multiply across requests. Rate limiting is fail-open unless `--rate-limit-fail-closed` is set |
+| **D**enial of service: request flooding | Low | 32 MB body limit, 64 in-flight HTTP request cap, per-search fan-out cap of 32 files, process-wide file-search cap of 128, and optional Redis/Valkey quotas. Rate limiting fails closed by default when configured; `--rate-limit-fail-open` opts out |
 | **E**levation of privilege: N/A | — | — |
 
 ### Test coverage
@@ -225,11 +223,8 @@ contention) than Loom can provide.
 
 The server uses plain HTTP; the bearer token is not encrypted in transit by the
 server itself. Terminate TLS at a trusted reverse proxy or gateway for remote
-traffic. The token is one shared credential with no per-user identity or roles,
-and bearer comparison is not constant-time. Keep `/healthz` reachable only where
-its public status response is acceptable. Add a process-wide file-I/O budget and
-consider fail-closed rate limiting for deployments where quota enforcement is a
-security boundary.
+traffic. The token is one shared credential with no per-user identity or roles.
+Keep `/healthz` reachable only where its public status response is acceptable.
 
 ---
 

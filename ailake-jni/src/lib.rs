@@ -275,6 +275,7 @@ fn do_search(
     text_column: &str,
     bm25_weight: f32,
     pruning_threshold: f32,
+    strict_deletes: bool,
     catalog_opts: &CatalogOpts,
 ) -> ailake_core::AilakeResult<Vec<SearchResult>> {
     let store: Arc<dyn ailake_store::Store> =
@@ -296,7 +297,7 @@ fn do_search(
         partition_filter,
         hybrid,
         column_filter: None,
-        strict_deletes: false,
+        strict_deletes,
     };
     rt().block_on(rs_search(
         &table, &query, config, vec_col, dim, catalog, store,
@@ -526,6 +527,7 @@ pub unsafe extern "C" fn ailake_vector_search_json(
             "chunk_text",
             0.5,
             f32::INFINITY,
+            true,
             &CatalogOpts::default(),
         ) {
             Ok(v) => v.into_iter().map(RowResultJson::from).collect(),
@@ -592,6 +594,8 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
             bm25_weight: f32,
             #[serde(default)]
             pruning_threshold: Option<f32>,
+            #[serde(default = "default_strict_deletes")]
+            strict_deletes: bool,
         }
         fn default_ns() -> String {
             "default".into()
@@ -610,6 +614,9 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
         }
         fn default_bm25_weight() -> f32 {
             0.5
+        }
+        fn default_strict_deletes() -> bool {
+            true
         }
 
         if request_json.is_null() {
@@ -658,6 +665,7 @@ pub unsafe extern "C" fn ailake_search_json(request_json: *const c_char) -> *mut
             &text_column,
             bm25_weight,
             pruning_threshold,
+            req.strict_deletes,
             &req.catalog_opts,
         ) {
             Ok(v) => v,
@@ -1809,12 +1817,17 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
             top_k: u32,
             #[serde(default)]
             partition_filter: Option<String>,
+            #[serde(default = "default_strict_deletes_multi")]
+            strict_deletes: bool,
         }
         fn default_ns_multi() -> String {
             "default".into()
         }
         fn default_topk_multi() -> u32 {
             10
+        }
+        fn default_strict_deletes_multi() -> bool {
+            true
         }
 
         #[derive(serde::Serialize)]
@@ -1882,6 +1895,7 @@ pub unsafe extern "C" fn ailake_search_multimodal_json(request_json: *const c_ch
         let config = SearchConfig {
             top_k: req.top_k as usize,
             partition_filter: req.partition_filter,
+            strict_deletes: req.strict_deletes,
             ..Default::default()
         };
 
@@ -2202,6 +2216,8 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
             ef_search: u32,
             #[serde(default)]
             partition_filter: Option<String>,
+            #[serde(default = "scan_default_strict_deletes")]
+            strict_deletes: bool,
         }
         fn scan_default_ns() -> String {
             "default".into()
@@ -2214,6 +2230,9 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
         }
         fn scan_default_ef() -> u32 {
             50
+        }
+        fn scan_default_strict_deletes() -> bool {
+            true
         }
 
         if request_json.is_null() {
@@ -2256,6 +2275,7 @@ pub unsafe extern "C" fn ailake_scan_json(request_json: *const c_char) -> *mut c
             "",
             0.0,
             f32::INFINITY,
+            req.strict_deletes,
             &req.catalog_opts,
         ) {
             Ok(v) => v,

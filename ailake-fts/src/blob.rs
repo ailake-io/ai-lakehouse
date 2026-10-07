@@ -14,7 +14,9 @@ pub const BLOB_MAGIC: [u8; 4] = *b"AFTS";
 const BLOB_VERSION: u16 = 1;
 const FLAG_ZSTD: u16 = 0x0001;
 /// Upper bound for a single FTS index payload after decompression.
-pub const MAX_FTS_PAYLOAD_BYTES: u64 = 1 << 30;
+/// Maximum uncompressed Tantivy payload accepted from a file (64 MiB).
+/// This keeps a single corrupt or hostile index from forcing gigabytes of RAM.
+pub const MAX_FTS_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Serialize all managed files from `dir` into a zstd-compressed blob.
 ///

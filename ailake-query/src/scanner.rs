@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use futures::{StreamExt, TryStreamExt};
 use rayon::prelude::*;
@@ -15,10 +15,66 @@ use ailake_store::Store;
 use ailake_vec::exact_distance;
 use arrow_array::{Array, RecordBatch};
 use bytes::Bytes;
+use tokio::sync::Semaphore;
 
 use crate::equality_delete::EqualityDeleteFilter;
 use crate::pruner::{BloomPruner, VectorPruner};
 use crate::schema_filler::SchemaFiller;
+
+const MAX_CONCURRENT_FILE_SEARCHES: usize = 32;
+const MAX_PROCESS_FILE_SEARCHES: usize = 128;
+static PROCESS_FILE_SEARCH_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn process_file_search_limit() -> Arc<Semaphore> {
+    Arc::clone(
+        PROCESS_FILE_SEARCH_LIMIT
+            .get_or_init(|| Arc::new(Semaphore::new(MAX_PROCESS_FILE_SEARCHES))),
+    )
+}
+
+async fn load_bm25_stats(store: &dyn Store, path: &str) -> crate::bm25::IdfStats {
+    let size = match store.file_size(path).await {
+        Ok(size) => size,
+        Err(error) => {
+            debug!("ailake: BM25 stats size unavailable at '{path}': {error}");
+            return crate::bm25::IdfStats::default();
+        }
+    };
+    if size > crate::bm25::MAX_BM25_STATS_COMPRESSED_BYTES as u64 {
+        warn!("ailake: BM25 stats at '{path}' exceed the compressed size limit; using empty corpus IDF");
+        return crate::bm25::IdfStats::default();
+    }
+    match store.get_range(path, 0..size).await {
+        Ok(bytes) => match crate::bm25::IdfStats::from_bytes(&bytes) {
+            Ok(stats) => stats,
+            Err(error) => {
+                warn!("ailake: invalid BM25 stats at '{path}': {error}; using empty corpus IDF");
+                crate::bm25::IdfStats::default()
+            }
+        },
+        Err(error) => {
+            debug!("ailake: BM25 stats not found at '{path}': {error}; using empty corpus IDF");
+            crate::bm25::IdfStats::default()
+        }
+    }
+}
+
+fn ensure_search_session_snapshot_is_delete_free(
+    files: &[DataFileEntry],
+    equality_deletes: &[ailake_catalog::EqualityDeleteFile],
+) -> AilakeResult<()> {
+    if files.iter().any(|file| file.deletion_vector.is_some()) {
+        return Err(AilakeError::InvalidArgument(
+            "SearchSession does not support snapshots with deletion vectors; use search()".into(),
+        ));
+    }
+    if !equality_deletes.is_empty() {
+        return Err(AilakeError::InvalidArgument(
+            "SearchSession does not support snapshots with equality deletes; use search()".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// Injectable per-result scoring function for hybrid ranking.
 ///
@@ -345,16 +401,7 @@ pub async fn search(
                 .get(crate::bm25::BM25_STATS_PATH_PROP)
                 .map(String::as_str)
                 .unwrap_or(crate::bm25::BM25_STATS_FILE);
-            match store.get(stats_path).await {
-                Ok(bytes) => crate::bm25::IdfStats::from_bytes(&bytes).ok(),
-                Err(_) => {
-                    debug!(
-                        "ailake: BM25 stats not found at '{}' — falling back to empty corpus IDF",
-                        stats_path
-                    );
-                    None
-                }
-            }
+            Some(load_bm25_stats(store.as_ref(), stats_path).await)
         }
     } else {
         None
@@ -381,7 +428,6 @@ pub async fn search(
     // parallelism, no `tokio::spawn`). This overlaps store latency while
     // bounding open requests and in-flight file/index buffers when pruning is
     // disabled or a table has many surviving files.
-    const MAX_CONCURRENT_FILE_SEARCHES: usize = 32;
     let shared_query: Arc<[f32]> = Arc::from(query);
     let shared_table_meta = Arc::new(table_meta);
     let shared_config = Arc::new(config);
@@ -395,7 +441,11 @@ pub async fn search(
             let store = Arc::clone(&store);
             let eq_del_filter = Arc::clone(&shared_deletes);
             let vector_column = vector_column.clone();
+            let process_limit = process_file_search_limit();
             async move {
+                let _permit = process_limit.acquire_owned().await.map_err(|_| {
+                    AilakeError::InvalidArgument("process-wide file-search limit is closed".into())
+                })?;
                 search_one_file(
                     &file_entry,
                     &query,
@@ -1141,11 +1191,9 @@ fn parse_metric(s: &str) -> VectorMetric {
 /// Useful for benchmarks and servers that issue many queries against the same
 /// snapshot. Avoids re-loading and re-deserializing indexes on every call.
 ///
-/// **Deleted rows are NOT filtered here**: unlike [`search`]/[`search_text`],
-/// this session does not load deletion vectors or equality delete files —
-/// rows removed via `delete_rows`/`delete_where` still appear in results.
-/// Use [`search`] when delete visibility matters; this type trades that for
-/// raw throughput on static snapshots (its benchmark use case).
+/// Delete-bearing snapshots are rejected during loading. This preserves the
+/// session's preloaded search path while preventing it from silently returning
+/// deleted rows; use [`search`] or [`search_text`] for tables with deletes.
 pub struct SearchSession {
     shards: Vec<LoadedShard>,
     metric: VectorMetric,
@@ -1175,6 +1223,8 @@ impl SearchSession {
         load_raw: bool,
     ) -> AilakeResult<Self> {
         let all_files = catalog.list_files(table, None).await?;
+        let equality_deletes = catalog.list_equality_deletes(table, None).await?;
+        ensure_search_session_snapshot_is_delete_free(&all_files, &equality_deletes)?;
         let table_meta = catalog.load_table(table).await?;
         let metric = parse_metric(
             table_meta
@@ -1516,16 +1566,7 @@ pub async fn search_text_with_options(
         .get(crate::bm25::BM25_STATS_PATH_PROP)
         .map(String::as_str)
         .unwrap_or(crate::bm25::BM25_STATS_FILE);
-    let stats = match store.get(stats_path).await {
-        Ok(bytes) => crate::bm25::IdfStats::from_bytes(&bytes).unwrap_or_default(),
-        Err(_) => {
-            debug!(
-                "ailake: BM25 stats not found at '{}' — using empty corpus IDF",
-                stats_path
-            );
-            crate::bm25::IdfStats::default()
-        }
-    };
+    let stats = load_bm25_stats(store.as_ref(), stats_path).await;
     let scorer = crate::bm25::BM25Scorer::new(&stats);
 
     // Phase H: equality delete filter for search_text results.
@@ -1840,6 +1881,26 @@ mod tests {
     #[test]
     fn search_defaults_to_fail_closed_delete_handling() {
         assert!(SearchConfig::default().strict_deletes);
+    }
+
+    #[test]
+    fn search_session_rejects_delete_bearing_snapshots() {
+        assert!(ensure_search_session_snapshot_is_delete_free(&[], &[]).is_ok());
+        let file = DataFileEntry {
+            deletion_vector: Some(ailake_catalog::provider::DeletionVector {
+                path: "metadata/deletes.dv".into(),
+                offset: 0,
+                length: 1,
+                cardinality: 1,
+            }),
+            ..Default::default()
+        };
+        assert!(ensure_search_session_snapshot_is_delete_free(&[file], &[]).is_err());
+        assert!(ensure_search_session_snapshot_is_delete_free(
+            &[],
+            &[ailake_catalog::EqualityDeleteFile::default()]
+        )
+        .is_err());
     }
 
     #[test]

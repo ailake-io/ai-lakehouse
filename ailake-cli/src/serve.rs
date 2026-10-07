@@ -897,6 +897,18 @@ const MAX_TOP_K: usize = 10_000;
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024; // 32 MB
 const MAX_INFLIGHT_REQUESTS: usize = 64;
 
+fn bearer_token_matches(expected: &str, provided: &str) -> bool {
+    let expected = expected.as_bytes();
+    let provided = provided.as_bytes();
+    let mut difference = expected.len() ^ provided.len();
+    for index in 0..expected.len().max(provided.len()) {
+        difference |= usize::from(
+            expected.get(index).copied().unwrap_or(0) ^ provided.get(index).copied().unwrap_or(0),
+        );
+    }
+    difference == 0
+}
+
 #[derive(Clone, Copy)]
 enum RateLimitRequestClass {
     Search,
@@ -937,7 +949,7 @@ async fn authorize_and_acquire(
             .map(|value| {
                 value
                     .strip_prefix("Bearer ")
-                    .is_some_and(|token| token == expected.expose_secret())
+                    .is_some_and(|token| bearer_token_matches(expected.expose_secret(), token))
             })
             .unwrap_or(false);
         if !valid {
@@ -2017,6 +2029,13 @@ fn build_router(state: Arc<AppState>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bearer_tokens_match_without_early_byte_exit() {
+        assert!(bearer_token_matches("secret-token", "secret-token"));
+        assert!(!bearer_token_matches("secret-token", "secret-tokeN"));
+        assert!(!bearer_token_matches("secret-token", "short"));
+    }
 
     #[test]
     fn unauthenticated_bind_is_limited_to_loopback_hosts() {
