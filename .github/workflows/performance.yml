@@ -108,6 +108,7 @@ jobs:
             --base-url http://127.0.0.1:7700 \
             --requests 128 --concurrency 64 \
             --write-workers 8 --write-rounds 8 --write-batch-size 128 \
+            --max-p95-ms 2000 \
             --server-pid "$(cat perf/serve.pid)" \
             --output perf/http-load.json
           kill "$(cat perf/serve.pid)"

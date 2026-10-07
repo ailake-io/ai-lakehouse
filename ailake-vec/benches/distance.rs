@@ -6,6 +6,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 const SAMPLES: usize = 7;
+type DistanceKernel = fn(&[f32], &[f32]) -> f32;
 
 struct BenchResult {
     kernel: &'static str,
@@ -53,7 +54,7 @@ fn run_case(
 
 fn main() {
     let json = env::args().any(|arg| arg == "--json");
-    let cases: [(&str, fn(&[f32], &[f32]) -> f32); 3] = [
+    let cases: [(&str, DistanceKernel); 3] = [
         ("cosine", ailake_vec::cosine_distance),
         ("euclidean", ailake_vec::euclidean_distance),
         ("dot_product", ailake_vec::dot_product),

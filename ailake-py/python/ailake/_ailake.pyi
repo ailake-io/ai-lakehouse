@@ -311,6 +311,7 @@ def search(
     ef_search: Optional[int] = None,
     rerank_factor: Optional[int] = None,
     catalog_opts: Optional[dict[str, str]] = None,
+    strict_deletes: bool = True,
 ) -> list[dict[str, object]]:
     """Search a table for the top-*k* nearest vectors to *query*.
 
@@ -487,6 +488,7 @@ def search_with_data(
     ef_search: Optional[int] = None,
     rerank_factor: Optional[int] = None,
     catalog_opts: Optional[dict[str, str]] = None,
+    strict_deletes: bool = True,
 ) -> bytes:
     """Search and return full row data serialized as Arrow IPC bytes.
 
@@ -532,6 +534,7 @@ def read_changes(
     pk_columns: Optional[list[str]] = None,
     coalesce_updates: bool = False,
     catalog_opts: Optional[dict[str, str]] = None,
+    strict_deletes: bool = True,
 ) -> bytes:
     """Read the change stream between two snapshots of an AI-Lake table.
 

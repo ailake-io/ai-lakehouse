@@ -113,6 +113,12 @@ The readiness probe records the first successful query latency separately as a
 single cold-path sample; the concurrent phase characterizes the warmed index
 and metadata caches.
 `--write-rounds` and `--write-batch-size` control the number of shards and rows.
+CI runs this profile with 64 concurrent searches and 8 writers (8 rounds of
+128 rows) and enforces a 2,000 ms p95 ceiling. This limit is calibrated from
+the hosted-runner profile at that load (1,205 ms p95) and local reproduction
+(1,559 ms p95); it keeps headroom for runner variance while still failing
+material regressions. The separate deterministic regression job retains its
+tighter 500 ms threshold.
 The result includes `/info` file count, row count and manifest file bytes, plus
 the scanner's size-based reservation estimate. When `--server-pid` is provided,
 it samples RSS only during concurrent search and records starting, peak and
