@@ -3,12 +3,62 @@ name: CI GPU (ailake-index — CUDA/ROCm)
 on:
   workflow_dispatch:
 
+permissions:
+  actions: read
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  discover-gpu-runners:
+    name: Discover online Windows GPU runners
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+      has_gpu: ${{ steps.discover.outputs.has_gpu }}
+    steps:
+      - name: Find online Windows GPU runners
+        id: discover
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! runners_json="$(gh api --paginate --slurp \
+            "repos/${REPOSITORY}/actions/runners?per_page=100" 2>&1)"; then
+            echo "::warning::Unable to list self-hosted runners; skipping GPU jobs."
+            runners_json='[]'
+          fi
+
+          matrix="$(jq -c '
+            [.[].runners[]
+              | select(.status == "online" and .busy == false)
+              | ([.labels[].name | ascii_downcase]) as $labels
+              | if (($labels | index("windows")) and ($labels | index("x64"))
+                    and ($labels | index("gpu-nvidia"))) then
+                  {backend: "cuda", runner: ["self-hosted", "Windows", "X64", "gpu-nvidia"]}
+                elif (($labels | index("windows")) and ($labels | index("x64"))
+                      and ($labels | index("gpu-amd"))) then
+                  {backend: "rocm", runner: ["self-hosted", "Windows", "X64", "gpu-amd"]}
+                else empty
+                end
+            ] | unique_by(.backend)
+          ' <<<"${runners_json}")"
+
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+          if [[ "${matrix}" == "[]" ]]; then
+            echo "has_gpu=false" >> "${GITHUB_OUTPUT}"
+            echo "No online Windows GPU runners found; GPU jobs will be skipped."
+          else
+            echo "has_gpu=true" >> "${GITHUB_OUTPUT}"
+            echo "Online Windows GPU runners found: ${matrix}"
+          fi
+
   # ── Windows self-hosted (bare-metal CUDA or ROCm) ──────────────────────────
   #
   # Runs all ailake-index tests: unit tests (src/gpu.rs, src/hardware.rs, …)
@@ -18,10 +68,16 @@ jobs:
   # Runner requirements:
   #   NVIDIA: CUDA Toolkit 11 or 12 (cudart64_*.dll + cublas64_*.dll in PATH)
   #   AMD:    ROCm for Windows (amdhip64.dll + hipblas.dll in PATH)
-  #   Rust stable toolchain (rustup)
+  #   Rust stable toolchain (rustup), plus the matching `gpu-nvidia` or `gpu-amd` runner label
   index-gpu-windows:
-    name: index — gpu (Windows)
-    runs-on: [self-hosted, Windows, X64]
+    name: index — gpu (Windows, ${{ matrix.backend }})
+    needs: discover-gpu-runners
+    if: needs.discover-gpu-runners.outputs.has_gpu == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover-gpu-runners.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -50,8 +106,14 @@ jobs:
             Write-Host "AMD ROCm runtime found: $rocm"
             echo "AILAKE_GPU_BACKEND=rocm" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           } else {
-            Write-Host "WARNING: no CUDA or ROCm runtime found — GPU tests will skip via libloading fallback"
-            echo "AILAKE_GPU_BACKEND=none" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            throw "GPU runner is labeled '${{ matrix.backend }}' but CUDA/ROCm runtime DLLs were not found."
+          }
+
+      - name: Verify expected GPU backend
+        shell: pwsh
+        run: |
+          if ($env:AILAKE_GPU_BACKEND -ne "${{ matrix.backend }}") {
+            throw "Expected '${{ matrix.backend }}', detected '$env:AILAKE_GPU_BACKEND'."
           }
 
       - name: Run ailake-index tests (GPU path)
