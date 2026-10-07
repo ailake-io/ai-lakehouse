@@ -217,7 +217,7 @@ contention) than Loom can provide.
 ### Test coverage
 
 - Health, metrics authentication, cache invalidation and auto-compaction paths are covered by dedicated server tests.
-- HTTP load, multi-writer fencing, cache invalidation and rate-limit decisions are exercised by server tests and `performance.yml`; production deployments should still validate gateway behavior and real Redis/Valkey failure policy.
+- HTTP load, multi-writer fencing, cache invalidation and rate-limit decisions are exercised by server tests and `performance.yml`. Redis outage tests verify both fail-closed and fail-open behavior. Proxy headers are ignored unless explicitly trusted, and accepted client addresses must parse as IPs; configure the gateway to overwrite forwarding headers and prevent direct access to the server. `/metrics` exposes cumulative fallback file/row/time counters for alerting. Production deployments should still validate gateway behavior and Redis/Valkey policy in their own network.
 
 ### Remaining deployment controls
 

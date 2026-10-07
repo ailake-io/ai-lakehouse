@@ -38,9 +38,16 @@ def request(base_url: str, method: str, path: str, payload: dict | None = None) 
 
 
 def vector(index: int, dim: int) -> list[float]:
-    values = [0.0] * dim
-    values[index % dim] = 1.0
-    values[(index * 7 + 3) % dim] = 0.25
+    # Generate a deterministic, non-periodic vector so requests do not collapse
+    # to the same query-cache key after `dim` iterations.
+    state = (index + 1) * 2_654_435_761
+    values = []
+    for coordinate in range(dim):
+        state = (state + coordinate * 97_531 + 2_246_822_519) & 0xFFFFFFFF
+        state ^= state >> 16
+        state = (state * 2_246_822_519) & 0xFFFFFFFF
+        state ^= state >> 13
+        values.append((state / 0xFFFFFFFF) * 2.0 - 1.0)
     return values
 
 
@@ -94,21 +101,6 @@ def main() -> int:
     if status != 200:
         raise SystemExit(f"healthz failed with HTTP {status}")
 
-    rss_samples: list[int] = []
-    rss_stop = threading.Event()
-    rss_monitor = None
-    if args.server_pid is not None:
-        try:
-            rss_samples.append(process_rss_bytes(args.server_pid))
-        except (OSError, ValueError) as error:
-            raise SystemExit(f"cannot read RSS for server PID {args.server_pid}: {error}")
-        rss_monitor = threading.Thread(
-            target=sample_process_rss,
-            args=(args.server_pid, rss_stop, rss_samples),
-            daemon=True,
-        )
-        rss_monitor.start()
-
     def write_one(worker: int) -> list[tuple[int, float, str]]:
         results = []
         for round_index in range(args.write_rounds):
@@ -140,6 +132,18 @@ def main() -> int:
     if write_errors:
         raise SystemExit(f"multi-writer phase failed: {write_errors[:3]}")
 
+    info_status, _, info_body = request(base_url, "GET", "/info")
+    if info_status != 200:
+        raise SystemExit(f"could not read table info after writes: HTTP {info_status}")
+    try:
+        table_info = json.loads(info_body)
+        table_files = int(table_info["files"])
+        table_rows = int(table_info["rows"])
+        table_size_bytes = int(table_info["size_bytes"])
+        estimated_search_budget_bytes = int(table_info["estimated_search_budget_bytes"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise SystemExit(f"invalid /info response: {error}")
+
     def search_one(index: int) -> tuple[int, float, str]:
         return request(
             base_url,
@@ -155,9 +159,11 @@ def main() -> int:
     ready_deadline = time.monotonic() + args.search_ready_timeout
     ready_status = None
     ready_body = ""
+    first_search_latency_ms = None
     while time.monotonic() < ready_deadline:
-        ready_status, _, ready_body = search_one(0)
+        ready_status, ready_latency_ms, ready_body = search_one(0)
         if ready_status == 200:
+            first_search_latency_ms = ready_latency_ms
             break
         time.sleep(0.5)
     else:
@@ -166,6 +172,21 @@ def main() -> int:
             "search endpoint did not become ready within "
             f"{args.search_ready_timeout:.1f}s (HTTP {ready_status}): {excerpt}"
         )
+
+    rss_samples: list[int] = []
+    rss_stop = threading.Event()
+    rss_monitor = None
+    if args.server_pid is not None:
+        try:
+            rss_samples.append(process_rss_bytes(args.server_pid))
+        except (OSError, ValueError) as error:
+            raise SystemExit(f"cannot read RSS for server PID {args.server_pid}: {error}")
+        rss_monitor = threading.Thread(
+            target=sample_process_rss,
+            args=(args.server_pid, rss_stop, rss_samples),
+            daemon=True,
+        )
+        rss_monitor.start()
 
     started = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
@@ -184,6 +205,12 @@ def main() -> int:
         "concurrency": args.concurrency,
         "writers": args.write_workers,
         "write_rounds": args.write_rounds,
+        "write_batch_size": args.write_batch_size,
+        "table_files": table_files,
+        "table_rows": table_rows,
+        "table_file_bytes": table_size_bytes,
+        "estimated_search_budget_bytes": estimated_search_budget_bytes,
+        "first_search_latency_ms": first_search_latency_ms,
         "write_statuses": [status for status, _, _ in writes],
         "search_errors": len(search_errors),
         "elapsed_ms": elapsed_ms,
@@ -196,12 +223,21 @@ def main() -> int:
         },
     }
     if rss_samples:
+        search_rss_start = rss_samples[0]
+        search_rss_peak = max(rss_samples)
+        search_rss_peak_delta = max(0, search_rss_peak - search_rss_start)
         result["server_rss_bytes"] = {
-            "start": rss_samples[0],
-            "peak": max(rss_samples),
+            "search_start": search_rss_start,
+            "search_peak": search_rss_peak,
+            "search_peak_delta": search_rss_peak_delta,
             "end": rss_samples[-1],
             "samples": len(rss_samples),
         }
+        result["rss_delta_to_estimated_budget_ratio"] = (
+            search_rss_peak_delta / estimated_search_budget_bytes
+            if estimated_search_budget_bytes
+            else None
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2))

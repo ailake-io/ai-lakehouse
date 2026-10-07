@@ -274,6 +274,7 @@ impl ServerMetrics {
         catalog_open: bool,
         storage_open: bool,
     ) -> String {
+        let flat_scan = ailake_query::scanner::flat_scan_stats();
         format!(
             "# TYPE ailake_http_requests_total counter\n\
              ailake_http_requests_total {}\n\
@@ -289,6 +290,14 @@ impl ServerMetrics {
              ailake_http_write_total {}\n\
              # TYPE ailake_http_compact_total counter\n\
              ailake_http_compact_total {}\n\
+             # TYPE ailake_search_flat_scan_deferred_files_total counter\n\
+             ailake_search_flat_scan_deferred_files_total {}\n\
+             # TYPE ailake_search_flat_scan_unexpected_files_total counter\n\
+             ailake_search_flat_scan_unexpected_files_total {}\n\
+             # TYPE ailake_search_flat_scan_rows_total counter\n\
+             ailake_search_flat_scan_rows_total {}\n\
+             # TYPE ailake_search_flat_scan_elapsed_micros_total counter\n\
+             ailake_search_flat_scan_elapsed_micros_total {}\n\
              # TYPE ailake_cache_hits_total counter\n\
              ailake_cache_hits_total {}\n\
              # TYPE ailake_cache_misses_total counter\n\
@@ -336,6 +345,10 @@ impl ServerMetrics {
             self.search_total.load(Ordering::Relaxed),
             self.write_total.load(Ordering::Relaxed),
             self.compact_total.load(Ordering::Relaxed),
+            flat_scan.deferred_files_total,
+            flat_scan.unexpected_files_total,
+            flat_scan.rows_total,
+            flat_scan.elapsed_micros_total,
             cache.hits_total,
             cache.misses_total,
             cache.inserts_total,
@@ -927,14 +940,16 @@ fn client_ip(headers: &HeaderMap, trust_proxy_headers: bool) -> Option<String> {
     if !trust_proxy_headers {
         return None;
     }
-    headers
-        .get("x-forwarded-for")
-        .or_else(|| headers.get("x-real-ip"))
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    let parse_header = |name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .and_then(|value| value.parse::<IpAddr>().ok())
+            .map(|address| address.to_string())
+    };
+    parse_header("x-forwarded-for").or_else(|| parse_header("x-real-ip"))
 }
 
 async fn authorize_and_acquire(
@@ -1055,6 +1070,7 @@ struct InfoResponse {
     failed_files: usize,
     rows: u64,
     size_bytes: u64,
+    estimated_search_budget_bytes: u64,
     snapshot_id: Option<i64>,
 }
 
@@ -1404,6 +1420,9 @@ async fn handle_info(
     let file_count = files.len();
     let row_count: u64 = files.iter().map(|f| f.record_count).sum();
     let size_bytes: u64 = files.iter().map(|f| f.file_size_bytes).sum();
+    let estimated_search_budget_bytes = ailake_query::scanner::estimate_file_search_budget_bytes(
+        files.iter().map(|file| file.file_size_bytes),
+    );
     let ready = files
         .iter()
         .filter(|f| f.index_status == IndexStatus::Ready)
@@ -1440,6 +1459,7 @@ async fn handle_info(
         failed_files: failed,
         rows: row_count,
         size_bytes,
+        estimated_search_budget_bytes,
         snapshot_id: meta.current_snapshot_id,
     };
     request_metrics.success();
@@ -2049,6 +2069,18 @@ mod tests {
         assert!(validate_bind_auth("0.0.0.0", true).is_ok());
         assert!(validate_bind_auth("0.0.0.0", false).is_err());
     }
+
+    #[test]
+    fn proxy_ip_headers_are_opt_in_and_must_contain_an_ip_address() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.7, 10.0.0.2".parse().unwrap());
+        assert_eq!(client_ip(&headers, false), None);
+        assert_eq!(client_ip(&headers, true).as_deref(), Some("203.0.113.7"));
+
+        headers.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
+        headers.insert("x-real-ip", "2001:db8::1".parse().unwrap());
+        assert_eq!(client_ip(&headers, true).as_deref(), Some("2001:db8::1"));
+    }
     use ailake_catalog::HadoopCatalog;
     use ailake_core::{VectorMetric, VectorPrecision};
     use ailake_query::TableWriter;
@@ -2293,6 +2325,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("ailake_search_flat_scan_unexpected_files_total"));
+        assert!(body.contains("ailake_search_flat_scan_elapsed_micros_total"));
     }
 
     #[tokio::test]

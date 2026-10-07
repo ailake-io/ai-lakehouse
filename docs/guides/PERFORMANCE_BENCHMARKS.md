@@ -36,8 +36,9 @@ runner measurement.
 ## Recall and search latency
 
 The deterministic integration test writes 10,000 128-dimensional vectors,
-runs four warm-up queries, compares 32 HNSW queries with an exact brute-force
-oracle and measures p95 search latency. On the current development machine the
+records a first-read sample, injects 5 ms per object read to model remote
+latency, compares 32 indexed and 8 flat-scan queries with an exact brute-force
+oracle, and reports p95, object-read count and bytes for both paths. On the current development machine the
 debug run took about 103 seconds; expect the duration to vary with hardware and
 build cache state:
 
@@ -58,9 +59,10 @@ These checks do not yet provide a full production performance profile:
 - The recall/p95 case uses one local table at 10,000 rows and 128 dimensions.
   It does not measure large multi-file/cloud scans, cold-cache behavior, peak
   memory across a large data set, or concurrent searches across many large
-  shards. The HTTP smoke now records server RSS while exercising 64 concurrent
-  searches over 32 small files, but it is not a substitute for a large-data
-  memory profile.
+  shards. The HTTP smoke records server RSS, manifest file bytes and the
+  scanner's estimated reservation while exercising 64 concurrent searches over
+  64 files and 8,192 rows. This remains a local-store profile, not a substitute
+  for cloud storage or a production-sized memory profile.
 - The distance benchmark measures kernels. Pull request runs compare with the
   base branch on the same runner and use a 25% tolerance; push, scheduled and
   manual runs validate the output schema without a baseline comparison.
@@ -73,8 +75,13 @@ These checks do not yet provide a full production performance profile:
   remains O(rows × dimensions); it should remain a fallback for small or
   unindexed shards, with compaction/reindexing monitored operationally.
 - Parquet delete filtering reuses footer metadata, but still opens readers for
-  surviving row groups. Further batching should follow measurements on realistic
-  files rather than assumed gains.
+  surviving row groups. Row ID matching now batches surviving groups through one
+  projected reader; realistic file profiles should verify the gain and guide any
+  further batching.
+- Search logs report flat-scan fallback rows and time spent reading and scanning
+  them. Alerting thresholds are deployment-specific; sustained unexpected
+  fallback should trigger compaction or index repair. `/metrics` exposes
+  cumulative counters for deferred/unexpected files, rows and elapsed time.
 - FTS payloads are capped at 64 MiB and BM25 stats use a size check plus bounded
   range read. These limits are fixed constants; tuning them by workload remains
   a follow-up if real indexes approach those ceilings.
@@ -99,10 +106,25 @@ python3 scripts/ci/http_load.py \
 ```
 
 The harness performs concurrent `/write` requests, then concurrent `/search`
-requests, and records QPS, mean, p50, p95 and p99. `--write-rounds` increases
-the number of files before search. When `--server-pid` is provided, it samples
-the server RSS during the run and records start, peak and end values in the JSON
-artifact. It fails on non-2xx responses or when p95 exceeds `--max-p95-ms`.
+requests, and records QPS, mean, p50, p95 and p99. The CI profile creates 64
+shards with 128 rows each. Query vectors are deterministic
+and unique so repeated requests do not collapse onto the same query-cache key.
+The readiness probe records the first successful query latency separately as a
+single cold-path sample; the concurrent phase characterizes the warmed index
+and metadata caches.
+`--write-rounds` and `--write-batch-size` control the number of shards and rows.
+The result includes `/info` file count, row count and manifest file bytes, plus
+the scanner's size-based reservation estimate. When `--server-pid` is provided,
+it samples RSS only during concurrent search and records starting, peak and
+delta values, plus the RSS delta divided by the estimated reservation. The
+estimate is a reservation ceiling, not decoded memory or a process-memory cap.
+The harness fails on non-2xx responses or when p95 exceeds `--max-p95-ms`.
+
+The HTTP profile uses the local store. To measure remote latency, run the same
+workload with the S3/LocalStack catalog environment or a staging object store
+and record the endpoint, region, network path and cache state with the artifact. Cold-cache
+measurements need a fresh server/cache namespace for each run; reusing a warmed
+server reports the warm path even when each query vector is unique.
 
 The multi-process fencing check confirms that a second `ailake serve` instance
 cannot acquire the same table lease:
@@ -124,7 +146,7 @@ baseline for Hadoop and JDBC writers.
 | `benchmark-cpu` | PR, push, nightly, manual | Structured CPU microbenchmark and artifact |
 | `recall-latency` | PR, push, nightly, manual | Deterministic Recall@10 and p95 gate |
 | `http-load-and-writers` | PR, push, nightly, manual | Real server, HTTP load, concurrent writes and process fencing |
-| `catalog-matrix` | PR, push, nightly, manual | Local catalog, MinIO/LocalStack and Iceberg REST emulator smoke |
+| `catalog-matrix` | PR, push, nightly, manual | Local concurrent writes and shared Redis quotas; S3/LocalStack object-read profile; Iceberg REST emulator smoke |
 | `gpu-performance-matrix` | push, nightly, manual | CPU fallback plus NVIDIA CUDA and AMD ROCm runners when registered |
 
 Linux GPU jobs require self-hosted runners labelled `gpu-nvidia` and

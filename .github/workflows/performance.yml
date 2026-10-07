@@ -107,7 +107,7 @@ jobs:
           python3 scripts/ci/http_load.py \
             --base-url http://127.0.0.1:7700 \
             --requests 128 --concurrency 64 \
-            --write-workers 8 --write-rounds 4 \
+            --write-workers 8 --write-rounds 8 --write-batch-size 128 \
             --server-pid "$(cat perf/serve.pid)" \
             --output perf/http-load.json
           kill "$(cat perf/serve.pid)"
@@ -138,6 +138,25 @@ jobs:
       - name: Local catalog concurrency baseline
         if: matrix.catalog == 'local'
         run: cargo test -p ailake-tests --test concurrent_writes -- --test-threads=1
+      - name: Start Redis for multi-instance rate-limit check
+        if: matrix.catalog == 'local'
+        run: docker run --detach --name ailake-rate-redis --publish 16379:6379 redis:7.4-alpine
+      - name: Wait for Redis
+        if: matrix.catalog == 'local'
+        run: |
+          for _ in $(seq 1 30); do
+            if docker exec ailake-rate-redis redis-cli ping | grep -q PONG; then break; fi
+            sleep 1
+          done
+          docker exec ailake-rate-redis redis-cli ping | grep -q PONG
+      - name: Verify shared rate quotas and Redis outage policies
+        if: matrix.catalog == 'local'
+        env:
+          AILAKE_TEST_REDIS_URL: redis://127.0.0.1:16379/
+        run: cargo test -p ailake-cache --features redis redis_ -- --nocapture
+      - name: Stop Redis test service
+        if: always() && matrix.catalog == 'local'
+        run: docker rm -f ailake-rate-redis || true
       - name: Start object-store and catalog emulators
         if: matrix.catalog != 'local'
         run: |
@@ -147,6 +166,27 @@ jobs:
           done
           curl -fsS http://127.0.0.1:4566/_localstack/health >/dev/null
           curl -fsS http://127.0.0.1:19120/api/v2/config >/dev/null
+      - name: Create LocalStack S3 test bucket
+        if: matrix.catalog == 's3-localstack'
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
+        run: aws --endpoint-url http://127.0.0.1:4566 s3 mb s3://ailake-perf
+      - name: Measure search reads against S3-compatible storage
+        if: matrix.catalog == 's3-localstack'
+        env:
+          AILAKE_TEST_S3_ENDPOINT: http://127.0.0.1:4566
+          AILAKE_TEST_S3_BUCKET: ailake-perf
+          AILAKE_PERF_OUTPUT: perf/s3-latency.json
+        run: cargo test -p ailake-tests --test s3_latency_profile -- --nocapture
+      - name: Upload S3 performance profile
+        if: always() && matrix.catalog == 's3-localstack'
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-s3-${{ github.run_id }}
+          path: perf/s3-latency.json
+          if-no-files-found: ignore
       - name: REST catalog compatibility smoke
         if: matrix.catalog == 'rest-iceberg'
         run: cargo test -p ailake-tests --test iceberg_compat -- --test-threads=1

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use futures::{StreamExt, TryStreamExt};
@@ -25,6 +26,29 @@ const MAX_CONCURRENT_FILE_SEARCHES: usize = 32;
 const FILE_SEARCH_BUDGET_QUANTUM_BYTES: u64 = 16 * 1024 * 1024;
 const PROCESS_FILE_SEARCH_BUDGET_UNITS: u32 = 32;
 static PROCESS_FILE_SEARCH_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static FLAT_SCAN_DEFERRED_FILES: AtomicU64 = AtomicU64::new(0);
+static FLAT_SCAN_UNEXPECTED_FILES: AtomicU64 = AtomicU64::new(0);
+static FLAT_SCAN_ROWS: AtomicU64 = AtomicU64::new(0);
+static FLAT_SCAN_ELAPSED_MICROS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FlatScanStats {
+    pub deferred_files_total: u64,
+    pub unexpected_files_total: u64,
+    pub rows_total: u64,
+    pub elapsed_micros_total: u64,
+}
+
+/// Process-wide totals for completed flat-scan fallbacks, suitable for
+/// monitoring whether deferred or unexpected shards are accumulating.
+pub fn flat_scan_stats() -> FlatScanStats {
+    FlatScanStats {
+        deferred_files_total: FLAT_SCAN_DEFERRED_FILES.load(Ordering::Relaxed),
+        unexpected_files_total: FLAT_SCAN_UNEXPECTED_FILES.load(Ordering::Relaxed),
+        rows_total: FLAT_SCAN_ROWS.load(Ordering::Relaxed),
+        elapsed_micros_total: FLAT_SCAN_ELAPSED_MICROS.load(Ordering::Relaxed),
+    }
+}
 
 fn process_file_search_limit() -> Arc<Semaphore> {
     Arc::clone(
@@ -40,6 +64,21 @@ fn file_search_budget_units(file_size_bytes: u64) -> u32 {
         .unwrap_or(0)
         .max(1)
         .min(u64::from(PROCESS_FILE_SEARCH_BUDGET_UNITS)) as u32
+}
+
+/// Return the maximum semaphore reservation represented by a set of manifest
+/// files, in bytes. This reports the same file-size estimate used by search;
+/// it is not a bound on decoded or process resident memory.
+pub fn estimate_file_search_budget_bytes(file_sizes: impl IntoIterator<Item = u64>) -> u64 {
+    let units = file_sizes
+        .into_iter()
+        .map(file_search_budget_units)
+        .fold(0u32, |total, units| {
+            total
+                .saturating_add(units)
+                .min(PROCESS_FILE_SEARCH_BUDGET_UNITS)
+        });
+    u64::from(units) * FILE_SEARCH_BUDGET_QUANTUM_BYTES
 }
 
 async fn acquire_file_search_budget(
@@ -442,6 +481,8 @@ pub async fn search(
     // exact), just O(N) instead of O(log N), and silently forever unless recompacted.
     let mut flat_scan_deferred = 0usize;
     let mut flat_scan_unexpected = 0usize;
+    let mut flat_scan_rows = 0u64;
+    let mut flat_scan_elapsed_micros = 0u64;
 
     // Fetch + search each surviving file concurrently instead of one at a time —
     // the dominant cost per file is a network round-trip (`store.get`), so this
@@ -493,24 +534,38 @@ pub async fn search(
             Some(FlatScanKind::Unexpected) => flat_scan_unexpected += 1,
             None => {}
         }
+        flat_scan_rows = flat_scan_rows.saturating_add(outcome.flat_scan_rows);
+        flat_scan_elapsed_micros =
+            flat_scan_elapsed_micros.saturating_add(outcome.flat_scan_elapsed_micros);
         all_results.extend(outcome.results);
         raw_candidates.extend(outcome.candidates);
     }
+
+    FLAT_SCAN_DEFERRED_FILES.fetch_add(flat_scan_deferred as u64, Ordering::Relaxed);
+    FLAT_SCAN_UNEXPECTED_FILES.fetch_add(flat_scan_unexpected as u64, Ordering::Relaxed);
+    FLAT_SCAN_ROWS.fetch_add(flat_scan_rows, Ordering::Relaxed);
+    FLAT_SCAN_ELAPSED_MICROS.fetch_add(flat_scan_elapsed_micros, Ordering::Relaxed);
 
     if flat_scan_unexpected > 0 {
         warn!(
             "ailake: search degraded — {}/{} files scanned without an AI-Lake index \
              (unexpected — likely external rewrites; {} more in expected deferred-indexing \
-             state). Run compaction to restore O(log N) search on affected files",
+             state), {} rows read in {:.3} ms of flat-scan work. Run compaction to restore \
+             indexed search on affected files",
             flat_scan_unexpected,
             surviving_files.len(),
-            flat_scan_deferred
+            flat_scan_deferred,
+            flat_scan_rows,
+            flat_scan_elapsed_micros as f64 / 1_000.0
         );
     } else if flat_scan_deferred > 0 {
         debug!(
-            "ailake: search — {}/{} files scanned via flat fallback (deferred indexing)",
+            "ailake: search — {}/{} files scanned via flat fallback (deferred indexing), \
+             {} rows read in {:.3} ms of flat-scan work",
             flat_scan_deferred,
-            surviving_files.len()
+            surviving_files.len(),
+            flat_scan_rows,
+            flat_scan_elapsed_micros as f64 / 1_000.0
         );
     }
 
@@ -631,6 +686,8 @@ struct FileSearchOutcome {
     /// Populated when hybrid search is on: (row_id, vector distance, file path, text).
     candidates: Vec<(RowId, f32, String, String)>,
     flat_scan: Option<FlatScanKind>,
+    flat_scan_rows: u64,
+    flat_scan_elapsed_micros: u64,
 }
 
 /// Fetches, index-searches (or flat-scans), and filters a single file — the
@@ -819,10 +876,17 @@ async fn search_one_file(
                 }
             }
         }
+        let flat_scan_started = std::time::Instant::now();
         let (raw_batch, raw_vectors) = reader.read_parquet()?;
         // Phase G: inject columns added via schema evolution with initial_default values.
         let batch = SchemaFiller::fill(raw_batch, &table_meta.schema_fields)?;
-        for (row_id, distance) in flat_search(&raw_vectors, query, candidate_k, metric) {
+        let flat_results = flat_search(&raw_vectors, query, candidate_k, metric);
+        outcome.flat_scan_rows = raw_vectors.len() as u64;
+        outcome.flat_scan_elapsed_micros = flat_scan_started
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        for (row_id, distance) in flat_results {
             // Skip rows marked as deleted by a V3 Deletion Vector.
             if dv_bitmap
                 .as_ref()
@@ -1924,6 +1988,22 @@ mod tests {
         assert_eq!(
             file_search_budget_units(u64::MAX),
             PROCESS_FILE_SEARCH_BUDGET_UNITS
+        );
+    }
+
+    #[test]
+    fn estimated_file_search_budget_rounds_each_file_and_caps_at_process_limit() {
+        assert_eq!(estimate_file_search_budget_bytes([]), 0);
+        assert_eq!(
+            estimate_file_search_budget_bytes([1, 1, 1]),
+            3 * FILE_SEARCH_BUDGET_QUANTUM_BYTES
+        );
+        assert_eq!(
+            estimate_file_search_budget_bytes(std::iter::repeat_n(
+                FILE_SEARCH_BUDGET_QUANTUM_BYTES,
+                64,
+            )),
+            u64::from(PROCESS_FILE_SEARCH_BUDGET_UNITS) * FILE_SEARCH_BUDGET_QUANTUM_BYTES
         );
     }
 
