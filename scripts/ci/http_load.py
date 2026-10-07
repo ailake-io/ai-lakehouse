@@ -37,6 +37,29 @@ def request(base_url: str, method: str, path: str, payload: dict | None = None) 
         return error.code, (time.perf_counter() - started) * 1000.0, error.read().decode("utf-8")
 
 
+def request_search_with_admission_retry(
+    base_url: str, payload: dict, max_retries: int = 40
+) -> tuple[int, float, str, int]:
+    started = time.perf_counter()
+    retries = 0
+    while True:
+        status, _, text = request(base_url, "POST", "/search", payload)
+        if status != 429:
+            break
+        retries += 1
+        if retries >= max_retries:
+            break
+        # The server deliberately rejects requests above its in-flight memory
+        # budget. Retry those admissions with bounded backoff so the load test
+        # measures completed searches rather than treating backpressure as a
+        # test failure.
+        delay = min(0.01 * (2 ** min(retries - 1, 4)), 0.16)
+        jitter = (time.perf_counter_ns() % 7) / 1000.0
+        time.sleep(delay + jitter)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    return status, elapsed_ms, text, retries
+
+
 def vector(index: int, dim: int) -> list[float]:
     # Generate a deterministic, non-periodic vector so requests do not collapse
     # to the same query-cache key after `dim` iterations.
@@ -144,13 +167,21 @@ def main() -> int:
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise SystemExit(f"invalid /info response: {error}")
 
+    search_retry_lock = threading.Lock()
+    search_admission_retries = [0]
+
     def search_one(index: int) -> tuple[int, float, str]:
-        return request(
-            base_url,
-            "POST",
-            "/search",
-            {"query": vector(index, args.dim), "top_k": 5, "pruning_threshold": 1.0},
+        payload = {
+            "query": vector(index, args.dim),
+            "top_k": 5,
+            "pruning_threshold": 1.0,
+        }
+        status, elapsed_ms, text, retries = request_search_with_admission_retry(
+            base_url, payload
         )
+        with search_retry_lock:
+            search_admission_retries[0] += retries
+        return status, elapsed_ms, text
 
     # A write returns after the snapshot is committed, but index publication
     # and catalog visibility can briefly lag behind that commit. Probe the
@@ -213,6 +244,7 @@ def main() -> int:
         "first_search_latency_ms": first_search_latency_ms,
         "write_statuses": [status for status, _, _ in writes],
         "search_errors": len(search_errors),
+        "search_admission_retries": search_admission_retries[0],
         "elapsed_ms": elapsed_ms,
         "qps": args.requests / max(elapsed_ms / 1000.0, 0.001),
         "latency_ms": {
