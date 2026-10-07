@@ -327,6 +327,11 @@ in-process, so this protects the embedding host process itself, not just a subpr
 same limit shared by every AI-Lake binding, including the JNI C-ABI boundary used by
 Spark/Trino/Flink). Applies to `search()`, `search_text()`, and `search_multimodal()`.
 
+Search functions use strict delete handling by default. Pass `strict_deletes=False`
+to `search()`, `search_with_data()`/`scan()`, or `search_multimodal()` only when
+possibly stale deleted rows are acceptable. `read_changes()` has an independent
+`strict_deletes` option that also defaults to `True`.
+
 **Materialisation methods:**
 
 ```python
@@ -1002,7 +1007,7 @@ See `docs/specs/CDC.md` for the full semantics of `insert`, `delete`, `update_be
 | `search_multimodal(path, queries, top_k, ...)` | Cross-modal RRF; supports `rerank_factor` |
 | `search_with_data(path, query, top_k, ...)` | Arrow IPC bytes (full row data); full param parity with `search()` |
 | `scan(path, query, top_k, ...)` | Alias of `search_with_data` — naming parity with `ailake-go`'s `Scan()` |
-| `read_changes(path, *, start_snapshot, end_snapshot, pk_columns, coalesce_updates, catalog_opts)` | CDC change stream between two snapshots; returns `pyarrow.Table` with `_change_type`, `_snapshot_id`, `_sequence_number`, `_commit_timestamp` |
+| `read_changes(path, *, start_snapshot, end_snapshot, pk_columns, coalesce_updates, catalog_opts, strict_deletes=True)` | CDC change stream between two snapshots; returns `pyarrow.Table` with `_change_type`, `_snapshot_id`, `_sequence_number`, `_commit_timestamp` |
 | `assemble_context(chunks, max_tokens, ...)` | Returns `{"text", "chunk_count", "token_estimate"}`; supports `embedding` (dedup), `group_by_document`, `max_chunks_per_document` |
 | `compact(path, *, min_files, target_size_bytes, ...)` | Native binding — merges small files, no external CLI required. `target_size_bytes` default `536_870_912` |
 | `estimate(rows, dim, hnsw_m, pq_m)` | Storage estimate per precision mode — pure math, no I/O |

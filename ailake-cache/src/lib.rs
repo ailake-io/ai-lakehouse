@@ -1184,4 +1184,37 @@ mod tests {
                 .allowed
         );
     }
+
+    #[cfg(feature = "redis")]
+    #[tokio::test]
+    async fn redis_outage_obeys_rate_limit_fail_closed_policy() {
+        let redis_url = "redis://127.0.0.1:1/".to_string();
+        let fail_closed = RateLimiter::new(RateLimitConfig {
+            redis_url: Some(redis_url.clone()),
+            fail_closed: true,
+            ..RateLimitConfig::default()
+        })
+        .unwrap();
+        let error = fail_closed
+            .check(RateLimitClass::Search, Some("token"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RateLimitError::Backend(_)));
+        assert_eq!(fail_closed.stats().await.backend_errors_total, 1);
+
+        let fail_open = RateLimiter::new(RateLimitConfig {
+            redis_url: Some(redis_url),
+            fail_closed: false,
+            ..RateLimitConfig::default()
+        })
+        .unwrap();
+        assert!(
+            fail_open
+                .check(RateLimitClass::Search, Some("token"), None)
+                .await
+                .unwrap()
+                .allowed
+        );
+        assert_eq!(fail_open.stats().await.backend_errors_total, 1);
+    }
 }

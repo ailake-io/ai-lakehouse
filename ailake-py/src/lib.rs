@@ -772,7 +772,7 @@ impl TableWriter {
 /// Returns a list of dicts: [{"row_id": int, "distance": float, "file": str}, ...]
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None, catalog_opts=None))]
+#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None, catalog_opts=None, strict_deletes=true))]
 fn search(
     py: Python<'_>,
     path: &str,
@@ -786,6 +786,7 @@ fn search(
     ef_search: Option<usize>,
     rerank_factor: Option<usize>,
     catalog_opts: Option<std::collections::HashMap<String, String>>,
+    strict_deletes: bool,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
@@ -828,7 +829,7 @@ fn search(
         partition_filter,
         hybrid,
         column_filter: None,
-        strict_deletes: false,
+        strict_deletes,
     };
 
     let results = rt
@@ -910,7 +911,7 @@ fn search_text(
 /// Python side deserializes with: `pyarrow.ipc.open_file(io.BytesIO(bytes)).read_all()`
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None, catalog_opts=None))]
+#[pyo3(signature = (path, query, top_k=10, partition_filter=None, hybrid_text=None, text_column="chunk_text", bm25_weight=0.5, pruning_threshold=None, ef_search=None, rerank_factor=None, catalog_opts=None, strict_deletes=true))]
 fn search_with_data(
     py: Python<'_>,
     path: &str,
@@ -924,6 +925,7 @@ fn search_with_data(
     ef_search: Option<usize>,
     rerank_factor: Option<usize>,
     catalog_opts: Option<std::collections::HashMap<String, String>>,
+    strict_deletes: bool,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
@@ -967,7 +969,7 @@ fn search_with_data(
         partition_filter,
         hybrid,
         column_filter: None,
-        strict_deletes: false,
+        strict_deletes,
     };
 
     let results = rt
@@ -1001,7 +1003,8 @@ fn search_with_data(
 /// Returns a `pyarrow.Table` serialized as Arrow IPC bytes. The Python wrapper
 /// deserializes it automatically.
 #[pyfunction]
-#[pyo3(name = "read_changes", signature = (path, start_snapshot=None, end_snapshot=None, pk_columns=None, coalesce_updates=false, catalog_opts=None))]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(name = "read_changes", signature = (path, start_snapshot=None, end_snapshot=None, pk_columns=None, coalesce_updates=false, catalog_opts=None, strict_deletes=true))]
 fn read_changes_py(
     py: Python<'_>,
     path: &str,
@@ -1010,6 +1013,7 @@ fn read_changes_py(
     pk_columns: Option<Vec<String>>,
     coalesce_updates: bool,
     catalog_opts: Option<std::collections::HashMap<String, String>>,
+    strict_deletes: bool,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     debug!(
@@ -1025,7 +1029,7 @@ fn read_changes_py(
         end_snapshot_id: end_snapshot,
         pk_columns: pk_columns.unwrap_or_default(),
         coalesce_updates,
-        strict_deletes: false,
+        strict_deletes,
     };
 
     let batch = rt
@@ -1335,7 +1339,7 @@ fn parse_precision(s: &str) -> ailake_core::VectorPrecision {
 /// rrf_score is higher for better results.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, queries, top_k=10, dim=None, partition_filter=None, ef_search=None, pruning_threshold=None, rerank_factor=None, catalog_opts=None))]
+#[pyo3(signature = (path, queries, top_k=10, dim=None, partition_filter=None, ef_search=None, pruning_threshold=None, rerank_factor=None, catalog_opts=None, strict_deletes=true))]
 fn search_multimodal(
     py: Python<'_>,
     path: &str,
@@ -1347,6 +1351,7 @@ fn search_multimodal(
     pruning_threshold: Option<f32>,
     rerank_factor: Option<usize>,
     catalog_opts: Option<std::collections::HashMap<String, String>>,
+    strict_deletes: bool,
 ) -> PyResult<Py<PyAny>> {
     let rt = rt()?;
     let (catalog, store) = local_catalog_store(path, catalog_opts.as_ref())?;
@@ -1401,7 +1406,7 @@ fn search_multimodal(
         partition_filter,
         hybrid: None,
         column_filter: None,
-        strict_deletes: false,
+        strict_deletes,
     };
 
     let results = rt

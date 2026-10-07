@@ -1,11 +1,12 @@
 # Integridade de deletes
 
-Leituras do AI-Lake são permissivas por padrão para preservar compatibilidade:
-se uma deletion vector ou um equality delete não puder ser carregado, a
-consulta registra o problema e continua. Isso pode expor temporariamente uma
-linha potencialmente excluída.
+As buscas Rust, os comandos `ailake search` e `ailake serve`, e os bindings
+Python/JNI falham de forma fechada por padrão: se uma deletion vector ou um
+equality delete não puder ser carregado, a consulta falha em vez de devolver
+uma linha potencialmente excluída. `SearchConfig::default()` e a função Rust
+`search_text()` usam esse comportamento.
 
-Para workloads que exigem fail-closed, use `strict_deletes`:
+O modo pode ser definido explicitamente na API Rust:
 
 ```rust
 let config = ailake_query::SearchConfig {
@@ -20,16 +21,31 @@ Com `strict_deletes = true`, falham imediatamente:
 - erros ao listar equality-delete manifests;
 - erros ao ler ou interpretar arquivos Avro de equality deletes.
 
-O modo também é propagado por buscas multimodais. Para busca textual, a API
-equivalente é `search_text_with_options(..., strict_deletes)`. No CLI:
+O modo também é propagado por buscas multimodais. Para busca textual, use
+`search_text_with_options(..., strict_deletes)`. No CLI:
 
 ```bash
-ailake search tabela --query "0.1,0.2,0.3" --strict-deletes
-ailake search tabela --text "termo" --strict-deletes
-ailake serve tabela --strict-deletes
+ailake search tabela --query "0.1,0.2,0.3"
+ailake search tabela --text "termo"
+ailake serve tabela
 ailake read-changes tabela --strict-deletes
 ```
 
-O CDC (`ChangeReaderConfig`) aplica a mesma política aos deletion vectors. O
-modo permissivo continua disponível explicitamente com `false` e é o default
-para bindings Python, JNI e chamadas existentes.
+No CLI, `search` e `serve` são estritos por padrão. `--allow-stale-deletes` (ou
+`AILAKE_ALLOW_STALE_DELETES=1` no servidor) volta explicitamente ao modo
+permissivo. `--strict-deletes` permanece aceito por compatibilidade.
+
+## Limites atuais por integração
+
+- Os bindings Python e JNI ainda constroem `SearchConfig` com
+  `strict_deletes: true` por padrão e expõem `strict_deletes=False` como opção
+  explícita para workloads que aceitam resultados possivelmente obsoletos.
+- `SearchSession::load()` rejeita snapshots com deletion vectors ou equality
+  deletes. Use o fluxo normal de `search()` para essas tabelas.
+- `ailake read-changes` é uma API de CDC separada. Seu
+  `ChangeReaderConfig::strict_deletes` continua independente e permissivo por
+  padrão; passe `--strict-deletes` no CLI quando necessário.
+
+Essas garantias são relevantes para correção dos resultados, não apenas para
+disponibilidade. O modo permissivo deve ser escolhido conscientemente; a sessão
+pré-carregada exige uma tabela sem deletes.

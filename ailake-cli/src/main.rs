@@ -359,6 +359,9 @@ enum Commands {
         /// Fail instead of returning rows when deletion metadata cannot be read.
         #[arg(long, default_value_t = false)]
         strict_deletes: bool,
+        /// Explicitly allow results that may include rows whose deletion metadata is unavailable.
+        #[arg(long, default_value_t = false)]
+        allow_stale_deletes: bool,
         /// Output format
         #[arg(long, value_enum, default_value = "text")]
         format: OutputFormat,
@@ -431,6 +434,9 @@ enum Commands {
         /// Fail search requests when deletion metadata cannot be read.
         #[arg(long, env = "AILAKE_STRICT_DELETES", default_value_t = false)]
         strict_deletes: bool,
+        /// Opt out of fail-closed deletion handling. Use only when stale rows are acceptable.
+        #[arg(long, env = "AILAKE_ALLOW_STALE_DELETES", default_value_t = false)]
+        allow_stale_deletes: bool,
         /// Redis/Valkey URL for distributed rate limiting. Defaults to --cache-url.
         #[arg(long, env = "AILAKE_RATE_LIMIT_URL", hide_env_values = true)]
         rate_limit_url: Option<String>,
@@ -455,6 +461,9 @@ enum Commands {
         /// Reject requests when Redis rate-limit storage is unavailable.
         #[arg(long, env = "AILAKE_RATE_LIMIT_FAIL_CLOSED", default_value_t = false)]
         rate_limit_fail_closed: bool,
+        /// Allow requests when Redis/Valkey rate-limit storage is unavailable.
+        #[arg(long, env = "AILAKE_RATE_LIMIT_FAIL_OPEN", default_value_t = false)]
+        rate_limit_fail_open: bool,
         /// Consecutive catalog/storage failures before opening the circuit.
         #[arg(long, env = "AILAKE_CIRCUIT_FAILURE_THRESHOLD", default_value_t = 5)]
         circuit_failure_threshold: u32,
@@ -1292,6 +1301,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             top_k,
             pruning_threshold,
             strict_deletes,
+            allow_stale_deletes,
             format,
         } => {
             let ident = parse_table_ident(&table);
@@ -1308,7 +1318,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     catalog as Arc<dyn CatalogProvider>,
                     store,
                     None,
-                    strict_deletes,
+                    strict_deletes || !allow_stale_deletes,
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -1398,7 +1408,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 partition_filter: None,
                 hybrid,
                 column_filter: None,
-                strict_deletes,
+                strict_deletes: strict_deletes || !allow_stale_deletes,
             };
 
             let results = ailake_query::search(
@@ -1653,6 +1663,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             cache_max_bytes,
             cache_ttl_secs,
             strict_deletes,
+            allow_stale_deletes,
             rate_limit_url,
             rate_window_secs,
             search_quota_token,
@@ -1661,6 +1672,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             write_quota_ip,
             trust_proxy_headers,
             rate_limit_fail_closed,
+            rate_limit_fail_open,
             circuit_failure_threshold,
             circuit_cooldown_secs,
         } => {
@@ -1713,7 +1725,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     cache_url,
                     cache_max_bytes,
                     cache_ttl_secs,
-                    strict_deletes,
+                    strict_deletes: strict_deletes || !allow_stale_deletes,
                     rate_limit_url,
                     rate_window_secs,
                     search_quota_token,
@@ -1721,7 +1733,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     search_quota_ip,
                     write_quota_ip,
                     trust_proxy_headers,
-                    rate_limit_fail_closed,
+                    rate_limit_fail_closed: rate_limit_fail_closed || !rate_limit_fail_open,
                     circuit_failure_threshold,
                     circuit_cooldown_secs,
                 },

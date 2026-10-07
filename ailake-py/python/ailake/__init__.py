@@ -51,6 +51,7 @@ def read_changes(
     pk_columns: "list[str] | None" = None,
     coalesce_updates: bool = False,
     catalog_opts: "dict[str, str] | None" = None,
+    strict_deletes: bool = True,
 ) -> "pa.Table":
     """Read the change stream between two snapshots of an AI-Lake table.
 
@@ -67,6 +68,7 @@ def read_changes(
         coalesce_updates: when ``True``, convert a same-PK ``DELETE`` + ``INSERT``
             pair in the same snapshot into ``UPDATE_BEFORE`` + ``UPDATE_AFTER``.
         catalog_opts: optional catalog backend configuration.
+        strict_deletes: fail if delete metadata cannot be loaded (default True).
     """
     import io
     import pyarrow as pa  # noqa: PLC0415
@@ -78,6 +80,7 @@ def read_changes(
         pk_columns,
         coalesce_updates,
         catalog_opts,
+        strict_deletes,
     )
     return pa.ipc.open_file(io.BytesIO(ipc_bytes)).read_all()
 
@@ -180,6 +183,7 @@ class SearchQuery:
         ef_search: "int | None" = None,
         rerank_factor: "int | None" = None,
         catalog_opts: "dict[str, str] | None" = None,
+        strict_deletes: bool = True,
     ) -> None:
         self._path = path
         self._query = query
@@ -194,6 +198,7 @@ class SearchQuery:
         self._ef_search = ef_search
         self._rerank_factor = rerank_factor
         self._catalog_opts = catalog_opts
+        self._strict_deletes = strict_deletes
         self._results: list[dict] | None = None      # lazy — pointer-only
         self._arrow_batch: Any | None = None          # lazy — full RecordBatch
 
@@ -215,6 +220,7 @@ class SearchQuery:
                 self._hybrid_text, self._text_column, self._bm25_weight,
                 self._pruning_threshold, self._ef_search, self._rerank_factor,
                 self._catalog_opts,
+                self._strict_deletes,
             )
         return self._results
 
@@ -227,6 +233,7 @@ class SearchQuery:
                 self._hybrid_text, self._text_column, self._bm25_weight,
                 self._pruning_threshold, self._ef_search, self._rerank_factor,
                 self._catalog_opts,
+                self._strict_deletes,
             )
             table = pa.ipc.open_file(io.BytesIO(ipc_bytes)).read_all()
             if self._score_fn is not None:
@@ -648,6 +655,7 @@ class Table:
         pruning_threshold: "float | None" = None,
         ef_search: "int | None" = None,
         rerank_factor: "int | None" = None,
+        strict_deletes: bool = True,
     ) -> SearchQuery:
         """Return a chainable :class:`SearchQuery`.
 
@@ -687,6 +695,7 @@ class Table:
             ef_search=ef_search,
             rerank_factor=rerank_factor,
             catalog_opts=self._catalog_opts,
+            strict_deletes=strict_deletes,
         )
 
     # ── context manager ───────────────────────────────────────────────────────
@@ -1400,6 +1409,7 @@ def search(
     ef_search: "int | None" = None,
     rerank_factor: "int | None" = None,
     catalog_opts: "dict[str, str] | None" = None,
+    strict_deletes: bool = True,
 ) -> SearchQuery:
     """Module-level search returning a chainable :class:`SearchQuery`.
 
@@ -1475,6 +1485,7 @@ def search(
         ef_search=ef_search,
         rerank_factor=rerank_factor,
         catalog_opts=catalog_opts,
+        strict_deletes=strict_deletes,
     )
 
 
