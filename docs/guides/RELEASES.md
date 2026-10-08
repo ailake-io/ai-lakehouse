@@ -32,8 +32,9 @@ desenvolvimento, registre mudanças visíveis ao usuário em `[Unreleased]`:
 ## Checklist antes do merge em `main`
 
 - `[Unreleased]` contém as mudanças da janela de release.
-- Exemplos de instalação usam a versão atualmente publicada (`TAG` e
-  `JAR_VERSION`); a Action os atualiza na promoção da tag.
+- Exemplos do core usam a tag `vX.Y.Z`; plugins JVM usam tags próprias
+  (`spark-vX.Y.Z`, `trino-vX.Y.Z`, `flink-vX.Y.Z`) e são publicados pelo
+  workflow `Release JVM plugin`.
 - CI, CI Safety, Go, C++, performance e Compat Heavy estão verdes.
 - Mudanças de comportamento operacional apontam para as guias de cache,
   coordenação distribuída, secrets, rate limiting e performance.

@@ -3,13 +3,14 @@
     {
       "id": "spark",
       "name": "Spark",
+      "version_policy": "independent",
       "directory": "spark-plugin",
       "targets": [
         {
           "file": "spark-plugin/build.gradle.kts",
-          "pattern": "(?m)^version = \"[^\"]+\"$",
-          "replacement": "version = \"{version}\"",
-          "version_pattern": "(?m)^version = \"([^\"]+)\"$"
+          "pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"[^\\\"]+\\\"\\)$",
+          "replacement": "version = providers.gradleProperty(\"pluginVersion\").getOrElse(\"{version}\")",
+          "version_pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"([^\\\"]+)\\\"\\)$"
         }
       ],
       "test": [
@@ -24,13 +25,14 @@
     {
       "id": "trino",
       "name": "Trino",
+      "version_policy": "independent",
       "directory": "trino-plugin",
       "targets": [
         {
           "file": "trino-plugin/build.gradle.kts",
-          "pattern": "(?m)^version = \"[^\"]+\"$",
-          "replacement": "version = \"{version}\"",
-          "version_pattern": "(?m)^version = \"([^\"]+)\"$"
+          "pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"[^\\\"]+\\\"\\)$",
+          "replacement": "version = providers.gradleProperty(\"pluginVersion\").getOrElse(\"{version}\")",
+          "version_pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"([^\\\"]+)\\\"\\)$"
         }
       ],
       "test": [
@@ -45,13 +47,14 @@
     {
       "id": "flink",
       "name": "Flink",
+      "version_policy": "independent",
       "directory": "ailake-flink",
       "targets": [
         {
           "file": "ailake-flink/build.gradle.kts",
-          "pattern": "(?m)^version = \"[^\"]+\"$",
-          "replacement": "version = \"{version}\"",
-          "version_pattern": "(?m)^version = \"([^\"]+)\"$"
+          "pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"[^\\\"]+\\\"\\)$",
+          "replacement": "version = providers.gradleProperty(\"pluginVersion\").getOrElse(\"{version}\")",
+          "version_pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"([^\\\"]+)\\\"\\)$"
         }
       ],
       "test": [
@@ -66,6 +69,7 @@
     {
       "id": "airflow",
       "name": "Airflow provider",
+      "version_policy": "core",
       "directory": "airflow-providers-ailake",
       "targets": [
         {
@@ -87,6 +91,7 @@
     {
       "id": "airbyte",
       "name": "Airbyte destination",
+      "version_policy": "core",
       "directory": "airbyte-destination-ailake",
       "targets": [
         {
@@ -114,6 +119,7 @@
     {
       "id": "duckdb",
       "name": "DuckDB extension",
+      "version_policy": "core",
       "directory": "duckdb-ailake",
       "targets": [
         {
@@ -135,6 +141,7 @@
     {
       "id": "cpp",
       "name": "C++ SDK",
+      "version_policy": "core",
       "directory": "ailake-cpp",
       "targets": [
         {
@@ -167,6 +174,7 @@
     {
       "id": "go",
       "name": "Go SDK",
+      "version_policy": "core",
       "directory": "ailake-go",
       "targets": [],
       "test": [

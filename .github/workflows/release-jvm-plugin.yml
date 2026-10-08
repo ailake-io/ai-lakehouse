@@ -1,0 +1,118 @@
+name: Release JVM plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: Plugin to test and release
+        required: true
+        type: choice
+        options: [spark, trino, flink]
+      version:
+        description: Independent plugin version (blank increments its latest plugin tag)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  release:
+    name: Test and release ${{ inputs.plugin }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Resolve plugin project, version, and tag
+        id: release
+        env:
+          PLUGIN: ${{ inputs.plugin }}
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          case "$PLUGIN" in
+            spark) PROJECT=spark-plugin; ARTIFACT=spark-plugin;;
+            trino) PROJECT=trino-plugin; ARTIFACT=trino-plugin;;
+            flink) PROJECT=ailake-flink; ARTIFACT=ailake-flink;;
+            *) echo "Unsupported plugin: $PLUGIN" >&2; exit 1;;
+          esac
+
+          if [ -n "$VERSION_INPUT" ]; then
+            VERSION="$VERSION_INPUT"
+          else
+            git fetch --tags --force
+            LATEST=$(git tag --list "$PLUGIN-v*" --sort=-version:refname | head -1)
+            BASE=${LATEST#"$PLUGIN-v"}
+            if [ -z "$LATEST" ]; then
+              BASE=$(sed -n 's/.*getOrElse("\([^"]*\)").*/\1/p' "$PROJECT/build.gradle.kts" | head -1)
+            fi
+            [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid base version: $BASE" >&2; exit 1; }
+            IFS=. read -r MAJOR MINOR PATCH <<< "$BASE"
+            VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Version must be MAJOR.MINOR.PATCH" >&2; exit 1; }
+          TAG="$PLUGIN-v$VERSION"
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build JNI library
+        run: cargo build --release -p ailake-jni
+
+      - name: Test selected plugin and build fat JAR
+        env:
+          PROJECT: ${{ steps.release.outputs.project }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          gradle -p "$PROJECT" -PpluginVersion="$VERSION" test shadowJar --no-daemon --no-configuration-cache
+
+      - name: Create or update plugin release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLUGIN: ${{ inputs.plugin }}
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          ARTIFACT: ${{ steps.release.outputs.artifact }}
+        run: |
+          set -euo pipefail
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            TAG_SHA=$(git rev-list -n 1 "$TAG")
+            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+              echo "Tag $TAG already points to $TAG_SHA, not $GITHUB_SHA" >&2
+              exit 1
+            fi
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
+
+          JAR=$(find "$ARTIFACT/build/libs" -maxdepth 1 -type f -name "${ARTIFACT}-${VERSION}-plugin.jar" -print -quit)
+          [ -n "$JAR" ] || { echo "Expected plugin JAR not found" >&2; exit 1; }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$JAR" target/release/libailake_jni.so --clobber
+          else
+            gh release create "$TAG" "$JAR" target/release/libailake_jni.so \
+              --title "$PLUGIN $TAG" \
+              --notes "Independent $PLUGIN plugin release ($VERSION), tested and packaged with libailake_jni.so built from source commit $GITHUB_SHA."
+          fi
