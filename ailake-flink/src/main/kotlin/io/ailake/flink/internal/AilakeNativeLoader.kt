@@ -26,6 +26,7 @@ object AilakeNativeLoader {
     private val mapper = jacksonObjectMapper()
 
     private const val AILAKE_EXPECTED_MAJOR = "0"
+    private const val AILAKE_EXPECTED_FFI_ABI = 1
 
     val lib: AilakeNativeLib by lazy {
         val explicitPath =
@@ -38,6 +39,12 @@ object AilakeNativeLoader {
             } else {
                 Native.load("ailake_jni", AilakeNativeLib::class.java)
             }
+        }.map { native ->
+            val abi = native.ailake_ffi_abi_version()
+            check(abi == AILAKE_EXPECTED_FFI_ABI) {
+                "Incompatible ailake-jni C-ABI: plugin requires $AILAKE_EXPECTED_FFI_ABI, loaded $abi"
+            }
+            native
         }.onSuccess { native ->
             val v = native.ailake_version()
             val major = v.substringBefore('.')

@@ -4,6 +4,7 @@
       "id": "spark",
       "name": "Spark",
       "version_policy": "independent",
+      "tag_prefix": "spark-v",
       "directory": "spark-plugin",
       "targets": [
         {
@@ -26,6 +27,7 @@
       "id": "trino",
       "name": "Trino",
       "version_policy": "independent",
+      "tag_prefix": "trino-v",
       "directory": "trino-plugin",
       "targets": [
         {
@@ -48,6 +50,7 @@
       "id": "flink",
       "name": "Flink",
       "version_policy": "independent",
+      "tag_prefix": "flink-v",
       "directory": "ailake-flink",
       "targets": [
         {
@@ -69,7 +72,8 @@
     {
       "id": "airflow",
       "name": "Airflow provider",
-      "version_policy": "core",
+      "version_policy": "independent",
+      "tag_prefix": "airflow-v",
       "directory": "airflow-providers-ailake",
       "targets": [
         {
@@ -91,7 +95,8 @@
     {
       "id": "airbyte",
       "name": "Airbyte destination",
-      "version_policy": "core",
+      "version_policy": "independent",
+      "tag_prefix": "airbyte-v",
       "directory": "airbyte-destination-ailake",
       "targets": [
         {
@@ -119,7 +124,8 @@
     {
       "id": "duckdb",
       "name": "DuckDB extension",
-      "version_policy": "core",
+      "version_policy": "independent",
+      "tag_prefix": "duckdb-v",
       "directory": "duckdb-ailake",
       "targets": [
         {
@@ -141,7 +147,8 @@
     {
       "id": "cpp",
       "name": "C++ SDK",
-      "version_policy": "core",
+      "version_policy": "independent",
+      "tag_prefix": "cpp-v",
       "directory": "ailake-cpp",
       "targets": [
         {
@@ -174,9 +181,17 @@
     {
       "id": "go",
       "name": "Go SDK",
-      "version_policy": "core",
+      "version_policy": "independent",
+      "tag_prefix": "ailake-go/v",
       "directory": "ailake-go",
-      "targets": [],
+      "targets": [
+        {
+          "file": "ailake-go/VERSION",
+          "pattern": "(?m)^[^\\n]+$",
+          "replacement": "{version}",
+          "version_pattern": "(?m)^([^\\n]+)$"
+        }
+      ],
       "test": [
         "go",
         "test",
