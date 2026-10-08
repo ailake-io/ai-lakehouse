@@ -9,6 +9,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Releases independentes para todos os plugins** — Spark, Trino, Flink, Airflow, Airbyte, DuckDB, C++ e Go agora têm tags e versões próprias; cada execução testa e publica somente o plugin escolhido. Os três plugins JVM também publicam bibliotecas JNI para Linux x86_64, macOS arm64 e Windows x86_64.
+- **Compatibilidade JNI explícita** — os carregadores JVM exigem o ABI C-ABI declarado pela biblioteca antes de chamar outros símbolos e falham com incompatibilidade em vez de continuar com uma combinação não validada.
+
 ## [0.1.15] — 2026-10-08
 
 ### Segurança

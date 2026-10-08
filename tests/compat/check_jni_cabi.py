@@ -62,6 +62,9 @@ if lib is None:
     sys.exit(0)
 
 # Wire up C-ABI signatures
+lib.ailake_ffi_abi_version.argtypes = []
+lib.ailake_ffi_abi_version.restype = ctypes.c_uint32
+
 lib.ailake_version.argtypes = []
 lib.ailake_version.restype = ctypes.c_char_p
 
@@ -86,7 +89,10 @@ lib.ailake_search_text_json.restype = ctypes.c_void_p
 lib.ailake_free_string.argtypes = [ctypes.c_void_p]
 lib.ailake_free_string.restype = None
 
-print(f"ailake-jni version: {lib.ailake_version().decode()}")
+abi_version = lib.ailake_ffi_abi_version()
+if abi_version != 1:
+    raise RuntimeError(f"Unsupported ailake-jni C-ABI version: {abi_version} (expected 1)")
+print(f"ailake-jni version: {lib.ailake_version().decode()} (C-ABI {abi_version})")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

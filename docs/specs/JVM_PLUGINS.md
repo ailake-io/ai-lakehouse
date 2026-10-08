@@ -83,26 +83,37 @@ listed above — it predates the JSON-envelope API and isn't used by any plugin'
 
 ## Download pre-built JARs (recommended)
 
-Each GitHub Release includes pre-built artifacts uploaded by the `publish-jvm.yml` workflow. No Rust toolchain or Gradle required.
+Each JVM plugin has an independent GitHub Release. Tags use `spark-vX.Y.Z`,
+`trino-vX.Y.Z`, and `flink-vX.Y.Z`; choose the plugin's tag to download its
+fat JAR and a matching JNI library for Linux x86_64, macOS arm64, or Windows
+x86_64. Rename the downloaded native asset to the platform library name JNA
+expects (`libailake_jni.so`, `libailake_jni.dylib`, or `ailake_jni.dll`) before
+adding it to `java.library.path`. No Rust toolchain or Gradle is needed to
+install a published build.
 
 ```bash
-TAG=v0.1.15          # GitHub release tag — replace with desired release (Rust/PyPI version)
-JAR_VERSION=0.1.15   # JVM plugin version — gradle, versioned independently of TAG; check the release page
+SPARK_TAG=spark-v0.1.1
+TRINO_TAG=trino-v0.1.1
+FLINK_TAG=flink-v0.1.1
+SPARK_VERSION=0.1.1
+TRINO_VERSION=0.1.1
+FLINK_VERSION=0.1.1
+NATIVE_TAG=$SPARK_TAG # Set to the tag for the plugin release you install.
 
 # Spark plugin
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/spark-plugin-${JAR_VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${SPARK_TAG}/spark-plugin-${SPARK_VERSION}-plugin.jar
 
 # Trino plugin
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/trino-plugin-${JAR_VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TRINO_TAG}/trino-plugin-${TRINO_VERSION}-plugin.jar
 
 # Flink connector
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/ailake-flink-${JAR_VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${FLINK_TAG}/ailake-flink-${FLINK_VERSION}-plugin.jar
 
-# Native library (required by all three)
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/libailake_jni.so
+# Native library (download the asset matching the host platform from NATIVE_TAG)
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${NATIVE_TAG}/libailake_jni-linux-x86_64.so
 ```
 
-Place `libailake_jni.so` in a directory accessible to the JVM (see [Native library deployment](#native-library-deployment)).
+Place the renamed platform library in a directory accessible to the JVM (see [Native library deployment](#native-library-deployment)). The plugin checks `ailake_ffi_abi_version()` at startup and fails closed if the loaded native library does not report ABI 1.
 
 ---
 

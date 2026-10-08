@@ -13,13 +13,38 @@ From the repository root:
 python3 scripts/plugins.py list
 python3 scripts/plugins.py check
 python3 scripts/plugins.py update --plugin spark --version 0.1.13
-python3 scripts/plugins.py update --all --version 0.1.13
+python3 scripts/plugins.py update --policy core --version 0.1.13
 ```
 
-`check` verifies registered artifact versions against `ailake-core`. `update`
-requires each target to match exactly once and reports changed files. Add every
-version-bearing file for a plugin to its `targets` entry. Plugins without an
-independent artifact version can use an empty target list.
+`check` validates each plugin's registered version targets and policy. Every
+registered plugin has an independent SemVer and tag prefix. The core
+release updates Rust crates and Python bindings, not plugin versions. `--all`
+remains available for an intentional fleet wide bump. `update` requires each
+target to match exactly once and reports changed files. Add every
+version-bearing file for a plugin to its `targets` entry and its independent
+tag prefix to the registry.
+
+| Plugin | Tag prefix | Published result |
+|---|---|---|
+| Spark, Trino, Flink | `<plugin>-v` | Fat JAR + JNI for Linux x86_64, macOS arm64, Windows x86_64 |
+| Airflow provider | `airflow-v` | PyPI wheel + sdist |
+| Airbyte destination | `airbyte-v` | PyPI wheel + sdist + GHCR image |
+| DuckDB extension | `duckdb-v` | Linux x86_64 extension, statically linked to its Rust core and pinned DuckDB build |
+| C++ SDK | `cpp-v` | Tested source archive |
+| Go SDK | `ailake-go/v` | Tested source archive and Go module tag |
+
+Run **Actions → Release plugin**, choose any registered plugin, and optionally
+enter a version; blank increments that plugin's latest tag. The workflow tests
+and packages only the selected plugin. Airflow and Airbyte publish their Python
+distributions to PyPI; DuckDB, C++, and Go publish standalone release assets;
+JVM plugins publish their JAR and matching native libraries for Linux x86_64,
+macOS arm64, and Windows x86_64. Release tags are recorded in `tag_prefix`.
+
+DuckDB's extension embeds the Rust core statically, so its independent version
+does not mean its binary can be mixed with arbitrary core builds: the release
+asset is an atomic plugin+core build and is also tied to its pinned DuckDB ABI.
+The C++ and Go SDKs version their own public APIs and retain format compatibility
+checks against published AI-Lake files.
 
 ## Shared JVM dependencies
 
