@@ -33,7 +33,9 @@ desenvolvimento, registre mudanças visíveis ao usuário em `[Unreleased]`:
 
 - `[Unreleased]` contém as mudanças da janela de release.
 - Exemplos do core usam a tag `vX.Y.Z`; cada plugin usa sua tag independente
-  pelo workflow `Release plugin` (prefixos no registry `scripts/plugins.json`).
+  pelo workflow nomeado do plugin (por exemplo, `Release Spark`); os oito
+  workflows usam a implementação compartilhada `release-plugin.yml` e os
+  prefixos ficam no registry `scripts/plugins.json`.
 - CI, CI Safety, Go, C++, performance e Compat Heavy estão verdes.
 - Mudanças de comportamento operacional apontam para as guias de cache,
   coordenação distribuída, secrets, rate limiting e performance.

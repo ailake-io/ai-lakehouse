@@ -1,0 +1,25 @@
+name: Release Airflow
+run-name: Release Airflow ${{ inputs.version || 'next version' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Independent Airflow version (blank increments the latest tag)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-plugin.yml
+    with:
+      plugin: airflow
+      version: ${{ inputs.version }}
+    secrets: inherit
+    permissions:
+      contents: write
+      packages: write

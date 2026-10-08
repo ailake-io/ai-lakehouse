@@ -33,12 +33,13 @@ tag prefix to the registry.
 | C++ SDK | `cpp-v` | Tested source archive |
 | Go SDK | `ailake-go/v` | Tested source archive and Go module tag |
 
-Run **Actions → Release plugin**, choose any registered plugin, and optionally
-enter a version; blank increments that plugin's latest tag. The workflow tests
-and packages only the selected plugin. Airflow and Airbyte publish their Python
-distributions to PyPI; DuckDB, C++, and Go publish standalone release assets;
-JVM plugins publish their JAR and matching native libraries for Linux x86_64,
-macOS arm64, and Windows x86_64. Release tags are recorded in `tag_prefix`.
+Run the named workflow under **Actions** (for example, **Release Spark**) and
+optionally enter a version; blank increments that plugin's latest tag. Each
+entry point invokes the shared release workflow, which tests and packages only
+the selected plugin. Airflow and Airbyte publish their Python distributions to
+PyPI; DuckDB, C++, and Go publish standalone release assets; JVM plugins publish
+their JAR and matching native libraries for Linux x86_64, macOS arm64, and
+Windows x86_64. Release tags are recorded in `tag_prefix`.
 
 DuckDB's extension embeds the Rust core statically, so its independent version
 does not mean its binary can be mixed with arbitrary core builds: the release

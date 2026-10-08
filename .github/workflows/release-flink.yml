@@ -1,0 +1,25 @@
+name: Release Flink
+run-name: Release Flink ${{ inputs.version || 'next version' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Independent Flink version (blank increments the latest tag)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-plugin.yml
+    with:
+      plugin: flink
+      version: ${{ inputs.version }}
+    secrets: inherit
+    permissions:
+      contents: write
+      packages: write
