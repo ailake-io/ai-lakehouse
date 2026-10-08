@@ -20,6 +20,7 @@
 | Benchmark | `ailake-vec/benches/` + external [`ailake-benchmarks`](https://github.com/ThiagoLange/ailake-benchmarks) repo | `cargo bench` locally; `performance.yml` in CI | CPU kernels, deterministic Recall@10/p95, HTTP load, and SIFT-1M release comparisons |
 | UB detection (Miri) | `src/` inline `#[cfg(miri)]` | `ci-safety.yml` — every PR | `get_unchecked_mut`, SIMD intrinsics, CStr FFI, scalar edge cases |
 | Concurrency model (Loom) | `src/` inline `#[cfg(feature = "loom")]` | `ci-safety.yml` — every PR | JNI table locks, shared codebooks, atomic counters |
+| GPU | `ailake-index/tests/gpu_data.rs` + GPU unit tests | `ci-gpu.yml` — manual dispatch when an online Windows GPU runner is available | CUDA/ROCm correctness; skipped when no matching `gpu-nvidia` or `gpu-amd` runner is online |
 | Compat (Python/DuckDB) | `tests/compat/` | `ci.yml` — every PR | PyArrow, DuckDB, PyIceberg, ailake-py SDK |
 | Compat (Spark/Trino/JVM) | `tests/compat/` + Gradle | `compat-heavy.yml` — push to main + weekly | Spark+Iceberg, Trino+REST, Flink/Spark/Trino JVM plugins |
 
