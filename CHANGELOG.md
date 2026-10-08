@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.15] — 2026-10-08
+
 ### Segurança
 
 - **Limites de recursos no catálogo REST e no armazenamento** — validação de paginação e limites de resposta reduzem o risco de consumo excessivo de memória e CPU em respostas grandes ou malformadas. Leituras e buscas concorrentes também respeitam limites de recursos configuráveis.
