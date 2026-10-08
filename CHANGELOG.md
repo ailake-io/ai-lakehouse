@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.15] — 2026-10-08
+
+### Segurança
+
+- **Limites de recursos no catálogo REST e no armazenamento** — validação de paginação e limites de resposta reduzem o risco de consumo excessivo de memória e CPU em respostas grandes ou malformadas. Leituras e buscas concorrentes também respeitam limites de recursos configuráveis.
+
+### Performance
+
+- **Busca vetorial e carga concorrente** — o scanner distribui o trabalho por arquivo com orçamento de concorrência ajustado ao tamanho dos dados; benchmarks e testes de regressão cobrem recall, latência p95, uso de memória e carga HTTP com múltiplos escritores.
+
+### CI
+
+- **Workflows de GPU sem runner disponível** — a CI detecta runners GPU online e ignora os jobs CUDA/ROCm quando não há runner compatível, mantendo os checks de CPU ativos.
+
 ## [0.1.14] — 2026-09-30
 
 ## [0.1.13] — 2026-09-30
