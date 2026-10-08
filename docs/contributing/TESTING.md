@@ -767,6 +767,7 @@ update.
 
 | Input | Description |
 |---|---|
+| `plugin` | Selected plugin, supplied by the named workflow entry point. |
 | `version` | Optional SemVer. Blank increments the selected plugin's latest tag. |
 
 ### `publish-pypi.yml` — manual fallback (`workflow_dispatch`)
