@@ -183,6 +183,14 @@ jobs:
         if: inputs.plugin == 'spark' || inputs.plugin == 'trino' || inputs.plugin == 'flink'
         run: cargo build --release -p ailake-jni
 
+      - name: Generate Spark/Trino JNI fixture
+        if: inputs.plugin == 'spark' || inputs.plugin == 'trino'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ailake-jni-venv"
+          AILAKE_LIB="$GITHUB_WORKSPACE/target/release/libailake_jni.so" \
+            "$RUNNER_TEMP/ailake-jni-venv/bin/python3" \
+            tests/fixtures/write_jni_fixture.py "$RUNNER_TEMP/ailake-jni-fixture"
+
       - name: Test and build selected plugin
         shell: bash
         run: |
@@ -190,11 +198,21 @@ jobs:
           mkdir -p dist
           case "$PLUGIN" in
             spark)
-              AILAKE_NATIVE_LIB="$GITHUB_WORKSPACE/target/release/libailake_jni.so" gradle -p spark-plugin -PpluginVersion="$VERSION" test shadowJar --no-daemon --no-configuration-cache
+              AILAKE_NATIVE_LIB="$GITHUB_WORKSPACE/target/release/libailake_jni.so" \
+              AILAKE_LIB_PATH="$GITHUB_WORKSPACE/target/release" \
+              AILAKE_WRITE_DIR="$RUNNER_TEMP/ailake-spark-write" \
+              AILAKE_SPARK_TRINO_FIXTURE="$RUNNER_TEMP/ailake-jni-fixture" \
+              LD_LIBRARY_PATH="$GITHUB_WORKSPACE/target/release" \
+                gradle -p spark-plugin -PpluginVersion="$VERSION" test shadowJar --no-daemon --no-configuration-cache
               cp "spark-plugin/build/libs/spark-plugin-${VERSION}-plugin.jar" dist/
               ;;
             trino)
-              AILAKE_NATIVE_LIB="$GITHUB_WORKSPACE/target/release/libailake_jni.so" gradle -p trino-plugin -PpluginVersion="$VERSION" test shadowJar --no-daemon --no-configuration-cache
+              AILAKE_NATIVE_LIB="$GITHUB_WORKSPACE/target/release/libailake_jni.so" \
+              AILAKE_LIB_PATH="$GITHUB_WORKSPACE/target/release" \
+              AILAKE_WRITE_DIR="$RUNNER_TEMP/ailake-trino-write" \
+              AILAKE_SPARK_TRINO_FIXTURE="$RUNNER_TEMP/ailake-jni-fixture" \
+              LD_LIBRARY_PATH="$GITHUB_WORKSPACE/target/release" \
+                gradle -p trino-plugin -PpluginVersion="$VERSION" test shadowJar --no-daemon --no-configuration-cache
               cp "trino-plugin/build/libs/trino-plugin-${VERSION}-plugin.jar" dist/
               ;;
             flink)
