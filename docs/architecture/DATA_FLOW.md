@@ -517,6 +517,15 @@ sequenceDiagram
 
 **C-ABI contract** (`ailake-jni/src/lib.rs`):
 
+`ailake_ffi_abi_version()` returns the C-ABI contract number. JVM plugins check
+it before using any other export and fail closed on mismatch. ABI 1 remains
+compatible across patch/minor releases: do not change exported signatures,
+pointer ownership, string encoding, or required function semantics in place.
+Additive optional exports can retain ABI 1. Increment the ABI for an incompatible
+change or a changed required export set, then update the plugins' required ABI.
+The Rust package version (`ailake_version()`) is diagnostic metadata, not an ABI
+compatibility signal.
+
 ```c
 // All strings: UTF-8, null-terminated, little-endian platform.
 // Caller MUST call ailake_free_string() on every non-null return value.
@@ -534,6 +543,7 @@ char* ailake_write_batch_json(const char* request_json);
 
 void  ailake_free_string(char* ptr);
 
+uint32_t ailake_ffi_abi_version(); // stable contract number; must be supported
 const char* ailake_version();   // static string — do NOT free
 ```
 

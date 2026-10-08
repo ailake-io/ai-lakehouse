@@ -36,17 +36,24 @@ Engine (Spark / Trino / Flink)
 SPARK_TAG=spark-v0.1.1
 TRINO_TAG=trino-v0.1.1
 FLINK_TAG=flink-v0.1.1
+SPARK_VERSION=0.1.1
+TRINO_VERSION=0.1.1
+FLINK_VERSION=0.1.1
 NATIVE_TAG=$SPARK_TAG # Set to the tag for the plugin release you install.
 
-# Native library (required by all three engines)
-# Download it from the same plugin release tag as the JAR you install.
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${NATIVE_TAG}/libailake_jni.so
+# Native library (download the asset matching the host platform from NATIVE_TAG)
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${NATIVE_TAG}/libailake_jni-linux-x86_64.so
 
 # Engine JARs (download the ones you need)
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${SPARK_TAG}/spark-plugin-0.1.1-plugin.jar
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TRINO_TAG}/trino-plugin-0.1.1-plugin.jar
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${FLINK_TAG}/ailake-flink-0.1.1-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${SPARK_TAG}/spark-plugin-${SPARK_VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TRINO_TAG}/trino-plugin-${TRINO_VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${FLINK_TAG}/ailake-flink-${FLINK_VERSION}-plugin.jar
 ```
+
+The same release contains `libailake_jni-macos-arm64.dylib` and
+`ailake_jni-windows-x86_64.dll`. Rename the selected file to the platform
+library name JNA expects before adding it to `java.library.path`. JVM plugins
+require JNI ABI 1 and stop loading if the native library reports another ABI.
 
 ### 2B — Build from source
 

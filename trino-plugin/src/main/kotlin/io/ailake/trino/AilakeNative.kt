@@ -72,6 +72,9 @@ object AilakeNative {
     )
 
     private interface Lib : Library {
+        /** Stable C-ABI contract version. Must match the version supported by this plugin. */
+        fun ailake_ffi_abi_version(): Int
+
         /** Returns ailake-jni version string. Static — do NOT free this pointer. */
         fun ailake_version(): String
 
@@ -130,14 +133,20 @@ object AilakeNative {
     }
 
     private const val AILAKE_EXPECTED_MAJOR = "0"
+    private const val AILAKE_EXPECTED_FFI_ABI = 1
 
     private val lib: Lib? by lazy {
         val explicitPath =
             System.getProperty("ailake.native.lib")
                 ?: System.getenv("AILAKE_NATIVE_LIB")
         runCatching {
-            if (explicitPath != null) Native.load(explicitPath, Lib::class.java) as Lib
+            val loaded = if (explicitPath != null) Native.load(explicitPath, Lib::class.java) as Lib
             else Native.load("ailake_jni", Lib::class.java) as Lib
+            val abi = loaded.ailake_ffi_abi_version()
+            check(abi == AILAKE_EXPECTED_FFI_ABI) {
+                "Incompatible ailake-jni C-ABI: plugin requires $AILAKE_EXPECTED_FFI_ABI, loaded $abi"
+            }
+            loaded
         }
             .onSuccess { loaded ->
                 val version = loaded.ailake_version()
@@ -153,7 +162,7 @@ object AilakeNative {
             }
             .onFailure {
                 log.warn(
-                    "[ailake] Native library libailake_jni not found — vector search disabled. " +
+                    "[ailake] Native library libailake_jni could not be loaded — vector search disabled. " +
                     "Set ailake.native.lib system property or AILAKE_NATIVE_LIB env var. Error: ${it.message}"
                 )
             }

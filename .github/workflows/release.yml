@@ -116,9 +116,8 @@ jobs:
             sed -i -E "s/(${INTERNAL}[[:space:]]*=[[:space:]]*\{[^}]*version[[:space:]]*=[[:space:]]*\")[^\"]*/\1${NEW_VERSION}/" Cargo.toml
           done
 
-          # Core-coupled artifacts share the Rust/PyPI version. JVM plugins
-          # have their own release cadence and are intentionally excluded.
-          # ailake-py's own
+          # Plugin artifacts all have their own release cadence and are
+          # intentionally excluded from the core version bump. ailake-py's own
           # pyproject.toml is excluded: it's `dynamic = ["version"]`, sourced
           # from ailake-py/Cargo.toml by maturin, already covered above.
           # Plugin version targets live in scripts/plugins.json so new plugins
@@ -210,12 +209,9 @@ jobs:
           ### Python wheel (PyPI)
           \`ailake\` wheel published to PyPI for x86_64 and aarch64 Linux and Windows x86_64.
 
-          ### Airflow provider (PyPI)
-          \`apache-airflow-providers-ailake\` published to PyPI.
-
           ### JNI library
-          \`libailake_jni.so\` attached as a release asset. Spark, Trino, and Flink
-          plugins use independent releases tagged \`<plugin>-vX.Y.Z\`.
+          Linux \`libailake_jni.so\` attached as a release asset. All eight plugins
+          use independent versions and releases through the \`Release plugin\` workflow.
           " \
               --draft=false
           fi
@@ -343,50 +339,9 @@ jobs:
         run: |
           gh release upload "$TAG" target/release/libailake_jni.so --clobber
 
-  publish-airflow:
-    name: Build and publish Airflow provider
-    needs: release
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    env:
-      TAG: ${{ needs.release.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - name: Build wheel and sdist
-        run: |
-          pip install hatchling
-          cd airflow-providers-ailake
-          python -m hatchling build --target wheel --target sdist
-
-      - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          pip install twine
-          twine upload --skip-existing airflow-providers-ailake/dist/*
-
-      - name: Upload wheel to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "$TAG" \
-            airflow-providers-ailake/dist/*.whl \
-            airflow-providers-ailake/dist/*.tar.gz \
-            --clobber
-
   pypi-linux:
     name: Build Python wheel — Linux (${{ matrix.target }})
-    needs: [release, publish-airflow]
+    needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

@@ -88,7 +88,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("list", help="list plugins and their source directories")
-    subparsers.add_parser("check", help="check plugin version targets against ailake-core")
+    subparsers.add_parser("check", help="check plugin version targets and policies")
     update = subparsers.add_parser("update", help="update plugin artifact versions")
     update.add_argument("--version", required=True, help="target SemVer, for example 0.1.13")
     selection = update.add_mutually_exclusive_group(required=True)
@@ -121,8 +121,11 @@ def main() -> int:
         selected = [p for p in registry["plugins"] if p.get("version_policy", "core") == args.policy]
     else:
         selected = [plugins.get(args.plugin)]
-    if not selected or selected[0] is None:
+    if args.plugin and selected[0] is None:
         parser.error(f"unknown plugin ID: {args.plugin}")
+    if not selected:
+        print(f"No plugins use the {args.policy} version policy; nothing to update.")
+        return 0
     changed = []
     for plugin in selected:
         changed.extend(set_plugin_version(ROOT, plugin, args.version))

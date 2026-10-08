@@ -13,6 +13,9 @@ import com.sun.jna.Pointer
  * [ailake_free_string] after consuming each result.
  */
 interface AilakeNativeLib : Library {
+    /** Stable C-ABI contract version. Must match the version supported by this plugin. */
+    fun ailake_ffi_abi_version(): Int
+
 
     /** Returns ailake-jni version string. Static — do NOT free this pointer. */
     fun ailake_version(): String

@@ -57,8 +57,9 @@ unsafe fn bounded_cstr_utf8<'a>(ptr: *const c_char, max_bytes: usize) -> Result<
     Err(format!("C string exceeds maximum of {max_bytes} bytes"))
 }
 
-/// Stable C-ABI contract version. Increment only when an exported signature or
-/// ownership rule changes incompatibly.
+/// Stable C-ABI contract version. JVM plugins require an exact match before
+/// calling any other export. Increment when a signature, ownership rule, or
+/// required export set changes; additive optional exports may keep the version.
 #[no_mangle]
 pub extern "C" fn ailake_ffi_abi_version() -> u32 {
     1

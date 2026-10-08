@@ -159,20 +159,27 @@ pip install apache-airflow-providers-ailake
 **JVM (Spark / Trino / Flink)** — baixe os JARs pré-compilados em [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
 
 ```bash
-TAG=v0.1.15            # tag do release GitHub (versão Rust/PyPI)
-JAR_VERSION=0.1.15     # versão do plugin JVM (gradle, versionado à parte — confira a página do release)
+SPARK_TAG=spark-v0.1.15
+TRINO_TAG=trino-v0.1.15
+FLINK_TAG=flink-v0.1.15
+SPARK_VERSION=0.1.15
+TRINO_VERSION=0.1.15
+FLINK_VERSION=0.1.15
+NATIVE_TAG=$SPARK_TAG # Use a tag do plugin JVM que você instalar.
 
 # Plugin Spark
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/spark-plugin-${JAR_VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${SPARK_TAG}/spark-plugin-${SPARK_VERSION}-plugin.jar
 
 # Plugin Trino
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/trino-plugin-${JAR_VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TRINO_TAG}/trino-plugin-${TRINO_VERSION}-plugin.jar
 
 # Conector Flink
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/ailake-flink-${JAR_VERSION}-plugin.jar
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${FLINK_TAG}/ailake-flink-${FLINK_VERSION}-plugin.jar
 
 # Biblioteca nativa (necessária pelos três — coloque no java.library.path)
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TAG}/libailake_jni.so
+wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${NATIVE_TAG}/libailake_jni-linux-x86_64.so
+# A mesma tag também contém bibliotecas para macOS arm64 e Windows x86_64;
+# renomeie o arquivo escolhido para o nome de biblioteca que o JNA espera.
 ```
 
 Veja [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) para instalação e configuração.
