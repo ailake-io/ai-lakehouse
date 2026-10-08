@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Releases JVM independentes** — Spark, Trino e Flink agora têm tags e versões próprias; cada execução testa e publica apenas o plugin selecionado junto com a biblioteca JNI correspondente. O release do core continua atualizando apenas os artefatos acoplados à versão Rust/Python.
+
 ## [0.1.15] — 2026-10-08
 
 ### Segurança

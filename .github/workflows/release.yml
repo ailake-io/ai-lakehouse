@@ -33,7 +33,7 @@ jobs:
           REPO="${{ github.repository }}"
           # Excludes this workflow's own job names — Release always reports pending/
           # in-progress for itself, which would deadlock the wait otherwise.
-          SELF_JOBS='^(Wait for CI checks to pass|Create GitHub Release|Sync version bump to develop|Publish to crates\.io|Build and upload JVM plugin JARs)$'
+          SELF_JOBS='^(Wait for CI checks to pass|Create GitHub Release|Sync version bump to develop|Publish to crates\.io|Build and upload JNI library)$'
 
           echo "Waiting for all other check-runs on $SHA to complete successfully..."
           for i in $(seq 1 90); do
@@ -116,14 +116,14 @@ jobs:
             sed -i -E "s/(${INTERNAL}[[:space:]]*=[[:space:]]*\{[^}]*version[[:space:]]*=[[:space:]]*\")[^\"]*/\1${NEW_VERSION}/" Cargo.toml
           done
 
-          # Every other independently-versioned artifact in the monorepo — kept
-          # in lockstep with the Rust/PyPI version by explicit project policy
-          # (all artifacts share one version number). ailake-py's own
+          # Core-coupled artifacts share the Rust/PyPI version. JVM plugins
+          # have their own release cadence and are intentionally excluded.
+          # ailake-py's own
           # pyproject.toml is excluded: it's `dynamic = ["version"]`, sourced
           # from ailake-py/Cargo.toml by maturin, already covered above.
           # Plugin version targets live in scripts/plugins.json so new plugins
           # need one registry entry instead of edits to this release workflow.
-          python3 scripts/plugins.py update --all --version "$NEW_VERSION"
+          python3 scripts/plugins.py update --policy core --version "$NEW_VERSION"
 
           # Promote the accumulated release notes before tagging. Keep a fresh
           # [Unreleased] section at the top so the next development cycle has
@@ -145,20 +145,12 @@ jobs:
             mv "$CHANGELOG_TMP" CHANGELOG.md
           fi
 
-          # Doc-example version placeholders: JVM plugin JAR filenames (the
-          # actual JAR name `publish-jvm` produces below is
-          # `<plugin>-$NEW_VERSION-plugin.jar`, driven by the build.gradle.kts
-          # version just bumped above), the `JAR_VERSION=`/`TAG=v` install-
-          # snippet placeholders, the `ailake==X` PyPI pip-install examples, and
+          # Doc-example version placeholders: core release tag examples,
+          # `ailake==X` PyPI pip-install examples, and
           # the `ailake-core/-query/-store = "X"` crates.io dependency examples.
           # CHANGELOG.md is a historical record of each past release and must
           # never be rewritten.
           DOC_FILES=$(grep -rl \
-            -e "spark-plugin-$OLD_VERSION-plugin\.jar" \
-            -e "trino-plugin-$OLD_VERSION-plugin\.jar" \
-            -e "ailake-flink-$OLD_VERSION-plugin\.jar" \
-            -e "JAR_VERSION=$OLD_VERSION" \
-            -e "TAG=v$OLD_VERSION" \
             -e "ailake==$OLD_VERSION" \
             -e "ailake-core[[:space:]]*=[[:space:]]*\"$OLD_VERSION\"" \
             -e "ailake-query[[:space:]]*=[[:space:]]*\"$OLD_VERSION\"" \
@@ -166,11 +158,6 @@ jobs:
             --include="*.md" . 2>/dev/null | grep -v "CHANGELOG.md" || true)
           for f in $DOC_FILES; do
             sed -i -E \
-              -e "s/spark-plugin-$OLD_VERSION-plugin\.jar/spark-plugin-$NEW_VERSION-plugin.jar/g" \
-              -e "s/trino-plugin-$OLD_VERSION-plugin\.jar/trino-plugin-$NEW_VERSION-plugin.jar/g" \
-              -e "s/ailake-flink-$OLD_VERSION-plugin\.jar/ailake-flink-$NEW_VERSION-plugin.jar/g" \
-              -e "s/JAR_VERSION=$OLD_VERSION/JAR_VERSION=$NEW_VERSION/g" \
-              -e "s/TAG=v$OLD_VERSION/TAG=v$NEW_VERSION/g" \
               -e "s/ailake==$OLD_VERSION/ailake==$NEW_VERSION/g" \
               -e "s/(ailake-core[[:space:]]*=[[:space:]]*\")$OLD_VERSION(\")/\1$NEW_VERSION\2/g" \
               -e "s/(ailake-query[[:space:]]*=[[:space:]]*\")$OLD_VERSION(\")/\1$NEW_VERSION\2/g" \
@@ -226,8 +213,9 @@ jobs:
           ### Airflow provider (PyPI)
           \`apache-airflow-providers-ailake\` published to PyPI.
 
-          ### JVM plugins
-          Spark, Trino, and Flink fat-JARs and \`libailake_jni.so\` attached as release assets.
+          ### JNI library
+          \`libailake_jni.so\` attached as a release asset. Spark, Trino, and Flink
+          plugins use independent releases tagged \`<plugin>-vX.Y.Z\`.
           " \
               --draft=false
           fi
@@ -319,8 +307,8 @@ jobs:
           pub ailake-jni
           pub ailake-cli
 
-  publish-jvm:
-    name: Build and upload JVM plugin JARs
+  publish-jni:
+    name: Build and upload JNI library
     needs: [release, publish-crates]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -349,26 +337,15 @@ jobs:
       - name: Build libailake_jni.so
         run: cargo build --release -p ailake-jni
 
-      - name: Build fat-JARs
-        run: |
-          gradle -p spark-plugin  shadowJar --no-daemon --no-configuration-cache
-          gradle -p trino-plugin  shadowJar --no-daemon --no-configuration-cache
-          gradle -p ailake-flink  shadowJar --no-daemon --no-configuration-cache
-
-      - name: Upload JVM artifacts to GitHub Release
+      - name: Upload JNI library to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$TAG" \
-            spark-plugin/build/libs/spark-plugin-*-plugin.jar \
-            trino-plugin/build/libs/trino-plugin-*-plugin.jar \
-            ailake-flink/build/libs/ailake-flink-*-plugin.jar \
-            target/release/libailake_jni.so \
-            --clobber
+          gh release upload "$TAG" target/release/libailake_jni.so --clobber
 
   publish-airflow:
     name: Build and publish Airflow provider
-    needs: [release, publish-jvm]
+    needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

@@ -752,13 +752,17 @@ Fails the step with a descriptive error if cargo is not found. Adding the found 
 | `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests; includes FTS write (`fts_columns[]`) + `ailake_search_text_json` round-trip for Spark and Trino |
 | `compat-bigquery` | BigQuery: `fsouza/fake-gcs-server` + `goccy/bigquery-emulator:0.6.6`; pyarrow reads AILK Parquet + BQ streaming inserts (`insertAll`); validates row count, schema, `MIN`/`MAX(id)` |
 
-### `publish-jvm.yml` — manual fallback (`workflow_dispatch`)
+### `release-jvm-plugin.yml` — manual independent release (`workflow_dispatch`)
 
-Re-builds and re-uploads JVM plugin fat-JARs + `libailake_jni.so` to an existing GitHub Release **without** rerunning the full release pipeline. The canonical publish-jvm job now lives inside `release.yml` (see below).
+Choose Spark, Trino, or Flink to test and publish that plugin's fat JAR plus its
+matching `libailake_jni.so`. The version can be provided or incremented from
+that plugin's latest tag (`<plugin>-vX.Y.Z`). A retry on the same commit and
+version replaces release assets; a tag pointing to another commit is rejected.
 
 | Input | Description |
 |---|---|
-| `tag` | Release tag to attach artifacts to (e.g. `v0.1.0`). Optional — derived from `Cargo.toml` when omitted. |
+| `plugin` | Required choice: `spark`, `trino`, or `flink`. |
+| `version` | Optional SemVer. Blank increments the selected plugin's latest tag. |
 
 ### `publish-pypi.yml` — manual fallback (`workflow_dispatch`)
 
@@ -816,7 +820,8 @@ merge develop → main  (or workflow_dispatch)
         ├── patch+1 from latest tag → bump all Cargo.toml → commit [skip ci] → push main
         ├── git tag vX.Y.Z → push
         ├── gh release create
-        └── publish-crates → publish-jvm → publish-airflow
+        └── publish-crates → publish-jni
+        └── publish-airflow
               └── pypi-linux (x86_64 → aarch64) → pypi-macos [disabled] → pypi-windows
                     └── pypi-sdist → pypi-publish
 ```
@@ -827,6 +832,6 @@ If any publish job fails, re-run only that job and its dependents — the tag an
 
 | Workflow | When to use |
 |---|---|
-| `publish-jvm.yml` | Re-upload JARs to existing release |
+| `release-jvm-plugin.yml` | Test and publish one JVM plugin independently |
 | `publish-airflow-provider.yml` | Re-publish Airflow provider to existing release |
 | `publish-pypi.yml` | Re-build + re-publish Python wheels to existing release |
