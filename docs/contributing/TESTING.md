@@ -752,18 +752,22 @@ Fails the step with a descriptive error if cargo is not found. Adding the found 
 | `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests; includes FTS write (`fts_columns[]`) + `ailake_search_text_json` round-trip for Spark and Trino |
 | `compat-bigquery` | BigQuery: `fsouza/fake-gcs-server` + `goccy/bigquery-emulator:0.6.6`; pyarrow reads AILK Parquet + BQ streaming inserts (`insertAll`); validates row count, schema, `MIN`/`MAX(id)` |
 
-### `release-plugin.yml` — manual independent release (`workflow_dispatch`)
+### Independent plugin releases — manual dispatch
 
-Choose any registered plugin to test and publish only its package or binaries.
-The version can be provided or incremented from that plugin's latest tag.
-Airflow and Airbyte publish to PyPI (Airbyte also publishes a GHCR image);
-DuckDB, C++, and Go publish release assets;
-JVM plugin releases also carry the JNI libraries for Linux x86_64, macOS arm64,
-and Windows x86_64. Release tags include the plugin's version-target update.
+The Actions page has one named workflow per plugin: `release-spark.yml`,
+`release-trino.yml`, `release-flink.yml`, `release-airflow.yml`,
+`release-airbyte.yml`, `release-duckdb.yml`, `release-cpp.yml`, and
+`release-go.yml`. Each entry invokes the shared `release-plugin.yml` workflow,
+which tests and publishes only that plugin. The version can be provided or
+incremented from that plugin's latest tag. Airflow and Airbyte publish to PyPI
+(Airbyte also publishes a GHCR image); DuckDB, C++, and Go publish release
+assets; JVM plugin releases also carry JNI libraries for Linux x86_64, macOS
+arm64, and Windows x86_64. Release tags include the plugin's version-target
+update.
 
 | Input | Description |
 |---|---|
-| `plugin` | Required choice: `spark`, `trino`, `flink`, `airflow`, `airbyte`, `duckdb`, `cpp`, or `go`. |
+| `plugin` | Selected plugin, supplied by the named workflow entry point. |
 | `version` | Optional SemVer. Blank increments the selected plugin's latest tag. |
 
 ### `publish-pypi.yml` — manual fallback (`workflow_dispatch`)
@@ -829,5 +833,5 @@ If any publish job fails, re-run only that job and its dependents — the tag an
 
 | Workflow | When to use |
 |---|---|
-| `release-plugin.yml` | Test and publish one plugin independently |
+| `release-<plugin>.yml` | Start a named independent release; delegates to `release-plugin.yml` |
 | `publish-pypi.yml` | Re-build + re-publish Python wheels to existing release |
