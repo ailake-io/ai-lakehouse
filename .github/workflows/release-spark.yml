@@ -1,0 +1,25 @@
+name: Release Spark
+run-name: Release Spark ${{ inputs.version || 'next version' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Independent Spark version (blank increments the latest tag)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-plugin.yml
+    with:
+      plugin: spark
+      version: ${{ inputs.version }}
+    secrets: inherit
+    permissions:
+      contents: write
+      packages: write

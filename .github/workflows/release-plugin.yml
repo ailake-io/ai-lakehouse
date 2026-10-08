@@ -1,13 +1,12 @@
 name: Release plugin
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       plugin:
         description: Plugin to test and release
         required: true
-        type: choice
-        options: [spark, trino, flink, airflow, airbyte, duckdb, cpp, go]
+        type: string
       version:
         description: Independent plugin version (blank increments its latest plugin tag)
         required: false

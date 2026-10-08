@@ -474,8 +474,7 @@ Delivered in Phase 6:
 - **`publish-pypi.yml`** — manylinux wheels via `maturin-action` (abi3-py39, Linux x86_64 + aarch64 + Windows x86_64 + sdist); publishes `ailake` to PyPI; attaches `.whl`/`.tar.gz` to GitHub Release
   - Dynamic versioning: `ailake-py/pyproject.toml` uses `dynamic = ["version"]` — maturin reads version from `Cargo.toml` at build time; no manual sync required
   - Publish via `twine` (maturin upload/publish deprecated, PyO3/maturin#2334)
-- **`release-plugin.yml`** — current independent release workflow for all plugins; builds the selected distribution and publishes the matching plugin tag (the historical single-purpose publish workflows were consolidated).
-- **`release-plugin.yml`** — current unified workflow for independently testing and publishing each plugin; the former JVM and Airflow single-purpose workflows were consolidated.
+- **`release-<plugin>.yml`** — named manual entry point for each independently released plugin; all eight delegate to the shared `release-plugin.yml` workflow for testing and publishing.
 - **CI Go** (`ci-go.yml`) — `go build ./...` + `go vet ./...` for `ailake-go`
 - **CI C++** (`ci-cpp.yml`) — CMake configure + build for `ailake-cpp` (CPU-only, no CUDA)
 - **CI GPU** (`ci-gpu.yml`) — three-platform GPU tests: Windows bare-metal (existing), Linux/CUDA Docker (new, runner label `gpu-nvidia`), Linux/ROCm Docker (new, runner label `gpu-amd`). Previously Windows-only; `hardware.rs` Linux paths (`libcuda.so.1`, `libamdhip64.so`) now exercised in CI. `ci-gpu-data.yml` was merged into `ci-gpu.yml` (its sole test target `gpu_data` is a strict subset of `cargo test -p ailake-index`).
