@@ -17,7 +17,8 @@ extern "C" {
 /* Static string owned by the library; never pass it to ailake_free_string. */
 AILAKE_API const char *ailake_version(void);
 
-/* Stable C-ABI contract version. */
+/* Stable C-ABI contract version. Bump for incompatible signature, ownership,
+   required-export, or required-semantics changes. */
 AILAKE_API uint32_t ailake_ffi_abi_version(void);
 
 /* Every returned JSON string must be released exactly once. */

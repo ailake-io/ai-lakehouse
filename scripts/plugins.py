@@ -57,6 +57,10 @@ def check_registry(root: Path, registry: dict[str, Any]) -> list[str]:
     )
     expected = expected_match.group(1) if expected_match else None
     for plugin in registry["plugins"]:
+        policy = plugin.get("version_policy", "core")
+        if policy not in {"core", "independent"}:
+            errors.append(f"{plugin['id']}: invalid version_policy: {policy}")
+            continue
         if not (root / plugin["directory"]).is_dir():
             errors.append(f"{plugin['id']}: directory not found: {plugin['directory']}")
         try:
@@ -65,7 +69,7 @@ def check_registry(root: Path, registry: dict[str, Any]) -> list[str]:
             errors.append(f"{plugin['id']}: {error}")
             continue
         for path, version in versions:
-            if expected and version != expected:
+            if policy == "core" and expected and version != expected:
                 errors.append(f"{path}: version {version} differs from core {expected}")
         if versions and len({version for _, version in versions}) != 1:
             errors.append(f"{plugin['id']}: version targets are out of sync")
@@ -84,12 +88,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("list", help="list plugins and their source directories")
-    subparsers.add_parser("check", help="check plugin version targets against ailake-core")
+    subparsers.add_parser("check", help="check plugin version targets and policies")
     update = subparsers.add_parser("update", help="update plugin artifact versions")
     update.add_argument("--version", required=True, help="target SemVer, for example 0.1.13")
     selection = update.add_mutually_exclusive_group(required=True)
     selection.add_argument("--plugin", help="one plugin ID from `list`")
     selection.add_argument("--all", action="store_true", help="update every registered plugin")
+    selection.add_argument("--policy", choices=("core", "independent"), help="update plugins with this version policy")
     args = parser.parse_args()
 
     if args.command == "update" and not re.fullmatch(r"\d+\.\d+\.\d+", args.version):
@@ -99,19 +104,28 @@ def main() -> int:
     plugins = plugin_map(registry)
     if args.command == "list":
         for plugin in registry["plugins"]:
-            print(f"{plugin['id']:<10} {plugin['name']} ({plugin['directory']})")
+            policy = plugin.get("version_policy", "core")
+            print(f"{plugin['id']:<10} {plugin['name']} [{policy}] ({plugin['directory']})")
         return 0
     if args.command == "check":
         errors = check_registry(ROOT, registry)
         if errors:
             print("\n".join(errors), file=sys.stderr)
             return 1
-        print(f"Plugin versions are aligned with ailake-core ({core_version(ROOT)}).")
+        print(f"Plugin registry satisfies version policies (core: {core_version(ROOT)}).")
         return 0
 
-    selected = registry["plugins"] if args.all else [plugins.get(args.plugin)]
-    if selected[0] is None:
+    if args.all:
+        selected = registry["plugins"]
+    elif args.policy:
+        selected = [p for p in registry["plugins"] if p.get("version_policy", "core") == args.policy]
+    else:
+        selected = [plugins.get(args.plugin)]
+    if args.plugin and selected[0] is None:
         parser.error(f"unknown plugin ID: {args.plugin}")
+    if not selected:
+        print(f"No plugins use the {args.policy} version policy; nothing to update.")
+        return 0
     changed = []
     for plugin in selected:
         changed.extend(set_plugin_version(ROOT, plugin, args.version))

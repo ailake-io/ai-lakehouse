@@ -752,21 +752,23 @@ Fails the step with a descriptive error if cargo is not found. Adding the found 
 | `compat-jvm-plugins` | `libailake_jni.so` C-ABI + Flink, Spark, Trino Gradle integration tests; includes FTS write (`fts_columns[]`) + `ailake_search_text_json` round-trip for Spark and Trino |
 | `compat-bigquery` | BigQuery: `fsouza/fake-gcs-server` + `goccy/bigquery-emulator:0.6.6`; pyarrow reads AILK Parquet + BQ streaming inserts (`insertAll`); validates row count, schema, `MIN`/`MAX(id)` |
 
-### `publish-jvm.yml` — manual fallback (`workflow_dispatch`)
+### `release-plugin.yml` — manual independent release (`workflow_dispatch`)
 
-Re-builds and re-uploads JVM plugin fat-JARs + `libailake_jni.so` to an existing GitHub Release **without** rerunning the full release pipeline. The canonical publish-jvm job now lives inside `release.yml` (see below).
+Choose any registered plugin to test and publish only its package or binaries.
+The version can be provided or incremented from that plugin's latest tag.
+Airflow and Airbyte publish to PyPI (Airbyte also publishes a GHCR image);
+DuckDB, C++, and Go publish release assets;
+JVM plugin releases also carry the JNI libraries for Linux x86_64, macOS arm64,
+and Windows x86_64. Release tags include the plugin's version-target update.
 
 | Input | Description |
 |---|---|
-| `tag` | Release tag to attach artifacts to (e.g. `v0.1.0`). Optional — derived from `Cargo.toml` when omitted. |
+| `plugin` | Required choice: `spark`, `trino`, `flink`, `airflow`, `airbyte`, `duckdb`, `cpp`, or `go`. |
+| `version` | Optional SemVer. Blank increments the selected plugin's latest tag. |
 
 ### `publish-pypi.yml` — manual fallback (`workflow_dispatch`)
 
 Re-builds and re-publishes `ailake` wheels to PyPI + attaches to an existing GitHub Release **without** rerunning the full release pipeline. The canonical build+publish chain lives inside `release.yml`.
-
-### `publish-airflow-provider.yml` — manual fallback (`workflow_dispatch`)
-
-Re-builds and re-publishes `apache-airflow-providers-ailake` to PyPI + attaches to an existing GitHub Release. The canonical publish-airflow job lives inside `release.yml`.
 
 ### Failure policy
 
@@ -816,9 +818,9 @@ merge develop → main  (or workflow_dispatch)
         ├── patch+1 from latest tag → bump all Cargo.toml → commit [skip ci] → push main
         ├── git tag vX.Y.Z → push
         ├── gh release create
-        └── publish-crates → publish-jvm → publish-airflow
-              └── pypi-linux (x86_64 → aarch64) → pypi-macos [disabled] → pypi-windows
-                    └── pypi-sdist → pypi-publish
+        ├── publish-crates → publish-jni
+        └── pypi-linux (x86_64 → aarch64) → pypi-macos [disabled] → pypi-windows
+              └── pypi-sdist → pypi-publish
 ```
 
 If any publish job fails, re-run only that job and its dependents — the tag and GitHub Release already exist.
@@ -827,6 +829,5 @@ If any publish job fails, re-run only that job and its dependents — the tag an
 
 | Workflow | When to use |
 |---|---|
-| `publish-jvm.yml` | Re-upload JARs to existing release |
-| `publish-airflow-provider.yml` | Re-publish Airflow provider to existing release |
+| `release-plugin.yml` | Test and publish one plugin independently |
 | `publish-pypi.yml` | Re-build + re-publish Python wheels to existing release |

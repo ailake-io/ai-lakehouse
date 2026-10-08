@@ -1,0 +1,301 @@
+name: Release plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: Plugin to test and release
+        required: true
+        type: choice
+        options: [spark, trino, flink, airflow, airbyte, duckdb, cpp, go]
+      version:
+        description: Independent plugin version (blank increments its latest plugin tag)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: plugin-release-${{ inputs.plugin }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  resolve:
+    name: Resolve ${{ inputs.plugin }} release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Resolve independent version and tag
+        id: meta
+        env:
+          PLUGIN: ${{ inputs.plugin }}
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Plugin releases must run from main (received $GITHUB_REF)" >&2
+            exit 1
+          fi
+          git fetch --tags --force
+          readarray -t META < <(python3 - "$PLUGIN" <<'PY'
+          import json, re, sys
+          from pathlib import Path
+          registry = json.loads(Path("scripts/plugins.json").read_text())
+          plugin = next(p for p in registry["plugins"] if p["id"] == sys.argv[1])
+          version = ""
+          for target in plugin["targets"]:
+              match = re.search(target["version_pattern"], Path(target["file"]).read_text())
+              if match:
+                  version = match.group(1)
+                  break
+          print(plugin["tag_prefix"])
+          print(version)
+          PY
+          )
+          PREFIX=${META[0]}
+          BASE=${META[1]}
+          if [ -n "$VERSION_INPUT" ]; then
+            VERSION="$VERSION_INPUT"
+          else
+            LATEST=$(git tag --list "${PREFIX}*" --sort=-version:refname | head -1)
+            if [ -n "$LATEST" ]; then BASE=${LATEST#"$PREFIX"}; fi
+            [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid base version: $BASE" >&2; exit 1; }
+            IFS=. read -r MAJOR MINOR PATCH <<< "$BASE"
+            VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Version must be MAJOR.MINOR.PATCH" >&2; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$PREFIX$VERSION" >> "$GITHUB_OUTPUT"
+
+  build-jni:
+    name: Build JNI (${{ matrix.platform }})
+    needs: resolve
+    if: inputs.plugin == 'spark' || inputs.plugin == 'trino' || inputs.plugin == 'flink'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            source: target/release/libailake_jni.so
+            asset: libailake_jni-linux-x86_64.so
+          - os: macos-latest
+            platform: macos-arm64
+            source: target/release/libailake_jni.dylib
+            asset: libailake_jni-macos-arm64.dylib
+          - os: windows-latest
+            platform: windows-x86_64
+            source: target/release/ailake_jni.dll
+            asset: ailake_jni-windows-x86_64.dll
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build native library
+        run: cargo build --release -p ailake-jni
+      - name: Stage native library
+        shell: bash
+        env:
+          SOURCE: ${{ matrix.source }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          mkdir -p dist
+          cp "$SOURCE" "dist/$ASSET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jni-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  package:
+    name: Test and package ${{ inputs.plugin }}
+    needs: [resolve, build-jni]
+    if: >-
+      always() && needs.resolve.result == 'success' &&
+      (needs.build-jni.result == 'success' || needs.build-jni.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      PLUGIN: ${{ inputs.plugin }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        if: inputs.plugin == 'spark' || inputs.plugin == 'trino' || inputs.plugin == 'flink'
+        with:
+          pattern: jni-*
+          path: dist
+          merge-multiple: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: inputs.plugin == 'duckdb'
+
+      - uses: actions/setup-java@v4
+        if: inputs.plugin == 'spark' || inputs.plugin == 'trino' || inputs.plugin == 'flink'
+        with:
+          java-version: '17'
+          distribution: temurin
+
+      - uses: gradle/actions/setup-gradle@v3
+        if: inputs.plugin == 'spark' || inputs.plugin == 'trino' || inputs.plugin == 'flink'
+        with:
+          gradle-version: '8.7'
+
+      - uses: actions/setup-python@v5
+        if: inputs.plugin == 'airflow' || inputs.plugin == 'airbyte' || inputs.plugin == 'duckdb'
+        with:
+          python-version: '3.11'
+
+      - uses: jwlawson/actions-setup-cmake@v2
+        if: inputs.plugin == 'duckdb' || inputs.plugin == 'cpp'
+        with:
+          cmake-version: '3.28'
+
+      - uses: actions/setup-go@v5
+        if: inputs.plugin == 'go'
+        with:
+          go-version-file: ailake-go/go.mod
+          cache: false
+
+      - name: Set independent plugin version in release source
+        run: python3 scripts/plugins.py update --plugin "$PLUGIN" --version "$VERSION" | sed '$d' > "$RUNNER_TEMP/plugin-version-files"
+
+      - name: Build JNI library for integration tests
+        if: inputs.plugin == 'spark' || inputs.plugin == 'trino' || inputs.plugin == 'flink'
+        run: cargo build --release -p ailake-jni
+
+      - name: Test and build selected plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          case "$PLUGIN" in
+            spark)
+              AILAKE_NATIVE_LIB="$GITHUB_WORKSPACE/target/release/libailake_jni.so" gradle -p spark-plugin -PpluginVersion="$VERSION" test shadowJar --no-daemon --no-configuration-cache
+              cp "spark-plugin/build/libs/spark-plugin-${VERSION}-plugin.jar" dist/
+              ;;
+            trino)
+              AILAKE_NATIVE_LIB="$GITHUB_WORKSPACE/target/release/libailake_jni.so" gradle -p trino-plugin -PpluginVersion="$VERSION" test shadowJar --no-daemon --no-configuration-cache
+              cp "trino-plugin/build/libs/trino-plugin-${VERSION}-plugin.jar" dist/
+              ;;
+            flink)
+              AILAKE_NATIVE_LIB="$GITHUB_WORKSPACE/target/release/libailake_jni.so" gradle -p ailake-flink -PpluginVersion="$VERSION" test shadowJar --no-daemon --no-configuration-cache
+              cp "ailake-flink/build/libs/ailake-flink-${VERSION}-plugin.jar" dist/
+              ;;
+            airflow)
+              python -m pip install hatchling pytest 'apache-airflow>=2.6'
+              python -m pytest airflow-providers-ailake/tests -q
+              (cd airflow-providers-ailake && python -m hatchling build --target wheel --target sdist)
+              cp airflow-providers-ailake/dist/* dist/
+              ;;
+            airbyte)
+              python -m pip install pytest numpy airbyte-cdk hatchling
+              python -m pip install --no-deps ./airbyte-destination-ailake
+              python -m pytest airbyte-destination-ailake/tests -q
+              (cd airbyte-destination-ailake && python -m hatchling build --target wheel --target sdist)
+              cp airbyte-destination-ailake/dist/* dist/
+              ;;
+            duckdb)
+              cargo build --release -p ailake-jni
+              DUCKDB_VERSION=$(sed -n 's/^set(DUCKDB_VERSION "\([^"]*\)".*/\1/p' duckdb-ailake/CMakeLists.txt | head -1)
+              cmake -S duckdb-ailake -B duckdb-ailake/build -DCMAKE_BUILD_TYPE=Release -DDUCKDB_VERSION="$DUCKDB_VERSION"
+              cmake --build duckdb-ailake/build --parallel 2
+              python -m pip install pytest numpy pyarrow "duckdb==${DUCKDB_VERSION#v}"
+              AILAKE_LIB=target/release/libailake_jni.so python tests/fixtures/write_fixture.py ./compat-fixture
+              for TEST_FILE in duckdb-ailake/test/test_*.py; do
+                TEST_NAME=$(basename "$TEST_FILE" .py)
+                AILAKE_EXT=duckdb-ailake/build/ailake.duckdb_extension \
+                AILAKE_FIXTURE=./compat-fixture \
+                AILAKE_TMPDIR="$RUNNER_TEMP/$TEST_NAME" \
+                  python -m pytest "$TEST_FILE" -q
+              done
+              cp duckdb-ailake/build/ailake.duckdb_extension dist/
+              ;;
+            cpp)
+              cmake -S ailake-cpp -B ailake-cpp/build -DCMAKE_BUILD_TYPE=Release -DAILAKE_CUDA=OFF -DAILAKE_TESTS=ON -DAILAKE_EXAMPLES=ON
+              cmake --build ailake-cpp/build --parallel
+              ctest --test-dir ailake-cpp/build --output-on-failure --parallel
+              tar --exclude=build --exclude=.git -C ailake-cpp -czf "dist/ailake-cpp-${VERSION}-source.tar.gz" .
+              ;;
+            go)
+              (cd ailake-go && go vet ./... && go test ./... -timeout 120s)
+              tar --exclude=.git -C ailake-go -czf "dist/ailake-go-${VERSION}-source.tar.gz" .
+              ;;
+            *) echo "Unsupported plugin: $PLUGIN" >&2; exit 1;;
+          esac
+
+      - name: Build Airbyte container image
+        if: inputs.plugin == 'airbyte'
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/airbyte-destination-ailake
+        run: docker build -t "$IMAGE:$VERSION" -f airbyte-destination-ailake/Dockerfile airbyte-destination-ailake
+
+      - name: Create versioned source tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            TAG_PARENT=$(git rev-parse "$TAG^")
+            if [ "$TAG_PARENT" != "$GITHUB_SHA" ]; then
+              echo "Tag $TAG already exists for a different source commit" >&2
+              exit 1
+            fi
+          else
+            git add $(cat "$RUNNER_TEMP/plugin-version-files")
+            git commit -m "chore($PLUGIN): release $VERSION [skip ci]"
+            git tag "$TAG" -m "Release $PLUGIN $VERSION"
+            git push origin "$TAG"
+          fi
+
+      - name: Publish Python package to PyPI
+        if: inputs.plugin == 'airflow' || inputs.plugin == 'airbyte'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m pip install twine
+          python -m twine upload --skip-existing dist/*
+
+      - name: Publish Airbyte container to GHCR
+        if: inputs.plugin == 'airbyte'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/airbyte-destination-ailake
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:$VERSION"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "$PLUGIN $VERSION" \
+              --generate-notes \
+              --notes "Independent $PLUGIN release $VERSION. Source commit: $GITHUB_SHA."
+          fi
