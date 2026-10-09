@@ -1,0 +1,42 @@
+name: CI Kof integration
+
+on:
+  pull_request:
+    paths:
+      - "integrations/kof/**"
+      - "ailake-*/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/actions/setup-kof/**"
+      - ".github/workflows/ci-kof.yml"
+  push:
+    branches: [main, develop]
+    paths:
+      - "integrations/kof/**"
+      - "ailake-*/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/actions/setup-kof/**"
+      - ".github/workflows/ci-kof.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kof:
+    name: Kof (JVM + JS + Native C-ABI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-kof
+      - name: Build JNI C-ABI library for Native target
+        run: cargo build -p ailake-jni
+      - name: Check Kof JVM HTTP client
+        run: kof check integrations/kof/client --target jvm
+      - name: Check Kof JS HTTP client
+        run: kof check integrations/kof/client --target js
+      - name: Check Kof Native adapter
+        run: kof check integrations/kof/native --target native

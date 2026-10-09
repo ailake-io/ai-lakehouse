@@ -4,6 +4,12 @@ This directory contains a production-oriented Kof integration for the AI-Lake
 service. The HTTP client exposes typed DTOs on Kof JVM and JS, while the Native
 target uses the stable C-ABI binding for in-process calls.
 
+The Kof integration bundle has an independent version in `VERSION` and is
+published with the `kof-vX.Y.Z` tag by **Actions → Release Kof**. Its Native
+adapter currently targets C-ABI contract version `1`; the Kof bundle version
+does not replace or override that ABI requirement. The HTTP client's
+`X-Ailake-Client-Version` header carries the Kof bundle version.
+
 ## Run
 
 Start AI-Lake against an existing table:

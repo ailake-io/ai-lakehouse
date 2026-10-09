@@ -1,0 +1,22 @@
+name: Set up Kof
+description: Install a checksum-verified Kof compiler distribution
+runs:
+  using: composite
+  steps:
+    - name: Install Kof 0.5.0-beta
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="0.5.0-beta"
+        asset="kof-${version}-linux-x86_64.tar.gz"
+        release_tag="kof-${version}-linux-x86_64"
+        url="https://github.com/KofLang/Kof4j/releases/download/${release_tag}"
+        archive="$RUNNER_TEMP/$asset"
+        sha256="f93f02eb62af584ea49ffb44efdbf54f970bdb9570f16fdc48ccc28242798ca9"
+        curl --fail --location --silent --show-error "$url/$asset" -o "$archive"
+        echo "$sha256  $archive" | sha256sum --check --status
+        tar -xzf "$archive" -C "$RUNNER_TEMP"
+        kof_home="$RUNNER_TEMP/kof-${version}-linux-x86_64"
+        echo "$kof_home/bin" >> "$GITHUB_PATH"
+        echo "KOF_HOME=$kof_home" >> "$GITHUB_ENV"
+        "$kof_home/bin/kof" version

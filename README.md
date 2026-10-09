@@ -194,7 +194,10 @@ See [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) for installation 
 
 AI-Lake includes a tested Kof HTTP adapter in [`integrations/kof/`](./integrations/kof/).
 The HTTP client is typed on Kof JVM/JS; Native applications use the stable C-ABI
-binding for in-process calls, keeping both paths independent from Rust internals:
+binding for in-process calls, keeping both paths independent from Rust internals.
+The SDK and integration versions are released independently from the core using
+**Release Python** and **Release Kof** in GitHub Actions. Kof Native requires a
+compatible C-ABI contract; its bundle version does not change the ABI version.
 
 ```bash
 # Local service (binds to localhost by default)

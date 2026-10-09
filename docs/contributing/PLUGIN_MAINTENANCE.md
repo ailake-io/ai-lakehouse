@@ -17,9 +17,9 @@ python3 scripts/plugins.py update --policy core --version 0.1.13
 ```
 
 `check` validates each plugin's registered version targets and policy. Every
-registered plugin has an independent SemVer and tag prefix. The core
-release updates Rust crates and Python bindings, not plugin versions. `--all`
-remains available for an intentional fleet wide bump. `update` requires each
+registered integration or SDK has an independent SemVer and tag prefix. The
+core release updates Rust core crates without changing the Python SDK or plugin
+versions. `--all` remains available for an intentional fleet wide bump. `update` requires each
 target to match exactly once and reports changed files. Add every
 version-bearing file for a plugin to its `targets` entry and its independent
 tag prefix to the registry.
@@ -32,14 +32,17 @@ tag prefix to the registry.
 | DuckDB extension | `duckdb-v` | Linux x86_64 extension, statically linked to its Rust core and pinned DuckDB build |
 | C++ SDK | `cpp-v` | Tested source archive |
 | Go SDK | `ailake-go/v` | Tested source archive and Go module tag |
+| Python SDK | `python-v` | Linux/macOS/Windows wheels + sdist on PyPI and GitHub Release |
+| Kof integration | `kof-v` | Tested HTTP JVM/JS and Native C-ABI source archive |
 
-Run the named workflow under **Actions** (for example, **Release Spark**) and
-optionally enter a version; blank increments that plugin's latest tag. Each
-entry point invokes the shared release workflow, which tests and packages only
-the selected plugin. Airflow and Airbyte publish their Python distributions to
-PyPI; DuckDB, C++, and Go publish standalone release assets; JVM plugins publish
-their JAR and matching native libraries for Linux x86_64, macOS arm64, and
-Windows x86_64. Release tags are recorded in `tag_prefix`.
+Run the named workflow under **Actions** (for example, **Release Spark** or
+**Release Python**) and optionally enter a version; blank increments that
+component's latest tag. Most plugin entry points invoke the shared release
+workflow. Python has its own multi-platform build because its PyPI release
+contains Linux, macOS, and Windows wheels. Kof releases the HTTP client and
+Native adapter together; the Native adapter requires the compatible C-ABI
+contract version recorded in the Kof guide. Release tags are recorded in
+`tag_prefix`.
 
 DuckDB's extension embeds the Rust core statically, so its independent version
 does not mean its binary can be mixed with arbitrary core builds: the release
