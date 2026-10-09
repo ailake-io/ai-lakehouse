@@ -305,7 +305,7 @@ apache-avro = "0.16"
 
 # Full-text search
 tantivy     = { version = "0.22", default-features = false, features = ["mmap"] }
-ailake-fts  = { path = "ailake-fts", version = "0.1.16" }
+ailake-fts  = { path = "ailake-fts", version = "0.1.17" }
 
 # Vector index — HNSW is custom Rust code in ailake-index; no hnsw_rs dep needed
 bincode     = "1"
