@@ -122,9 +122,9 @@ Veja [`tests/docker/`](./tests/docker/) para detalhes dos arquivos compose.
 **Rust** (adicione ao `Cargo.toml`):
 ```toml
 [dependencies]
-ailake-core  = "0.1.15"
-ailake-query = "0.1.15"   # search(), TableWriter, ContextAssembler, search_multimodal
-ailake-store = "0.1.15"   # backends S3 / GCS / Azure / local
+ailake-core  = "0.1.16"
+ailake-query = "0.1.16"   # search(), TableWriter, ContextAssembler, search_multimodal
+ailake-store = "0.1.16"   # backends S3 / GCS / Azure / local
 ```
 
 **Python**:

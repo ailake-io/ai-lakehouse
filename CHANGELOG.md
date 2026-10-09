@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.16] — 2026-10-09
+
 ### Changed
 
 - **Releases independentes para todos os plugins** — Spark, Trino, Flink, Airflow, Airbyte, DuckDB, C++ e Go têm tags e versões próprias; cada execução testa e publica somente o plugin escolhido. Os três plugins JVM também publicam bibliotecas JNI para Linux x86_64, macOS arm64 e Windows x86_64.
