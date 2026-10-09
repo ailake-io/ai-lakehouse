@@ -1,9 +1,9 @@
 # Releases e versionamento
 
-O core Rust usa a tag `vX.Y.Z`. O SDK Python, cada plugin e a integração Kof
-possuem tags e ciclos independentes. A C-ABI mantém seu próprio número de
-contrato para compatibilidade binária. Cada Action incrementa a versão a partir
-da última tag do componente correspondente.
+O core Rust usa a tag `vX.Y.Z`. O SDK Python usa a mesma versão do core, com
+tag `python-vX.Y.Z`, e é publicado pela Action própria. Cada plugin e a
+integração Kof mantêm tags e ciclos independentes. A C-ABI mantém seu próprio
+número de contrato para compatibilidade binária.
 
 ## Fluxo automático
 

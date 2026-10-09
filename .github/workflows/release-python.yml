@@ -1,17 +1,17 @@
 name: Release Python
-run-name: Release Python SDK ${{ inputs.version || 'next version' }}
+run-name: Release Python SDK ${{ inputs.version || 'core version' }}
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Independent Python SDK version (blank increments the latest python-v tag)
+        description: Python SDK version; must match ailake-core (blank uses the core version)
         required: false
         type: string
   workflow_call:
     inputs:
       version:
-        description: Independent Python SDK version (blank increments the latest python-v tag)
+        description: Python SDK version; must match ailake-core (blank uses the core version)
         required: false
         type: string
 
@@ -49,20 +49,22 @@ jobs:
             exit 1
           fi
           git fetch --tags --force
-          BASE=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' ailake-py/Cargo.toml | head -1)
+          CORE_VERSION=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' ailake-core/Cargo.toml | head -1)
+          [[ "$CORE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid core version: $CORE_VERSION" >&2; exit 1; }
           if [ -n "$VERSION_INPUT" ]; then
             VERSION="$VERSION_INPUT"
           else
-            LATEST=$(git tag --list 'python-v*' --sort=-version:refname | head -1)
-            if [ -n "$LATEST" ]; then BASE=${LATEST#python-v}; fi
-            [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid base version: $BASE" >&2; exit 1; }
-            IFS=. read -r MAJOR MINOR PATCH <<< "$BASE"
-            VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+            VERSION="$CORE_VERSION"
           fi
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Version must be MAJOR.MINOR.PATCH" >&2; exit 1; }
+          [ "$VERSION" = "$CORE_VERSION" ] || { echo "Python SDK version $VERSION must match AI-Lake core $CORE_VERSION" >&2; exit 1; }
           TAG="python-v$VERSION"
           if git rev-parse "$TAG^{commit}" >/dev/null 2>&1; then
             SOURCE_SHA=$(git rev-parse "$TAG^{commit}")
+            TAG_VERSION=$(git show "$TAG:ailake-py/Cargo.toml" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' | head -1)
+            TAG_CORE_VERSION=$(git show "$SOURCE_SHA:ailake-core/Cargo.toml" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' | head -1)
+            [ "$TAG_VERSION" = "$VERSION" ] || { echo "Existing $TAG has Python version $TAG_VERSION" >&2; exit 1; }
+            [ "$TAG_CORE_VERSION" = "$VERSION" ] || { echo "Existing $TAG has core version $TAG_CORE_VERSION" >&2; exit 1; }
           else
             SOURCE_SHA="$GITHUB_SHA"
           fi

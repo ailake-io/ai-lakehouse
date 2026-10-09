@@ -471,8 +471,8 @@ Delivered in Phase 5:
 Delivered in Phase 6:
 
 - **`release.yml`** — automated crates.io publish for all 10 workspace crates in dependency order (30 s index wait between tiers) + creates git tag + GitHub Release
-- **`release-python.yml`** — independently versions `ailake-py/Cargo.toml`, builds Linux/macOS/Windows abi3 wheels plus sdist, and publishes `ailake` to PyPI and GitHub Releases. `pyproject.toml` uses `dynamic = ["version"]`, read from Cargo by maturin.
-- **`publish-pypi.yml`** — manual rebuild/re-publish entry point for an existing independent Python SDK version.
+- **`release-python.yml`** — sets `ailake-py/Cargo.toml` to the current core version, builds Linux/macOS/Windows abi3 wheels plus sdist, and publishes `ailake` to PyPI and GitHub Releases. `pyproject.toml` uses `dynamic = ["version"]`, read from Cargo by maturin.
+- **`publish-pypi.yml`** — manual rebuild/re-publish entry point for an existing Python SDK version.
 - **`release-<plugin>.yml`** — named manual entry point for each independently released plugin; all eight delegate to the shared `release-plugin.yml` workflow for testing and publishing.
 - **`release-kof.yml`** — independently versions, checks, and packages the Kof HTTP JVM/JS client and Native C-ABI adapter; `ci-kof.yml` validates those targets on relevant changes.
 - **CI Go** (`ci-go.yml`) — `go build ./...` + `go vet ./...` for `ailake-go`
@@ -484,7 +484,7 @@ Delivered in Phase 6:
 - **GPU Docker images** (`docker/gpu-cuda/Dockerfile`, `docker/gpu-rocm/Dockerfile`, `docker-compose.gpu.yml`) — purpose-built images for reproducible local and CI GPU testing. `gpu-cuda`: `nvidia/cuda:12.6.0-runtime-ubuntu22.04` (runtime-only; no CUDA Toolkit headers needed because `ailake-index` uses libloading). `gpu-rocm`: `rocm/dev-ubuntu-22.04:6.2`. Both pre-fetch deps and pre-build test harness for fast subsequent runs. `docker-compose.gpu.yml` wires up device passthrough flags.
 - **Node.js 24 opt-in** — `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` across all 10 workflows; eliminates deprecation warnings ahead of GitHub-forced switch
 
-Core releases publish Rust crates and JNI. Python and each plugin/Kof integration are released independently through their named Actions; CI Go, C++, Kof, and Compat Heavy checks run on their configured triggers. GPU CI and the non-PR Performance GPU matrix run in parallel with CPU checks. See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.
+Core releases publish Rust crates and JNI. Python wheels are published separately at the core version; each plugin/Kof integration uses its own version through the named Actions. CI Go, C++, Kof, and Compat Heavy checks run on their configured triggers. GPU CI and the non-PR Performance GPU matrix run in parallel with CPU checks. See [`docs/contributing/TESTING.md`](../contributing/TESTING.md) for the full checklist.
 
 ### Phase 7 — DuckDB Extension + Deferred Engine + Airbyte 🚧
 
