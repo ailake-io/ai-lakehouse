@@ -11,7 +11,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **Releases independentes para todos os plugins** — Spark, Trino, Flink, Airflow, Airbyte, DuckDB, C++ e Go agora têm tags e versões próprias; cada execução testa e publica somente o plugin escolhido. Os três plugins JVM também publicam bibliotecas JNI para Linux x86_64, macOS arm64 e Windows x86_64.
+- **Releases independentes para todos os plugins** — Spark, Trino, Flink, Airflow, Airbyte, DuckDB, C++ e Go têm tags e versões próprias; cada execução testa e publica somente o plugin escolhido. Os três plugins JVM também publicam bibliotecas JNI para Linux x86_64, macOS arm64 e Windows x86_64.
+- **Versões independentes para Python e Kof** — o SDK Python publica wheels Linux/macOS/Windows e sdist sem exigir uma release do core. A integração Kof tem Action própria para validar o cliente HTTP JVM/JS e o adaptador Native, que requer C-ABI v1.
 - **Compatibilidade JNI explícita** — os carregadores JVM exigem o ABI C-ABI declarado pela biblioteca antes de chamar outros símbolos e falham com incompatibilidade em vez de continuar com uma combinação não validada.
 
 ## [0.1.15] — 2026-10-08

@@ -146,7 +146,10 @@ jobs:
           merge-multiple: true
 
       - uses: dtolnay/rust-toolchain@stable
-        if: inputs.plugin == 'duckdb'
+        if: inputs.plugin == 'duckdb' || inputs.plugin == 'kof'
+
+      - uses: Swatinem/rust-cache@v2
+        if: inputs.plugin == 'duckdb' || inputs.plugin == 'kof'
 
       - uses: actions/setup-java@v4
         if: inputs.plugin == 'spark' || inputs.plugin == 'trino' || inputs.plugin == 'flink'
@@ -175,6 +178,9 @@ jobs:
           go-version-file: ailake-go/go.mod
           cache: false
 
+      - uses: ./.github/actions/setup-kof
+        if: inputs.plugin == 'kof'
+
       - name: Set independent plugin version in release source
         run: python3 scripts/plugins.py update --plugin "$PLUGIN" --version "$VERSION" | sed '$d' > "$RUNNER_TEMP/plugin-version-files"
 
@@ -189,6 +195,10 @@ jobs:
           AILAKE_LIB="$GITHUB_WORKSPACE/target/release/libailake_jni.so" \
             "$RUNNER_TEMP/ailake-jni-venv/bin/python3" \
             tests/fixtures/write_jni_fixture.py "$RUNNER_TEMP/ailake-jni-fixture"
+
+      - name: Build JNI library for Kof Native checks
+        if: inputs.plugin == 'kof'
+        run: cargo build -p ailake-jni
 
       - name: Test and build selected plugin
         shell: bash
@@ -256,6 +266,12 @@ jobs:
             go)
               (cd ailake-go && go vet ./... && go test ./... -timeout 120s)
               tar --exclude=.git -C ailake-go -czf "dist/ailake-go-${VERSION}-source.tar.gz" .
+              ;;
+            kof)
+              kof check integrations/kof/client --target jvm
+              kof check integrations/kof/client --target js
+              kof check integrations/kof/native --target native
+              tar --exclude=.git -czf "dist/ai-lake-kof-${VERSION}-source.tar.gz" integrations/kof
               ;;
             *) echo "Unsupported plugin: $PLUGIN" >&2; exit 1;;
           esac

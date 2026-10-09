@@ -23,6 +23,7 @@
 | GPU | `ailake-index/tests/gpu_data.rs` + GPU unit tests | `ci-gpu.yml` — manual dispatch when an online Windows GPU runner is available | CUDA/ROCm correctness; skipped when no matching `gpu-nvidia` or `gpu-amd` runner is online |
 | Compat (Python/DuckDB) | `tests/compat/` | `ci.yml` — every PR | PyArrow, DuckDB, PyIceberg, ailake-py SDK |
 | Compat (Spark/Trino/JVM) | `tests/compat/` + Gradle | `compat-heavy.yml` — push to main + weekly | Spark+Iceberg, Trino+REST, Flink/Spark/Trino JVM plugins |
+| Kof integration | `integrations/kof/` | `ci-kof.yml` — relevant changes | Kof HTTP client on JVM/JS and Native adapter against C-ABI |
 
 Plugin version targets, shared JVM dependency pins, and maintenance commands are
 documented in [`PLUGIN_MAINTENANCE.md`](PLUGIN_MAINTENANCE.md).
@@ -757,13 +758,18 @@ Fails the step with a descriptive error if cargo is not found. Adding the found 
 The Actions page has one named workflow per plugin: `release-spark.yml`,
 `release-trino.yml`, `release-flink.yml`, `release-airflow.yml`,
 `release-airbyte.yml`, `release-duckdb.yml`, `release-cpp.yml`, and
-`release-go.yml`. Each entry invokes the shared `release-plugin.yml` workflow,
-which tests and publishes only that plugin. The version can be provided or
-incremented from that plugin's latest tag. Airflow and Airbyte publish to PyPI
-(Airbyte also publishes a GHCR image); DuckDB, C++, and Go publish release
-assets; JVM plugin releases also carry JNI libraries for Linux x86_64, macOS
-arm64, and Windows x86_64. Release tags include the plugin's version-target
-update.
+`release-go.yml`. Each entry invokes the shared `release-plugin.yml` workflow.
+`release-python.yml` builds and publishes the independent Python SDK version
+with Linux x86_64/aarch64, macOS x86_64/arm64, Windows x86_64 wheels, and an
+sdist. `release-kof.yml` checks and packages the Kof HTTP JVM/JS client and the
+Native C-ABI adapter. The Native adapter must match the C-ABI contract version
+documented in `integrations/kof/README.md`. Versions can be provided or
+incremented from that component's latest tag. Release tags include the version
+target update.
+
+The Kof integration checks use the checksum-pinned Kof 0.5.0-beta distribution
+through `.github/actions/setup-kof`. `ci-kof.yml` validates the HTTP client on
+JVM and JS and the Native adapter against the built JNI library.
 
 | Input | Description |
 |---|---|
@@ -794,6 +800,7 @@ Use the trigger configured by each workflow. For a pre-release validation, trigg
 |---|---|---|---|
 | 1 | **CI** (`ci.yml`) | Rust fmt/clippy/deny, unit, integration, compat Python/DuckDB/PyIceberg/ailake-py, Airflow provider tests | Must pass |
 | 1b | **CI Safety** (`ci-safety.yml`) | Miri UB detection (nightly) + Loom concurrency model checking (stable). Runs in parallel with CI. | Must pass |
+| 1c | **CI Kof** (`ci-kof.yml`) | Kof HTTP client (JVM/JS) + Native adapter against C-ABI | Must pass when Kof/native surfaces change |
 | 2 | **CI Go** (`ci-go.yml`) | Go SDK build + vet | Must pass |
 | 3 | **CI C++** (`ci-cpp.yml`) | C++17 cmake build | Must pass |
 | 4 | **Performance** (`performance.yml`) | CPU benchmark, Recall@10/p95, HTTP load, concurrent writers, serve fencing and catalog emulator matrix; GPU matrix on push/nightly/manual | CPU jobs must pass; GPU jobs require runners |
@@ -810,7 +817,7 @@ Step 5 requires the Windows GPU runner — can run in parallel with steps 2–4.
 The `release` job auto-bumps the patch version before tagging — **no manual version edits required**:
 
 1. Reads the latest semver tag (`v*.*.*`) and increments its patch component.
-2. Updates every release manifest and versioned documentation example.
+2. Updates core crate manifests and core-version documentation examples; independent SDK/plugin versions stay unchanged.
 3. Promotes `CHANGELOG.md`'s `[Unreleased]` section to the new version with the UTC release date, then creates a fresh `[Unreleased]` header.
 4. Commits the bump with `[skip ci]` and pushes to `main` — `[skip ci]` prevents a second workflow run.
 5. Creates the git tag and GitHub Release on the bumped commit.
@@ -822,10 +829,12 @@ merge develop → main  (or workflow_dispatch)
         ├── patch+1 from latest tag → bump all Cargo.toml → commit [skip ci] → push main
         ├── git tag vX.Y.Z → push
         ├── gh release create
-        ├── publish-crates → publish-jni
-        └── pypi-linux (x86_64 → aarch64) → pypi-macos [disabled] → pypi-windows
-              └── pypi-sdist → pypi-publish
+        └── publish-crates → publish-jni
 ```
+
+Python is released independently by `release-python.yml` with Linux, macOS, and
+Windows wheels plus an sdist. `release-kof.yml` validates and packages the Kof
+HTTP and Native adapters. Both workflows use their own tags and versions.
 
 If any publish job fails, re-run only that job and its dependents — the tag and GitHub Release already exist.
 
@@ -834,4 +843,6 @@ If any publish job fails, re-run only that job and its dependents — the tag an
 | Workflow | When to use |
 |---|---|
 | `release-<plugin>.yml` | Start a named independent release; delegates to `release-plugin.yml` |
-| `publish-pypi.yml` | Re-build + re-publish Python wheels to existing release |
+| `release-python.yml` | Build and publish an independent Python SDK release |
+| `release-kof.yml` | Validate and publish the Kof integration bundle |
+| `publish-pypi.yml` | Rebuild an existing Python SDK version and retry its PyPI/GitHub publication |

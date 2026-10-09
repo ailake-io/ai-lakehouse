@@ -1,217 +1,23 @@
-name: Publish Python
+name: Republish Python SDK
+run-name: Republish Python SDK ${{ inputs.version }}
 
-# Manual fallback only. The canonical pypi-linux / pypi-windows / pypi-sdist /
-# pypi-publish jobs live in release.yml (needs: release) where they have direct
-# access to the release job outputs. Use this workflow to re-publish wheels to
-# an existing release without rerunning the full release pipeline.
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Existing Python SDK version to rebuild and publish (for example 0.1.16)
+        required: true
+        type: string
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+permissions:
+  contents: write
 
 jobs:
-  linux:
-    name: Build Linux (${{ matrix.target }})
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [x86_64, aarch64]
-    steps:
-      - name: Fix Docker-owned file permissions
-        run: |
-          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
-            "rm -rf dist/ target/ 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
-
-      - uses: actions/checkout@v6
-        with:
-          clean: false
-
-      - uses: PyO3/maturin-action@v1
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
-          CARGO_TARGET_DIR: /tmp/ailake-target-${{ matrix.target }}
-          # Skip sudo on self-hosted runner: chown runs without sudo, fails silently
-          # (ignoreReturnCode: true in action source), dist/ world-readable so upload works
-          RUNNER_ALLOW_RUNASROOT: "1"
-        with:
-          target: ${{ matrix.target }}
-          manylinux: auto
-          before-script-linux: |
-            # Ensure build tools for openssl-sys vendored compilation are present
-            yum install -y perl-core make gcc 2>/dev/null \
-              || dnf install -y perl-core make gcc 2>/dev/null \
-              || apt-get install -y perl make gcc 2>/dev/null \
-              || true
-          command: build
-          args: --release --out dist --manifest-path ailake-py/Cargo.toml
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-${{ matrix.target }}
-          path: dist
-
-  macos:
-    name: Build macOS (${{ matrix.target }})
-    if: false
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        target: [x86_64-apple-darwin, aarch64-apple-darwin]
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: |
-            3.9
-            3.10
-            3.11
-            3.12
-            3.13
-
-      - uses: PyO3/maturin-action@v1
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
-        with:
-          target: ${{ matrix.target }}
-          command: build
-          args: --release --out dist --find-interpreter --manifest-path ailake-py/Cargo.toml
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-macos-${{ matrix.target }}
-          path: dist
-
-  windows:
-    name: Build Windows (x86_64)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust (Windows)
-        shell: pwsh
-        run: |
-          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
-            $tmp = "$env:TEMP\rustup-init.exe"
-            Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $tmp
-            Start-Process -FilePath $tmp -ArgumentList '-y','--default-toolchain','stable','--target','x86_64-pc-windows-msvc' -Wait -NoNewWindow
-            Remove-Item $tmp
-          } else {
-            rustup toolchain install stable --target x86_64-pc-windows-msvc
-            rustup default stable
-          }
-          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Add Strawberry Perl to PATH
-        shell: pwsh
-        run: |
-          echo "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - uses: PyO3/maturin-action@v1
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
-          CARGO_TARGET_DIR: C:\t
-        with:
-          target: x86_64
-          command: build
-          args: --release --out dist --manifest-path ailake-py/Cargo.toml
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-windows-x86_64
-          path: dist
-
-  sdist:
-    name: Build sdist
-    runs-on: ubuntu-latest
-    steps:
-      - name: Fix Docker-owned file permissions
-        run: |
-          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
-            "rm -rf dist/ 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
-
-      - uses: actions/checkout@v6
-        with:
-          clean: false
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist --manifest-path ailake-py/Cargo.toml
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-sdist
-          path: dist
-
-  publish:
-    name: Publish to PyPI
-    runs-on: ubuntu-latest
-    needs: [linux, windows, sdist]
+  release:
+    uses: ./.github/workflows/release-python.yml
+    with:
+      version: ${{ inputs.version }}
+    secrets: inherit
     permissions:
       actions: read
-      contents: write   # needed to upload wheel assets to GitHub Release
-    # TODO: after creating PyPI account, create a "pypi" environment in
-    # Settings → Environments with PYPI_API_TOKEN as an environment secret.
-    # This adds a manual approval gate before publish runs.
-    # environment:
-    #   name: pypi
-    #   url: https://pypi.org/p/ailake
-    steps:
-      - name: Pre-checkout cleanup of root-owned files
-        run: |
-          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
-            "rm -rf dist dist-raw 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
-
-      - uses: actions/checkout@v6
-
-      - name: Download wheels
-        run: gh run download ${{ github.run_id }} --pattern "wheels-*" --dir dist-raw
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Flatten artifacts into dist/
-        run: |
-          mkdir -p dist
-          find dist-raw -name "*.whl" -o -name "*.tar.gz" | xargs -I{} cp {} dist/
-          rm -rf dist-raw
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          pip install twine
-          twine upload --skip-existing dist/*
-
-      - name: Upload wheels to GitHub Release
-        run: |
-          VERSION=$(grep '^version' ailake-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          TAG="v$VERSION"
-          # Upload each wheel/sdist as a release asset.
-          # --clobber replaces existing assets if the step is retried.
-          gh release upload "$TAG" dist/*.whl dist/*.tar.gz --clobber 2>/dev/null || \
-            echo "Warning: GitHub Release $TAG not found — run the Release workflow first to create the tag."
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Cleanup root-owned dist/
-        if: always()
-        run: |
-          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
-            "rm -rf dist dist-raw 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
+      contents: write

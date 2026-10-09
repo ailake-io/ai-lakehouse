@@ -49,6 +49,32 @@ def plugin_versions(root: Path, plugin: dict[str, Any]) -> list[tuple[str, str]]
     return versions
 
 
+def bump_core_cargo_versions(
+    root: Path, old_version: str, new_version: str, registry: dict[str, Any]
+) -> list[Path]:
+    """Bump core Cargo manifests without changing independently versioned packages."""
+    independent_targets = {
+        Path(target["file"])
+        for plugin in registry["plugins"]
+        if plugin.get("version_policy", "core") == "independent"
+        for target in plugin["targets"]
+        if target["file"].endswith("Cargo.toml")
+    }
+    changed: list[Path] = []
+    old = f'"{old_version}"'
+    new = f'"{new_version}"'
+    for path in root.rglob("Cargo.toml"):
+        relative = path.relative_to(root)
+        if "target" in relative.parts or relative in independent_targets:
+            continue
+        source = path.read_text(encoding="utf-8")
+        updated = source.replace(old, new)
+        if updated != source:
+            path.write_text(updated, encoding="utf-8")
+            changed.append(path)
+    return changed
+
+
 def check_registry(root: Path, registry: dict[str, Any]) -> list[str]:
     errors = []
     expected_match = re.search(
@@ -95,12 +121,25 @@ def main() -> int:
     selection.add_argument("--plugin", help="one plugin ID from `list`")
     selection.add_argument("--all", action="store_true", help="update every registered plugin")
     selection.add_argument("--policy", choices=("core", "independent"), help="update plugins with this version policy")
+    cargo_bump = subparsers.add_parser(
+        "bump-core-cargo", help="bump core Cargo versions while preserving independent packages"
+    )
+    cargo_bump.add_argument("--from-version", required=True, help="current core version")
+    cargo_bump.add_argument("--version", required=True, help="new core version")
     args = parser.parse_args()
 
-    if args.command == "update" and not re.fullmatch(r"\d+\.\d+\.\d+", args.version):
+    if args.command in {"update", "bump-core-cargo"} and not re.fullmatch(r"\d+\.\d+\.\d+", args.version):
         parser.error("--version must use SemVer numeric form: MAJOR.MINOR.PATCH")
 
     registry = load_registry()
+    if args.command == "bump-core-cargo":
+        if not re.fullmatch(r"\d+\.\d+\.\d+", args.from_version):
+            parser.error("--from-version must use SemVer numeric form: MAJOR.MINOR.PATCH")
+        changed = bump_core_cargo_versions(ROOT, args.from_version, args.version, registry)
+        for path in changed:
+            print(path.relative_to(ROOT))
+        print(f"Updated {len(changed)} core Cargo manifest(s) to {args.version}.")
+        return 0
     plugins = plugin_map(registry)
     if args.command == "list":
         for plugin in registry["plugins"]:
