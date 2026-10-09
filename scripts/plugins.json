@@ -200,6 +200,55 @@
         "120s"
       ],
       "test_directory": "ailake-go"
+    },
+    {
+      "id": "python",
+      "name": "Python SDK",
+      "version_policy": "independent",
+      "tag_prefix": "python-v",
+      "directory": "ailake-py",
+      "targets": [
+        {
+          "file": "ailake-py/Cargo.toml",
+          "pattern": "(?m)^version\\s*=\\s*\"[^\"]+\"$",
+          "replacement": "version = \"{version}\"",
+          "version_pattern": "(?m)^version\\s*=\\s*\"([^\"]+)\"$"
+        }
+      ],
+      "test": [
+        "cargo",
+        "test",
+        "-p",
+        "ailake-py"
+      ]
+    },
+    {
+      "id": "kof",
+      "name": "Kof integration",
+      "version_policy": "independent",
+      "tag_prefix": "kof-v",
+      "directory": "integrations/kof",
+      "targets": [
+        {
+          "file": "integrations/kof/VERSION",
+          "pattern": "(?m)^[^\\n]+$",
+          "replacement": "{version}",
+          "version_pattern": "(?m)^([^\\n]+)$"
+        },
+        {
+          "file": "integrations/kof/client/AilakeClient.kf",
+          "pattern": "(?m)^    static String CLIENT_VERSION = \"[^\"]+\"$",
+          "replacement": "    static String CLIENT_VERSION = \"{version}\"",
+          "version_pattern": "(?m)^    static String CLIENT_VERSION = \"([^\"]+)\"$"
+        }
+      ],
+      "test": [
+        "kof",
+        "check",
+        "integrations/kof/client",
+        "--target",
+        "jvm"
+      ]
     }
   ]
 }
