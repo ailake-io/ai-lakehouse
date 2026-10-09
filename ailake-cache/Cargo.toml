@@ -1,6 +1,6 @@
 [package]
 name        = "ailake-cache"
-version     = "0.1.15"
+version     = "0.1.16"
 edition     = "2021"
 description = "Local and Redis/Valkey cache for AI-Lake metadata, queries and index reads"
 license     = "MIT OR Apache-2.0"
@@ -11,8 +11,8 @@ default = []
 redis = ["dep:redis"]
 
 [dependencies]
-ailake-core  = { path = "../ailake-core", version = "0.1.15" }
-ailake-store = { path = "../ailake-store", version = "0.1.15" }
+ailake-core  = { path = "../ailake-core", version = "0.1.16" }
+ailake-store = { path = "../ailake-store", version = "0.1.16" }
 async-trait  = { workspace = true }
 bytes        = { workspace = true }
 redis        = { workspace = true, optional = true }
