@@ -101,11 +101,11 @@ jobs:
           fi
           NEW_TAG="v$NEW_VERSION"
 
-          # Bump every Cargo.toml (crate versions + inter-crate deps).
-          # Quotes ensure we don't partial-match e.g. "0.0.9" inside "0.0.10".
+          # Bump core Cargo manifests and internal dependency pins while
+          # preserving package versions registered as independently released.
           OLD_VERSION="${LATEST#v}"
-          find . -name "Cargo.toml" -not -path "*/target/*" \
-            -exec sed -i "s/\"$OLD_VERSION\"/\"$NEW_VERSION\"/g" {} \;
+          python3 scripts/plugins.py bump-core-cargo \
+            --from-version "$OLD_VERSION" --version "$NEW_VERSION"
 
           # Fix internal workspace dep versions regardless of stale value.
           # The sed above only replaces the exact OLD_VERSION; if a workspace dep
@@ -116,12 +116,9 @@ jobs:
             sed -i -E "s/(${INTERNAL}[[:space:]]*=[[:space:]]*\{[^}]*version[[:space:]]*=[[:space:]]*\")[^\"]*/\1${NEW_VERSION}/" Cargo.toml
           done
 
-          # Plugin artifacts all have their own release cadence and are
-          # intentionally excluded from the core version bump. ailake-py's own
-          # pyproject.toml is excluded: it's `dynamic = ["version"]`, sourced
-          # from ailake-py/Cargo.toml by maturin, already covered above.
-          # Plugin version targets live in scripts/plugins.json so new plugins
-          # need one registry entry instead of edits to this release workflow.
+          # Plugin artifacts and the Python SDK have their own release cadence.
+          # Their version targets live in scripts/plugins.json, so new entries
+          # don't require changes to this release workflow.
           python3 scripts/plugins.py update --policy core --version "$NEW_VERSION"
 
           # Promote the accumulated release notes before tagging. Keep a fresh
@@ -144,20 +141,16 @@ jobs:
             mv "$CHANGELOG_TMP" CHANGELOG.md
           fi
 
-          # Doc-example version placeholders: core release tag examples,
-          # `ailake==X` PyPI pip-install examples, and
-          # the `ailake-core/-query/-store = "X"` crates.io dependency examples.
-          # CHANGELOG.md is a historical record of each past release and must
-          # never be rewritten.
+          # Doc-example version placeholders for the core release tag and
+          # crates.io dependencies. Python package versions have their own
+          # release workflow. CHANGELOG.md is historical and must not be rewritten.
           DOC_FILES=$(grep -rl \
-            -e "ailake==$OLD_VERSION" \
             -e "ailake-core[[:space:]]*=[[:space:]]*\"$OLD_VERSION\"" \
             -e "ailake-query[[:space:]]*=[[:space:]]*\"$OLD_VERSION\"" \
             -e "ailake-store[[:space:]]*=[[:space:]]*\"$OLD_VERSION\"" \
             --include="*.md" . 2>/dev/null | grep -v "CHANGELOG.md" || true)
           for f in $DOC_FILES; do
             sed -i -E \
-              -e "s/ailake==$OLD_VERSION/ailake==$NEW_VERSION/g" \
               -e "s/(ailake-core[[:space:]]*=[[:space:]]*\")$OLD_VERSION(\")/\1$NEW_VERSION\2/g" \
               -e "s/(ailake-query[[:space:]]*=[[:space:]]*\")$OLD_VERSION(\")/\1$NEW_VERSION\2/g" \
               -e "s/(ailake-store[[:space:]]*=[[:space:]]*\")$OLD_VERSION(\")/\1$NEW_VERSION\2/g" \
@@ -206,12 +199,12 @@ jobs:
           ### Rust crates (crates.io)
           All crates bumped to \`${{ steps.version.outputs.version }}\`.
 
-          ### Python wheel (PyPI)
-          \`ailake\` wheel published to PyPI for x86_64 and aarch64 Linux and Windows x86_64.
+          ### Python SDK
+          Published separately through the \`Release Python\` workflow.
 
           ### JNI library
-          Linux \`libailake_jni.so\` attached as a release asset. All eight plugins
-          use independent versions and releases through the \`Release plugin\` workflow.
+          Linux \`libailake_jni.so\` attached as a release asset. Plugin integrations,
+          the Python SDK, and Kof publish through their own versioned workflows.
           " \
               --draft=false
           fi
@@ -338,224 +331,3 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$TAG" target/release/libailake_jni.so --clobber
-
-  pypi-linux:
-    name: Build Python wheel — Linux (${{ matrix.target }})
-    needs: release
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      matrix:
-        target: [x86_64, aarch64]
-      max-parallel: 1
-    steps:
-      - name: Fix Docker-owned file permissions
-        run: |
-          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
-            "rm -rf dist/ target/ 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
-
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-          clean: false
-
-      - uses: PyO3/maturin-action@v1
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
-          CARGO_TARGET_DIR: /tmp/ailake-target-${{ matrix.target }}
-          RUNNER_ALLOW_RUNASROOT: "1"
-          # ailake-py depends on ailake-catalog's rest-catalog feature (reqwest,
-          # rustls-tls -> ring backend), which needs a real C compiler pass for
-          # ring's pregenerated ARMv8 assembly (chacha/aes/sha/... .S files).
-          # The aarch64 cross-compile toolchain in maturin-action's manylinux
-          # Docker image doesn't predefine __ARM_ARCH in its default invocation,
-          # and ring's asm_base.h hard-errors without it ("ARM assembler must
-          # define __ARM_ARCH") — a known ring/cross-gcc issue, unrelated to any
-          # code in this repo. Only matters for aarch64 (native x86_64 gcc
-          # predefines its own arch macros correctly); harmless no-op for the
-          # x86_64 matrix leg since cc-rs only reads the target-suffixed var
-          # matching the crate's actual build target.
-          CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8"
-        with:
-          target: ${{ matrix.target }}
-          manylinux: auto
-          before-script-linux: |
-            yum install -y perl-core make gcc 2>/dev/null \
-              || dnf install -y perl-core make gcc 2>/dev/null \
-              || apt-get install -y perl make gcc 2>/dev/null \
-              || true
-          command: build
-          args: --release --out dist --manifest-path ailake-py/Cargo.toml
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-${{ matrix.target }}
-          path: dist
-
-  pypi-macos:
-    name: Build Python wheel — macOS (${{ matrix.target }})
-    needs: [release, pypi-linux]
-    runs-on: macos-latest
-    timeout-minutes: 30
-    strategy:
-      matrix:
-        target: [x86_64-apple-darwin, aarch64-apple-darwin]
-      max-parallel: 1
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: |
-            3.9
-            3.10
-            3.11
-            3.12
-            3.13
-
-      - uses: PyO3/maturin-action@v1
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
-        with:
-          target: ${{ matrix.target }}
-          command: build
-          args: --release --out dist --find-interpreter --manifest-path ailake-py/Cargo.toml
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-macos-${{ matrix.target }}
-          path: dist
-
-  pypi-windows:
-    name: Build Python wheel — Windows (x86_64)
-    needs: [release, pypi-linux]
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-
-      - name: Install Rust (Windows)
-        shell: pwsh
-        run: |
-          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
-            $tmp = "$env:TEMP\rustup-init.exe"
-            Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $tmp
-            Start-Process -FilePath $tmp -ArgumentList '-y','--default-toolchain','stable','--target','x86_64-pc-windows-msvc' -Wait -NoNewWindow
-            Remove-Item $tmp
-          } else {
-            rustup toolchain install stable --target x86_64-pc-windows-msvc
-            rustup default stable
-          }
-          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Add Strawberry Perl to PATH
-        shell: pwsh
-        run: |
-          echo "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - uses: PyO3/maturin-action@v1
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
-          CARGO_TARGET_DIR: C:\t
-        with:
-          target: x86_64
-          command: build
-          args: --release --out dist --manifest-path ailake-py/Cargo.toml
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-windows-x86_64
-          path: dist
-
-  pypi-sdist:
-    name: Build Python sdist
-    needs: [release, pypi-linux]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Fix Docker-owned file permissions
-        run: |
-          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
-            "rm -rf dist/ 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
-
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-          clean: false
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist --manifest-path ailake-py/Cargo.toml
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-sdist
-          path: dist
-
-  pypi-publish:
-    name: Publish Python wheel to PyPI
-    needs: [release, pypi-linux, pypi-macos, pypi-windows, pypi-sdist]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      actions: read
-      contents: write
-    env:
-      TAG: ${{ needs.release.outputs.tag }}
-    steps:
-      - name: Pre-checkout cleanup of root-owned files
-        run: |
-          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
-            "rm -rf dist dist-raw 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
-
-      - uses: actions/checkout@v6
-
-      - name: Download wheels
-        run: gh run download ${{ github.run_id }} --pattern "wheels-*" --dir dist-raw
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Flatten artifacts into dist/
-        run: |
-          mkdir -p dist
-          find dist-raw -name "*.whl" -o -name "*.tar.gz" | xargs -I{} cp {} dist/
-          rm -rf dist-raw
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          pip install twine
-          twine upload --skip-existing dist/*
-
-      - name: Upload wheels to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "$TAG" dist/*.whl dist/*.tar.gz --clobber
-
-      - name: Cleanup root-owned dist/
-        if: always()
-        run: |
-          docker run --rm -v "$PWD:/work" -w /work alpine sh -c \
-            "rm -rf dist dist-raw 2>/dev/null; chown -R $(id -u):$(id -g) . 2>/dev/null; true" || true
