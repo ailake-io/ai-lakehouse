@@ -147,7 +147,7 @@ WorkerType: G.1X
 NumberOfWorkers: 10
 DefaultArguments:
   --extra-jars: "s3://my-bucket/ailake/jars/spark-plugin-0.1.15-plugin.jar"
-  --additional-python-modules: "ailake==0.1.15"
+  --additional-python-modules: "ailake==0.1.18"
   --conf: "spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions"
 ```
 
@@ -442,7 +442,7 @@ chmod 755 /opt/ailake/lib/libailake_jni.so
   },
   "libraries": [
     { "jar": "dbfs:/FileStore/ailake/jars/spark-plugin-0.1.15-plugin.jar" },
-    { "pypi": { "package": "ailake==0.1.15" } }
+    { "pypi": { "package": "ailake==0.1.18" } }
   ],
   "init_scripts": [
     { "dbfs": { "destination": "dbfs:/FileStore/ailake/init/install.sh" } }
@@ -533,7 +533,7 @@ channels:
 dependencies:
   - python=3.12
   - pip:
-    - ailake==0.1.15
+    - ailake==0.1.18
 ```
 
 **Or via Docker:**
