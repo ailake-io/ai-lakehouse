@@ -9,11 +9,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Docs
+
+- **Checagem de impacto do core nos plugins** — `docs/contributing/PLUGIN_MAINTENANCE.md` documenta como cada plugin consome o core (link estático, JNI, C-ABI, CLI, SDK Python) e o checklist obrigatório para toda mudança no core: classificar a mudança, ajustar os plugins afetados no mesmo PR, testar compatibilidade de formato com a release anterior e disparar o release de cada plugin afetado.
+- **Plugins que embutem o core** — a tabela indica quem embute o core (DuckDB, Python, Spark, Trino, Flink) e quem não (Kof, Go, C++, Airflow, Airbyte). Os que embutem só devem ser lançados depois do release do core que traz a correção.
+- **Versões de dependências atualizadas nas docs** — `CLAUDE.md` e `docs/architecture/WORKSPACE.md` passam a refletir Arrow/Parquet 60, Tantivy 0.27 e zstd 0.14 (#148); removida a versão fixa 0.1.12 do `ailake-py/README.md`.
+
+### Security
+
+- **Exceções de advisories obsoletas removidas** — `.cargo/audit.toml` e `deny.toml` não ignoram mais advisories já resolvidos pelas atualizações da 0.1.19: `instant` (saiu da árvore com Tantivy 0.27), `lru` (agora 0.18.5, corrigido), `rustls-webpki`, `lexical-core`, `crossbeam-epoch` e `quinn-proto`. `cargo audit --deny warnings` passa com lockfile gerado do zero, como no CI.
+
+### Fixed
+
+- **Compaction descartava o índice FTS (Tantivy)** — o caminho incremental (`compact_incremental`, usado sempre que há um arquivo dominante, inclusive pelo CLI/JNI/Python via `CompactionExecutor::run`) gravava com `AilakeFileWriter::write_with_prebuilt_hnsw`, que ignorava o blob FTS já montado. O arquivo compactado ficava sem seção `AILK_FTS` e toda busca de texto caía no BM25 O(N). Bug anterior à 0.1.19. A montagem da seção FTS virou um helper único usado pelos dois caminhos de escrita; teste de regressão `compact_incremental_preserves_fts_index`.
+
+- **Release: `sync-develop` falhava e deixava `develop` divergente da `main`** — o job fazia cherry-pick só do commit de bump; quando um PR entrava direto na `main` (ex.: #148, DuckDB 2.0) o contexto do `Cargo.toml` divergia e o cherry-pick conflitava (release v0.1.19, inclusive em reruns). Agora o job faz merge do commit da tag em `develop` com `-X theirs` (conflitos resolvidos a favor da `main`), tornando os dois branches iguais após cada release e o job idempotente.
+- **Release: seções vazias no CHANGELOG** — 0.1.14, 0.1.17, 0.1.18 e 0.1.19 foram publicadas com `[Unreleased]` vazio e ficaram sem notas; preenchidas a partir dos PRs #128, #145, #146 e #148. A Action agora gera a seção da versão a partir dos commits desde a última tag quando `[Unreleased]` está vazio.
+
 ## [0.1.19] — 2026-10-26
+
+### Added
+
+- **Compatibilidade com DuckDB 2.0** (#148) — DuckDB 2.0.0 vira o alvo padrão do CMake da `duckdb-ailake`, mantendo suporte a 1.5.6; linkagem estática adaptada ao novo modelo de registro de extensões em link-time; extensão empacotada por versão do DuckDB. Restrição de migração de formato de storage do DuckDB 2.0 documentada.
+
+### Security
+
+- **Dependências atualizadas para fechar advisories** (#148) — `rustls` e `klauspost/compress` (Dependabot), `zstd` 0.14, Arrow/Parquet 60 e Tantivy 0.27, com APIs de estatísticas/footer do Parquet e collectors do Tantivy adaptadas. Suporte a zstd no Parquet mantido.
+
+### CI
+
+- Java 17 fixado; mock HTTP de resposta grande passa a ler os headers da requisição; amostras dos microbenchmarks de CPU mais longas para reduzir ruído do runner (#148).
 
 ## [0.1.18] — 2026-10-09
 
+### Fixed
+
+- **Versão do SDK Python alinhada ao core** (#146) — a Action `Release Python` resolve a versão a partir de `ailake-core/Cargo.toml`, rejeita versões manuais divergentes e valida SDK/core de uma tag Python existente antes de reconstruí-la.
+
 ## [0.1.17] — 2026-10-09
+
+### Fixed
+
+- **Permissões da Action `Release Kof`** (#145) — workflow chamador e job reutilizável ganham `packages: write`, como os demais wrappers de `release-plugin.yml`; o primeiro dispatch falhava antes de criar jobs.
 
 ## [0.1.16] — 2026-10-09
 
@@ -38,6 +75,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Workflows de GPU sem runner disponível** — a CI detecta runners GPU online e ignora os jobs CUDA/ROCm quando não há runner compatível, mantendo os checks de CPU ativos.
 
 ## [0.1.14] — 2026-09-30
+
+### Fixed
+
+- **Ordem de publicação no crates.io** (#128) — `ailake-secrets` publicado antes de `ailake-catalog` e `ailake-cache` depois de `ailake-store` e antes de `ailake-cli`, respeitando a ordem de dependências; recupera a publicação parcial da 0.1.13.
 
 ## [0.1.13] — 2026-09-30
 

@@ -137,11 +137,19 @@ impl AilakeFileWriter {
             0u16, // flags=0: HNSW (not IVF-PQ)
         )?;
 
-        let kv_val = footer_start.to_string();
-        let kv_refs: &[(&str, &str)] = &[("ailake.footer_offset", kv_val.as_str())];
+        let fts_section = self.fts_section(batch);
+        let mut kv_owned = vec![("ailake.footer_offset".to_string(), footer_start.to_string())];
+        if fts_section.is_some() {
+            let fts_abs_offset = footer_start + ailk_section.len();
+            kv_owned.push((KV_FTS_OFFSET.to_string(), fts_abs_offset.to_string()));
+        }
+        let kv_refs: Vec<(&str, &str)> = kv_owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
 
         // Pass 2: write Parquet with AILK offset KV embedded.
-        let (parquet_v2, _) = parquet_writer.write_batch_with_kv(batch, embeddings, kv_refs)?;
+        let (parquet_v2, _) = parquet_writer.write_batch_with_kv(batch, embeddings, &kv_refs)?;
         let footer_start_v2 = parquet_footer_start(&parquet_v2).map_err(|e| {
             AilakeError::Parquet(format!(
                 "footer_start unstable in write_with_prebuilt_hnsw: {e}"
@@ -153,12 +161,35 @@ impl AilakeFileWriter {
         );
 
         let footer_len_v2 = parquet_v2.len() - footer_start_v2;
-        let mut out = BytesMut::with_capacity(footer_start + ailk_section.len() + footer_len_v2);
+        let total_fts = fts_section.as_ref().map_or(0, |s| s.len());
+        let mut out =
+            BytesMut::with_capacity(footer_start + ailk_section.len() + total_fts + footer_len_v2);
         out.put_slice(&parquet_v1[..footer_start]);
         drop(parquet_v1);
         out.put(ailk_section);
+        if let Some(fts_sec) = fts_section {
+            out.put(fts_sec);
+        }
         out.put_slice(&parquet_v2[footer_start_v2..]);
         Ok(out.freeze())
+    }
+
+    /// Build the optional AILK_FTS section. A pre-built blob takes priority;
+    /// otherwise it is built from `batch` when `fts_config` is set.
+    fn fts_section(&self, batch: &RecordBatch) -> Option<Bytes> {
+        let blob: Vec<u8> = self.prebuilt_fts_blob.clone().or_else(|| {
+            self.fts_config
+                .as_ref()
+                .and_then(|cfg| ailake_fts::build_fts_blob_from_batch(cfg, batch).ok())
+        })?;
+        // AILK_FTS header: magic(4) | version(2 LE) | reserved(2) | blob_len(8 LE)
+        let mut sec = BytesMut::with_capacity(AILK_FTS_HEADER_SIZE + blob.len());
+        sec.put_slice(&AILK_FTS_MAGIC);
+        sec.put_slice(&1u16.to_le_bytes()); // version
+        sec.put_slice(&0u16.to_le_bytes()); // reserved
+        sec.put_slice(&(blob.len() as u64).to_le_bytes());
+        sec.put_slice(&blob);
+        Some(sec.freeze())
     }
 
     /// Write RecordBatch + embeddings as plain Parquet, with no AILK section.
@@ -325,29 +356,10 @@ impl AilakeFileWriter {
             ailk_sections.push(section);
         }
 
-        // Build optional AILK_FTS section.
-        // Pre-built blob takes priority; otherwise build from batch if fts_config is set.
-        let fts_blob: Option<Vec<u8>> = self.prebuilt_fts_blob.clone().or_else(|| {
-            self.fts_config
-                .as_ref()
-                .and_then(|cfg| ailake_fts::build_fts_blob_from_batch(cfg, batch).ok())
-        });
-        let fts_section: Option<Bytes> = fts_blob.map(|blob| {
-            // AILK_FTS header: magic(4) | version(2 LE) | reserved(2) | blob_len(8 LE)
-            let blob_len = blob.len() as u64;
-            let mut sec = BytesMut::with_capacity(AILK_FTS_HEADER_SIZE + blob.len());
-            sec.put_slice(&AILK_FTS_MAGIC);
-            sec.put_slice(&1u16.to_le_bytes()); // version
-            sec.put_slice(&0u16.to_le_bytes()); // reserved
-            sec.put_slice(&blob_len.to_le_bytes());
-            sec.put_slice(&blob);
-            sec.freeze()
-        });
-
-        if let Some(ref sec) = fts_section {
-            let fts_abs_offset = current_offset; // right after all vector AILK sections
-            kv_owned.push((KV_FTS_OFFSET.to_string(), fts_abs_offset.to_string()));
-            let _ = sec; // current_offset update not needed; no more sections after FTS
+        // Build optional AILK_FTS section, placed right after all vector AILK sections.
+        let fts_section = self.fts_section(batch);
+        if fts_section.is_some() {
+            kv_owned.push((KV_FTS_OFFSET.to_string(), current_offset.to_string()));
         }
 
         // Pass 2 — write Parquet with all AILK offset KVs embedded.

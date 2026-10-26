@@ -736,9 +736,9 @@ ailake/
 ```toml
 [workspace.dependencies]
 # I/O de dados
-parquet        = "52"                 # parquet-rs — Apache oficial
-arrow          = "52"                 # arrow-rs — in-memory columnar
-arrow-array    = "52"
+parquet        = "60"                 # parquet-rs — Apache oficial
+arrow          = "60"                 # arrow-rs — in-memory columnar
+arrow-array    = "60"
 object_store   = { version = "0.10", features = ["aws", "gcp", "azure"] }
 
 # Indexação vetorial: HNSW é código Rust próprio em ailake-index — sem hnsw_rs
@@ -758,7 +758,7 @@ bincode        = "1"                 # serialização ultra-rápida do HNSW
 
 # Compressão
 lz4_flex       = "0.11"
-zstd           = "0.13"
+zstd           = "0.14"
 
 # Async
 tokio          = { version = "1", features = ["full"] }
