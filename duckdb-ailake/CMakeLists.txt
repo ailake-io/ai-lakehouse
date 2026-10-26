@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ── DuckDB version (must match the duckdb Python package used in tests) ────────
-set(DUCKDB_VERSION "v1.5.3" CACHE STRING "DuckDB version to build against")
+set(DUCKDB_VERSION "v2.0.0" CACHE STRING "DuckDB version to build against")
 
 include(FetchContent)
 
@@ -79,33 +79,29 @@ target_include_directories(duckdb_ailake PRIVATE
     ${duckdb_SOURCE_DIR}/src/include
 )
 
-# duckdb_static (built by src/CMakeLists.txt) is assembled from that file's own
-# local ALL_OBJECT_FILES scope, which never receives the objects added by
-# extension/CMakeLists.txt (a separate add_subdirectory, separate variable
-# scope). Two consequences, both "undefined symbol" at dlopen time rather than
-# at link time (undefined refs are legal in a MODULE/shared lib, resolved
-# against the host process later — Python's duckdb, in our case):
-#  1. ExtensionHelper::LoadAllExtensions's real (non-dummy) definition lives in
-#     duckdb_generated_extension_loader (compiled from
-#     extension/generated_extension_loader.cpp.in) — declared and called from
-#     duckdb_static's own database.cpp but never *defined* within duckdb_static.a.
-#  2. extension/extension_config.cmake unconditionally statically links
-#     `core_functions` and `parquet` (duckdb_extension_load(...), independent of
-#     DISABLE_BUILTIN_EXTENSIONS above) — the generated loader body references
-#     CoreFunctionsExtension/ParquetExtension by type (vtable emitted in their
-#     own TUs), so their static targets (core_functions_extension,
-#     parquet_extension) must also be linked in or their vtable symbols dangle.
-# Official DuckDB builds (CLI/Python wheel) link all of these explicitly
-# alongside duckdb_static for the same reason; confirmed against a real local
-# build + `LOAD` in Python's duckdb (see CHANGELOG).
-target_link_libraries(duckdb_ailake PRIVATE
+# DuckDB 1.5 requires its generated C++ loader plus the core_functions and
+# parquet static targets to resolve built-in extension symbols. DuckDB 2.0
+# removed that generated loader and registers linked static extensions at
+# link-time; the version-specific target list below accounts for that change.
+set(DUCKDB_VERSION_NUMBER "${DUCKDB_VERSION}")
+string(REGEX REPLACE "^v" "" DUCKDB_VERSION_NUMBER "${DUCKDB_VERSION_NUMBER}")
+
+# DuckDB 2.0 switched from the generated C++ extension loader to link-time
+# registration of static extensions. The old loader target is absent there;
+# the 1.5 line still needs it to satisfy DuckDB's built-in extension symbols.
+set(DUCKDB_LINK_LIBRARIES
     nlohmann_json::nlohmann_json
     duckdb_static
-    duckdb_generated_extension_loader
+)
+if(DUCKDB_VERSION_NUMBER VERSION_LESS "2.0.0")
+    list(APPEND DUCKDB_LINK_LIBRARIES duckdb_generated_extension_loader)
+endif()
+list(APPEND DUCKDB_LINK_LIBRARIES
     core_functions_extension
     parquet_extension
     ailake_jni
 )
+target_link_libraries(duckdb_ailake PRIVATE ${DUCKDB_LINK_LIBRARIES})
 
 # ABI note: match the ABI of the host duckdb Python package.
 # Anaconda/pip wheels on modern Linux use C++11 ABI (default, no flag needed).
