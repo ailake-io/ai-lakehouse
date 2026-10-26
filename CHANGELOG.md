@@ -9,7 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Docs
+
+- **Checagem de impacto do core nos plugins** — `docs/contributing/PLUGIN_MAINTENANCE.md` documenta como cada plugin consome o core (link estático, JNI, C-ABI, CLI, SDK Python) e o checklist obrigatório para toda mudança no core: classificar a mudança, ajustar os plugins afetados no mesmo PR, testar compatibilidade de formato com a release anterior e disparar o release de cada plugin afetado.
+- **Versões de dependências atualizadas nas docs** — `CLAUDE.md` e `docs/architecture/WORKSPACE.md` passam a refletir Arrow/Parquet 60, Tantivy 0.27 e zstd 0.14 (#148); removida a versão fixa 0.1.12 do `ailake-py/README.md`.
+
+### Security
+
+- **Exceções de advisories obsoletas removidas** — `.cargo/audit.toml` e `deny.toml` não ignoram mais advisories já resolvidos pelas atualizações da 0.1.19: `instant` (saiu da árvore com Tantivy 0.27), `lru` (agora 0.18.5, corrigido), `rustls-webpki`, `lexical-core`, `crossbeam-epoch` e `quinn-proto`. `cargo audit --deny warnings` passa com lockfile gerado do zero, como no CI.
+
 ### Fixed
+
+- **Compaction descartava o índice FTS (Tantivy)** — o caminho incremental (`compact_incremental`, usado sempre que há um arquivo dominante, inclusive pelo CLI/JNI/Python via `CompactionExecutor::run`) gravava com `AilakeFileWriter::write_with_prebuilt_hnsw`, que ignorava o blob FTS já montado. O arquivo compactado ficava sem seção `AILK_FTS` e toda busca de texto caía no BM25 O(N). Bug anterior à 0.1.19. A montagem da seção FTS virou um helper único usado pelos dois caminhos de escrita; teste de regressão `compact_incremental_preserves_fts_index`.
 
 - **Release: `sync-develop` falhava e deixava `develop` divergente da `main`** — o job fazia cherry-pick só do commit de bump; quando um PR entrava direto na `main` (ex.: #148, DuckDB 2.0) o contexto do `Cargo.toml` divergia e o cherry-pick conflitava (release v0.1.19, inclusive em reruns). Agora o job faz merge do commit da tag em `develop` com `-X theirs` (conflitos resolvidos a favor da `main`), tornando os dois branches iguais após cada release e o job idempotente.
 - **Release: seções vazias no CHANGELOG** — 0.1.14, 0.1.17, 0.1.18 e 0.1.19 foram publicadas com `[Unreleased]` vazio e ficaram sem notas; preenchidas a partir dos PRs #128, #145, #146 e #148. A Action agora gera a seção da versão a partir dos commits desde a última tag quando `[Unreleased]` está vazio.

@@ -58,9 +58,6 @@ ignore = [
     # rsa — Marvin timing attack, via sqlx-mysql; no fix available upstream
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack, transitive via sqlx-mysql; no upstream fix available" },
 
-    # instant 0.1.13 — unmaintained, via measure_time → tantivy 0.22; no tantivy release drops this dep yet
-    { id = "RUSTSEC-2024-0384", reason = "instant unmaintained, transitive via tantivy 0.22/measure_time; no fix available upstream" },
-
     # quick-xml 0.36.2 — via object_store's S3/GCS XML parsing; fix requires quick-xml >=0.41.0,
     # but object_store's latest release (0.14.0) only pins quick-xml ^0.40.1. No object_store
     # release satisfies the fix yet. AI-Lake doesn't parse untrusted XML directly — these

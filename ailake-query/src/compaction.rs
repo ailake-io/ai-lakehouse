@@ -1767,6 +1767,118 @@ mod tests {
         assert_eq!(results[0].0, RowId::new(6));
     }
 
+    /// Regression: the incremental path writes through `write_with_prebuilt_hnsw`,
+    /// which ignored the FTS blob — every compaction with a dominant file silently
+    /// dropped the Tantivy index and text search fell back to O(N) BM25.
+    #[tokio::test]
+    async fn compact_incremental_preserves_fts_index() {
+        use ailake_core::{VectorMetric, VectorPrecision};
+        use ailake_store::LocalStore;
+        use arrow_array::{RecordBatch, StringArray};
+        use arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(dir.path()));
+        let policy = VectorStoragePolicy {
+            column_name: "embedding".into(),
+            dim: 4,
+            metric: VectorMetric::Cosine,
+            precision: VectorPrecision::F16,
+            pq: None,
+            keep_raw_for_reranking: true,
+            pre_normalize: false,
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivf_residual: false,
+            embedding_model: None,
+            modality: None,
+            partition_by: None,
+            partition_value: None,
+            partition_column_type: None,
+            partition_fields: vec![],
+        };
+        let fts = ailake_fts::FtsConfig::default();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "chunk_text",
+            DataType::Utf8,
+            false,
+        )]));
+
+        let mk = |texts: Vec<&str>| {
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(texts))]).unwrap()
+        };
+        // Dominant file (6 of 8 rows) + small file; "zebrafish" only in the small one.
+        let batch_dom = mk(vec!["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]);
+        let embs_dom: Vec<Vec<f32>> = (0..6)
+            .map(|i| {
+                let mut v = vec![0.1f32; 4];
+                v[i % 4] = 1.0;
+                v
+            })
+            .collect();
+        let batch_small = mk(vec!["eta", "zebrafish"]);
+        let embs_small: Vec<Vec<f32>> = vec![vec![0.0, 0.0, 0.0, 1.0], vec![0.5, 0.5, 0.5, 0.5]];
+
+        let mut entries = Vec::new();
+        for (path, batch, embs) in [
+            ("data/dominant.parquet", &batch_dom, &embs_dom),
+            ("data/small.parquet", &batch_small, &embs_small),
+        ] {
+            let bytes = AilakeFileWriter::new(policy.clone())
+                .with_fts(fts.clone())
+                .write(batch, embs)
+                .unwrap();
+            store.put(path, bytes.clone()).await.unwrap();
+            entries.push(DataFileEntry {
+                path: path.into(),
+                record_count: batch.num_rows() as u64,
+                file_size_bytes: bytes.len() as u64,
+                centroid_b64: None,
+                radius: None,
+                hnsw_offset: None,
+                hnsw_len: None,
+                vector_column: None,
+                vector_dim: None,
+                extra_vector_indexes: vec![],
+                index_status: IndexStatus::Ready,
+                index_error: None,
+                batch_id: None,
+                embedding_model: None,
+                partition_value: None,
+                deletion_vector: None,
+                first_row_id: None,
+                column_stats: None,
+                sequence_number: 0,
+            });
+        }
+
+        CompactionExecutor::new(store.clone(), policy)
+            .with_fts_config(fts)
+            .compact_incremental(&entries, "data/merged.parquet")
+            .await
+            .unwrap();
+
+        let reader = AilakeFileReader::new(
+            store.get("data/merged.parquet").await.unwrap(),
+            "embedding",
+            4,
+        );
+        reader.verify_integrity().unwrap();
+        let blob = reader
+            .load_fts_blob()
+            .unwrap()
+            .expect("compacted file must keep its FTS section");
+        let hits = ailake_fts::FtsSearcher::from_blob(&blob)
+            .unwrap()
+            .search("zebrafish", 5)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        // Small file rows follow the 6 dominant rows.
+        assert_eq!(hits[0].row_id, 7);
+    }
+
     /// Regression: `compact_incremental()` only ever produces HNSW (it extends the
     /// dominant file's existing graph) — with a dominant file present, it never checked
     /// `self.index_strategy` before taking that path, so an explicit `ForceIvfPq` request
