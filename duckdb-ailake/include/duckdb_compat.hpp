@@ -2,10 +2,10 @@
 #pragma once
 
 #include "duckdb.hpp"
-#include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/function/table_function.hpp"
 
 #if AILAKE_DUCKDB_V2
+#include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #endif
 
