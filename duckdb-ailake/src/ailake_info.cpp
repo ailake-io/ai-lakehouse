@@ -154,9 +154,9 @@ void RegisterAilakeInfo(duckdb::ExtensionLoader &loader) {
         "ailake_info", {LogicalType::VARCHAR}, AilakeInfoScan, AilakeInfoBind, AilakeInfoInit
     );
 
-    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR);
+    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR, Value("default"));
+    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR, Value("table"));
+    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 
     loader.RegisterFunction(func);
 }

@@ -310,11 +310,11 @@ void RegisterAilakeScan(duckdb::ExtensionLoader &loader) {
         AilakeScanScan, AilakeScanBind, AilakeScanInit
     );
 
-    AilakeAddNamedParameter(func, "vec_col", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "ef_search", LogicalType::INTEGER);
-    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR);
+    AilakeAddNamedParameter(func, "vec_col", LogicalType::VARCHAR, Value("embedding"));
+    AilakeAddNamedParameter(func, "ef_search", LogicalType::INTEGER, Value(50));
+    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR, Value("table"));
+    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR, Value("default"));
+    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 
     loader.RegisterFunction( func);
 }

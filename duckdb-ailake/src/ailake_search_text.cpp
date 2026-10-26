@@ -193,12 +193,15 @@ void RegisterAilakeSearchText(duckdb::ExtensionLoader &loader) {
         AilakeSearchTextScan, AilakeSearchTextBind, AilakeSearchTextInit
     );
 
-    AilakeAddNamedParameter(func, "text_columns", LogicalType::LIST(LogicalType::VARCHAR));
-    AilakeAddNamedParameter(func, "text_column", LogicalType::VARCHAR);  // legacy compat
-    AilakeAddNamedParameter(func, "partition_filter", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR);
+    AilakeAddNamedParameter(
+        func, "text_columns", LogicalType::LIST(LogicalType::VARCHAR),
+        Value(LogicalType::LIST(LogicalType::VARCHAR))
+    );
+    AilakeAddNamedParameter(func, "text_column", LogicalType::VARCHAR, Value(LogicalType::VARCHAR)); // legacy compat
+    AilakeAddNamedParameter(func, "partition_filter", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR, Value("table"));
+    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR, Value("default"));
+    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 
     loader.RegisterFunction( func);
 }

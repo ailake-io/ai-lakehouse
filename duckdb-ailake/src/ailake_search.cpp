@@ -211,15 +211,15 @@ void RegisterAilakeSearch(duckdb::ExtensionLoader &loader) {
         AilakeSearchScan, AilakeSearchBind, AilakeSearchInit
     );
 
-    AilakeAddNamedParameter(func, "vec_col", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "ef_search", LogicalType::INTEGER);
-    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "partition_filter", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "hybrid_text", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "text_column", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "bm25_weight", LogicalType::FLOAT);
-    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR);
+    AilakeAddNamedParameter(func, "vec_col", LogicalType::VARCHAR, Value("embedding"));
+    AilakeAddNamedParameter(func, "ef_search", LogicalType::INTEGER, Value(50));
+    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR, Value("table"));
+    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR, Value("default"));
+    AilakeAddNamedParameter(func, "partition_filter", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+    AilakeAddNamedParameter(func, "hybrid_text", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+    AilakeAddNamedParameter(func, "text_column", LogicalType::VARCHAR, Value("chunk_text"));
+    AilakeAddNamedParameter(func, "bm25_weight", LogicalType::FLOAT, Value(0.5f));
+    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 
     loader.RegisterFunction( func);
 }

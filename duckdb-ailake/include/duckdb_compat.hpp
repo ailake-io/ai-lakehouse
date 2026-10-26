@@ -36,11 +36,13 @@ inline duckdb::TableFunction AilakeMakeTableFunction(
 inline void AilakeAddNamedParameter(
     duckdb::TableFunction &function,
     const char *name,
-    duckdb::LogicalType type
+    duckdb::LogicalType type,
+    duckdb::optional<duckdb::Value> default_value = {}
 ) {
 #if AILAKE_DUCKDB_V2
-    function.GetSignature().AddKeywordOnly(duckdb::Identifier(name), std::move(type));
+    function.GetSignature().AddKeywordOnly(duckdb::Identifier(name), std::move(type), std::move(default_value));
 #else
+    (void)default_value;
     function.named_parameters[name] = std::move(type);
 #endif
 }

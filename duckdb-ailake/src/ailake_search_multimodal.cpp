@@ -219,10 +219,10 @@ void RegisterAilakeSearchMultimodal(duckdb::ExtensionLoader &loader) {
         AilakeMultimodalScan, AilakeMultimodalBind, AilakeMultimodalInit
     );
 
-    AilakeAddNamedParameter(func, "partition_filter", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR);
-    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR);
+    AilakeAddNamedParameter(func, "partition_filter", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR, Value("table"));
+    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR, Value("default"));
+    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 
     loader.RegisterFunction( func);
 }

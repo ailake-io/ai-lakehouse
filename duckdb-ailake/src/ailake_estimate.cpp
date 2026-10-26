@@ -146,8 +146,8 @@ void RegisterAilakeEstimate(duckdb::ExtensionLoader &loader) {
         AilakeEstimateScan, AilakeEstimateBind, AilakeEstimateInit
     );
 
-    AilakeAddNamedParameter(func, "hnsw_m", LogicalType::INTEGER);
-    AilakeAddNamedParameter(func, "pq_m", LogicalType::INTEGER);
+    AilakeAddNamedParameter(func, "hnsw_m", LogicalType::INTEGER, Value(16));
+    AilakeAddNamedParameter(func, "pq_m", LogicalType::INTEGER, Value(-1));
 
     loader.RegisterFunction(func);
 }
