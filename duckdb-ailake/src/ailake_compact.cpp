@@ -22,6 +22,7 @@
 //   SELECT ailake_compact('file:///data/my_table', min_files := 2);
 
 #include "ailake_extension.hpp"
+#include "duckdb_compat.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -80,6 +81,27 @@ static void AilakeCompactExec(
 }
 
 void RegisterAilakeCompact(duckdb::ExtensionLoader &loader) {
+#if AILAKE_DUCKDB_V2
+    // DuckDB 2 makes scalar-function arguments positional-only when they are
+    // registered from LogicalType vectors. Use named FunctionParameters so
+    // the documented SQL form (min_files := ...) remains supported.
+    ScalarFunction function(
+        Identifier("ailake_compact"),
+        {
+            FunctionParameter(Identifier("table_path"), LogicalType::VARCHAR),
+            FunctionParameter(Identifier("min_files"), LogicalType::BIGINT, Value::BIGINT(-1)),
+            FunctionParameter(Identifier("target_size_bytes"), LogicalType::BIGINT, Value::BIGINT(-1)),
+            FunctionParameter(Identifier("max_files_per_pass"), LogicalType::BIGINT, Value::BIGINT(-1)),
+            FunctionParameter(Identifier("deferred"), LogicalType::BOOLEAN, Value::BOOLEAN(false)),
+            FunctionParameter(Identifier("namespace"), LogicalType::VARCHAR, Value("default")),
+            FunctionParameter(Identifier("table_name"), LogicalType::VARCHAR, Value("table")),
+            FunctionParameter(Identifier("catalog_opts_json"), LogicalType::VARCHAR, Value("")),
+        },
+        LogicalType::BIGINT,
+        AilakeCompactExec
+    );
+    loader.RegisterFunction(function);
+#else
     ScalarFunctionSet fn_set("ailake_compact");
 
     // Arity 1: (table_path) — all defaults
@@ -145,4 +167,5 @@ void RegisterAilakeCompact(duckdb::ExtensionLoader &loader) {
     ));
 
     loader.RegisterFunction(fn_set);
+#endif
 }

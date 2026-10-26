@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use parquet::basic::Type as PhysicalType;
+use parquet::file::metadata::ParquetMetaDataReader;
 use parquet::file::statistics::Statistics;
 use serde::{Deserialize, Serialize};
 
@@ -65,7 +66,9 @@ pub fn extract_column_stats(
     file_bytes: &Bytes,
     skip_column_names: &[&str],
 ) -> Option<BTreeMap<i32, FieldStats>> {
-    let meta = parquet::file::footer::parse_metadata(file_bytes).ok()?;
+    let meta = ParquetMetaDataReader::new()
+        .parse_and_finish(file_bytes)
+        .ok()?;
     let schema_descr = meta.file_metadata().schema_descr();
     let mut acc: BTreeMap<i32, Accum> = BTreeMap::new();
 
@@ -80,9 +83,9 @@ pub fn extract_column_stats(
             entry.value_count += col.num_values();
             entry.column_size += col.compressed_size();
             if let Some(stats) = col.statistics() {
-                entry.null_count += stats.null_count() as i64;
-                if stats.has_min_max_set() {
-                    merge_bounds(entry, stats);
+                entry.null_count += stats.null_count_opt().unwrap_or(0) as i64;
+                if let (Some(min), Some(max)) = (stats.min_bytes_opt(), stats.max_bytes_opt()) {
+                    merge_bounds(entry, stats, min, max);
                 }
             }
         }
@@ -91,10 +94,12 @@ pub fn extract_column_stats(
     Some(acc.into_iter().map(|(id, a)| (id, finish(a))).collect())
 }
 
-fn merge_bounds(entry: &mut Accum, stats: &Statistics) {
+fn merge_bounds(entry: &mut Accum, stats: &Statistics, min: &[u8], max: &[u8]) {
+    if stats.is_min_max_deprecated() {
+        return;
+    }
     let ty = stats.physical_type();
     entry.physical_type = Some(ty);
-    let (min, max) = (stats.min_bytes(), stats.max_bytes());
 
     entry.lower = Some(match &entry.lower {
         Some(cur) if cmp_stat_bytes(ty, cur, min) != Ordering::Greater => cur.clone(),

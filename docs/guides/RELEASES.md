@@ -1,9 +1,9 @@
 # Releases e versionamento
 
-O core Rust usa a tag `vX.Y.Z`. O SDK Python, cada plugin e a integração Kof
-possuem tags e ciclos independentes. A C-ABI mantém seu próprio número de
-contrato para compatibilidade binária. Cada Action incrementa a versão a partir
-da última tag do componente correspondente.
+O core Rust usa a tag `vX.Y.Z`. O SDK Python usa a mesma versão do core, com
+tag `python-vX.Y.Z`, e é publicado pela Action própria. Cada plugin e a
+integração Kof mantêm tags e ciclos independentes. A C-ABI mantém seu próprio
+número de contrato para compatibilidade binária.
 
 ## Fluxo automático
 
@@ -14,8 +14,13 @@ da última tag do componente correspondente.
 4. Os manifests e exemplos documentais do core são atualizados para a nova versão.
 5. A seção `[Unreleased]` do `CHANGELOG.md` vira a seção da versão publicada,
    com a data UTC do release, e uma nova seção `[Unreleased]` é deixada no topo.
+   Se `[Unreleased]` estiver vazio, a seção é gerada a partir dos commits desde
+   a última tag.
 6. A Action cria a tag e o GitHub Release do core e publica crates e a biblioteca
    JNI. Workflows separados publicam os SDKs e integrações.
+7. O job `sync-develop` faz merge do commit da tag em `develop` (em conflito,
+   vence a `main`), deixando `main` e `develop` iguais — inclusive hotfixes
+   mergeados direto na `main`. É idempotente em reruns.
 
 Não edite manualmente a versão dos artefatos para um release normal. Durante o
 desenvolvimento, registre mudanças visíveis ao usuário em `[Unreleased]`:

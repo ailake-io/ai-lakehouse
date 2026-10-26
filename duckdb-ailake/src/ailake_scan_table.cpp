@@ -18,6 +18,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb_compat.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -54,7 +55,7 @@ static unique_ptr<FunctionData> AilakeScanBind(
     ClientContext                &context,
     TableFunctionBindInput       &input,
     vector<LogicalType>          &return_types,
-    vector<string>               &names
+    AilakeBindNames &names
 ) {
     auto data = make_uniq<AilakeScanBindData>();
 
@@ -135,7 +136,7 @@ static unique_ptr<FunctionData> AilakeScanBind(
 
     // Map ScanColType → DuckDB LogicalType.
     for (auto &col : data->result.columns) {
-        names.push_back(col.name);
+        names.push_back(AilakeMakeBindName(col.name));
         switch (col.type) {
             case ailake::ScanColType::INT64:
                 return_types.push_back(LogicalType::BIGINT);
@@ -199,11 +200,11 @@ static void AilakeScanScan(
     for (idx_t col_idx = 0; col_idx < result.columns.size(); ++col_idx) {
         const auto &sc  = result.columns[col_idx];
         auto       &vec = output.data[col_idx];
-        auto       &validity = FlatVector::Validity(vec);
+        auto       &validity = AILAKE_FLAT_VECTOR_VALIDITY(vec);
 
         switch (sc.type) {
             case ailake::ScanColType::INT64: {
-                auto *dst = FlatVector::GetData<int64_t>(vec);
+                auto *dst = AILAKE_FLAT_VECTOR_DATA(int64_t, vec);
                 for (idx_t i = 0; i < count; ++i) {
                     idx_t src = state.position + i;
                     if (sc.is_null[src]) {
@@ -215,7 +216,7 @@ static void AilakeScanScan(
                 break;
             }
             case ailake::ScanColType::FLOAT32: {
-                auto *dst = FlatVector::GetData<float>(vec);
+                auto *dst = AILAKE_FLAT_VECTOR_DATA(float, vec);
                 for (idx_t i = 0; i < count; ++i) {
                     idx_t src = state.position + i;
                     if (sc.is_null[src]) {
@@ -227,7 +228,7 @@ static void AilakeScanScan(
                 break;
             }
             case ailake::ScanColType::FLOAT64: {
-                auto *dst = FlatVector::GetData<double>(vec);
+                auto *dst = AILAKE_FLAT_VECTOR_DATA(double, vec);
                 for (idx_t i = 0; i < count; ++i) {
                     idx_t src = state.position + i;
                     if (sc.is_null[src]) {
@@ -244,14 +245,14 @@ static void AilakeScanScan(
                     if (sc.is_null[src]) {
                         validity.SetInvalid(i);
                     } else {
-                        FlatVector::GetData<string_t>(vec)[i] =
+                        AILAKE_FLAT_VECTOR_DATA(string_t, vec)[i] =
                             StringVector::AddString(vec, sc.str_vals[src]);
                     }
                 }
                 break;
             }
             case ailake::ScanColType::BOOL: {
-                auto *dst = FlatVector::GetData<bool>(vec);
+                auto *dst = AILAKE_FLAT_VECTOR_DATA(bool, vec);
                 for (idx_t i = 0; i < count; ++i) {
                     idx_t src = state.position + i;
                     if (sc.is_null[src]) {
@@ -271,9 +272,9 @@ static void AilakeScanScan(
                 }
                 ListVector::Reserve(vec, total_child);
 
-                auto *list_entries = FlatVector::GetData<list_entry_t>(vec);
-                auto &child_vec    = ListVector::GetEntry(vec);
-                auto *child_data   = FlatVector::GetData<float>(child_vec);
+                auto *list_entries = AILAKE_FLAT_VECTOR_DATA(list_entry_t, vec);
+                auto &child_vec    = AILAKE_LIST_VECTOR_ENTRY(vec);
+                auto *child_data   = AILAKE_FLAT_VECTOR_DATA(float, child_vec);
                 idx_t child_offset = 0;
 
                 for (idx_t i = 0; i < count; ++i) {
@@ -304,19 +305,16 @@ static void AilakeScanScan(
 // ── Registration ──────────────────────────────────────────────────────────────
 
 void RegisterAilakeScan(duckdb::ExtensionLoader &loader) {
-    TableFunction func(
-        "ailake_scan",
-        {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::FLOAT), LogicalType::INTEGER},
-        AilakeScanScan,
-        AilakeScanBind,
-        AilakeScanInit
+    auto func = AilakeMakeTableFunction(
+        "ailake_scan", {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::FLOAT), LogicalType::INTEGER},
+        AilakeScanScan, AilakeScanBind, AilakeScanInit
     );
 
-    func.named_parameters["vec_col"]    = LogicalType::VARCHAR;
-    func.named_parameters["ef_search"]  = LogicalType::INTEGER;
-    func.named_parameters["table_name"] = LogicalType::VARCHAR;
-    func.named_parameters["namespace"]  = LogicalType::VARCHAR;
-    func.named_parameters["catalog_opts_json"] = LogicalType::VARCHAR;
+    AilakeAddNamedParameter(func, "vec_col", LogicalType::VARCHAR, Value("embedding"));
+    AilakeAddNamedParameter(func, "ef_search", LogicalType::INTEGER, Value(50));
+    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR, Value("table"));
+    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR, Value("default"));
+    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 
     loader.RegisterFunction( func);
 }

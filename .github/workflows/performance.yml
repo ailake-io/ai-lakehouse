@@ -44,6 +44,11 @@ jobs:
         if: github.event_name == 'pull_request'
         working-directory: baseline
         run: |
+          # Compare the library with the same sampling harness on both sides.
+          # The PR branch may update the benchmark iteration count to reduce
+          # noise; using the base branch's older harness makes the comparison
+          # sensitive to sample length and runner frequency scaling.
+          cp ../ailake-vec/benches/distance.rs ailake-vec/benches/distance.rs
           mkdir -p ../perf
           CARGO_TARGET_DIR=../target cargo bench --quiet -p ailake-vec --bench distance -- --json > ../perf/cpu-distance-baseline.json
       - name: Run structured vector benchmark

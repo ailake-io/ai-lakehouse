@@ -1138,18 +1138,29 @@ mod tests {
 
     #[tokio::test]
     async fn response_body_limit_rejects_oversized_catalog_response() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::with_capacity(256);
+            let mut buffer = [0u8; 128];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0, "client closed before sending request headers");
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
             socket
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 32\r\nConnection: close\r\n\r\n01234567890123456789012345678901",
                 )
                 .await
                 .unwrap();
+            socket.shutdown().await.unwrap();
         });
 
         let response = reqwest::Client::new()

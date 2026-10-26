@@ -61,7 +61,9 @@ fn main() {
     ];
     let mut results = Vec::new();
     for (kernel, distance) in cases {
-        for (dim, iterations) in [(128, 100_000), (768, 25_000), (1_536, 12_500)] {
+        // Keep each timed sample long enough to average out scheduler and
+        // timer noise on shared CI runners (roughly 0.2–0.3 s per sample).
+        for (dim, iterations) in [(128, 10_000_000), (768, 2_500_000), (1_536, 1_250_000)] {
             results.push(run_case(kernel, distance, dim, iterations));
         }
     }
