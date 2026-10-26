@@ -15,7 +15,7 @@
 using AilakeBindNames = duckdb::vector<duckdb::Identifier>;
 #define AILAKE_FLAT_VECTOR_DATA(type, vector) duckdb::FlatVector::GetDataMutable<type>(vector)
 #define AILAKE_FLAT_VECTOR_VALIDITY(vector) duckdb::FlatVector::ValidityMutable(vector)
-#define AILAKE_LIST_VECTOR_ENTRY(vector) (*duckdb::ListVector::GetChildMutable(vector))
+#define AILAKE_LIST_VECTOR_ENTRY(vector) duckdb::ListVector::GetChildMutable(vector)
 #else
 using AilakeBindNames = duckdb::vector<duckdb::string>;
 #define AILAKE_FLAT_VECTOR_DATA(type, vector) duckdb::FlatVector::GetData<type>(vector)
@@ -63,7 +63,7 @@ inline void AilakeAddNamedParameter(
     duckdb::TableFunction &function,
     const char *name,
     duckdb::LogicalType type,
-    duckdb::optional<duckdb::Value> default_value = {}
+    duckdb::Value default_value
 ) {
 #if AILAKE_DUCKDB_V2
     function.GetSignature().AddKeywordOnly(duckdb::Identifier(name), std::move(type), std::move(default_value));
