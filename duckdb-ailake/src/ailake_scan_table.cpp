@@ -136,7 +136,7 @@ static unique_ptr<FunctionData> AilakeScanBind(
 
     // Map ScanColType → DuckDB LogicalType.
     for (auto &col : data->result.columns) {
-        names.push_back(col.name);
+        names.push_back(AilakeMakeBindName(col.name));
         switch (col.type) {
             case ailake::ScanColType::INT64:
                 return_types.push_back(LogicalType::BIGINT);
@@ -200,7 +200,7 @@ static void AilakeScanScan(
     for (idx_t col_idx = 0; col_idx < result.columns.size(); ++col_idx) {
         const auto &sc  = result.columns[col_idx];
         auto       &vec = output.data[col_idx];
-        auto       &validity = FlatVector::Validity(vec);
+        auto       &validity = AILAKE_FLAT_VECTOR_VALIDITY(vec);
 
         switch (sc.type) {
             case ailake::ScanColType::INT64: {
@@ -273,7 +273,7 @@ static void AilakeScanScan(
                 ListVector::Reserve(vec, total_child);
 
                 auto *list_entries = AILAKE_FLAT_VECTOR_DATA(list_entry_t, vec);
-                auto &child_vec    = ListVector::GetEntry(vec);
+                auto &child_vec    = AILAKE_LIST_VECTOR_ENTRY(vec);
                 auto *child_data   = AILAKE_FLAT_VECTOR_DATA(float, child_vec);
                 idx_t child_offset = 0;
 

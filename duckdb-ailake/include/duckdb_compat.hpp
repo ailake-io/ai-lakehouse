@@ -5,15 +5,31 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/function/table_function.hpp"
 
+#if AILAKE_DUCKDB_V2
+#include "duckdb/common/vector/list_vector.hpp"
+#endif
+
 #include <initializer_list>
 
 #if AILAKE_DUCKDB_V2
 using AilakeBindNames = duckdb::vector<duckdb::Identifier>;
 #define AILAKE_FLAT_VECTOR_DATA(type, vector) duckdb::FlatVector::GetDataMutable<type>(vector)
+#define AILAKE_FLAT_VECTOR_VALIDITY(vector) duckdb::FlatVector::ValidityMutable(vector)
+#define AILAKE_LIST_VECTOR_ENTRY(vector) (*duckdb::ListVector::GetChildMutable(vector))
 #else
 using AilakeBindNames = duckdb::vector<duckdb::string>;
 #define AILAKE_FLAT_VECTOR_DATA(type, vector) duckdb::FlatVector::GetData<type>(vector)
+#define AILAKE_FLAT_VECTOR_VALIDITY(vector) duckdb::FlatVector::Validity(vector)
+#define AILAKE_LIST_VECTOR_ENTRY(vector) duckdb::ListVector::GetEntry(vector)
 #endif
+
+inline AilakeBindNames::value_type AilakeMakeBindName(const std::string &name) {
+#if AILAKE_DUCKDB_V2
+    return duckdb::Identifier(duckdb::string(name));
+#else
+    return name;
+#endif
+}
 
 #if AILAKE_DUCKDB_V2
 inline const duckdb::string &AilakeGetIdentifierName(const duckdb::Identifier &name) {
