@@ -788,7 +788,7 @@ mod tests {
             .unwrap();
         let schema = reader.schema();
         let properties = WriterProperties::builder()
-            .set_max_row_group_size(2)
+            .set_max_row_group_row_count(Some(2))
             .build();
         let mut output = Vec::new();
         let mut row_group_writer =
