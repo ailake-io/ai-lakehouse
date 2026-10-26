@@ -12,6 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Docs
 
 - **Checagem de impacto do core nos plugins** — `docs/contributing/PLUGIN_MAINTENANCE.md` documenta como cada plugin consome o core (link estático, JNI, C-ABI, CLI, SDK Python) e o checklist obrigatório para toda mudança no core: classificar a mudança, ajustar os plugins afetados no mesmo PR, testar compatibilidade de formato com a release anterior e disparar o release de cada plugin afetado.
+- **Plugins que embutem o core** — a tabela indica quem embute o core (DuckDB, Python, Spark, Trino, Flink) e quem não (Kof, Go, C++, Airflow, Airbyte). Os que embutem só devem ser lançados depois do release do core que traz a correção.
 - **Versões de dependências atualizadas nas docs** — `CLAUDE.md` e `docs/architecture/WORKSPACE.md` passam a refletir Arrow/Parquet 60, Tantivy 0.27 e zstd 0.14 (#148); removida a versão fixa 0.1.12 do `ailake-py/README.md`.
 
 ### Security

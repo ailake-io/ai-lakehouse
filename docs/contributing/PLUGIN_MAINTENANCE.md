@@ -61,16 +61,21 @@ release.
 
 How each plugin consumes the core decides what a core change requires:
 
-| Plugin | Consumes the core via | Needs a release when the core changes… |
-|---|---|---|
-| DuckDB extension | Rust core linked statically | always (code, dependencies, security fixes) |
-| Python SDK | Rust core compiled into the wheel | always; version follows the core |
-| Spark, Trino, Flink | JNI library built from `ailake-jni` and bundled in the JAR | `ailake-jni`/core code or dependency changes (incl. security); C-ABI changes also need wrapper updates |
-| Kof | HTTP client + Native adapter over the C-ABI | C-ABI contract changes |
-| Go SDK | Native Avro/Parquet reader + `ailake` CLI | file/manifest format changes, CLI flag changes, its own `go.mod` dependencies |
-| C++ SDK | Native header-only reader + `ailake` CLI | file/manifest format changes, CLI flag changes |
-| Airflow provider | `ailake` CLI | CLI flag or output-format changes |
-| Airbyte destination | `ailake` Python SDK from PyPI | Python SDK API changes (dependency fixes arrive through the SDK release) |
+| Plugin | Embeds the core? | Consumes the core via | Needs a release when the core changes… |
+|---|---|---|---|
+| DuckDB extension | **Yes** | Rust core linked statically | always (code, dependencies, security fixes) |
+| Python SDK | **Yes** | Rust core compiled into the wheel | always; version follows the core |
+| Spark, Trino, Flink | **Yes** | JNI library built from `ailake-jni` and bundled in the JAR | `ailake-jni`/core code or dependency changes (incl. security); C-ABI changes also need wrapper updates |
+| Kof | No | HTTP client + Native adapter over the C-ABI | C-ABI contract changes |
+| Go SDK | No | Native Avro/Parquet reader + `ailake` CLI | file/manifest format changes, CLI flag changes, its own `go.mod` dependencies |
+| C++ SDK | No | Native header-only reader + `ailake` CLI | file/manifest format changes, CLI flag changes |
+| Airflow provider | No | `ailake` CLI | CLI flag or output-format changes |
+| Airbyte destination | No (via Python SDK) | `ailake` Python SDK from PyPI | Python SDK API changes (dependency fixes arrive through the SDK release) |
+
+Plugins that embed the core build it from `main` at release time, so release
+them **after** the core release that carries the fix, never before: a plugin
+released earlier ships the previous core and needs another release. Plugins
+that do not embed the core can release whenever their own code changes.
 
 Checklist for a core change:
 
