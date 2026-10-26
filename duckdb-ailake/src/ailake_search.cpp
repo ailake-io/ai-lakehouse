@@ -36,6 +36,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb_compat.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -74,7 +75,7 @@ static unique_ptr<FunctionData> AilakeSearchBind(
     ClientContext                &context,
     TableFunctionBindInput       &input,
     vector<LogicalType>          &return_types,
-    vector<string>               &names
+    AilakeBindNames &names
 ) {
     auto data = make_uniq<AilakeSearchBindData>();
 
@@ -187,14 +188,14 @@ static void AilakeSearchScan(
         static_cast<idx_t>(state.results.size()) - state.position
     );
 
-    auto *row_ids   = FlatVector::GetData<int64_t>(output.data[0]);
-    auto *distances = FlatVector::GetData<float>(output.data[1]);
+    auto *row_ids   = AILAKE_FLAT_VECTOR_DATA(int64_t, output.data[0]);
+    auto *distances = AILAKE_FLAT_VECTOR_DATA(float, output.data[1]);
 
     for (idx_t i = 0; i < count; i++) {
         const auto &row  = state.results[state.position + i];
         row_ids[i]   = row.row_id;
         distances[i] = row.distance;
-        FlatVector::GetData<string_t>(output.data[2])[i] =
+        AILAKE_FLAT_VECTOR_DATA(string_t, output.data[2])[i] =
             StringVector::AddString(output.data[2], row.file_path);
     }
 
@@ -205,23 +206,20 @@ static void AilakeSearchScan(
 // ── Registration ──────────────────────────────────────────────────────────────
 
 void RegisterAilakeSearch(duckdb::ExtensionLoader &loader) {
-    TableFunction func(
-        "ailake_search",
-        {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::FLOAT), LogicalType::INTEGER},
-        AilakeSearchScan,
-        AilakeSearchBind,
-        AilakeSearchInit
+    auto func = AilakeMakeTableFunction(
+        "ailake_search", {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::FLOAT), LogicalType::INTEGER},
+        AilakeSearchScan, AilakeSearchBind, AilakeSearchInit
     );
 
-    func.named_parameters["vec_col"]          = LogicalType::VARCHAR;
-    func.named_parameters["ef_search"]        = LogicalType::INTEGER;
-    func.named_parameters["table_name"]       = LogicalType::VARCHAR;
-    func.named_parameters["namespace"]        = LogicalType::VARCHAR;
-    func.named_parameters["partition_filter"] = LogicalType::VARCHAR;
-    func.named_parameters["hybrid_text"]      = LogicalType::VARCHAR;
-    func.named_parameters["text_column"]      = LogicalType::VARCHAR;
-    func.named_parameters["bm25_weight"]      = LogicalType::FLOAT;
-    func.named_parameters["catalog_opts_json"] = LogicalType::VARCHAR;
+    AilakeAddNamedParameter(func, "vec_col", LogicalType::VARCHAR, Value("embedding"));
+    AilakeAddNamedParameter(func, "ef_search", LogicalType::INTEGER, Value(50));
+    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR, Value("table"));
+    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR, Value("default"));
+    AilakeAddNamedParameter(func, "partition_filter", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+    AilakeAddNamedParameter(func, "hybrid_text", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+    AilakeAddNamedParameter(func, "text_column", LogicalType::VARCHAR, Value("chunk_text"));
+    AilakeAddNamedParameter(func, "bm25_weight", LogicalType::FLOAT, Value(0.5f));
+    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 
     loader.RegisterFunction( func);
 }

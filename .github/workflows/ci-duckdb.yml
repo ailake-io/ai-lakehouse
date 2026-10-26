@@ -9,7 +9,6 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  DUCKDB_VERSION: "v1.5.0"
   # DuckDB ≥1.2 pip wheels use the standard linux_amd64 platform tag;
   # gcc4/old-ABI builds were dropped in 1.2. Set explicitly so
   # append_extension_metadata.py uses the right tag at cmake build time.
@@ -17,14 +16,18 @@ env:
 
 jobs:
   build-and-test:
-    name: build + test (Linux x86_64)
+    name: build + test DuckDB ${{ matrix.duckdb_version }}
     runs-on: ubuntu-latest
     # ailake-jni is now linked statically into the extension via corrosion, and
-    # `cmake --build` builds a real duckdb_static from source at DUCKDB_VERSION
+    # `cmake --build` builds a real duckdb_static from source at the matrix version
     # instead of headers-only (see duckdb-ailake/README.md "Design") — a from-scratch
     # build of duckdb_static alone takes several minutes; 20 was sized for the old
     # headers-only setup and left this job getting killed mid-build.
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb_version: ["v1.5.6", "v2.0.0"]
 
     steps:
       - uses: actions/checkout@v6
@@ -44,15 +47,15 @@ jobs:
 
       # Caches the FetchContent'd DuckDB source/build tree (the expensive part —
       # duckdb_static built from scratch) and corrosion's cargo build output.
-      # Keyed on DUCKDB_VERSION + Cargo.lock so a DuckDB bump or ailake-jni
+      # Keyed on the matrix DuckDB version + Cargo.lock so a version bump or ailake-jni
       # dependency change invalidates it instead of silently reusing a stale build.
       # On a full cache hit this makes "Build DuckDB extension" below a no-op.
       - uses: actions/cache@v4
         with:
           path: duckdb-ailake/build
-          key: duckdb-ailake-build-${{ runner.os }}-${{ env.DUCKDB_VERSION }}-${{ hashFiles('Cargo.lock', 'ailake-jni/**', 'duckdb-ailake/CMakeLists.txt') }}
+          key: duckdb-ailake-build-${{ runner.os }}-${{ matrix.duckdb_version }}-${{ hashFiles('Cargo.lock', 'ailake-jni/**', 'duckdb-ailake/CMakeLists.txt') }}
           restore-keys: |
-            duckdb-ailake-build-${{ runner.os }}-${{ env.DUCKDB_VERSION }}-
+            duckdb-ailake-build-${{ runner.os }}-${{ matrix.duckdb_version }}-
 
       # Belt-and-suspenders for the case above only *partially* hits (e.g. a
       # duckdb-ailake/src/*.cpp change invalidates the whole-dir cache key but
@@ -62,7 +65,7 @@ jobs:
       # directory-level cache above misses.
       - uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: duckdb-ailake-ccache-${{ runner.os }}-${{ env.DUCKDB_VERSION }}
+          key: duckdb-ailake-ccache-${{ runner.os }}-${{ matrix.duckdb_version }}
           max-size: 2G
           update-package-index: true
 
@@ -72,7 +75,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DDUCKDB_VERSION=${{ env.DUCKDB_VERSION }}
+            -DDUCKDB_VERSION=${{ matrix.duckdb_version }}
 
       # Unbounded `--parallel` spawns one compile per vCPU (4 on ubuntu-latest);
       # duckdb_static's unified-build translation units can each peak at 3-4GB
@@ -98,7 +101,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python deps
-        run: pip install duckdb==$(echo ${{ env.DUCKDB_VERSION }} | tr -d 'v') pyarrow numpy
+        run: pip install duckdb==$(echo ${{ matrix.duckdb_version }} | tr -d 'v') pyarrow numpy
 
       - name: Generate write fixture
         run: python tests/fixtures/write_fixture.py ./compat-fixture

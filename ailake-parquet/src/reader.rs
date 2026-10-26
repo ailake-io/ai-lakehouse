@@ -55,19 +55,28 @@ fn stats_min_max_as_filter_values(stats: &Statistics) -> Option<(FilterValue, Fi
     }
     match stats {
         Statistics::Int32(s) => Some((
-            FilterValue::I64(*s.min() as i64),
-            FilterValue::I64(*s.max() as i64),
+            FilterValue::I64(*s.min_opt()? as i64),
+            FilterValue::I64(*s.max_opt()? as i64),
         )),
-        Statistics::Int64(s) => Some((FilterValue::I64(*s.min()), FilterValue::I64(*s.max()))),
+        Statistics::Int64(s) => Some((
+            FilterValue::I64(*s.min_opt()?),
+            FilterValue::I64(*s.max_opt()?),
+        )),
         Statistics::Float(s) => Some((
-            FilterValue::F64(*s.min() as f64),
-            FilterValue::F64(*s.max() as f64),
+            FilterValue::F64(*s.min_opt()? as f64),
+            FilterValue::F64(*s.max_opt()? as f64),
         )),
-        Statistics::Double(s) => Some((FilterValue::F64(*s.min()), FilterValue::F64(*s.max()))),
-        Statistics::Boolean(s) => Some((FilterValue::Bool(*s.min()), FilterValue::Bool(*s.max()))),
+        Statistics::Double(s) => Some((
+            FilterValue::F64(*s.min_opt()?),
+            FilterValue::F64(*s.max_opt()?),
+        )),
+        Statistics::Boolean(s) => Some((
+            FilterValue::Bool(*s.min_opt()?),
+            FilterValue::Bool(*s.max_opt()?),
+        )),
         Statistics::ByteArray(s) => {
-            let min = s.min().as_utf8().ok()?.to_string();
-            let max = s.max().as_utf8().ok()?.to_string();
+            let min = s.min_opt()?.as_utf8().ok()?.to_string();
+            let max = s.max_opt()?.as_utf8().ok()?.to_string();
             Some((FilterValue::Str(min), FilterValue::Str(max)))
         }
         _ => None,
@@ -779,7 +788,7 @@ mod tests {
             .unwrap();
         let schema = reader.schema();
         let properties = WriterProperties::builder()
-            .set_max_row_group_size(2)
+            .set_max_row_group_row_count(Some(2))
             .build();
         let mut output = Vec::new();
         let mut row_group_writer =

@@ -8,8 +8,8 @@ use arrow_schema::{Field, Schema};
 use bytes::Bytes;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
-use parquet::format::KeyValue;
 
 use ailake_vec::Quantizer;
 

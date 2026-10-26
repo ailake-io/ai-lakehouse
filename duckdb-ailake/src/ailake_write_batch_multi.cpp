@@ -37,6 +37,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb_compat.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -81,7 +82,7 @@ static std::vector<ailake::VectorColSpecArg> extract_vector_columns(const Value 
         auto &children = StructValue::GetChildren(elem);
         auto &keys     = StructType::GetChildTypes(elem.type());
         for (size_t i = 0; i < keys.size(); ++i) {
-            const std::string &fname = keys[i].first;
+            const std::string &fname = AilakeGetIdentifierName(keys[i].first);
             const Value       &fval  = children[i];
             if (fval.IsNull()) continue;
             if (fname == "col") {

@@ -100,7 +100,7 @@ impl FtsSearcher {
             .map_err(|e| AilakeError::Fts(format!("parse query: {e}")))?;
 
         let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(top_k))
+            .search(&query, &TopDocs::with_limit(top_k).order_by_score())
             .map_err(|e| AilakeError::Fts(format!("search: {e}")))?;
 
         let mut hits = Vec::with_capacity(top_docs.len());

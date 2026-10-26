@@ -23,6 +23,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb_compat.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -48,7 +49,7 @@ static unique_ptr<FunctionData> AilakeEstimateBind(
     ClientContext                &context,
     TableFunctionBindInput       &input,
     vector<LogicalType>          &return_types,
-    vector<string>               &names
+    AilakeBindNames &names
 ) {
     auto data = make_uniq<AilakeEstimateBindData>();
 
@@ -140,16 +141,13 @@ static void AilakeEstimateScan(
 // ── Registration ──────────────────────────────────────────────────────────────
 
 void RegisterAilakeEstimate(duckdb::ExtensionLoader &loader) {
-    TableFunction func(
-        "ailake_estimate",
-        {LogicalType::BIGINT, LogicalType::INTEGER},
-        AilakeEstimateScan,
-        AilakeEstimateBind,
-        AilakeEstimateInit
+    auto func = AilakeMakeTableFunction(
+        "ailake_estimate", {LogicalType::BIGINT, LogicalType::INTEGER},
+        AilakeEstimateScan, AilakeEstimateBind, AilakeEstimateInit
     );
 
-    func.named_parameters["hnsw_m"] = LogicalType::INTEGER;
-    func.named_parameters["pq_m"]   = LogicalType::INTEGER;
+    AilakeAddNamedParameter(func, "hnsw_m", LogicalType::INTEGER, Value(16));
+    AilakeAddNamedParameter(func, "pq_m", LogicalType::INTEGER, Value(-1));
 
     loader.RegisterFunction(func);
 }

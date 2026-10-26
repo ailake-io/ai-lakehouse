@@ -189,9 +189,10 @@ Veja [`docs/specs/JVM_PLUGINS.md`](./docs/specs/JVM_PLUGINS.md) para instalaçã
 O AI-Lake inclui um adaptador Kof validado em
 [`integrations/kof/`](./integrations/kof/). O cliente HTTP é tipado em Kof
 JVM/JS; aplicações Native usam o binding C-ABI no mesmo processo.
-O SDK Python e a integração Kof são publicados independentemente do core pelas
-Actions **Release Python** e **Release Kof**. O adaptador Kof Native exige uma
-C-ABI compatível; a versão do bundle não altera a versão do contrato ABI.
+O SDK Python é publicado separadamente pela Action **Release Python**, com a
+mesma versão do core. A integração Kof é publicada pela Action **Release Kof**
+com versionamento próprio. O adaptador Kof Native exige uma C-ABI compatível;
+a versão do bundle não altera a versão do contrato ABI.
 
 ```bash
 # Serviço local — por padrão escuta apenas em localhost
