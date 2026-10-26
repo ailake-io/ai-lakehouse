@@ -9,6 +9,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ── DuckDB version (must match the duckdb Python package used in tests) ────────
 set(DUCKDB_VERSION "v2.0.0" CACHE STRING "DuckDB version to build against")
+set(AILAKE_DUCKDB_VERSION_NUMBER "${DUCKDB_VERSION}")
+string(REGEX REPLACE "^v" "" AILAKE_DUCKDB_VERSION_NUMBER "${AILAKE_DUCKDB_VERSION_NUMBER}")
 
 include(FetchContent)
 
@@ -79,13 +81,16 @@ target_include_directories(duckdb_ailake PRIVATE
     ${duckdb_SOURCE_DIR}/src/include
 )
 
+if(AILAKE_DUCKDB_VERSION_NUMBER VERSION_GREATER_EQUAL "2.0.0")
+    target_compile_definitions(duckdb_ailake PRIVATE AILAKE_DUCKDB_V2=1)
+else()
+    target_compile_definitions(duckdb_ailake PRIVATE AILAKE_DUCKDB_V2=0)
+endif()
+
 # DuckDB 1.5 requires its generated C++ loader plus the core_functions and
 # parquet static targets to resolve built-in extension symbols. DuckDB 2.0
 # removed that generated loader and registers linked static extensions at
 # link-time; the version-specific target list below accounts for that change.
-set(DUCKDB_VERSION_NUMBER "${DUCKDB_VERSION}")
-string(REGEX REPLACE "^v" "" DUCKDB_VERSION_NUMBER "${DUCKDB_VERSION_NUMBER}")
-
 # DuckDB 2.0 switched from the generated C++ extension loader to link-time
 # registration of static extensions. The old loader target is absent there;
 # the 1.5 line still needs it to satisfy DuckDB's built-in extension symbols.
@@ -93,7 +98,7 @@ set(DUCKDB_LINK_LIBRARIES
     nlohmann_json::nlohmann_json
     duckdb_static
 )
-if(DUCKDB_VERSION_NUMBER VERSION_LESS "2.0.0")
+if(AILAKE_DUCKDB_VERSION_NUMBER VERSION_LESS "2.0.0")
     list(APPEND DUCKDB_LINK_LIBRARIES duckdb_generated_extension_loader)
 endif()
 list(APPEND DUCKDB_LINK_LIBRARIES
