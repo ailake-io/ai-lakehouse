@@ -128,12 +128,26 @@ jobs:
           if grep -q "^## \[$NEW_VERSION\]" CHANGELOG.md; then
             echo "CHANGELOG.md already contains [$NEW_VERSION], skipping promotion"
           else
+            # Nobody wrote release notes under [Unreleased]: fall back to the
+            # commit subjects since the last tag instead of an empty section.
+            UNRELEASED=$(awk '/^## \[Unreleased\]$/{f=1;next} /^## \[/{f=0} f && NF' CHANGELOG.md)
+            NOTES=""
+            if [ -z "$UNRELEASED" ]; then
+              NOTES=$(git log --no-merges --format='- %s' "$LATEST..HEAD" \
+                | grep -v 'chore: bump version' || true)
+            fi
             CHANGELOG_TMP=$(mktemp)
-            awk -v version="$NEW_VERSION" -v date="$RELEASE_DATE" '
+            NOTES="$NOTES" awk -v version="$NEW_VERSION" -v date="$RELEASE_DATE" '
               /^## \[Unreleased\]$/ {
                 print
                 print ""
                 print "## [" version "] — " date
+                if (ENVIRON["NOTES"] != "") {
+                  print ""
+                  print "### Changed"
+                  print ""
+                  print ENVIRON["NOTES"]
+                }
                 next
               }
               { print }
@@ -226,26 +240,35 @@ jobs:
           # is also protected by a PR-required ruleset.
           token: ${{ secrets.ACTIONS_PAT }}
 
-      - name: Cherry-pick version-bump commit onto develop
+      - name: Merge released main into develop
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           TAG="${{ needs.release.outputs.tag }}"
-          # The tag is created immediately after the bump commit (before any
-          # other commits land on main), so it always points at that exact commit.
-          BUMP_SHA=$(git rev-list -n 1 "$TAG")
-
           git fetch origin develop
           git checkout -B develop origin/develop
 
-          if git cherry-pick "$BUMP_SHA"; then
-            git push origin develop
-          else
-            git cherry-pick --abort
-            echo "::error::Version-bump commit $BUMP_SHA (tag $TAG) did not cherry-pick cleanly onto develop — develop is now version-drifted from main. Resolve manually: 'git checkout develop && git cherry-pick $BUMP_SHA', fix conflicts, then push."
-            exit 1
+          # Merge the released commit (not a cherry-pick of the bump alone):
+          # changes merged straight into main (hotfix PRs) also reach develop,
+          # and main becomes an ancestor of develop. On conflict main wins —
+          # it is what was just released. Idempotent on reruns.
+          if ! git merge --no-ff -X theirs "$TAG" -m "chore: sync main ($TAG) into develop"; then
+            # -X theirs does not cover modify/delete conflicts; take main's side.
+            for f in $(git diff --name-only --diff-filter=U); do
+              if git cat-file -e "$TAG:$f" 2>/dev/null; then
+                git checkout "$TAG" -- "$f"
+              else
+                git rm -q -- "$f"
+              fi
+            done
+            git commit --no-edit
           fi
+
+          # Develop may hold unreleased work merged after the release PR;
+          # anything else differing from the tag means the sync went wrong.
+          git diff --stat "$TAG" develop
+          git push origin develop
 
   publish-crates:
     name: Publish to crates.io

@@ -14,8 +14,13 @@ número de contrato para compatibilidade binária.
 4. Os manifests e exemplos documentais do core são atualizados para a nova versão.
 5. A seção `[Unreleased]` do `CHANGELOG.md` vira a seção da versão publicada,
    com a data UTC do release, e uma nova seção `[Unreleased]` é deixada no topo.
+   Se `[Unreleased]` estiver vazio, a seção é gerada a partir dos commits desde
+   a última tag.
 6. A Action cria a tag e o GitHub Release do core e publica crates e a biblioteca
    JNI. Workflows separados publicam os SDKs e integrações.
+7. O job `sync-develop` faz merge do commit da tag em `develop` (em conflito,
+   vence a `main`), deixando `main` e `develop` iguais — inclusive hotfixes
+   mergeados direto na `main`. É idempotente em reruns.
 
 Não edite manualmente a versão dos artefatos para um release normal. Durante o
 desenvolvimento, registre mudanças visíveis ao usuário em `[Unreleased]`:
