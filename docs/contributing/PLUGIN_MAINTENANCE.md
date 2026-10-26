@@ -51,6 +51,46 @@ asset is an atomic plugin+core build and is also tied to its pinned DuckDB ABI.
 The C++ and Go SDKs version their own public APIs and retain format compatibility
 checks against published AI-Lake files.
 
+## Core changes: plugin impact check
+
+Every core change (Rust crates, workspace dependencies, file format, C-ABI)
+must be checked against every plugin before it is merged and again before each
+core release. Plugins release independently, so nothing republishes them
+automatically: a core fix only reaches a plugin's users after that plugin's own
+release.
+
+How each plugin consumes the core decides what a core change requires:
+
+| Plugin | Consumes the core via | Needs a release when the core changes… |
+|---|---|---|
+| DuckDB extension | Rust core linked statically | always (code, dependencies, security fixes) |
+| Python SDK | Rust core compiled into the wheel | always; version follows the core |
+| Spark, Trino, Flink | JNI library built from `ailake-jni` and bundled in the JAR | `ailake-jni`/core code or dependency changes (incl. security); C-ABI changes also need wrapper updates |
+| Kof | HTTP client + Native adapter over the C-ABI | C-ABI contract changes |
+| Go SDK | Native Avro/Parquet reader + `ailake` CLI | file/manifest format changes, CLI flag changes, its own `go.mod` dependencies |
+| C++ SDK | Native header-only reader + `ailake` CLI | file/manifest format changes, CLI flag changes |
+| Airflow provider | `ailake` CLI | CLI flag or output-format changes |
+| Airbyte destination | `ailake` Python SDK from PyPI | Python SDK API changes (dependency fixes arrive through the SDK release) |
+
+Checklist for a core change:
+
+1. Classify the change: internal code, dependency/security update, file or
+   manifest format, C-ABI, CLI flags/output.
+2. Use the table to list affected plugins. Check each one for required code
+   changes (wrapper, flags, format readers) in the same PR.
+3. Format changes: verify backward compatibility by writing a table with the
+   previous release and reading/compacting it with the new build (vector, FTS,
+   deletes), including the native Go/C++ readers.
+4. After the core release, run the release workflow of every affected plugin
+   and record it in `CHANGELOG.md`.
+
+To find plugin code changed since its last release, compare content rather than
+`git log` (squash merges make history misleading):
+
+```sh
+git diff --stat <plugin-tag> origin/develop -- <plugin-directory>
+```
+
 ## Shared JVM dependencies
 
 Spark, Trino, and Flink read common build plugin and JNA versions from

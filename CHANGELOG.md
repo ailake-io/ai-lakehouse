@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Docs
+
+- **Checagem de impacto do core nos plugins** — `docs/contributing/PLUGIN_MAINTENANCE.md` documenta como cada plugin consome o core (link estático, JNI, C-ABI, CLI, SDK Python) e o checklist obrigatório para toda mudança no core: classificar a mudança, ajustar os plugins afetados no mesmo PR, testar compatibilidade de formato com a release anterior e disparar o release de cada plugin afetado.
+
 ### Fixed
 
 - **Release: `sync-develop` falhava e deixava `develop` divergente da `main`** — o job fazia cherry-pick só do commit de bump; quando um PR entrava direto na `main` (ex.: #148, DuckDB 2.0) o contexto do `Cargo.toml` divergia e o cherry-pick conflitava (release v0.1.19, inclusive em reruns). Agora o job faz merge do commit da tag em `develop` com `-X theirs` (conflitos resolvidos a favor da `main`), tornando os dois branches iguais após cada release e o job idempotente.
