@@ -15,6 +15,16 @@ using AilakeBindNames = duckdb::vector<duckdb::string>;
 #define AILAKE_FLAT_VECTOR_DATA(type, vector) duckdb::FlatVector::GetData<type>(vector)
 #endif
 
+#if AILAKE_DUCKDB_V2
+inline const duckdb::string &AilakeGetIdentifierName(const duckdb::Identifier &name) {
+    return name.GetIdentifierName();
+}
+#else
+inline const duckdb::string &AilakeGetIdentifierName(const duckdb::string &name) {
+    return name;
+}
+#endif
+
 inline duckdb::TableFunction AilakeMakeTableFunction(
     const char *name,
     std::initializer_list<duckdb::LogicalType> arguments,

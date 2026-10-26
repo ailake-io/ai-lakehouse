@@ -76,7 +76,7 @@ static unique_ptr<FunctionData> AilakeMultimodalBind(
         ailake::ModalQueryArg arg;
         // Resolve by field name (keys may be in any order).
         for (size_t i = 0; i < keys.size(); ++i) {
-            const std::string &fname = keys[i].first;
+            const std::string &fname = AilakeGetIdentifierName(keys[i].first);
             const Value       &fval  = children[i];
             if (fname == "col") {
                 if (fval.type().id() != LogicalTypeId::VARCHAR) {

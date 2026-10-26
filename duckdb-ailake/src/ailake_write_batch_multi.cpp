@@ -81,7 +81,7 @@ static std::vector<ailake::VectorColSpecArg> extract_vector_columns(const Value 
         auto &children = StructValue::GetChildren(elem);
         auto &keys     = StructType::GetChildTypes(elem.type());
         for (size_t i = 0; i < keys.size(); ++i) {
-            const std::string &fname = keys[i].first;
+            const std::string &fname = AilakeGetIdentifierName(keys[i].first);
             const Value       &fval  = children[i];
             if (fval.IsNull()) continue;
             if (fname == "col") {
