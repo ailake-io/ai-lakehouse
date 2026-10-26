@@ -490,7 +490,7 @@ Core releases publish Rust crates and JNI. Python wheels are published separatel
 
 Delivered in Phase 7:
 
-- **`duckdb-ailake`** — C++ DuckDB community extension: `ailake_search()`, `ailake_write_batch()`, `ailake_scan()` table functions; `dlopen`-based C-ABI bridge to `libailake_jni.so`; 512-byte DuckDB 1.0+ metadata block; DuckDB v1.1.3 via CMake FetchContent.
+- **`duckdb-ailake`** — C++ DuckDB community extension: `ailake_search()`, `ailake_write_batch()`, `ailake_scan()` table functions; statically linked JNI bridge; 512-byte DuckDB extension metadata; builds against DuckDB 1.5.6 or 2.0.0 via CMake FetchContent.
 - **`write_batch_auto_deferred`** — async deferred variant of the `Auto` engine: detects hardware at runtime, writes Parquet immediately (~200k vec/s), builds index in background via `IndexStatus::Indexing → Ready`.
 - **`pq_only` + `ivf_residual`** — Python SDK `TableWriter(pq_only=True, ivf_residual=True)`.
 - **`airbyte-destination-ailake`** — Airbyte CDK v3 destination connector with `cmd`, `openai`, `cohere`, `http` embedding backends; state message → commit durability.

@@ -35,19 +35,19 @@ futures     = "0.3"
 redis       = { version = "0.27", default-features = false, features = ["tokio-comp", "script"] }
 
 # Data
-parquet      = { version = "52", features = ["async"] }
-arrow-array  = "52"
-arrow-schema = "52"
-arrow-select = "52"
-arrow-buffer = "52"
-arrow-ipc    = "52"
+parquet      = { version = "60", features = ["async"] }
+arrow-array  = "60"
+arrow-schema = "60"
+arrow-select = "60"
+arrow-buffer = "60"
+arrow-ipc    = "60"
 object_store = { version = "0.10" }  # cloud features added per-crate via ailake-store feature flags
 
 # Iceberg — metadata/avro manipulation; custom code in ailake-catalog, not the iceberg crate
 apache-avro = "0.16"
 
 # Full-text search
-tantivy     = { version = "0.22", default-features = false, features = ["mmap"] }
+tantivy     = { version = "0.27", default-features = false, features = ["mmap"] }
 ailake-fts  = { path = "ailake-fts", version = "0.1.18" }
 
 # Vector index — HNSW is custom Rust code in ailake-index; no hnsw_rs dep needed
@@ -61,7 +61,7 @@ libloading  = "0.8"
 
 # Compression
 lz4_flex    = "0.11"
-zstd        = "0.13"
+zstd        = "0.14"
 sha2        = "0.10"
 
 

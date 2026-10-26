@@ -642,15 +642,26 @@ The extension must be built against the same DuckDB version as the Python/CLI cl
 ```bash
 cmake -S duckdb-ailake -B duckdb-ailake/build \
   -DCMAKE_BUILD_TYPE=Release \
-  -DDUCKDB_VERSION=v1.5.0
+  -DDUCKDB_VERSION=v2.0.0
 ```
 
-Match the pip package: `pip install duckdb==1.5.0` (see `.github/workflows/ci-duckdb.yml` for the
-version this project's CI actually tests against — keep this section in sync with it). Now that
+The supported DuckDB versions are **1.5.6** and **2.0.0**. Build a separate extension for each host
+version; CI compiles and runs the extension suite against both. Match the pip package to the CMake
+version (for example, `pip install duckdb==2.0.0`). Now that
 the extension links a real `duckdb_static` at this exact version/commit (see "Design" below)
 instead of resolving symbols from whatever DuckDB happens to be hosting it, a version mismatch
 between this setting and the client fails more informatively (ABI/struct-layout mismatch at
 `LOAD`) rather than the old silent "works with Python, not CLI" split.
+
+The DuckDB plugin release publishes separate extension files named
+`ailake-duckdb-v1.5.6.duckdb_extension` and
+`ailake-duckdb-v2.0.0.duckdb_extension`. Load the file built for the same DuckDB version as the
+Python package or CLI.
+
+DuckDB 2.0 changes the default database storage format, and DuckDB 1.5 cannot open a database
+written in the 2.0 format. For an existing database, migrate with DuckDB's export/import procedure,
+validate it in a shadow environment, and retain a backup before switching production over. See the
+[DuckDB 2.0 migration guide](https://duckdb.org/docs/2.0/operations_manual/migration).
 
 ## Load in Python
 

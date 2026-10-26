@@ -26,6 +26,7 @@
 #include "ailake_extension.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb_compat.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -51,7 +52,7 @@ static unique_ptr<FunctionData> AilakeInfoBind(
     ClientContext                &context,
     TableFunctionBindInput       &input,
     vector<LogicalType>          &return_types,
-    vector<string>               &names
+    AilakeBindNames &names
 ) {
     auto data = make_uniq<AilakeInfoBindData>();
 
@@ -149,17 +150,13 @@ static void AilakeInfoScan(
 // ── Registration ──────────────────────────────────────────────────────────────
 
 void RegisterAilakeInfo(duckdb::ExtensionLoader &loader) {
-    TableFunction func(
-        "ailake_info",
-        {LogicalType::VARCHAR},
-        AilakeInfoScan,
-        AilakeInfoBind,
-        AilakeInfoInit
+    auto func = AilakeMakeTableFunction(
+        "ailake_info", {LogicalType::VARCHAR}, AilakeInfoScan, AilakeInfoBind, AilakeInfoInit
     );
 
-    func.named_parameters["namespace"]         = LogicalType::VARCHAR;
-    func.named_parameters["table_name"]        = LogicalType::VARCHAR;
-    func.named_parameters["catalog_opts_json"] = LogicalType::VARCHAR;
+    AilakeAddNamedParameter(func, "namespace", LogicalType::VARCHAR, Value("default"));
+    AilakeAddNamedParameter(func, "table_name", LogicalType::VARCHAR, Value("table"));
+    AilakeAddNamedParameter(func, "catalog_opts_json", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 
     loader.RegisterFunction(func);
 }
