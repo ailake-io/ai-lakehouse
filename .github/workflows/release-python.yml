@@ -224,7 +224,8 @@ jobs:
           ref: ${{ needs.resolve.outputs.source_sha }}
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          # ubuntu-latest (26.04) has no 3.9; the sdist is interpreter-independent (abi3-py39)
+          python-version: "3.12"
       - name: Set Python SDK version
         env:
           VERSION: ${{ needs.resolve.outputs.version }}

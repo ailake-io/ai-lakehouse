@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### CI
+
+- **Release Python: sdist no Ubuntu 26.04** — o job do source distribution usava Python 3.9, que não existe no `ubuntu-latest` (agora 26.04); passa a usar 3.12. O pacote continua `abi3-py39`, compatível com Python 3.9+.
+
 ## [0.1.20] — 2026-10-27
 
 ### Docs
