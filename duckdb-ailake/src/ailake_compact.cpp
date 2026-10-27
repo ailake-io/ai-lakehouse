@@ -100,6 +100,7 @@ void RegisterAilakeCompact(duckdb::ExtensionLoader &loader) {
         LogicalType::BIGINT,
         AilakeCompactExec
     );
+    AilakeMarkFallible(function);
     loader.RegisterFunction(function);
 #else
     ScalarFunctionSet fn_set("ailake_compact");
@@ -165,6 +166,8 @@ void RegisterAilakeCompact(duckdb::ExtensionLoader &loader) {
         LogicalType::BIGINT,
         AilakeCompactExec
     ));
+
+    AilakeMarkFallible(fn_set);
 
     loader.RegisterFunction(fn_set);
 #endif
