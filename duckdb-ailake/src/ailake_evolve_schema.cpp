@@ -21,6 +21,7 @@
 //   );
 
 #include "ailake_extension.hpp"
+#include "duckdb_compat.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -119,6 +120,8 @@ void RegisterAilakeEvolveSchema(duckdb::ExtensionLoader &loader) {
         LogicalType::INTEGER,
         AilakeEvolveSchemaExec
     ));
+
+    AilakeMarkFallible(fn_set);
 
     loader.RegisterFunction( fn_set);
 }

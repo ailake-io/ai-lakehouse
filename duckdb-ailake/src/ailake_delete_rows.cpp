@@ -26,6 +26,7 @@
 //       'data/part-00001.parquet', [3, 7, 12]::UINTEGER[]);
 
 #include "ailake_extension.hpp"
+#include "duckdb_compat.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -112,6 +113,8 @@ void RegisterAilakeDeleteRows(duckdb::ExtensionLoader &loader) {
         LogicalType::BOOLEAN,
         AilakeDeleteRowsExec
     ));
+
+    AilakeMarkFallible(fn_set);
 
     loader.RegisterFunction(fn_set);
 }

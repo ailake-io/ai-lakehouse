@@ -30,6 +30,7 @@
 //       'image_embedding', 512, metric := 'euclidean');
 
 #include "ailake_extension.hpp"
+#include "duckdb_compat.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -96,6 +97,31 @@ static void AilakeAddVectorColumnExec(
 }
 
 void RegisterAilakeAddVectorColumn(duckdb::ExtensionLoader &loader) {
+#if AILAKE_DUCKDB_V2
+    // DuckDB 2 makes scalar-function arguments positional-only when they are
+    // registered from LogicalType vectors; named FunctionParameters keep the
+    // documented `name := value` SQL form working (same as ailake_compact).
+    ScalarFunction function(
+        Identifier("ailake_add_vector_column"),
+        {
+            FunctionParameter(Identifier("table_path"), LogicalType::VARCHAR),
+            FunctionParameter(Identifier("column"), LogicalType::VARCHAR),
+            FunctionParameter(Identifier("dim"), LogicalType::INTEGER),
+            FunctionParameter(Identifier("metric"), LogicalType::VARCHAR, Value("cosine")),
+            FunctionParameter(Identifier("precision"), LogicalType::VARCHAR, Value("f16")),
+            FunctionParameter(Identifier("pre_normalize"), LogicalType::BOOLEAN, Value::BOOLEAN(false)),
+            FunctionParameter(Identifier("hnsw_m"), LogicalType::INTEGER, Value::INTEGER(-1)),
+            FunctionParameter(Identifier("hnsw_ef_construction"), LogicalType::INTEGER, Value::INTEGER(-1)),
+            FunctionParameter(Identifier("namespace"), LogicalType::VARCHAR, Value("default")),
+            FunctionParameter(Identifier("table_name"), LogicalType::VARCHAR, Value("table")),
+            FunctionParameter(Identifier("catalog_opts_json"), LogicalType::VARCHAR, Value("")),
+        },
+        LogicalType::INTEGER,
+        AilakeAddVectorColumnExec
+    );
+    AilakeMarkFallible(function);
+    loader.RegisterFunction(function);
+#else
     ScalarFunctionSet fn_set("ailake_add_vector_column");
 
     // Arity 3: (table_path, column, dim) — all defaults
@@ -172,5 +198,8 @@ void RegisterAilakeAddVectorColumn(duckdb::ExtensionLoader &loader) {
         AilakeAddVectorColumnExec
     ));
 
+    AilakeMarkFallible(fn_set);
+
     loader.RegisterFunction(fn_set);
+#endif
 }

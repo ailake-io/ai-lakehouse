@@ -29,6 +29,7 @@
 //       'v2', 'chunk_text', 'python3 embed.py');
 
 #include "ailake_extension.hpp"
+#include "duckdb_compat.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -127,6 +128,8 @@ void RegisterAilakeBackfillVectorColumn(duckdb::ExtensionLoader &loader) {
         LogicalType::BOOLEAN,
         AilakeBackfillVectorColumnExec
     ));
+
+    AilakeMarkFallible(fn_set);
 
     loader.RegisterFunction(fn_set);
 }

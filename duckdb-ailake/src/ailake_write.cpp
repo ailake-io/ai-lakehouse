@@ -24,6 +24,7 @@
 //   );
 
 #include "ailake_extension.hpp"
+#include "duckdb_compat.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -505,6 +506,8 @@ void RegisterAilakeWrite(duckdb::ExtensionLoader &loader) {
         LogicalType::BIGINT,
         AilakeWriteExecFull
     ));
+
+    AilakeMarkFallible(write_set);
 
     loader.RegisterFunction( write_set);
 }
