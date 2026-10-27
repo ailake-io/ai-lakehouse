@@ -252,5 +252,7 @@ void RegisterAilakeWriteBatchMulti(duckdb::ExtensionLoader &loader) {
         AilakeWriteBatchMultiExec
     ));
 
+    AilakeMarkFallible(fn_set);
+
     loader.RegisterFunction(fn_set);
 }

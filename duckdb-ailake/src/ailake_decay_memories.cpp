@@ -24,6 +24,7 @@
 //   SELECT ailake_decay_memories('file:///data/agent_memory', 0.1);
 
 #include "ailake_extension.hpp"
+#include "duckdb_compat.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -101,6 +102,8 @@ void RegisterAilakeDecayMemories(duckdb::ExtensionLoader &loader) {
         LogicalType::BIGINT,
         AilakeDecayMemoriesExec
     ));
+
+    AilakeMarkFallible(fn_set);
 
     loader.RegisterFunction(fn_set);
 }

@@ -72,3 +72,15 @@ inline void AilakeAddNamedParameter(
     function.named_parameters[name] = std::move(type);
 #endif
 }
+
+// DuckDB 2 turns an exception thrown by a scalar function into an INTERNAL
+// error unless the function is marked fallible. Our scalar functions report
+// native-call failures by throwing InvalidInputException, so mark them.
+template <class F>
+inline void AilakeMarkFallible(F &function) {
+#if AILAKE_DUCKDB_V2
+    function.SetFallible();
+#else
+    (void)function;
+#endif
+}

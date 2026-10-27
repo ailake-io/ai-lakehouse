@@ -38,6 +38,7 @@
 //       vector_column := 'image_embedding', metric := 'euclidean');
 
 #include "ailake_extension.hpp"
+#include "duckdb_compat.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -137,6 +138,40 @@ static void AilakeCreateTableExec(
 }
 
 void RegisterAilakeCreateTable(duckdb::ExtensionLoader &loader) {
+#if AILAKE_DUCKDB_V2
+    // DuckDB 2 makes scalar-function arguments positional-only when they are
+    // registered from LogicalType vectors; named FunctionParameters keep the
+    // documented `name := value` SQL form working (same as ailake_compact).
+    ScalarFunction function(
+        Identifier("ailake_create_table"),
+        {
+            FunctionParameter(Identifier("table_path"), LogicalType::VARCHAR),
+            FunctionParameter(Identifier("dim"), LogicalType::INTEGER),
+            FunctionParameter(Identifier("vector_column"), LogicalType::VARCHAR, Value("embedding")),
+            FunctionParameter(Identifier("metric"), LogicalType::VARCHAR, Value("cosine")),
+            FunctionParameter(Identifier("precision"), LogicalType::VARCHAR, Value("f16")),
+            FunctionParameter(Identifier("format_version"), LogicalType::INTEGER, Value::INTEGER(2)),
+            FunctionParameter(Identifier("hnsw_m"), LogicalType::INTEGER, Value::INTEGER(-1)),
+            FunctionParameter(Identifier("hnsw_ef_construction"), LogicalType::INTEGER, Value::INTEGER(-1)),
+            FunctionParameter(Identifier("pre_normalize"), LogicalType::BOOLEAN, Value::BOOLEAN(false)),
+            FunctionParameter(Identifier("modality"), LogicalType::VARCHAR, Value("")),
+            FunctionParameter(Identifier("partition_by"), LogicalType::VARCHAR, Value("")),
+            FunctionParameter(Identifier("partition_value"), LogicalType::VARCHAR, Value("")),
+            FunctionParameter(Identifier("partition_column_type"), LogicalType::VARCHAR, Value("")),
+            FunctionParameter(Identifier("partition_fields_json"), LogicalType::VARCHAR, Value("")),
+            FunctionParameter(Identifier("fts_columns"), LogicalType::VARCHAR, Value("")),
+            FunctionParameter(Identifier("fts_tokenizer"), LogicalType::VARCHAR, Value("")),
+            FunctionParameter(Identifier("embedding_model"), LogicalType::VARCHAR, Value("")),
+            FunctionParameter(Identifier("namespace"), LogicalType::VARCHAR, Value("default")),
+            FunctionParameter(Identifier("table_name"), LogicalType::VARCHAR, Value("table")),
+            FunctionParameter(Identifier("catalog_opts_json"), LogicalType::VARCHAR, Value("")),
+        },
+        LogicalType::BOOLEAN,
+        AilakeCreateTableExec
+    );
+    AilakeMarkFallible(function);
+    loader.RegisterFunction(function);
+#else
     ScalarFunctionSet fn_set("ailake_create_table");
 
     // All arities from 2 to 19 share the same Exec function.
@@ -299,5 +334,8 @@ void RegisterAilakeCreateTable(duckdb::ExtensionLoader &loader) {
         AilakeCreateTableExec
     ));
 
+    AilakeMarkFallible(fn_set);
+
     loader.RegisterFunction(fn_set);
+#endif
 }

@@ -101,75 +101,26 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python deps
-        run: pip install duckdb==$(echo ${{ matrix.duckdb_version }} | tr -d 'v') pyarrow numpy
+        run: pip install duckdb==$(echo ${{ matrix.duckdb_version }} | tr -d 'v') pyarrow numpy pytest
 
       - name: Generate write fixture
         run: python tests/fixtures/write_fixture.py ./compat-fixture
         env:
           AILAKE_LIB: target/release/libailake_jni.so
 
-      - name: Run write tests
-        run: python duckdb-ailake/test/test_write.py
-        env:
-          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
-          AILAKE_TMPDIR: /tmp/ailake_duck_write
-
-      - name: Run search tests
-        run: python duckdb-ailake/test/test_search.py
+      # Run every test file, as release-plugin.yml does: a hand-picked list let
+      # test_add_vector_column (and others) skip CI and fail only at release time.
+      - name: Run all DuckDB extension tests
         env:
           AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
           AILAKE_FIXTURE: ./compat-fixture
-
-      - name: Run scan tests
-        run: python duckdb-ailake/test/test_scan.py
-        env:
-          AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
-          AILAKE_FIXTURE: ./compat-fixture
-
-      - name: Run multimodal search tests
-        run: python duckdb-ailake/test/test_multimodal.py
-        env:
-          AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
-          AILAKE_FIXTURE: ./compat-fixture
-
-      - name: Run delete_where tests
-        run: python duckdb-ailake/test/test_delete.py
-        env:
-          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
-          AILAKE_TMPDIR: /tmp/ailake_duck_delete
-
-      - name: Run evolve_schema tests
-        run: python duckdb-ailake/test/test_evolve.py
-        env:
-          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
-          AILAKE_TMPDIR: /tmp/ailake_duck_evolve
-
-      - name: Run write_batch_multi tests
-        run: python duckdb-ailake/test/test_write_multi.py
-        env:
-          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
-          AILAKE_TMPDIR: /tmp/ailake_duck_write_multi
-
-      - name: Run compact tests
-        run: python duckdb-ailake/test/test_compact.py
-        env:
-          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
-          AILAKE_TMPDIR: /tmp/ailake_duck_compact
-
-      - name: Run create_table tests
-        run: python duckdb-ailake/test/test_create_table.py
-        env:
-          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
-          AILAKE_TMPDIR: /tmp/ailake_duck_create_table
-
-      - name: Phase T — Run FTS write tests
-        run: python duckdb-ailake/test/test_write.py -k fts
-        env:
-          AILAKE_EXT:    duckdb-ailake/build/ailake.duckdb_extension
-          AILAKE_TMPDIR: /tmp/ailake_duck_fts_write
-
-      - name: Phase T — Run FTS search tests
-        run: python duckdb-ailake/test/test_search.py -k fts
-        env:
-          AILAKE_EXT:     duckdb-ailake/build/ailake.duckdb_extension
-          AILAKE_FIXTURE: ./compat-fixture
+        run: |
+          set -euo pipefail
+          failed=0
+          for TEST_FILE in duckdb-ailake/test/test_*.py; do
+            TEST_NAME=$(basename "$TEST_FILE" .py)
+            echo "::group::$TEST_NAME"
+            AILAKE_TMPDIR="$RUNNER_TEMP/$TEST_NAME" python -m pytest "$TEST_FILE" -q || failed=1
+            echo "::endgroup::"
+          done
+          exit $failed

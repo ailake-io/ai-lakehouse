@@ -7,7 +7,7 @@ Verifies that:
   1. Creating an empty table succeeds.
   2. Searching on an empty table returns 0 rows (no error).
   3. Creating the same table again raises an error.
-  4. Custom vector_column/metric/precision are honored.
+  4. Custom vector_column/metric/precision are honored (positional and named).
   5. create → insert → search round-trips correctly.
 
 Prerequisites:
@@ -84,6 +84,11 @@ def test_create_duplicate_raises():
             conn.execute(f"SELECT ailake_create_table('{table_dir}', 1536, 'embedding', 'cosine', 'f16', 2)")
             require(False, "expected an exception creating a duplicate table, got a result")
         except Exception as e:
+            # DuckDB 2 reports throws from non-fallible scalar functions as INTERNAL errors.
+            require(
+                isinstance(e, duckdb.InvalidInputException),
+                f"expected InvalidInputException, got {type(e).__name__}: {e}",
+            )
             require(
                 "already exists" in str(e) or "TableAlreadyExists" in str(e) or "Conflict" in str(e),
                 f"unexpected error message: {e}",
@@ -105,6 +110,26 @@ def test_create_with_custom_params():
         ).fetchall()
         require(len(rows) == 0, f"expected 0 results from empty table, got {len(rows)}")
         print("PASS test_create_with_custom_params")
+    finally:
+        if cleanup:
+            shutil.rmtree(cleanup, ignore_errors=True)
+        conn.close()
+
+
+def test_create_with_named_params():
+    # Documented `name := value` form; DuckDB 2 needs named FunctionParameters for it.
+    conn = setup_connection()
+    table_dir, cleanup = make_table_dir("named_table")
+    try:
+        conn.execute(
+            f"SELECT ailake_create_table('{table_dir}', 768, "
+            f"vector_column := 'image_embedding', metric := 'euclidean')"
+        )
+        rows = conn.execute(
+            f"SELECT * FROM ailake_search('{table_dir}', {float_list_sql(768)}, 5, vec_col='image_embedding')"
+        ).fetchall()
+        require(len(rows) == 0, f"expected 0 results from empty table, got {len(rows)}")
+        print("PASS test_create_with_named_params")
     finally:
         if cleanup:
             shutil.rmtree(cleanup, ignore_errors=True)
@@ -138,6 +163,7 @@ if __name__ == "__main__":
     test_create_empty_table_search_returns_zero_rows()
     test_create_duplicate_raises()
     test_create_with_custom_params()
+    test_create_with_named_params()
     test_create_then_insert_then_search()
     print()
     print("PASS: ailake_create_table — all tests passed")

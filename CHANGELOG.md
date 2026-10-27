@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **DuckDB 2.0: argumentos nomeados em `ailake_add_vector_column`, `ailake_create_table` e `ailake_migrate`** — no DuckDB 2.0, função escalar registrada só com tipos aceita apenas argumentos posicionais, então a forma documentada `metric := 'euclidean'` falhava com `Binder Error`. As três passam a usar `FunctionParameter` nomeado na 2.0, como `ailake_compact` já fazia. A 1.5.x não muda.
+- **DuckDB 2.0: erros das funções escalares viravam `INTERNAL Error`** — a 2.0 exige que função escalar que lança exceção seja marcada com `SetFallible()`; sem isso, uma falha comum (tabela duplicada, caminho inexistente) virava erro interno, que pode invalidar a conexão. Todas as funções escalares do plugin passam a ser marcadas e devolvem `InvalidInputException` como na 1.5.x.
+
+### CI
+
+- **CI DuckDB roda todos os testes** — `ci-duckdb.yml` rodava uma lista fixa de arquivos e deixava de fora `test_add_vector_column`, `test_decay_memories`, `test_delete_rows`, `test_estimate` e `test_info`; o erro acima só apareceu no release do plugin. Agora roda todo `duckdb-ailake/test/test_*.py`, igual ao release.
+- **Release Python: sdist no Ubuntu 26.04** — o job do source distribution usava Python 3.9, que não existe no `ubuntu-latest` (agora 26.04); passa a usar 3.12. O pacote continua `abi3-py39`, compatível com Python 3.9+.
+
 ## [0.1.20] — 2026-10-27
 
 ### Docs

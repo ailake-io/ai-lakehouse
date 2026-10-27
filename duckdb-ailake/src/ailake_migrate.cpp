@@ -34,6 +34,7 @@
 //       'python3 embed_v2.py', model_name := 'text-embedding-3-large');
 
 #include "ailake_extension.hpp"
+#include "duckdb_compat.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -103,6 +104,32 @@ static void AilakeMigrateExec(
 }
 
 void RegisterAilakeMigrate(duckdb::ExtensionLoader &loader) {
+#if AILAKE_DUCKDB_V2
+    // DuckDB 2 makes scalar-function arguments positional-only when they are
+    // registered from LogicalType vectors; named FunctionParameters keep the
+    // documented `name := value` SQL form working (same as ailake_compact).
+    ScalarFunction function(
+        Identifier("ailake_migrate"),
+        {
+            FunctionParameter(Identifier("table_path"), LogicalType::VARCHAR),
+            FunctionParameter(Identifier("old_column"), LogicalType::VARCHAR),
+            FunctionParameter(Identifier("new_column"), LogicalType::VARCHAR),
+            FunctionParameter(Identifier("embed_cmd"), LogicalType::VARCHAR),
+            FunctionParameter(Identifier("text_column"), LogicalType::VARCHAR, Value("chunk_text")),
+            FunctionParameter(Identifier("strategy"), LogicalType::VARCHAR, Value("atomic-replace")),
+            FunctionParameter(Identifier("batch_size"), LogicalType::BIGINT, Value::BIGINT(10000)),
+            FunctionParameter(Identifier("model_name"), LogicalType::VARCHAR, Value("")),
+            FunctionParameter(Identifier("model_version"), LogicalType::VARCHAR, Value("")),
+            FunctionParameter(Identifier("namespace"), LogicalType::VARCHAR, Value("default")),
+            FunctionParameter(Identifier("table_name"), LogicalType::VARCHAR, Value("table")),
+            FunctionParameter(Identifier("catalog_opts_json"), LogicalType::VARCHAR, Value("")),
+        },
+        LogicalType::BOOLEAN,
+        AilakeMigrateExec
+    );
+    AilakeMarkFallible(function);
+    loader.RegisterFunction(function);
+#else
     ScalarFunctionSet fn_set("ailake_migrate");
 
     // Arity 4: (table_path, old_column, new_column, embed_cmd) — all defaults
@@ -181,5 +208,8 @@ void RegisterAilakeMigrate(duckdb::ExtensionLoader &loader) {
         AilakeMigrateExec
     ));
 
+    AilakeMarkFallible(fn_set);
+
     loader.RegisterFunction(fn_set);
+#endif
 }
