@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.20] — 2026-10-27
+
 ### Docs
 
 - **Checagem de impacto do core nos plugins** — `docs/contributing/PLUGIN_MAINTENANCE.md` documenta como cada plugin consome o core (link estático, JNI, C-ABI, CLI, SDK Python) e o checklist obrigatório para toda mudança no core: classificar a mudança, ajustar os plugins afetados no mesmo PR, testar compatibilidade de formato com a release anterior e disparar o release de cada plugin afetado.
