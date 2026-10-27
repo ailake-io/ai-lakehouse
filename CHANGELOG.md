@@ -16,6 +16,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### CI
 
+- **Release espera até 90 minutos pelo CI** — o job *Wait for CI checks* esperava 30 minutos e foi cancelado na primeira tentativa da v0.1.20 no exato momento em que o CI terminou verde. A espera passa a 90 minutos, com limite do job em 100, para o timeout sempre ser o erro claro do próprio laço.
 - **CI DuckDB roda todos os testes** — `ci-duckdb.yml` rodava uma lista fixa de arquivos e deixava de fora `test_add_vector_column`, `test_decay_memories`, `test_delete_rows`, `test_estimate` e `test_info`; o erro acima só apareceu no release do plugin. Agora roda todo `duckdb-ailake/test/test_*.py`, igual ao release.
 - **Release Python: sdist no Ubuntu 26.04** — o job do source distribution usava Python 3.9, que não existe no `ubuntu-latest` (agora 26.04); passa a usar 3.12. O pacote continua `abi3-py39`, compatível com Python 3.9+.
 

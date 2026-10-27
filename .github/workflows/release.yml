@@ -19,7 +19,10 @@ jobs:
   wait-for-ci:
     name: Wait for CI checks to pass
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Job limit stays above the 90-minute poll loop below, so a slow CI ends
+    # in the loop's clear timeout error instead of the job being cancelled
+    # (v0.1.20's first run was cancelled the moment CI turned green at 30 min).
+    timeout-minutes: 100
     permissions:
       checks: read
       actions: read
@@ -36,7 +39,7 @@ jobs:
           SELF_JOBS='^(Wait for CI checks to pass|Create GitHub Release|Sync version bump to develop|Publish to crates\.io|Build and upload JNI library)$'
 
           echo "Waiting for all other check-runs on $SHA to complete successfully..."
-          for i in $(seq 1 90); do
+          for i in $(seq 1 270); do
             runs_json=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate -q '.check_runs')
             others=$(echo "$runs_json" | jq --arg self "$SELF_JOBS" '[.[] | select(.name | test($self) | not)]')
             total=$(echo "$others" | jq 'length')
@@ -58,7 +61,7 @@ jobs:
             echo "  [$((i * 20))s] $pending/$total check(s) still pending (or none reported yet)..."
             sleep 20
           done
-          echo "::error::Timed out after 30 minutes waiting for CI checks to complete on $SHA."
+          echo "::error::Timed out after 90 minutes waiting for CI checks to complete on $SHA."
           exit 1
 
   release:
