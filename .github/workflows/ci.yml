@@ -25,6 +25,18 @@ jobs:
       - run: python -m unittest scripts.test_plugins
       - run: python scripts/plugins.py check
 
+  lockfiles:
+    name: lockfiles up to date
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # Fails when a Cargo.toml change was committed without its Cargo.lock.
+      # fuzz/ is its own workspace and has a separate lockfile.
+      - run: cargo metadata --locked --format-version 1 >/dev/null
+      - run: cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml >/dev/null
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest

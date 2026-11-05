@@ -1,8 +1,6 @@
 # Rust
 /target/
 fuzz/target/
-Cargo.lock
-!/fuzz/Cargo.lock
 
 # C/C++ build artifacts
 *.o
