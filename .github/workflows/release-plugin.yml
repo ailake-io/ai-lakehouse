@@ -105,7 +105,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build native library
-        run: cargo build --release -p ailake-jni
+        run: cargo build --release --locked -p ailake-jni
       - name: Stage native library
         shell: bash
         env:
@@ -186,7 +186,7 @@ jobs:
 
       - name: Build JNI library for integration tests
         if: inputs.plugin == 'spark' || inputs.plugin == 'trino' || inputs.plugin == 'flink'
-        run: cargo build --release -p ailake-jni
+        run: cargo build --release --locked -p ailake-jni
 
       - name: Generate Spark/Trino JNI fixture
         if: inputs.plugin == 'spark' || inputs.plugin == 'trino'
@@ -198,7 +198,7 @@ jobs:
 
       - name: Build JNI library for Kof Native checks
         if: inputs.plugin == 'kof'
-        run: cargo build -p ailake-jni
+        run: cargo build --locked -p ailake-jni
 
       - name: Test and build selected plugin
         shell: bash
@@ -242,7 +242,7 @@ jobs:
               cp airbyte-destination-ailake/dist/* dist/
               ;;
             duckdb)
-              cargo build --release -p ailake-jni
+              cargo build --release --locked -p ailake-jni
               python -m pip install pytest numpy pyarrow
               AILAKE_LIB=target/release/libailake_jni.so python tests/fixtures/write_fixture.py ./compat-fixture
               for DUCKDB_VERSION in v1.5.6 v2.0.0; do

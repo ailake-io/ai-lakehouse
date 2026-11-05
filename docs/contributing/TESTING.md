@@ -624,6 +624,7 @@ SIMD information.
 
 | Job | Command | What it covers |
 |---|---|---|
+| `lockfiles` | `cargo metadata --locked` (root and `fuzz/`) | Both tracked `Cargo.lock` files match their manifests |
 | `fmt` | `cargo fmt --all -- --check` | Formatting |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | Lints |
 | `deny` | `cargo deny check licenses advisories sources` | License + advisory audit |
@@ -785,7 +786,7 @@ Re-builds and re-publishes `ailake` wheels to PyPI + attaches to an existing Git
 
 | Test suite | Failure blocks |
 |---|---|
-| `fmt`, `clippy` | Every PR |
+| `lockfiles`, `fmt`, `clippy` | Every PR |
 | `unit`, `integration`, `compat-parquet` | Every PR |
 | `compat-pyarrow`, `compat-duckdb`, `compat-pyiceberg`, `compat-ailake-py` | Every PR |
 | `miri` (UB), `loom` (concurrency model) | Every PR |
@@ -818,7 +819,7 @@ Step 5 requires the Windows GPU runner — can run in parallel with steps 2–4.
 The `release` job auto-bumps the patch version before tagging — **no manual version edits required**:
 
 1. Reads the latest semver tag (`v*.*.*`) and increments its patch component.
-2. Updates core crate manifests and core-version documentation examples; independent SDK/plugin versions stay unchanged.
+2. Updates core crate manifests and core-version documentation examples; independent SDK/plugin versions stay unchanged. Refreshes `Cargo.lock` and `fuzz/Cargo.lock` with `cargo metadata`, which records the new workspace versions without upgrading any other dependency.
 3. Promotes `CHANGELOG.md`'s `[Unreleased]` section to the new version with the UTC release date, then creates a fresh `[Unreleased]` header.
 4. Commits the bump with `[skip ci]` and pushes to `main` — `[skip ci]` prevents a second workflow run.
 5. Creates the git tag and GitHub Release on the bumped commit.
