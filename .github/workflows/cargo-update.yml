@@ -20,12 +20,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # ACTIONS_PAT is only used in the last step, and only through env: it is
+      # not persisted in the git config where other steps could read it.
       - uses: actions/checkout@v6
         with:
           ref: develop
-          # A PR opened with the default GITHUB_TOKEN does not trigger CI.
-          token: ${{ secrets.ACTIONS_PAT }}
-      - uses: dtolnay/rust-toolchain@stable
+          persist-credentials: false
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal && rustup default stable
 
       - name: Update lockfiles
         run: |
@@ -50,7 +52,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$BRANCH"
           git commit -m "chore(deps): cargo update" -- Cargo.lock fuzz/Cargo.lock
-          git push --force origin "$BRANCH"
+          # A PR opened with the default GITHUB_TOKEN does not trigger CI.
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH"
           if [ "$(gh pr view "$BRANCH" --json state --jq .state 2>/dev/null)" = "OPEN" ]; then
             gh pr edit "$BRANCH" --body-file "$RUNNER_TEMP/body.md"
           else
