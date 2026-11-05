@@ -48,6 +48,13 @@ desenvolvimento, registre mudanças visíveis ao usuário em `[Unreleased]`:
 - Para levar à `main` só correções de CI/plugin sem gerar release do core,
   coloque `[skip ci]` no título do PR: ele vai para a mensagem do merge commit
   e o push não dispara workflows. Depois rode os releases dos plugins à mão.
+- `Cargo.lock` e `fuzz/Cargo.lock` são versionados e o job `lockfiles` do CI
+  falha se algum estiver defasado. Ao mudar um `Cargo.toml`, commite o lock
+  junto. O release atualiza os dois sozinho no bump de versão. Os builds de
+  release do core e dos plugins usam `--locked`; as wheels Python não, porque
+  `release-python.yml` grava a versão do SDK em `ailake-py/Cargo.toml` antes do
+  build. O Dependabot abre um PR semanal agrupado contra `develop`
+  (`.github/dependabot.yml`), só com atualizações que cabem nos ranges atuais.
 - Mudanças de comportamento operacional apontam para as guias de cache,
   coordenação distribuída, secrets, rate limiting e performance.
 
