@@ -53,8 +53,11 @@ desenvolvimento, registre mudanças visíveis ao usuário em `[Unreleased]`:
   junto. O release atualiza os dois sozinho no bump de versão. Os builds de
   release do core e dos plugins usam `--locked`; as wheels Python não, porque
   `release-python.yml` grava a versão do SDK em `ailake-py/Cargo.toml` antes do
-  build. O Dependabot abre um PR semanal agrupado contra `develop`
-  (`.github/dependabot.yml`), só com atualizações que cabem nos ranges atuais.
+  build. O workflow `cargo-update.yml` roda `cargo update` nos dois locks toda
+  segunda-feira e abre (ou atualiza) o PR `chore/cargo-update` contra `develop`,
+  só com atualizações que cabem nos ranges atuais. Não usamos o Dependabot para
+  isso: o updater de Cargo dele falha neste workspace, que usa duas versões de
+  várias crates ao mesmo tempo. Os alertas do Dependabot continuam ativos.
 - Mudanças de comportamento operacional apontam para as guias de cache,
   coordenação distribuída, secrets, rate limiting e performance.
 

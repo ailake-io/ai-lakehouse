@@ -1,0 +1,40 @@
+name: Gradle dependency submission
+
+# GitHub's dependency graph does not read Gradle builds on its own, so without
+# this the Spark, Trino and Flink plugins get no Dependabot alerts. Alerts are
+# computed for the default branch, so this runs on main (weekly, since
+# [skip ci] merges into main skip push-triggered workflows).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+  push:
+    branches: [main]
+    paths:
+      - "spark-plugin/**/*.gradle.kts"
+      - "trino-plugin/**/*.gradle.kts"
+      - "ailake-flink/**/*.gradle.kts"
+
+permissions:
+  contents: write # required to submit the dependency snapshot
+
+jobs:
+  submit:
+    name: submit (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [spark-plugin, trino-plugin, ailake-flink]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+      - uses: gradle/actions/dependency-submission@v4
+        with:
+          gradle-version: '8.7'
+          build-root-directory: ${{ matrix.project }}

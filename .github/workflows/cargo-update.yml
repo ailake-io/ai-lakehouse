@@ -1,0 +1,59 @@
+name: Cargo update
+
+# Weekly refresh of both Cargo.lock files, opened as a PR against develop.
+# Replaces Dependabot version updates for Cargo: its updater fails on this
+# workspace, which uses two versions of several crates at once (thiserror,
+# rand, sha2, lz4_flex), and it produced a lockfile cargo rejects (#161).
+# Dependabot alerts still run from the dependency graph.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    if: github.repository == 'ailake-io/ai-lakehouse'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: develop
+          # A PR opened with the default GITHUB_TOKEN does not trigger CI.
+          token: ${{ secrets.ACTIONS_PAT }}
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Update lockfiles
+        run: |
+          {
+            echo '### Workspace (`Cargo.lock`)'
+            echo '```'
+            cargo update 2>&1 | grep -E '^ +(Updating|Adding|Removing|Downgrading) ' | grep -v 'crates.io index' || echo 'no changes'
+            echo '```'
+            echo '### Fuzz (`fuzz/Cargo.lock`)'
+            echo '```'
+            cargo update --manifest-path fuzz/Cargo.toml 2>&1 | grep -E '^ +(Updating|Adding|Removing|Downgrading) ' | grep -v 'crates.io index' || echo 'no changes'
+            echo '```'
+          } > "$RUNNER_TEMP/body.md"
+
+      - name: Open or refresh the PR
+        env:
+          GH_TOKEN: ${{ secrets.ACTIONS_PAT }}
+          BRANCH: chore/cargo-update
+        run: |
+          git diff --quiet -- Cargo.lock fuzz/Cargo.lock && { echo "Lockfiles already current"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git commit -m "chore(deps): cargo update" -- Cargo.lock fuzz/Cargo.lock
+          git push --force origin "$BRANCH"
+          if [ "$(gh pr view "$BRANCH" --json state --jq .state 2>/dev/null)" = "OPEN" ]; then
+            gh pr edit "$BRANCH" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --base develop --head "$BRANCH" \
+              --title "chore(deps): cargo update" --body-file "$RUNNER_TEMP/body.md"
+          fi

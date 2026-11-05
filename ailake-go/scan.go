@@ -58,7 +58,9 @@ func Scan(
 	}
 
 	dim := uint32(0)
-	if d, err := strconv.ParseUint(info.VectorDim, 10, 32); err == nil {
+	// bitSize 31 keeps dim within int range on 32-bit platforms, where it is
+	// later converted to int.
+	if d, err := strconv.ParseUint(info.VectorDim, 10, 31); err == nil {
 		dim = uint32(d)
 	}
 

@@ -745,6 +745,18 @@ Fails the step with a descriptive error if cargo is not found. Adding the found 
 |---|---|---|
 | `audit` | `cargo audit` | Weekly scan of `Cargo.lock` against the RustSec advisory database; also runs on any push/PR touching `Cargo.toml`/`Cargo.lock`/`deny.toml`. Complements `cargo deny check licenses advisories sources` (point-in-time, run in `ci.yml`) with a scheduled recheck that catches newly-disclosed advisories against an unchanged lockfile. |
 
+### `cargo-update.yml` — weekly schedule (`workflow_dispatch`)
+
+| Job | Command | What it covers |
+|---|---|---|
+| `update` | `cargo update` (root and `fuzz/`) | Opens or refreshes the `chore/cargo-update` PR against `develop` with semver-compatible lockfile updates. Replaces Dependabot version updates, whose Cargo updater fails on this workspace (several crates in two versions at once). |
+
+### `dependency-submission.yml` — weekly schedule + push to `main` on Gradle build changes (`workflow_dispatch`)
+
+| Job | Command | What it covers |
+|---|---|---|
+| `submit` | `gradle/actions/dependency-submission` per plugin | Sends the Spark, Trino and Flink Gradle dependencies to GitHub's dependency graph, so Dependabot alerts cover them. GitHub does not read Gradle builds on its own. |
+
 ### `compat-heavy.yml` — manual dispatch (`workflow_dispatch`)
 
 | Job | What it covers |

@@ -449,7 +449,7 @@ func readManifestList(path string) ([]manifestListEntry, error) {
 		// for a plain Avro "int" varies by version/path (int32 in practice, but
 		// asInt64 already handles the full int32/int64/float64/string spread
 		// used elsewhere in this file for the same reason).
-		content := int(asInt64(rec["content"]))
+		content := int(asInt32(rec["content"]))
 		entries = append(entries, manifestListEntry{Path: p, Content: content})
 	}
 	return entries, ocf.Err()
@@ -641,7 +641,7 @@ func readEqualityDeleteManifest(path string) ([]EqualityDeleteFile, error) {
 				}
 			}
 			for _, id := range rawIDs {
-				entry.EqualityIDs = append(entry.EqualityIDs, int32(asInt64(id)))
+				entry.EqualityIDs = append(entry.EqualityIDs, asInt32(id))
 			}
 		}
 		entries = append(entries, entry)
@@ -682,4 +682,13 @@ func asInt64(v any) int64 {
 		return n
 	}
 	return 0
+}
+
+// asInt32 is asInt64 for Avro "int" fields; out-of-range values become 0.
+func asInt32(v any) int32 {
+	n := asInt64(v)
+	if n < math.MinInt32 || n > math.MaxInt32 {
+		return 0
+	}
+	return int32(n)
 }
