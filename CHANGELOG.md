@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **`fuzz/Cargo.lock`: dependências vulneráveis atualizadas** — `rustls` 0.23.45 → 0.23.46 (GHSA-c8m5-c952-6cm4, GHSA-vp88-798v-h67f, GHSA-w44r-93j7-qv28, GHSA-h2v8-394m-p7vv), `quinn-proto` 0.11.16 → 0.11.19, `webpki-roots` 1.0.8 → 1.0.11, `tokio` 1.52.3 → 1.54.1 e `chacha20` 0.10.1 → 0.10.2 (versão yanked). O lock também estava defasado em relação aos manifests e foi sincronizado (`arrow`/`parquet` 52 → 60, `tantivy` 0.22 → 0.27), o que remove `thrift` e `lexical-core`. `quick-xml` 0.36.2 continua: já está na lista de exceções de `.cargo/audit.toml` e `deny.toml`, sem correção disponível via `object_store`.
+
 ### Fixed
 
 - **DuckDB 2.0: argumentos nomeados em `ailake_add_vector_column`, `ailake_create_table` e `ailake_migrate`** — no DuckDB 2.0, função escalar registrada só com tipos aceita apenas argumentos posicionais, então a forma documentada `metric := 'euclidean'` falhava com `Binder Error`. As três passam a usar `FunctionParameter` nomeado na 2.0, como `ailake_compact` já fazia. A 1.5.x não muda.
