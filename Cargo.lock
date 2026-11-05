@@ -66,7 +66,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-glue",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bincode",
  "bytes",
  "duckdb",
