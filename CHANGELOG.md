@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **`fuzz/Cargo.lock`: dependências vulneráveis atualizadas** — `rustls` 0.23.45 → 0.23.46 (GHSA-c8m5-c952-6cm4, GHSA-vp88-798v-h67f, GHSA-w44r-93j7-qv28, GHSA-h2v8-394m-p7vv), `quinn-proto` 0.11.16 → 0.11.19, `webpki-roots` 1.0.8 → 1.0.11, `tokio` 1.52.3 → 1.54.1 e `chacha20` 0.10.1 → 0.10.2 (versão yanked). O lock também estava defasado em relação aos manifests e foi sincronizado (`arrow`/`parquet` 52 → 60, `tantivy` 0.22 → 0.27), o que remove `thrift` e `lexical-core`. `quick-xml` 0.36.2 continua: já está na lista de exceções de `.cargo/audit.toml` e `deny.toml`, sem correção disponível via `object_store`.
+
 ### Fixed
 
 - **DuckDB 2.0: argumentos nomeados em `ailake_add_vector_column`, `ailake_create_table` e `ailake_migrate`** — no DuckDB 2.0, função escalar registrada só com tipos aceita apenas argumentos posicionais, então a forma documentada `metric := 'euclidean'` falhava com `Binder Error`. As três passam a usar `FunctionParameter` nomeado na 2.0, como `ailake_compact` já fazia. A 1.5.x não muda.
@@ -16,6 +20,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### CI
 
+- **Release espera até 90 minutos pelo CI** — o job *Wait for CI checks* esperava 30 minutos e foi cancelado na primeira tentativa da v0.1.20 no exato momento em que o CI terminou verde. A espera passa a 90 minutos, com limite do job em 100, para o timeout sempre ser o erro claro do próprio laço.
 - **CI DuckDB roda todos os testes** — `ci-duckdb.yml` rodava uma lista fixa de arquivos e deixava de fora `test_add_vector_column`, `test_decay_memories`, `test_delete_rows`, `test_estimate` e `test_info`; o erro acima só apareceu no release do plugin. Agora roda todo `duckdb-ailake/test/test_*.py`, igual ao release.
 - **Release Python: sdist no Ubuntu 26.04** — o job do source distribution usava Python 3.9, que não existe no `ubuntu-latest` (agora 26.04); passa a usar 3.12. O pacote continua `abi3-py39`, compatível com Python 3.9+.
 
