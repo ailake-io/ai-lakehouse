@@ -598,6 +598,11 @@ echo "-Djava.library.path=/opt/ailake/lib" >> $TRINO_HOME/etc/jvm.config
 > (`ConnectorMetadata getTableHandle() is not implemented`) — a real Trino SPI signature
 > change between the two versions not yet accounted for in this plugin.
 >
+> The port to SPI 475+ (which also lets the plugin bundle a patched Jackson) is
+> studied in [`docs/contributing/TRINO_SPI_UPGRADE.md`](../contributing/TRINO_SPI_UPGRADE.md):
+> 8 compile errors against SPI 475–480, the version table behind choosing 475, and
+> the runtime checks still needed.
+>
 > **`SELECT` execution works end-to-end** (verified live against a real Trino 430 server,
 > 2026-07-13). This was previously blocked by two distinct Jackson serialization bugs in
 > Trino's internal `TaskUpdateRequest` codec (coordinator → worker HTTP call, exercised even
