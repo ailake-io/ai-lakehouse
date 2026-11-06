@@ -42,3 +42,7 @@ jobs:
         with:
           gradle-version: '8.7'
           build-root-directory: ${{ matrix.project }}
+          # Only what ships in the plugin JAR. compileOnly and test
+          # dependencies (Spark, Trino and Flink themselves) are provided by
+          # the engine at runtime and would otherwise flood the alerts.
+          dependency-graph-include-configurations: ^runtimeClasspath$
