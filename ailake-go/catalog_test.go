@@ -427,3 +427,19 @@ func TestTableInfo_NoPartitionSpec_EmptyFields(t *testing.T) {
 		t.Errorf("PartitionFields: expected empty, got %d entries", len(info.PartitionFields))
 	}
 }
+
+func TestAsInt32RejectsOutOfRange(t *testing.T) {
+	cases := map[any]int32{
+		int32(7):                 7,
+		int64(-3):                -3,
+		"42":                     42,
+		int64(math.MaxInt32) + 1: 0,
+		int64(math.MinInt32) - 1: 0,
+		"9999999999":             0,
+	}
+	for in, want := range cases {
+		if got := asInt32(in); got != want {
+			t.Errorf("asInt32(%#v) = %d, want %d", in, got, want)
+		}
+	}
+}
