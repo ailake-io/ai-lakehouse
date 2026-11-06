@@ -14,6 +14,9 @@ env:
   # append_extension_metadata.py uses the right tag at cmake build time.
   DUCKDB_PLATFORM: "linux_amd64"
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     name: build + test DuckDB ${{ matrix.duckdb_version }}
