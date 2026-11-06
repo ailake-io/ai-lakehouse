@@ -25,8 +25,8 @@ dependencies {
     implementation(ailakeLibs.jna)
 
     // Jackson for JSON parsing of native results
-    implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.16.1")
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.16.1")
+    implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.18.12")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.18.12")
 
     testImplementation(kotlin("test"))
     testImplementation("org.apache.flink:flink-table-api-java:$flinkVersion")

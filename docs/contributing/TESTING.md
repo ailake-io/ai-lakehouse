@@ -755,7 +755,7 @@ Fails the step with a descriptive error if cargo is not found. Adding the found 
 
 | Job | Command | What it covers |
 |---|---|---|
-| `submit` | `gradle/actions/dependency-submission` per plugin | Sends the Spark, Trino and Flink Gradle dependencies to GitHub's dependency graph, so Dependabot alerts cover them. GitHub does not read Gradle builds on its own. |
+| `submit` | `gradle/actions/dependency-submission` per plugin | Sends the `runtimeClasspath` of the Spark, Trino and Flink plugins (what ships in each plugin JAR) to GitHub's dependency graph, so Dependabot alerts cover them. GitHub does not read Gradle builds on its own. `compileOnly` and test dependencies are left out: the engine provides them at runtime. |
 
 ### `compat-heavy.yml` — manual dispatch (`workflow_dispatch`)
 
