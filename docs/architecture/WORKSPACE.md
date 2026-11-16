@@ -305,7 +305,7 @@ apache-avro = "0.16"
 
 # Full-text search
 tantivy     = { version = "0.27", default-features = false, features = ["mmap"] }
-ailake-fts  = { path = "ailake-fts", version = "0.1.20" }
+ailake-fts  = { path = "ailake-fts", version = "0.1.21" }
 
 # Vector index — HNSW is custom Rust code in ailake-index; no hnsw_rs dep needed
 bincode     = "1"
@@ -401,7 +401,7 @@ Deferred to Phase 3:
 
 Delivered in Phase 3:
 - `ailake-catalog`: `NessieCatalog` — wraps `RestCatalog` + Nessie v2 branching API (`list_branches`, `create_branch`, `merge_branch`, `delete_branch`)
-- `ailake-catalog`: `JdbcCatalog` — PostgreSQL/MySQL/SQLite via `sqlx 0.8` `AnyPool`; schema auto-created; versioned metadata.json via UUID paths
+- `ailake-catalog`: `JdbcCatalog` — PostgreSQL/MySQL via SQLx `AnyPool`, SQLite via bundled rusqlite; schema auto-created; versioned metadata.json via UUID paths
 - `ailake-catalog`: `GlueCatalog` — AWS Glue Data Catalog via `aws-sdk-glue 1.x`; Iceberg-standard `metadata_location` parameter; tables visible in Athena/EMR
 - `ailake-jni`: C-ABI exports (`ailake_search_json`, `ailake_write_batch_json`, `ailake_free_string`)
 - Multi-column vector tables (`embedding` + `context_embedding`)

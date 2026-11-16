@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-cache"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-core",
  "ailake-store",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-catalog"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-core",
  "ailake-file",
@@ -71,13 +71,17 @@ dependencies = [
  "bytes",
  "duckdb",
  "parquet",
+ "percent-encoding",
  "proptest",
  "reqwest",
  "roaring",
+ "rusqlite",
  "secrecy",
  "serde",
  "serde_json",
- "sqlx",
+ "sqlx-core",
+ "sqlx-mysql",
+ "sqlx-postgres",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -87,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-cli"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-cache",
  "ailake-catalog",
@@ -119,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-core"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "async-trait",
  "half",
@@ -132,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-file"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-core",
  "ailake-fts",
@@ -149,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-fts"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-core",
  "arrow-array",
@@ -161,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-index"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-core",
  "ailake-vec",
@@ -180,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-jni"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-catalog",
  "ailake-core",
@@ -200,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-parquet"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-core",
  "ailake-vec",
@@ -239,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-query"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-catalog",
  "ailake-core",
@@ -274,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-secrets"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -291,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-store"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-core",
  "async-trait",
@@ -306,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-tests"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-catalog",
  "ailake-core",
@@ -327,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-vec"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ailake-core",
  "half",
@@ -1762,7 +1766,7 @@ dependencies = [
  "cast",
  "fallible-iterator",
  "fallible-streaming-iterator",
- "hashlink",
+ "hashlink 0.10.0",
  "libduckdb-sys",
  "num-integer",
  "strum 0.27.2",
@@ -1779,9 +1783,6 @@ name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "equivalent"
@@ -1890,17 +1891,6 @@ dependencies = [
  "crc32fast",
  "miniz_oxide",
  "zlib-rs",
-]
-
-[[package]]
-name = "flume"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
-dependencies = [
- "futures-core",
- "futures-sink",
- "spin",
 ]
 
 [[package]]
@@ -2178,6 +2168,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
 dependencies = [
  "hashbrown 0.15.5",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
+dependencies = [
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -2722,9 +2721,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.30.1"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -3735,6 +3734,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsqlite-vfs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "353b74f9810d5b085b6c42c9d86a5f0fdb795553235cdd48753b32e3809d18a7"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.41.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
+dependencies = [
+ "bitflags",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "hashlink 0.12.2",
+ "libsqlite3-sys",
+ "smallvec",
+ "sqlite-wasm-rs",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4147,9 +4170,6 @@ name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
-dependencies = [
- "lock_api",
-]
 
 [[package]]
 name = "spki"
@@ -4162,16 +4182,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "sqlx"
-version = "0.8.6"
+name = "sqlite-wasm-rs"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fefb893899429669dcdd979aff487bd78f4064e5e7907e4269081e0ef7d97dc"
+checksum = "a6cd504cecbfe7eef649988840f9a6cb768d11085efec138f8e99f160632d867"
 dependencies = [
- "sqlx-core",
- "sqlx-macros",
- "sqlx-mysql",
- "sqlx-postgres",
- "sqlx-sqlite",
+ "cc",
+ "rsqlite-vfs",
 ]
 
 [[package]]
@@ -4182,7 +4199,6 @@ checksum = "ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "crc",
  "crossbeam-queue",
  "either",
  "event-listener",
@@ -4191,7 +4207,7 @@ dependencies = [
  "futures-io",
  "futures-util",
  "hashbrown 0.15.5",
- "hashlink",
+ "hashlink 0.10.0",
  "indexmap",
  "log",
  "memchr",
@@ -4200,7 +4216,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.21",
  "tokio",
@@ -4208,44 +4223,6 @@ dependencies = [
  "tracing",
  "url",
  "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "sqlx-macros"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2d452988ccaacfbf5e0bdbc348fb91d7c8af5bee192173ac3636b5fb6e6715d"
-dependencies = [
- "proc-macro2",
- "quote",
- "sqlx-core",
- "sqlx-macros-core",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "sqlx-macros-core"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19a9c1841124ac5a61741f96e1d9e2ec77424bf323962dd894bdb93f37d5219b"
-dependencies = [
- "dotenvy",
- "either",
- "heck 0.5.0",
- "hex",
- "once_cell",
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx-core",
- "sqlx-mysql",
- "sqlx-postgres",
- "sqlx-sqlite",
- "syn 2.0.119",
- "tokio",
- "url",
 ]
 
 [[package]]
@@ -4279,7 +4256,6 @@ dependencies = [
  "percent-encoding",
  "rand 0.8.8",
  "rsa",
- "serde",
  "sha1",
  "sha2 0.10.9",
  "smallvec",
@@ -4325,30 +4301,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "whoami",
-]
-
-[[package]]
-name = "sqlx-sqlite"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2d12fe70b2c1b4401038055f90f151b78208de1f9f89a7dbfd41587a10c3eea"
-dependencies = [
- "atoi 2.0.0",
- "flume",
- "futures-channel",
- "futures-core",
- "futures-executor",
- "futures-intrusive",
- "futures-util",
- "libsqlite3-sys",
- "log",
- "percent-encoding",
- "serde",
- "serde_urlencoded",
- "sqlx-core",
- "thiserror 2.0.21",
- "tracing",
- "url",
 ]
 
 [[package]]

@@ -9,8 +9,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.21] — 2026-11-16
+
 ### Security
 
+- **SQLite no catálogo JDBC** — o backend SQLite passou para `rusqlite 0.41.1` (`libsqlite3-sys 0.39.1`, SQLite 3.54.1). PostgreSQL e MySQL continuam usando os drivers SQLx, sem incluir o SQLite vulnerável do SQLx 0.8 no lockfile.
 - **Flink: Jackson 2.16.1 → 2.18.12 no JAR do plugin** — o envio das dependências Gradle mostrou 15 advisories do `jackson-databind`/`jackson-core` no Jackson empacotado no plugin Flink. O Flink usa o próprio Jackson renomeado, então o plugin pode levar a versão corrigida sem conflito.
 - **Alertas Gradle só do que vai no JAR** — o primeiro envio incluiu todas as configurações e gerou cerca de 160 alertas, a maioria de Spark, Trino e Flink (`compileOnly`/teste), que o próprio motor fornece em tempo de execução. O envio passa a cobrir só `runtimeClasspath`. Com isso, o JAR do Spark leva só o JNA.
 - **Risco conhecido: Jackson 2.15.2 no plugin Trino** — o Trino carrega `com.fasterxml.jackson.annotation` do próprio servidor, por cima do que vem no plugin. Um `jackson-databind` mais novo que as anotações do servidor pode falhar em tempo de execução, então subir exige elevar a versão mínima do Trino suportada (hoje 430). Os 15 alertas foram dispensados como `not_used`: o plugin lê JSON (saída da biblioteca nativa, configuração do catálogo e propriedades de sessão) só para `JsonNode`/`Map`, sem tipagem polimórfica, object ids, parser assíncrono ou `DataInput`, nem conversão para tipos como `InetAddress`, `Path` ou `Duration`, que é onde estão os advisories. O port necessário está estudado em [`docs/contributing/TRINO_SPI_UPGRADE.md`](docs/contributing/TRINO_SPI_UPGRADE.md).
