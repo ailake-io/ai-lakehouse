@@ -12,7 +12,7 @@ categories  = ["database", "data-structures"]
 rest-catalog     = ["dep:reqwest"]           # REST + Nessie HTTP catalog backends
 catalog-glue     = ["dep:aws-sdk-glue", "dep:aws-config"]
 catalog-nessie   = ["rest-catalog"]
-catalog-jdbc     = ["dep:sqlx"]
+catalog-jdbc     = ["dep:sqlx-core", "dep:sqlx-postgres", "dep:sqlx-mysql", "dep:rusqlite", "dep:percent-encoding"]
 catalog-ducklake = ["dep:duckdb"]
 
 [dependencies]
@@ -41,8 +41,13 @@ arrow-schema = { workspace = true }
 aws-sdk-glue = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
 aws-config   = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"], optional = true }
 
-# catalog-jdbc optional deps
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite", "any"], optional = true }
+# catalog-jdbc optional deps. Keep the SQLite driver separate from SQLx so its
+# bundled SQLite can be updated independently of SQLx's release cadence.
+sqlx-core = { version = "0.8", default-features = false, features = ["any", "_rt-tokio", "_tls-rustls-ring-webpki"], optional = true }
+sqlx-postgres = { version = "0.8", default-features = false, features = ["any"], optional = true }
+sqlx-mysql = { version = "0.8", default-features = false, features = ["any"], optional = true }
+rusqlite = { version = "0.41", features = ["bundled"], optional = true }
+percent-encoding = { version = "2", optional = true }
 
 # catalog-ducklake optional deps
 duckdb = { version = "1", features = ["bundled"], optional = true }
