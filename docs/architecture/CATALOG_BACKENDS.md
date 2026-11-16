@@ -500,9 +500,9 @@ Hash-based optimistic concurrency: `get_branch` fetches the current hash before 
 
 ## Backend: `JdbcCatalog` (feature = `catalog-jdbc`)
 
-Stores the `metadata_location` pointer in a PostgreSQL or MySQL table. The actual `metadata.json` and manifests are written to object storage via `Store`. Suitable for self-hosted deployments without AWS Glue.
+Stores the `metadata_location` pointer in a PostgreSQL, MySQL, or SQLite database. The actual `metadata.json` and manifests are written to object storage via `Store`. Suitable for self-hosted deployments without AWS Glue.
 
-Dependencies: `sqlx 0.8` (runtime-selected driver via `AnyPool`).
+Dependencies: SQLx drivers for PostgreSQL/MySQL, plus bundled `rusqlite` for SQLite.
 
 ```toml
 ailake-catalog = { path = "...", features = ["catalog-jdbc"] }
@@ -617,7 +617,7 @@ let catalog: Arc<dyn CatalogProvider> = Arc::new(
     NessieCatalog::new(nessie_config, store)
 );
 
-// PostgreSQL / MySQL
+// PostgreSQL / MySQL / SQLite
 let catalog: Arc<dyn CatalogProvider> = Arc::new(
     JdbcCatalog::connect(db_url, "prod", warehouse, store).await?
 );

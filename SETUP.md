@@ -1558,7 +1558,7 @@ auth: RestCatalogAuth::OAuth2 {
 
 ---
 
-## 12. JdbcCatalog — PostgreSQL / MySQL
+## 12. JdbcCatalog — PostgreSQL / MySQL / SQLite
 
 Stores the `metadata_location` pointer in a relational database. Ideal for self-hosted deployments without AWS Glue.
 
@@ -1568,7 +1568,7 @@ Stores the `metadata_location` pointer in a relational database. Ideal for self-
 cargo test -p ailake-catalog --features catalog-jdbc
 ```
 
-Includes a complete end-to-end test with in-process SQLite (`catalog-jdbc` feature enables the SQLite driver via sqlx).
+Includes a complete end-to-end test with in-process SQLite (`catalog-jdbc` enables the SQLite driver through bundled rusqlite).
 
 ### 12B. PostgreSQL via Docker
 
