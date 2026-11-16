@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// JdbcCatalog: stores Iceberg metadata pointers in PostgreSQL or MySQL.
+// JdbcCatalog: stores Iceberg metadata pointers in PostgreSQL, MySQL, or SQLite.
 //
 // The catalog stores ONE row per table pointing to the current metadata.json.
 // Actual metadata.json files and manifests are written to object storage via Store.
@@ -12,15 +12,16 @@
 //   mysql://user:pass@host:3306/dbname
 //   sqlite::memory:               (in-process SQLite, useful for tests)
 //
-// Note: queries use ? as placeholder — sqlx::AnyPool translates to
-// $1/$2 (Postgres) or ? (MySQL/SQLite) internally.
+// Note: queries use ? as placeholder — SQLx Any translates to $1/$2 for
+// Postgres; SQLite uses its native ? placeholders through rusqlite.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ailake_core::{AilakeError, AilakeResult};
 use async_trait::async_trait;
 use bytes::Bytes;
-use sqlx::AnyPool;
+use rusqlite::{Connection, OptionalExtension};
+use sqlx_core::any::{Any, AnyPool};
 use uuid::Uuid;
 
 use crate::manifest_commit::{
@@ -37,15 +38,15 @@ use ailake_store::Store;
 // ── JdbcCatalog ───────────────────────────────────────────────────────────────
 
 pub struct JdbcCatalog {
-    pool: AnyPool,
+    backend: JdbcBackend,
     catalog_name: String,
     store: Arc<dyn Store>,
     warehouse: String,
 }
 
-#[derive(sqlx::FromRow)]
-struct MetadataLocationRow {
-    metadata_location: String,
+enum JdbcBackend {
+    Sqlx(AnyPool),
+    Sqlite(Arc<Mutex<Connection>>),
 }
 
 impl JdbcCatalog {
@@ -58,12 +59,18 @@ impl JdbcCatalog {
         warehouse: &str,
         store: Arc<dyn Store>,
     ) -> AilakeResult<Self> {
-        sqlx::any::install_default_drivers();
-        let pool = AnyPool::connect(connection_url)
-            .await
-            .map_err(|e| AilakeError::Catalog(format!("JDBC connect failed: {e}")))?;
+        let backend = if connection_url.starts_with("sqlite:") {
+            let connection = open_sqlite(connection_url)?;
+            JdbcBackend::Sqlite(Arc::new(Mutex::new(connection)))
+        } else {
+            install_sqlx_drivers()?;
+            let pool = AnyPool::connect(connection_url)
+                .await
+                .map_err(|e| AilakeError::Catalog(format!("JDBC connect failed: {e}")))?;
+            JdbcBackend::Sqlx(pool)
+        };
         let catalog = Self {
-            pool,
+            backend,
             catalog_name: catalog_name.to_string(),
             store,
             warehouse: warehouse.trim_end_matches('/').to_string(),
@@ -73,18 +80,25 @@ impl JdbcCatalog {
     }
 
     async fn migrate(&self) -> AilakeResult<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS iceberg_tables (
+        const SQL: &str = "CREATE TABLE IF NOT EXISTS iceberg_tables (
                 catalog_name      VARCHAR(255) NOT NULL,
                 table_namespace   VARCHAR(255) NOT NULL,
                 table_name        VARCHAR(255) NOT NULL,
                 metadata_location VARCHAR(1000) NOT NULL,
                 PRIMARY KEY (catalog_name, table_namespace, table_name)
-            )",
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| AilakeError::Catalog(format!("JDBC migrate: {e}")))?;
+            )";
+        match &self.backend {
+            JdbcBackend::Sqlx(pool) => {
+                sqlx_core::query::query(SQL)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| AilakeError::Catalog(format!("JDBC migrate: {e}")))?;
+            }
+            JdbcBackend::Sqlite(connection) => {
+                let connection = Arc::clone(connection);
+                with_sqlite(connection, "JDBC migrate", move |db| db.execute_batch(SQL)).await?;
+            }
+        }
         Ok(())
     }
 
@@ -96,19 +110,145 @@ impl JdbcCatalog {
         format!("{}/metadata/{}.metadata.json", self.table_root(table), uuid)
     }
 
-    async fn get_metadata_location(&self, table: &TableIdent) -> AilakeResult<String> {
-        let row: Option<MetadataLocationRow> = sqlx::query_as(
-            "SELECT metadata_location FROM iceberg_tables
-             WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?",
-        )
-        .bind(&self.catalog_name)
-        .bind(&table.namespace)
-        .bind(&table.name)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| AilakeError::Catalog(format!("JDBC get: {e}")))?;
+    async fn insert_metadata_location(
+        &self,
+        table: &TableIdent,
+        metadata_location: &str,
+    ) -> AilakeResult<()> {
+        const SQL: &str = "INSERT INTO iceberg_tables
+             (catalog_name, table_namespace, table_name, metadata_location)
+             VALUES (?, ?, ?, ?)";
+        match &self.backend {
+            JdbcBackend::Sqlx(pool) => {
+                sqlx_core::query::query(SQL)
+                    .bind(&self.catalog_name)
+                    .bind(&table.namespace)
+                    .bind(&table.name)
+                    .bind(metadata_location)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| AilakeError::Catalog(format!("JDBC create_table: {e}")))?;
+            }
+            JdbcBackend::Sqlite(connection) => {
+                let connection = Arc::clone(connection);
+                let catalog_name = self.catalog_name.clone();
+                let namespace = table.namespace.clone();
+                let name = table.name.clone();
+                let metadata_location = metadata_location.to_string();
+                with_sqlite(connection, "JDBC create_table", move |db| {
+                    db.execute(
+                        SQL,
+                        rusqlite::params![catalog_name, namespace, name, metadata_location],
+                    )
+                })
+                .await?;
+            }
+        }
+        Ok(())
+    }
 
-        row.map(|r| r.metadata_location).ok_or_else(|| {
+    async fn compare_and_swap_metadata_location(
+        &self,
+        table: &TableIdent,
+        new_location: &str,
+        old_location: &str,
+        operation: &'static str,
+    ) -> AilakeResult<bool> {
+        const SQL: &str = "UPDATE iceberg_tables SET metadata_location = ?
+             WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?
+               AND metadata_location = ?";
+        let rows_affected = match &self.backend {
+            JdbcBackend::Sqlx(pool) => sqlx_core::query::query(SQL)
+                .bind(new_location)
+                .bind(&self.catalog_name)
+                .bind(&table.namespace)
+                .bind(&table.name)
+                .bind(old_location)
+                .execute(pool)
+                .await
+                .map_err(|e| AilakeError::Catalog(format!("JDBC {operation}: {e}")))?
+                .rows_affected(),
+            JdbcBackend::Sqlite(connection) => {
+                let connection = Arc::clone(connection);
+                let new_location = new_location.to_string();
+                let catalog_name = self.catalog_name.clone();
+                let namespace = table.namespace.clone();
+                let name = table.name.clone();
+                let old_location = old_location.to_string();
+                with_sqlite(connection, "JDBC metadata update", move |db| {
+                    db.execute(
+                        SQL,
+                        rusqlite::params![
+                            new_location,
+                            catalog_name,
+                            namespace,
+                            name,
+                            old_location
+                        ],
+                    )
+                })
+                .await? as u64
+            }
+        };
+        Ok(rows_affected > 0)
+    }
+
+    async fn delete_metadata_location(&self, table: &TableIdent) -> AilakeResult<()> {
+        const SQL: &str = "DELETE FROM iceberg_tables
+             WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?";
+        match &self.backend {
+            JdbcBackend::Sqlx(pool) => {
+                sqlx_core::query::query(SQL)
+                    .bind(&self.catalog_name)
+                    .bind(&table.namespace)
+                    .bind(&table.name)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| AilakeError::Catalog(format!("JDBC drop_table: {e}")))?;
+            }
+            JdbcBackend::Sqlite(connection) => {
+                let connection = Arc::clone(connection);
+                let catalog_name = self.catalog_name.clone();
+                let namespace = table.namespace.clone();
+                let name = table.name.clone();
+                with_sqlite(connection, "JDBC drop_table", move |db| {
+                    db.execute(SQL, rusqlite::params![catalog_name, namespace, name])
+                })
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn get_metadata_location(&self, table: &TableIdent) -> AilakeResult<String> {
+        const SQL: &str = "SELECT metadata_location FROM iceberg_tables
+             WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?";
+        let location = match &self.backend {
+            JdbcBackend::Sqlx(pool) => sqlx_core::query_scalar::query_scalar::<Any, String>(SQL)
+                .bind(&self.catalog_name)
+                .bind(&table.namespace)
+                .bind(&table.name)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| AilakeError::Catalog(format!("JDBC get: {e}")))?,
+            JdbcBackend::Sqlite(connection) => {
+                let connection = Arc::clone(connection);
+                let catalog_name = self.catalog_name.clone();
+                let namespace = table.namespace.clone();
+                let name = table.name.clone();
+                with_sqlite(connection, "JDBC get", move |db| {
+                    db.query_row(
+                        SQL,
+                        rusqlite::params![catalog_name, namespace, name],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                })
+                .await?
+            }
+        };
+
+        location.ok_or_else(|| {
             AilakeError::Catalog(format!(
                 "table not found: {}.{}",
                 table.namespace, table.name
@@ -151,18 +291,8 @@ impl CatalogProvider for JdbcCatalog {
             .put(&metadata_location, Bytes::from(json.into_bytes()))
             .await?;
 
-        sqlx::query(
-            "INSERT INTO iceberg_tables
-                 (catalog_name, table_namespace, table_name, metadata_location)
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(&self.catalog_name)
-        .bind(&name.namespace)
-        .bind(&name.name)
-        .bind(&metadata_location)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| AilakeError::Catalog(format!("JDBC create_table: {e}")))?;
+        self.insert_metadata_location(name, &metadata_location)
+            .await?;
 
         Ok(())
     }
@@ -207,21 +337,15 @@ impl CatalogProvider for JdbcCatalog {
                 .put(&new_location, Bytes::from(json.into_bytes()))
                 .await?;
 
-            let result = sqlx::query(
-                "UPDATE iceberg_tables SET metadata_location = ?
-                 WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?
-                   AND metadata_location = ?",
-            )
-            .bind(&new_location)
-            .bind(&self.catalog_name)
-            .bind(&table.namespace)
-            .bind(&table.name)
-            .bind(&old_location)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| AilakeError::Catalog(format!("JDBC commit_snapshot: {e}")))?;
-
-            if result.rows_affected() > 0 {
+            if self
+                .compare_and_swap_metadata_location(
+                    table,
+                    &new_location,
+                    &old_location,
+                    "commit_snapshot",
+                )
+                .await?
+            {
                 return Ok(snap_id);
             }
 
@@ -245,16 +369,7 @@ impl CatalogProvider for JdbcCatalog {
     }
 
     async fn drop_table(&self, name: &TableIdent) -> AilakeResult<()> {
-        sqlx::query(
-            "DELETE FROM iceberg_tables
-             WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?",
-        )
-        .bind(&self.catalog_name)
-        .bind(&name.namespace)
-        .bind(&name.name)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| AilakeError::Catalog(format!("JDBC drop_table: {e}")))?;
+        self.delete_metadata_location(name).await?;
         Ok(())
     }
 
@@ -348,21 +463,15 @@ impl CatalogProvider for JdbcCatalog {
                 .put(&new_location, Bytes::from(json.into_bytes()))
                 .await?;
 
-            let result = sqlx::query(
-                "UPDATE iceberg_tables SET metadata_location = ?
-                 WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?
-                   AND metadata_location = ?",
-            )
-            .bind(&new_location)
-            .bind(&self.catalog_name)
-            .bind(&table.namespace)
-            .bind(&table.name)
-            .bind(&old_location)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| AilakeError::Catalog(format!("JDBC evolve_schema: {e}")))?;
-
-            if result.rows_affected() > 0 {
+            if self
+                .compare_and_swap_metadata_location(
+                    table,
+                    &new_location,
+                    &old_location,
+                    "evolve_schema",
+                )
+                .await?
+            {
                 return Ok(new_schema_id);
             }
             if attempt + 1 < MAX_RETRIES {
@@ -373,6 +482,86 @@ impl CatalogProvider for JdbcCatalog {
             "JDBC evolve_schema: {MAX_RETRIES} retries exhausted (concurrent modification)"
         )))
     }
+}
+
+fn install_sqlx_drivers() -> AilakeResult<()> {
+    static DRIVERS: OnceLock<Result<(), String>> = OnceLock::new();
+    match DRIVERS.get_or_init(|| {
+        sqlx_core::any::driver::install_drivers(&[
+            sqlx_postgres::any::DRIVER,
+            sqlx_mysql::any::DRIVER,
+        ])
+        .map_err(|error| error.to_string())
+    }) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(AilakeError::Catalog(format!(
+            "JDBC driver initialization failed: {error}"
+        ))),
+    }
+}
+
+fn open_sqlite(connection_url: &str) -> AilakeResult<Connection> {
+    let path_and_query = connection_url
+        .strip_prefix("sqlite:")
+        .ok_or_else(|| AilakeError::Catalog("invalid SQLite URL scheme".into()))?;
+    let (raw_path, query) = path_and_query
+        .split_once('?')
+        .unwrap_or((path_and_query, ""));
+    let raw_path = raw_path.strip_prefix("//").unwrap_or(raw_path);
+    if raw_path.is_empty() {
+        return Err(AilakeError::Catalog(
+            "SQLite URL is missing a database path".into(),
+        ));
+    }
+    let path = percent_encoding::percent_decode_str(raw_path)
+        .decode_utf8()
+        .map_err(|error| AilakeError::Catalog(format!("invalid SQLite URL path: {error}")))?;
+
+    let mode = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("mode="))
+        .unwrap_or("rwc");
+    let access_flags = match mode {
+        "ro" => rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        "rw" => rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        "rwc" | "memory" => {
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        }
+        other => {
+            return Err(AilakeError::Catalog(format!(
+                "unsupported SQLite URL mode: {other}"
+            )))
+        }
+    };
+    let flags = access_flags
+        | rusqlite::OpenFlags::SQLITE_OPEN_FULL_MUTEX
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let connection = Connection::open_with_flags(path.as_ref(), flags)
+        .map_err(|error| AilakeError::Catalog(format!("JDBC connect failed: {error}")))?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|error| AilakeError::Catalog(format!("JDBC SQLite setup failed: {error}")))?;
+    Ok(connection)
+}
+
+async fn with_sqlite<T, F>(
+    connection: Arc<Mutex<Connection>>,
+    operation: &'static str,
+    callback: F,
+) -> AilakeResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let connection = connection
+            .lock()
+            .map_err(|error| format!("SQLite connection lock failed: {error}"))?;
+        callback(&connection).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| AilakeError::Catalog(format!("{operation}: {error}")))?
+    .map_err(|error| AilakeError::Catalog(format!("{operation}: {error}")))
 }
 
 fn now_ms() -> i64 {
