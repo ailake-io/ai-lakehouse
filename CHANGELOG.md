@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.21] — 2026-11-16
+
 ### Security
 
 - **SQLite no catálogo JDBC** — o backend SQLite passou para `rusqlite 0.41.1` (`libsqlite3-sys 0.39.1`, SQLite 3.54.1). PostgreSQL e MySQL continuam usando os drivers SQLx, sem incluir o SQLite vulnerável do SQLx 0.8 no lockfile.
