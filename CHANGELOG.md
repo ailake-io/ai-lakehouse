@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.23] — 2026-11-17
+
+### Changed
+
+- ci(kof): test stable compiler 0.7.2
+
 ## [0.1.22] — 2026-11-17
 
 ### Changed

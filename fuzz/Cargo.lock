@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-catalog"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "ailake-core",
  "ailake-secrets",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-core"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "async-trait",
  "half",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-file"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "ailake-core",
  "ailake-fts",
@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-fts"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "ailake-core",
  "arrow-array",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-index"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "ailake-core",
  "ailake-vec",
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-jni"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "ailake-catalog",
  "ailake-core",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-parquet"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "ailake-core",
  "ailake-vec",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-query"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "ailake-catalog",
  "ailake-core",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-secrets"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "async-trait",
  "secrecy",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-store"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "ailake-core",
  "async-trait",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-vec"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "ailake-core",
  "half",
