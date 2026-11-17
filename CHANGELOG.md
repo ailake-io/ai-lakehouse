@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.22] — 2026-11-17
+
+### Changed
+
+- fix(security): align cargo-deny advisory exceptions
+- fix(security): account for unmaintained transitive crates
+- chore(deps): cargo update
+
 ## [0.1.21] — 2026-11-16
 
 ### Security
