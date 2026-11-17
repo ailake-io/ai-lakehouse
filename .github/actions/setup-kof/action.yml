@@ -3,16 +3,16 @@ description: Install a checksum-verified Kof compiler distribution
 runs:
   using: composite
   steps:
-    - name: Install Kof 0.5.0-beta
+    - name: Install Kof 0.7.2
       shell: bash
       run: |
         set -euo pipefail
-        version="0.5.0-beta"
+        version="0.7.2"
         asset="kof-${version}-linux-x86_64.tar.gz"
         release_tag="kof-${version}-linux-x86_64"
         url="https://github.com/KofLang/Kof4j/releases/download/${release_tag}"
         archive="$RUNNER_TEMP/$asset"
-        sha256="f93f02eb62af584ea49ffb44efdbf54f970bdb9570f16fdc48ccc28242798ca9"
+        sha256="3c6687438f2d9bebe24defee9f9250f9c8487d9194df4880057b274c5bce9692"
         curl --fail --location --silent --show-error "$url/$asset" -o "$archive"
         echo "$sha256  $archive" | sha256sum --check --status
         tar -xzf "$archive" -C "$RUNNER_TEMP"
