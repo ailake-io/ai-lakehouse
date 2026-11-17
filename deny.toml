@@ -55,6 +55,12 @@ ignore = [
     # rustls-pemfile 1.x + 2.x — via sqlx and object_store; no patched version exists
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained, transitive via sqlx/object_store; no fix available upstream" },
 
+    # chrono — transitive through Arrow; RustSec reports no fixed version.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, transitive via Arrow; no fixed upgrade is available" },
+
+    # humantime — transitive through object_store; RustSec reports no fixed version.
+    { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained, transitive via object_store; no fixed upgrade is available" },
+
     # rsa — Marvin timing attack, via sqlx-mysql; no fix available upstream
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack, transitive via sqlx-mysql; no upstream fix available" },
 
