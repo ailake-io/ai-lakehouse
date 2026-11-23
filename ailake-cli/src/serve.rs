@@ -2541,6 +2541,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn all_json_endpoints_reject_oversized_bodies_before_parsing() {
+        let dir = TempDir::new().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let app = build_router(Arc::new(test_state(catalog, store)));
+        for endpoint in ["/search", "/write", "/compact", "/jobs/compact"] {
+            // Invalid JSON would return 400 if it ever reached the parser.
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(endpoint)
+                        .body(Body::from(vec![b'{'; MAX_BODY_BYTES + 1]))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{endpoint}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn query_cache_is_snapshot_scoped_and_invalidated() {
         let cache = CacheManager::new(CacheConfig::default()).unwrap();
         cache
