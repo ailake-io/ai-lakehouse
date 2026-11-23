@@ -820,30 +820,29 @@ Use the trigger configured by each workflow. For a pre-release validation, trigg
 | 4 | **Performance** (`performance.yml`) | CPU benchmark, Recall@10/p95, HTTP load, concurrent writers, serve fencing and catalog emulator matrix; GPU matrix on push/nightly/manual | CPU jobs must pass; GPU jobs require runners |
 | 5 | **CI GPU** (`ci-gpu.yml`) | GPU unit + data integration tests on Windows bare-metal; Linux jobs disabled (`if: false`); skips gracefully if `AILAKE_GPU_BACKEND=none` | Must pass (on GPU runner) |
 | 6 | **Compat Heavy** (`compat-heavy.yml`) | Spark+Iceberg, Trino+REST, JVM plugins (Gradle), BigQuery emulator — Docker required | Must pass |
-| 7 | **Release** (`release.yml`) | Triggered automatically on merge to `main` — runs all publishing steps sequentially (see chain below). Can also be triggered manually via `workflow_dispatch`. | Steps 1–6 green |
+| 7 | **Release** (`release.yml`) | Triggered by pushing a prepared `vX.Y.Z` tag; validates versions and publishes the tagged commit (see chain below). | Steps 1–6 green |
 
 Step 5 requires the Windows GPU runner — can run in parallel with steps 2–4. Only the Windows job is currently active; Linux jobs (`index-gpu-linux-cuda`, `index-gpu-linux-rocm`) are disabled until a Linux GPU runner is registered. The performance workflow uses the same GPU labels for its non-PR matrix.
 
 ### `release.yml` sequential chain
 
-`release.yml` triggers on `push: branches: [main]` (automatic) and `workflow_dispatch` (manual).
+`release.yml` triggers only on a stable core version tag (`vX.Y.Z`). Merges to
+`main` run CI without publishing or incrementing a version.
 
-The `release` job auto-bumps the patch version before tagging — **no manual version edits required**:
-
-1. Reads the latest semver tag (`v*.*.*`) and increments its patch component.
-2. Updates core crate manifests and core-version documentation examples; independent SDK/plugin versions stay unchanged. Refreshes `Cargo.lock` and `fuzz/Cargo.lock` with `cargo metadata`, which records the new workspace versions without upgrading any other dependency.
-3. Promotes `CHANGELOG.md`'s `[Unreleased]` section to the new version with the UTC release date, then creates a fresh `[Unreleased]` header.
-4. Commits the bump with `[skip ci]` and pushes to `main` — `[skip ci]` prevents a second workflow run.
-5. Creates the git tag and GitHub Release on the bumped commit.
-6. Runs the full publish chain sequentially.
+1. Prepare the manifests, both lockfiles, documentation examples and dated
+   changelog section in a PR (see [release guide](../guides/RELEASES.md)).
+2. Merge to `main` and wait for CI on that commit. Do not use `[skip ci]`.
+3. Push the version tag on that prepared commit.
+4. The workflow validates the tag, main ancestry, versions and changelog,
+   then waits for successful main CI and the other checks on the tagged SHA.
+5. Create the GitHub Release, publish crates and build/upload JNI. The source
+   tag is not moved, and no version-bump commit is created by publication.
 
 ```
-merge develop → main  (or workflow_dispatch)
-  └── release job
-        ├── patch+1 from latest tag → bump all Cargo.toml → commit [skip ci] → push main
-        ├── git tag vX.Y.Z → push
-        ├── gh release create
-        └── publish-crates → publish-jni
+prepare release PR → merge to main → CI passes → push vX.Y.Z
+  └── validate-tag → wait-for-ci → release
+                                  ├── sync-develop
+                                  └── publish-crates → publish-jni
 ```
 
 Python is published separately by `release-python.yml` with Linux, macOS, and
