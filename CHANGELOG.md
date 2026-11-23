@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Publish core releases only from prepared `vX.Y.Z` tags; merges to `main` no longer increment or publish versions automatically.
+
 ## [0.1.24] — 2026-11-23
 
 ### Changed
