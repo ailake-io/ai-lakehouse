@@ -1097,6 +1097,11 @@ async fn handle_search(
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "search");
     check_rate_limit(&state, &headers, RateLimitRequestClass::Search).await?;
+    if body.len() > MAX_BODY_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "request body exceeds the maximum of {MAX_BODY_BYTES} bytes"
+        )));
+    }
     let req: SearchRequest = serde_json::from_slice(&body)
         .map_err(|e| ApiError::bad_request(format!("invalid JSON: {e}")))?;
 
@@ -1274,6 +1279,11 @@ async fn handle_write(
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "write");
     check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
+    if body.len() > MAX_BODY_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "request body exceeds the maximum of {MAX_BODY_BYTES} bytes"
+        )));
+    }
     let req: WriteRequest = serde_json::from_slice(&body)
         .map_err(|e| ApiError::bad_request(format!("invalid JSON: {e}")))?;
 
@@ -1350,6 +1360,11 @@ async fn handle_compact(
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "compact");
     check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
+    if body.len() > MAX_BODY_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "request body exceeds the maximum of {MAX_BODY_BYTES} bytes"
+        )));
+    }
     let req: CompactRequest = if body.trim().is_empty() {
         CompactRequest::default()
     } else {
@@ -1547,6 +1562,11 @@ async fn handle_submit_compact(
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "compact");
     check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
+    if body.len() > MAX_BODY_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "request body exceeds the maximum of {MAX_BODY_BYTES} bytes"
+        )));
+    }
     let req: CompactRequest = if body.trim().is_empty() {
         CompactRequest::default()
     } else {
