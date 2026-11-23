@@ -40,7 +40,7 @@ COPY tests            tests/
 RUN cargo build --release -p ailake-jni
 
 # ── Stage 2: ailake Flink connector (Gradle/Kotlin) ─────────────────────────────
-FROM gradle:8.7-jdk17 AS jvm-builder
+FROM gradle:8.14.4-jdk17 AS jvm-builder
 
 COPY ailake-flink /ailake-flink
 WORKDIR /ailake-flink

@@ -47,7 +47,7 @@ COPY tests            tests/
 RUN cargo build --release -p ailake-jni
 
 # ── Stage 2: ailake Trino plugin (Gradle/Kotlin) ───────────────────────────────
-FROM gradle:8.7-jdk17 AS jvm-builder
+FROM gradle:8.14.4-jdk17 AS jvm-builder
 
 COPY trino-plugin /trino-plugin
 WORKDIR /trino-plugin
