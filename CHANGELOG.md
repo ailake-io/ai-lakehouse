@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Upgrade Arrow/Parquet to 60.2.0 to fix RUSTSEC-2026-0595 (plaintext Bloom filters in encrypted Parquet files).
+
 ### Changed
 
 - Publish core releases only from prepared `vX.Y.Z` tags; merges to `main` no longer increment or publish versions automatically.
