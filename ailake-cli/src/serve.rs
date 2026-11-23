@@ -1008,7 +1008,9 @@ async fn guard_request(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchRequest {
+    #[serde(deserialize_with = "deserialize_bounded_vec::<_, _, MAX_QUERY_DIMENSIONS>")]
     query: Vec<f32>,
     #[serde(default = "default_top_k")]
     top_k: usize,
@@ -1037,8 +1039,11 @@ struct SearchResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WriteRequest {
+    #[serde(deserialize_with = "deserialize_bounded_vec::<_, _, MAX_WRITE_ROWS>")]
     texts: Vec<String>,
+    #[serde(deserialize_with = "deserialize_embeddings")]
     embeddings: Vec<Vec<f32>>,
     batch_id: Option<String>,
 }
@@ -1050,11 +1055,76 @@ struct WriteResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 struct CompactRequest {
     #[serde(default = "default_target_size")]
     target_size: u64,
     #[serde(default = "default_min_files")]
     min_files: usize,
+}
+
+// Enforce collection limits while reading JSON, before an attacker can cause
+// allocation for an entire oversized array. Do not reserve from size_hint:
+// the input is untrusted, and a nested array needs its own independent bound.
+fn deserialize_bounded_vec<'de, D, T, const MAX: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct BoundedVisitor<T, const MAX: usize>(std::marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>, const MAX: usize> serde::de::Visitor<'de>
+        for BoundedVisitor<T, MAX>
+    {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "an array with at most {MAX} elements")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut items = Vec::new();
+            while items.len() < MAX {
+                match seq.next_element()? {
+                    Some(item) => items.push(item),
+                    None => return Ok(items),
+                }
+            }
+            // Probe only for the presence of another element. Never deserialize
+            // another T (which may itself be a large embedding or string).
+            seq.next_element::<RejectExtraElement>()?;
+            Ok(items)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedVisitor::<T, MAX>(std::marker::PhantomData))
+}
+
+struct RejectExtraElement;
+
+impl<'de> Deserialize<'de> for RejectExtraElement {
+    fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom(
+            "array exceeds the maximum number of elements",
+        ))
+    }
+}
+
+fn deserialize_embeddings<'de, D>(deserializer: D) -> Result<Vec<Vec<f32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Embedding(
+        #[serde(deserialize_with = "deserialize_bounded_vec::<_, _, MAX_WRITE_DIMENSIONS>")]
+        Vec<f32>,
+    );
+
+    deserialize_bounded_vec::<D, Embedding, MAX_WRITE_ROWS>(deserializer)
+        .map(|rows| rows.into_iter().map(|row| row.0).collect())
 }
 
 fn default_target_size() -> u64 {
@@ -1097,6 +1167,11 @@ async fn handle_search(
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "search");
     check_rate_limit(&state, &headers, RateLimitRequestClass::Search).await?;
+    if body.len() > MAX_BODY_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "request body exceeds the maximum of {MAX_BODY_BYTES} bytes"
+        )));
+    }
     let req: SearchRequest = serde_json::from_slice(&body)
         .map_err(|e| ApiError::bad_request(format!("invalid JSON: {e}")))?;
 
@@ -1274,6 +1349,11 @@ async fn handle_write(
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "write");
     check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
+    if body.len() > MAX_BODY_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "request body exceeds the maximum of {MAX_BODY_BYTES} bytes"
+        )));
+    }
     let req: WriteRequest = serde_json::from_slice(&body)
         .map_err(|e| ApiError::bad_request(format!("invalid JSON: {e}")))?;
 
@@ -1350,6 +1430,11 @@ async fn handle_compact(
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "compact");
     check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
+    if body.len() > MAX_BODY_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "request body exceeds the maximum of {MAX_BODY_BYTES} bytes"
+        )));
+    }
     let req: CompactRequest = if body.trim().is_empty() {
         CompactRequest::default()
     } else {
@@ -1547,6 +1632,11 @@ async fn handle_submit_compact(
 ) -> ApiResult<impl IntoResponse> {
     let mut request_metrics = RequestMetricGuard::new(&state.metrics, "compact");
     check_rate_limit(&state, &headers, RateLimitRequestClass::Write).await?;
+    if body.len() > MAX_BODY_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "request body exceeds the maximum of {MAX_BODY_BYTES} bytes"
+        )));
+    }
     let req: CompactRequest = if body.trim().is_empty() {
         CompactRequest::default()
     } else {
@@ -2100,6 +2190,43 @@ mod tests {
     }
 
     #[test]
+    fn request_arrays_stop_before_deserializing_excess_elements() {
+        #[derive(Deserialize)]
+        struct Input {
+            #[serde(deserialize_with = "deserialize_bounded_vec::<_, _, 2>")]
+            items: Vec<u32>,
+        }
+
+        let valid: Input = serde_json::from_str(r#"{"items":[1,2]}"#).unwrap();
+        assert_eq!(valid.items, vec![1, 2]);
+        // The excess element is not even a u32. The bound must reject it before
+        // invoking its deserializer, rather than building the whole collection.
+        let error = serde_json::from_str::<Input>(r#"{"items":[1,2,{}]}"#)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("maximum number of elements"));
+    }
+
+    #[test]
+    fn request_schemas_reject_unknown_fields_and_oversized_embeddings() {
+        assert!(serde_json::from_str::<CompactRequest>(r#"{"unexpected":1}"#).is_err());
+        assert!(serde_json::from_str::<SearchRequest>(r#"{"query":[1],"unexpected":1}"#).is_err());
+        assert!(serde_json::from_str::<WriteRequest>(
+            r#"{"texts":[],"embeddings":[],"unexpected":1}"#
+        )
+        .is_err());
+
+        let oversized = vec![0.0_f32; MAX_WRITE_DIMENSIONS + 1];
+        let body = serde_json::json!({"texts":["text"], "embeddings":[oversized]});
+        let error = serde_json::from_value::<WriteRequest>(body).err().unwrap();
+        assert!(error.to_string().contains("maximum number of elements"));
+
+        let valid: WriteRequest =
+            serde_json::from_str(r#"{"texts":["text"],"embeddings":[[1,2]]}"#).unwrap();
+        assert_eq!(valid.embeddings, vec![vec![1.0, 2.0]]);
+    }
+
+    #[test]
     fn unauthenticated_bind_is_limited_to_loopback_hosts() {
         assert!(is_loopback_host("localhost"));
         assert!(is_loopback_host("127.0.0.1"));
@@ -2411,6 +2538,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(overloaded.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn all_json_endpoints_reject_oversized_bodies_before_parsing() {
+        let dir = TempDir::new().unwrap();
+        let store: Arc<dyn Store> = Arc::new(LocalStore::new(dir.path()));
+        let catalog: Arc<dyn CatalogProvider> =
+            Arc::new(HadoopCatalog::new(store.clone(), "warehouse"));
+        let app = build_router(Arc::new(test_state(catalog, store)));
+        for endpoint in ["/search", "/write", "/compact", "/jobs/compact"] {
+            // Invalid JSON would return 400 if it ever reached the parser.
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(endpoint)
+                        .body(Body::from(vec![b'{'; MAX_BODY_BYTES + 1]))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{endpoint}"
+            );
+        }
     }
 
     #[tokio::test]

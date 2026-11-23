@@ -5,7 +5,6 @@ ignore = [
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
     "RUSTSEC-2023-0071",
-    "RUSTSEC-2024-0436",
     "RUSTSEC-2025-0134",
     # Transitive Arrow/object_store dependencies; RustSec marks these crates unmaintained
     # and reports no fixed upgrade. Reassess when upstream replacements are available.

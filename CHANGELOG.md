@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.24] — 2026-11-23
+
+### Changed
+
+- test(cli): verify body limits on all JSON endpoints
+- fix(cli): bound JSON arrays during deserialization
+- fix(deps): patch url stack overflow and remove stale paste ignore
+- fix(cli): validate request size before JSON parsing
+
 ## [0.1.23] — 2026-11-17
 
 ### Changed
