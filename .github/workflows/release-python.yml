@@ -37,40 +37,26 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - name: Resolve Python version
         id: meta
         env:
           VERSION_INPUT: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-            echo "Python releases must run from main (received $GITHUB_REF)" >&2
-            exit 1
-          fi
-          git fetch --tags --force
-          CORE_VERSION=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' ailake-core/Cargo.toml | head -1)
-          [[ "$CORE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid core version: $CORE_VERSION" >&2; exit 1; }
-          if [ -n "$VERSION_INPUT" ]; then
-            VERSION="$VERSION_INPUT"
-          else
-            VERSION="$CORE_VERSION"
-          fi
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Version must be MAJOR.MINOR.PATCH" >&2; exit 1; }
-          [ "$VERSION" = "$CORE_VERSION" ] || { echo "Python SDK version $VERSION must match AI-Lake core $CORE_VERSION" >&2; exit 1; }
-          TAG="python-v$VERSION"
-          if git rev-parse "$TAG^{commit}" >/dev/null 2>&1; then
-            SOURCE_SHA=$(git rev-parse "$TAG^{commit}")
-            TAG_VERSION=$(git show "$TAG:ailake-py/Cargo.toml" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' | head -1)
-            TAG_CORE_VERSION=$(git show "$SOURCE_SHA:ailake-core/Cargo.toml" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' | head -1)
-            [ "$TAG_VERSION" = "$VERSION" ] || { echo "Existing $TAG has Python version $TAG_VERSION" >&2; exit 1; }
-            [ "$TAG_CORE_VERSION" = "$VERSION" ] || { echo "Existing $TAG has core version $TAG_CORE_VERSION" >&2; exit 1; }
-          else
-            SOURCE_SHA="$GITHUB_SHA"
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          git fetch origin main --tags
+          python3 scripts/python_release.py
+      - name: Require the matching published core release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CORE_TAG: ${{ steps.meta.outputs.core_tag }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view "$CORE_TAG" --json isDraft,isPrerelease --jq '.isDraft == false and .isPrerelease == false')" = true
 
   linux:
     name: Build and test Linux (${{ matrix.target }})
@@ -285,7 +271,7 @@ jobs:
             python3 scripts/plugins.py update --plugin python --version "$VERSION"
             sed -i -E "s/ailake==[0-9]+\.[0-9]+\.[0-9]+/ailake==$VERSION/g" docs/specs/CLOUD_DEPLOY.md
             git add ailake-py/Cargo.toml docs/specs/CLOUD_DEPLOY.md
-            git commit -m "chore(python): release $VERSION [skip ci]"
+            git diff --cached --quiet || git commit -m "chore(python): release $VERSION [skip ci]"
             git tag "$TAG" -m "Release Python SDK $VERSION"
             git push origin "$TAG"
           fi
@@ -304,3 +290,20 @@ jobs:
           else
             gh release create "$TAG" dist/* --title "Python SDK $VERSION" --notes "$NOTES"
           fi
+
+      - name: Check out release audit tools
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: release-audit-tools
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify published source versions and artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in 1 2 3; do
+            python3 release-audit-tools/scripts/release_audit.py --plugin "python" --version "$VERSION" && exit 0
+            if [ "$attempt" -lt 3 ]; then sleep 10; fi
+          done
+          exit 1

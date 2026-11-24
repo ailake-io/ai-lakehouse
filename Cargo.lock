@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "ailake-py"
-version = "0.1.15"
+version = "0.1.24"
 dependencies = [
  "ailake-catalog",
  "ailake-core",

@@ -777,7 +777,7 @@ version, with Linux x86_64/aarch64, macOS x86_64/arm64, Windows x86_64 wheels,
 and an sdist. `release-kof.yml` checks and packages the Kof HTTP JVM/JS client and the
 Native C-ABI adapter. The Native adapter must match the C-ABI contract version
 documented in `integrations/kof/README.md`. Plugin versions can be provided
-or incremented from their latest component tag. Python uses the core version;
+from reviewed manifests and documentation. Python follows the matching core version;
 its optional version input must match. Release tags include the version target
 update.
 
@@ -788,7 +788,7 @@ JVM and JS and the Native adapter against the built JNI library.
 | Input | Description |
 |---|---|
 | `plugin` | Selected plugin, supplied by the named workflow entry point. |
-| `version` | Optional SemVer. Blank increments the selected plugin's latest tag. |
+| `version` | Optional prepared SemVer. Blank uses the reviewed manifest version; existing tags retain their original source. |
 
 ### `publish-pypi.yml` — manual fallback (`workflow_dispatch`)
 
@@ -842,11 +842,12 @@ Step 5 requires the Windows GPU runner — can run in parallel with steps 2–4.
 prepare release PR → merge to main → CI passes → push vX.Y.Z
   └── validate-tag → wait-for-ci → release
                                   ├── sync-develop
-                                  └── publish-crates → publish-jni
+                                  └── publish-crates → publish-jni → publish-python
 ```
 
-Python is published separately by `release-python.yml` with Linux, macOS, and
-Windows wheels plus an sdist, using the core version and a `python-v` tag.
+The core release calls `release-python.yml` automatically after crates and JNI.
+It publishes Linux, macOS and Windows wheels plus an sdist at the same core
+version, using a `python-v` tag. Manual invocation remains available for recovery.
 `release-kof.yml` validates and packages the Kof HTTP and Native adapters with
 its own version and tag.
 

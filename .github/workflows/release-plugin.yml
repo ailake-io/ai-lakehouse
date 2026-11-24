@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       version:
-        description: Independent plugin version (blank increments its latest plugin tag)
+        description: Prepared plugin version (blank uses the reviewed manifest and documentation version)
         required: false
         type: string
 
@@ -30,10 +30,15 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
+      source_sha: ${{ steps.meta.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - name: Resolve independent version and tag
         id: meta
         env:
@@ -41,40 +46,8 @@ jobs:
           VERSION_INPUT: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-            echo "Plugin releases must run from main (received $GITHUB_REF)" >&2
-            exit 1
-          fi
-          git fetch --tags --force
-          readarray -t META < <(python3 - "$PLUGIN" <<'PY'
-          import json, re, sys
-          from pathlib import Path
-          registry = json.loads(Path("scripts/plugins.json").read_text())
-          plugin = next(p for p in registry["plugins"] if p["id"] == sys.argv[1])
-          version = ""
-          for target in plugin["targets"]:
-              match = re.search(target["version_pattern"], Path(target["file"]).read_text())
-              if match:
-                  version = match.group(1)
-                  break
-          print(plugin["tag_prefix"])
-          print(version)
-          PY
-          )
-          PREFIX=${META[0]}
-          BASE=${META[1]}
-          if [ -n "$VERSION_INPUT" ]; then
-            VERSION="$VERSION_INPUT"
-          else
-            LATEST=$(git tag --list "${PREFIX}*" --sort=-version:refname | head -1)
-            if [ -n "$LATEST" ]; then BASE=${LATEST#"$PREFIX"}; fi
-            [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid base version: $BASE" >&2; exit 1; }
-            IFS=. read -r MAJOR MINOR PATCH <<< "$BASE"
-            VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
-          fi
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Version must be MAJOR.MINOR.PATCH" >&2; exit 1; }
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$PREFIX$VERSION" >> "$GITHUB_OUTPUT"
+          git fetch origin main --tags
+          python3 scripts/plugin_release.py
 
   build-jni:
     name: Build JNI (${{ matrix.platform }})
@@ -101,7 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.resolve.outputs.source_sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build native library
@@ -132,10 +105,11 @@ jobs:
       PLUGIN: ${{ inputs.plugin }}
       VERSION: ${{ needs.resolve.outputs.version }}
       TAG: ${{ needs.resolve.outputs.tag }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.resolve.outputs.source_sha }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@v4
@@ -295,14 +269,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
-            TAG_PARENT=$(git rev-parse "$TAG^")
-            if [ "$TAG_PARENT" != "$GITHUB_SHA" ]; then
+            TAG_SHA=$(git rev-parse "$TAG^{commit}")
+            if [ "$TAG_SHA" != "$SOURCE_SHA" ]; then
               echo "Tag $TAG already exists for a different source commit" >&2
               exit 1
             fi
           else
-            git add $(cat "$RUNNER_TEMP/plugin-version-files")
-            git commit -m "chore($PLUGIN): release $VERSION [skip ci]"
+            if [ -s "$RUNNER_TEMP/plugin-version-files" ]; then
+              while IFS= read -r file; do git add -- "$file"; done < "$RUNNER_TEMP/plugin-version-files"
+            fi
+            git diff --cached --quiet || git commit -m "chore($PLUGIN): release $VERSION [skip ci]"
             git tag "$TAG" -m "Release $PLUGIN $VERSION"
             git push origin "$TAG"
           fi
@@ -335,5 +311,22 @@ jobs:
             gh release create "$TAG" dist/* \
               --title "$PLUGIN $VERSION" \
               --generate-notes \
-              --notes "Independent $PLUGIN release $VERSION. Source commit: $GITHUB_SHA."
+              --notes "Independent $PLUGIN release $VERSION. Source commit: $SOURCE_SHA."
           fi
+
+      - name: Check out release audit tools
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: release-audit-tools
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify published source versions and artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in 1 2 3; do
+            python3 release-audit-tools/scripts/release_audit.py --plugin "$PLUGIN" --version "$VERSION" && exit 0
+            if [ "$attempt" -lt 3 ]; then sleep 10; fi
+          done
+          exit 1

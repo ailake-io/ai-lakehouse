@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: python -m unittest scripts.test_plugins scripts.test_release_tag
+      - run: python -m unittest scripts.test_plugins scripts.test_release_tag scripts.test_python_release scripts.test_plugin_release
       - run: python scripts/plugins.py check
 
   lockfiles:

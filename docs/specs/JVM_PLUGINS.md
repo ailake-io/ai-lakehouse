@@ -92,25 +92,25 @@ adding it to `java.library.path`. No Rust toolchain or Gradle is needed to
 install a published build.
 
 ```bash
-SPARK_TAG=spark-v0.1.1
-TRINO_TAG=trino-v0.1.1
-FLINK_TAG=flink-v0.1.1
-SPARK_VERSION=0.1.1
-TRINO_VERSION=0.1.1
-FLINK_VERSION=0.1.1
+SPARK_TAG=spark-v0.1.17
+TRINO_TAG=trino-v0.1.17
+FLINK_TAG=flink-v0.1.18
+SPARK_VERSION=0.1.17
+TRINO_VERSION=0.1.17
+FLINK_VERSION=0.1.18
 NATIVE_TAG=$SPARK_TAG # Set to the tag for the plugin release you install.
 
 # Spark plugin
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${SPARK_TAG}/spark-plugin-${SPARK_VERSION}-plugin.jar
+wget https://github.com/ailake-io/ai-lakehouse/releases/download/${SPARK_TAG}/spark-plugin-${SPARK_VERSION}-plugin.jar
 
 # Trino plugin
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TRINO_TAG}/trino-plugin-${TRINO_VERSION}-plugin.jar
+wget https://github.com/ailake-io/ai-lakehouse/releases/download/${TRINO_TAG}/trino-plugin-${TRINO_VERSION}-plugin.jar
 
 # Flink connector
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${FLINK_TAG}/ailake-flink-${FLINK_VERSION}-plugin.jar
+wget https://github.com/ailake-io/ai-lakehouse/releases/download/${FLINK_TAG}/ailake-flink-${FLINK_VERSION}-plugin.jar
 
 # Native library (download the asset matching the host platform from NATIVE_TAG)
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${NATIVE_TAG}/libailake_jni-linux-x86_64.so
+wget -O libailake_jni.so https://github.com/ailake-io/ai-lakehouse/releases/download/${NATIVE_TAG}/libailake_jni-linux-x86_64.so
 ```
 
 Place the renamed platform library in a directory accessible to the JVM (see [Native library deployment](#native-library-deployment)). The plugin checks `ailake_ffi_abi_version()` at startup and fails closed if the loaded native library does not report ABI 1.
@@ -283,7 +283,7 @@ gradle wrapper       # creates ./gradlew — run once
 ./gradlew shadowJar  # builds fat-jar with JNA bundled
 
 # Output
-ls -lh build/libs/trino-plugin-0.1.15-plugin.jar
+ls -lh build/libs/trino-plugin-0.1.17-plugin.jar
 ```
 
 ### Install
@@ -293,7 +293,7 @@ TRINO_HOME=/opt/trino   # adjust to your installation
 
 # 1. Plugin jar
 mkdir -p $TRINO_HOME/plugin/ailake
-cp build/libs/trino-plugin-0.1.15-plugin.jar $TRINO_HOME/plugin/ailake/
+cp build/libs/trino-plugin-0.1.17-plugin.jar $TRINO_HOME/plugin/ailake/
 
 # 2. Native library — add to Trino's JVM library path
 echo "-Djava.library.path=$NATIVE_LIB_DIR" >> $TRINO_HOME/etc/jvm.config
@@ -492,7 +492,7 @@ cd spark-plugin
 gradle wrapper
 ./gradlew shadowJar
 
-ls -lh build/libs/spark-plugin-0.1.15-plugin.jar
+ls -lh build/libs/spark-plugin-0.1.17-plugin.jar
 ```
 
 ### How the strategy works
@@ -519,7 +519,7 @@ spark.ailakeSearch(uri, query, topK)
 ### Launching Spark
 
 ```bash
-PLUGIN_JAR=$(pwd)/spark-plugin/build/libs/spark-plugin-0.1.15-plugin.jar
+PLUGIN_JAR=$(pwd)/spark-plugin/build/libs/spark-plugin-0.1.17-plugin.jar
 
 # Interactive (spark-shell)
 $SPARK_HOME/bin/spark-shell \
@@ -590,7 +590,7 @@ export AILAKE_TABLE=/tmp/ailakeXXXXXX/warehouse/default/demo_table
 
 # 2. Start spark-shell with plugin
 $SPARK_HOME/bin/spark-shell \
-  --jars $(pwd)/spark-plugin/build/libs/spark-plugin-0.1.15-plugin.jar \
+  --jars $(pwd)/spark-plugin/build/libs/spark-plugin-0.1.17-plugin.jar \
   --conf spark.sql.extensions=io.ailake.spark.AilakeSparkExtensions \
   --conf "spark.driver.extraJavaOptions=-Djava.library.path=$(pwd)/target/release" \
   --conf spark.ui.enabled=false

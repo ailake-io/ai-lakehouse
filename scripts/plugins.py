@@ -30,7 +30,7 @@ def set_plugin_version(root: Path, plugin: dict[str, Any], version: str) -> list
         source = path.read_text(encoding="utf-8")
         pattern = re.compile(target["pattern"])
         updated, count = pattern.subn(target["replacement"].format(version=version), source)
-        if count != 1:
+        if count == 0 or (count != 1 and not target.get("multiple", False)):
             raise ValueError(f"{target['file']}: expected one version declaration, found {count}")
         if updated != source:
             path.write_text(updated, encoding="utf-8")
@@ -42,10 +42,12 @@ def plugin_versions(root: Path, plugin: dict[str, Any]) -> list[tuple[str, str]]
     versions = []
     for target in plugin["targets"]:
         path = root / target["file"]
-        match = re.search(target["version_pattern"], path.read_text(encoding="utf-8"))
-        if not match:
+        matches = list(re.finditer(target["version_pattern"], path.read_text(encoding="utf-8")))
+        if not matches:
             raise ValueError(f"{target['file']}: version declaration not found")
-        versions.append((target["file"], match.group(1)))
+        if len(matches) != 1 and not target.get("multiple", False):
+            raise ValueError(f"{target['file']}: expected one version declaration, found {len(matches)}")
+        versions.extend((target["file"], match.group(1)) for match in matches)
     return versions
 
 
@@ -99,6 +101,14 @@ def check_registry(root: Path, registry: dict[str, Any]) -> list[str]:
                 errors.append(f"{path}: version {version} differs from core {expected}")
         if versions and len({version for _, version in versions}) != 1:
             errors.append(f"{plugin['id']}: version targets are out of sync")
+    for target in registry.get("core_targets", []):
+        try:
+            versions = plugin_versions(root, {"targets": [target]})
+            for path, version in versions:
+                if expected and version != expected:
+                    errors.append(f"{path}: version {version} differs from core {expected}")
+        except (OSError, ValueError) as error:
+            errors.append(str(error))
     return errors
 
 
@@ -166,6 +176,8 @@ def main() -> int:
         print(f"No plugins use the {args.policy} version policy; nothing to update.")
         return 0
     changed = []
+    if args.policy == "core" or args.all:
+        changed.extend(set_plugin_version(ROOT, {"targets": registry.get("core_targets", [])}, args.version))
     for plugin in selected:
         changed.extend(set_plugin_version(ROOT, plugin, args.version))
     for path in changed:

@@ -1,7 +1,7 @@
 # AI-Lake Format
 
-[![CI](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci.yml)
-[![Safety](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci-safety.yml/badge.svg)](https://github.com/ThiagoLange/ai-lakehouse/actions/workflows/ci-safety.yml)
+[![CI](https://github.com/ailake-io/ai-lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/ailake-io/ai-lakehouse/actions/workflows/ci.yml)
+[![Safety](https://github.com/ailake-io/ai-lakehouse/actions/workflows/ci-safety.yml/badge.svg)](https://github.com/ailake-io/ai-lakehouse/actions/workflows/ci-safety.yml)
 [![crates.io](https://img.shields.io/crates/v/ailake-core.svg)](https://crates.io/crates/ailake-core)
 [![PyPI](https://img.shields.io/pypi/v/ailake.svg)](https://pypi.org/p/ailake)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
@@ -162,28 +162,28 @@ df = await table.search(query_embedding).limit(10).to_pandas_async()
 pip install apache-airflow-providers-ailake
 ```
 
-**JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ThiagoLange/ai-lakehouse/releases):
+**JVM (Spark / Trino / Flink)** — download pre-built JARs from [GitHub Releases](https://github.com/ailake-io/ai-lakehouse/releases):
 
 ```bash
-SPARK_TAG=spark-v0.1.15
-TRINO_TAG=trino-v0.1.15
-FLINK_TAG=flink-v0.1.15
-SPARK_VERSION=0.1.15
-TRINO_VERSION=0.1.15
-FLINK_VERSION=0.1.15
+SPARK_TAG=spark-v0.1.17
+TRINO_TAG=trino-v0.1.17
+FLINK_TAG=flink-v0.1.18
+SPARK_VERSION=0.1.17
+TRINO_VERSION=0.1.17
+FLINK_VERSION=0.1.18
 NATIVE_TAG=$SPARK_TAG # Use the tag of the JVM plugin release you install.
 
 # Spark plugin
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${SPARK_TAG}/spark-plugin-${SPARK_VERSION}-plugin.jar
+wget https://github.com/ailake-io/ai-lakehouse/releases/download/${SPARK_TAG}/spark-plugin-${SPARK_VERSION}-plugin.jar
 
 # Trino plugin
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${TRINO_TAG}/trino-plugin-${TRINO_VERSION}-plugin.jar
+wget https://github.com/ailake-io/ai-lakehouse/releases/download/${TRINO_TAG}/trino-plugin-${TRINO_VERSION}-plugin.jar
 
 # Flink connector
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${FLINK_TAG}/ailake-flink-${FLINK_VERSION}-plugin.jar
+wget https://github.com/ailake-io/ai-lakehouse/releases/download/${FLINK_TAG}/ailake-flink-${FLINK_VERSION}-plugin.jar
 
 # Native library (required by all three — place on java.library.path)
-wget https://github.com/ThiagoLange/ai-lakehouse/releases/download/${NATIVE_TAG}/libailake_jni-linux-x86_64.so
+wget -O libailake_jni.so https://github.com/ailake-io/ai-lakehouse/releases/download/${NATIVE_TAG}/libailake_jni-linux-x86_64.so
 # The same tag also contains macOS arm64 and Windows x86_64 native assets;
 # rename the selected file to the platform library name JNA expects.
 ```
