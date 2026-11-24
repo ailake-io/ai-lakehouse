@@ -160,7 +160,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v3
         if: inputs.plugin == 'spark' || inputs.plugin == 'trino' || inputs.plugin == 'flink'
         with:
-          gradle-version: '8.7'
+          gradle-version: '8.14.4'
 
       - uses: actions/setup-python@v5
         if: inputs.plugin == 'airflow' || inputs.plugin == 'airbyte' || inputs.plugin == 'duckdb'

@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: python -m unittest scripts.test_plugins
+      - run: python -m unittest scripts.test_plugins scripts.test_release_tag
       - run: python scripts/plugins.py check
 
   lockfiles:
@@ -387,7 +387,7 @@ jobs:
           python-version: "3.13"
       - uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: '8.7'
+          gradle-version: '8.14.4'
       - name: Build libailake_jni.so
         run: cargo build --release -p ailake-jni
       - name: Generate JNI fixture (dim=8, N=16)

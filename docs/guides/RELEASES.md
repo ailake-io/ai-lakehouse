@@ -5,61 +5,68 @@ tag `python-vX.Y.Z`, e é publicado pela Action própria. Cada plugin e a
 integração Kof mantêm tags e ciclos independentes. A C-ABI mantém seu próprio
 número de contrato para compatibilidade binária.
 
-## Fluxo automático
+## Publicação por tag
 
-1. O merge de `develop` para `main` dispara `.github/workflows/release.yml`.
-2. A Action espera todos os checks obrigatórios terminarem com sucesso (até
-   90 minutos; depois disso falha com erro de timeout).
-3. O patch é incrementado a partir da última tag (`vX.Y.Z` → próximo patch), ou
-   `version_override` é usado em uma execução manual.
-4. Os manifests e exemplos documentais do core são atualizados para a nova versão.
-5. A seção `[Unreleased]` do `CHANGELOG.md` vira a seção da versão publicada,
-   com a data UTC do release, e uma nova seção `[Unreleased]` é deixada no topo.
-   Se `[Unreleased]` estiver vazio, a seção é gerada a partir dos commits desde
-   a última tag.
-6. A Action cria a tag e o GitHub Release do core e publica crates e a biblioteca
-   JNI. Workflows separados publicam os SDKs e integrações.
-7. O job `sync-develop` faz merge do commit da tag em `develop` (em conflito,
-   vence a `main`), deixando `main` e `develop` iguais — inclusive hotfixes
-   mergeados direto na `main`. É idempotente em reruns.
+Merges e pushes em `main` executam CI, mas não publicam versões. A publicação
+do core começa apenas ao enviar uma tag estável `vX.Y.Z`.
 
-Não edite manualmente a versão dos artefatos para um release normal. Durante o
-desenvolvimento, registre mudanças visíveis ao usuário em `[Unreleased]`:
+1. Prepare as versões e as notas em um PR. Durante o desenvolvimento, continue
+   registrando mudanças visíveis ao usuário em `[Unreleased]`.
+2. Para preparar uma versão futura, por exemplo `0.1.25` a partir de `0.1.24`,
+   execute na branch do PR:
 
-```markdown
-## [Unreleased]
+   ```bash
+   python3 scripts/plugins.py bump-core-cargo --from-version 0.1.24 --version 0.1.25
+   python3 scripts/plugins.py update --policy core --version 0.1.25
+   cargo metadata --format-version 1 >/dev/null
+   cargo metadata --format-version 1 --manifest-path fuzz/Cargo.toml >/dev/null
+   ```
 
-### Added
+   Atualize também os exemplos do core na documentação e promova as notas de
+   `[Unreleased]` para `## [0.1.25] — AAAA-MM-DD`, deixando uma nova seção
+   `[Unreleased]` no topo. Revise o diff e inclua os dois lockfiles no PR.
+   Python e plugins preservam suas versões independentes.
+3. Faça merge do PR em `main` e espere a CI desse commit passar. Não use
+   `[skip ci]` no commit de preparação ou na mensagem do merge: a publicação
+   exige uma execução de CI bem-sucedida na `main` para o commit da tag.
+4. Atualize a cópia local da `main`, valide e envie a tag no commit aprovado:
 
-- Descreva a capacidade e indique as superfícies afetadas.
-```
+   ```bash
+   git fetch origin main
+   git switch --detach origin/main
+   python3 scripts/release_tag.py v0.1.25
+   git tag -a v0.1.25 -m "Release v0.1.25"
+   git push origin v0.1.25
+   ```
 
-## Checklist antes do merge em `main`
+5. `release.yml` valida o formato da tag, confirma que o commit pertence à
+   história da `main`, verifica as versões dos manifests e lockfiles e exige
+   uma seção datada no changelog. Aguarda a CI e os demais checks por até
+   90 minutos, então cria o GitHub Release e publica crates e a biblioteca JNI.
+6. O job `sync-develop` continua levando o commit publicado para `develop`.
+   SDKs e plugins continuam usando seus workflows próprios.
 
-- `[Unreleased]` contém as mudanças da janela de release.
-- Exemplos do core usam `vX.Y.Z`; SDKs e plugins usam tags próprias pelo
-  workflow nomeado correspondente. Python usa `Release Python`; os plugins
-  usam a implementação compartilhada `release-plugin.yml`; os prefixos ficam
-  no registry `scripts/plugins.json`.
+O workflow publica o código do commit da tag sem incrementar versões, criar
+commits em `main` ou mover a tag. Uma tag incompatível com as versões preparadas
+falha antes da publicação. Para repetir uma publicação após falha, use **Re-run
+failed jobs** na execução da tag; não apague nem mova uma tag publicada.
+
+## Verificações antes da tag
+
+- A versão do core e os dois lockfiles correspondem à tag.
+- O changelog tem a seção datada da versão e uma nova seção `[Unreleased]`.
+- Exemplos e referências do core usam a versão preparada.
 - CI, CI Safety, Go, C++, performance e Compat Heavy estão verdes.
-- O PR `develop` → `main` é mergeado com **merge commit** (a regra da branch
-  só permite esse). Squash junta as mensagens dos commits, e um `[skip ci]`
-  antigo nelas faz o push pular todos os workflows, inclusive o release.
-- Para levar à `main` só correções de CI/plugin sem gerar release do core,
-  coloque `[skip ci]` no título do PR: ele vai para a mensagem do merge commit
-  e o push não dispara workflows. Depois rode os releases dos plugins à mão.
-- `Cargo.lock` e `fuzz/Cargo.lock` são versionados e o job `lockfiles` do CI
-  falha se algum estiver defasado. Ao mudar um `Cargo.toml`, commite o lock
-  junto. O release atualiza os dois sozinho no bump de versão. Os builds de
-  release do core e dos plugins usam `--locked`; as wheels Python não, porque
-  `release-python.yml` grava a versão do SDK em `ailake-py/Cargo.toml` antes do
-  build. O workflow `cargo-update.yml` roda `cargo update` nos dois locks toda
-  segunda-feira e abre (ou atualiza) o PR `chore/cargo-update` contra `develop`,
-  só com atualizações que cabem nos ranges atuais. Não usamos o Dependabot para
-  isso: o updater de Cargo dele falha neste workspace, que usa duas versões de
-  várias crates ao mesmo tempo. Os alertas do Dependabot continuam ativos.
-- Mudanças de comportamento operacional apontam para as guias de cache,
-  coordenação distribuída, secrets, rate limiting e performance.
+- O PR foi integrado com merge commit, conforme a regra da branch.
+- Nenhum release de Python ou plugin é necessário apenas por fazer merge de
+  uma correção no core. Python usa `Release Python`; os plugins usam a
+  implementação compartilhada `release-plugin.yml`, com os prefixos definidos
+  em `scripts/plugins.json`.
+
+`Cargo.lock` e `fuzz/Cargo.lock` são versionados e o job `lockfiles` do CI falha
+se algum estiver defasado. Ao mudar um `Cargo.toml`, commite o lock junto.
+O workflow `cargo-update.yml` abre atualizações semanais contra `develop`.
+Os alertas do Dependabot continuam ativos.
 
 Para reprocessar apenas um artefato depois de uma falha, use os workflows de
 fallback documentados em [`docs/contributing/TESTING.md`](../contributing/TESTING.md).

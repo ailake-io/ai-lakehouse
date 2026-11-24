@@ -82,7 +82,7 @@ RUN cmake -S /duckdb-ailake -B /duckdb-ailake/build \
 
 # ── Stage 2: ailake Spark + Flink plugins (Gradle/Scala/Kotlin — separate JDK base,
 #    decoupled from the Rust/Python builder above) ─────────────────────────────
-FROM gradle:8.7-jdk17 AS jvm-builder
+FROM gradle:8.14.4-jdk17 AS jvm-builder
 
 COPY spark-plugin /spark-plugin
 WORKDIR /spark-plugin

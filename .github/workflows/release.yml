@@ -2,13 +2,11 @@ name: Release
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
-    inputs:
-      version_override:
-        description: "Version to release (e.g. 0.1.0). Leave empty for automatic patch+1."
-        required: false
-        default: ""
+    tags: ['v[0-9]*.[0-9]*.[0-9]*']
+
+concurrency:
+  group: core-release
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,8 +17,36 @@ permissions:
   contents: read
 
 jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.tag.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Validate tag, main ancestry and prepared versions
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          git fetch origin main
+          python3 scripts/release_tag.py "$RELEASE_TAG"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   wait-for-ci:
     name: Wait for CI checks to pass
+    needs: validate-tag
     runs-on: ubuntu-latest
     # Job limit stays above the 90-minute poll loop below, so a slow CI ends
     # in the loop's clear timeout error instead of the job being cancelled
@@ -33,17 +59,17 @@ jobs:
       - name: Poll check-runs for this commit until everything else is green
         env:
           GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.validate-tag.outputs.sha }}
         run: |
           set -euo pipefail
-          SHA="${{ github.sha }}"
           REPO="${{ github.repository }}"
           # Excludes this workflow's own job names — Release always reports pending/
           # in-progress for itself, which would deadlock the wait otherwise.
-          SELF_JOBS='^(Wait for CI checks to pass|Create GitHub Release|Sync version bump to develop|Publish to crates\.io|Build and upload JNI library)$'
+          SELF_JOBS='^(Validate release tag|Wait for CI checks to pass|Create GitHub Release|Sync released tag to develop|Publish to crates\.io|Build and upload JNI library)$'
 
           echo "Waiting for all other check-runs on $SHA to complete successfully..."
           for i in $(seq 1 270); do
-            runs_json=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate -q '.check_runs')
+            runs_json=$(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" --paginate --slurp --jq '[.[].check_runs[]]')
             others=$(echo "$runs_json" | jq --arg self "$SELF_JOBS" '[.[] | select(.name | test($self) | not)]')
             total=$(echo "$others" | jq 'length')
             pending=$(echo "$others" | jq '[.[] | select(.status != "completed")] | length')
@@ -56,7 +82,11 @@ jobs:
               exit 1
             fi
 
-            if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+            # A tag push does not start branch CI. Require a successful CI
+            # push run on this exact commit, not just a CodeQL check.
+            ci_runs=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=100")
+            ci_ok=$(echo "$ci_runs" | jq '[.workflow_runs[] | select(.head_branch == "main" and .conclusion == "success")] | length')
+            if [ "$ci_ok" -gt 0 ] && [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
               echo "All $total required check(s) completed successfully."
               exit 0
             fi
@@ -69,163 +99,34 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: wait-for-ci
+    needs: [validate-tag, wait-for-ci]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write   # needed to create tags and GitHub Releases
+      contents: write   # needed to create the GitHub Release
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ needs.validate-tag.outputs.version }}
+      tag: ${{ needs.validate-tag.outputs.tag }}
+      sha: ${{ needs.validate-tag.outputs.sha }}
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # full history needed to read latest tag
-          # main is protected by a ruleset requiring PRs; the default GITHUB_TOKEN
-          # pushes as github-actions[bot], which isn't in the ruleset's bypass list.
-          # ACTIONS_PAT belongs to a bypass-listed user, so the version-bump commit
-          # and release tag can be pushed directly.
-          token: ${{ secrets.ACTIONS_PAT }}
-
-      # Needed to refresh both Cargo.lock files after the manifest bump below.
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Bump patch version from latest tag
-        id: version
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Derive next version from latest semver tag (patch+1),
-          # or use version_override when explicitly provided.
-          LATEST=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
-          LATEST=${LATEST:-v0.0.0}
-          MAJOR=$(echo "${LATEST#v}" | cut -d. -f1)
-          MINOR=$(echo "${LATEST#v}" | cut -d. -f2)
-          PATCH=$(echo "${LATEST#v}" | cut -d. -f3)
-          if [ -n "${{ inputs.version_override }}" ]; then
-            NEW_VERSION="${{ inputs.version_override }}"
-          else
-            NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
-          fi
-          NEW_TAG="v$NEW_VERSION"
-
-          # Bump core Cargo manifests and internal dependency pins while
-          # preserving package versions registered as independently released.
-          OLD_VERSION="${LATEST#v}"
-          python3 scripts/plugins.py bump-core-cargo \
-            --from-version "$OLD_VERSION" --version "$NEW_VERSION"
-
-          # Fix internal workspace dep versions regardless of stale value.
-          # The sed above only replaces the exact OLD_VERSION; if a workspace dep
-          # was added/merged with an outdated version it would be missed.
-          for INTERNAL in ailake-core ailake-vec ailake-store ailake-fts ailake-parquet \
-                          ailake-index ailake-catalog ailake-file ailake-query ailake-jni \
-                          ailake-cli ailake-py; do
-            sed -i -E "s/(${INTERNAL}[[:space:]]*=[[:space:]]*\{[^}]*version[[:space:]]*=[[:space:]]*\")[^\"]*/\1${NEW_VERSION}/" Cargo.toml
-          done
-
-          # Plugin artifacts and the Python SDK have their own release cadence.
-          # Their version targets live in scripts/plugins.json, so new entries
-          # don't require changes to this release workflow.
-          python3 scripts/plugins.py update --policy core --version "$NEW_VERSION"
-
-          # Promote the accumulated release notes before tagging. Keep a fresh
-          # [Unreleased] section at the top so the next development cycle has
-          # an explicit place for user-visible changes.
-          RELEASE_DATE=$(date -u +%Y-%m-%d)
-          if grep -q "^## \[$NEW_VERSION\]" CHANGELOG.md; then
-            echo "CHANGELOG.md already contains [$NEW_VERSION], skipping promotion"
-          else
-            # Nobody wrote release notes under [Unreleased]: fall back to the
-            # commit subjects since the last tag instead of an empty section.
-            UNRELEASED=$(awk '/^## \[Unreleased\]$/{f=1;next} /^## \[/{f=0} f && NF' CHANGELOG.md)
-            NOTES=""
-            if [ -z "$UNRELEASED" ]; then
-              NOTES=$(git log --no-merges --format='- %s' "$LATEST..HEAD" \
-                | grep -v 'chore: bump version' || true)
-            fi
-            CHANGELOG_TMP=$(mktemp)
-            NOTES="$NOTES" awk -v version="$NEW_VERSION" -v date="$RELEASE_DATE" '
-              /^## \[Unreleased\]$/ {
-                print
-                print ""
-                print "## [" version "] — " date
-                if (ENVIRON["NOTES"] != "") {
-                  print ""
-                  print "### Changed"
-                  print ""
-                  print ENVIRON["NOTES"]
-                }
-                next
-              }
-              { print }
-            ' CHANGELOG.md > "$CHANGELOG_TMP"
-            mv "$CHANGELOG_TMP" CHANGELOG.md
-          fi
-
-          # Doc-example version placeholders for the core release tag and
-          # crates.io dependencies. Python package versions have their own
-          # release workflow. CHANGELOG.md is historical and must not be rewritten.
-          DOC_FILES=$(grep -rl \
-            -e "ailake-core[[:space:]]*=[[:space:]]*\"$OLD_VERSION\"" \
-            -e "ailake-query[[:space:]]*=[[:space:]]*\"$OLD_VERSION\"" \
-            -e "ailake-store[[:space:]]*=[[:space:]]*\"$OLD_VERSION\"" \
-            --include="*.md" . 2>/dev/null | grep -v "CHANGELOG.md" || true)
-          for f in $DOC_FILES; do
-            sed -i -E \
-              -e "s/(ailake-core[[:space:]]*=[[:space:]]*\")$OLD_VERSION(\")/\1$NEW_VERSION\2/g" \
-              -e "s/(ailake-query[[:space:]]*=[[:space:]]*\")$OLD_VERSION(\")/\1$NEW_VERSION\2/g" \
-              -e "s/(ailake-store[[:space:]]*=[[:space:]]*\")$OLD_VERSION(\")/\1$NEW_VERSION\2/g" \
-              "$f"
-          done
-
-          # ailake-fts workspace-dependency example — mirrors root Cargo.toml.
-          if [ -f docs/architecture/WORKSPACE.md ]; then
-            sed -i -E "s/(ailake-fts[[:space:]]*=[[:space:]]*\{ path = \"ailake-fts\", version = \")$OLD_VERSION(\" \})/\1$NEW_VERSION\2/" \
-              docs/architecture/WORKSPACE.md
-          fi
-
-          # Both lockfiles are tracked and CI checks them with --locked. Record the
-          # bumped workspace versions without upgrading any other dependency.
-          cargo metadata --format-version 1 >/dev/null
-          cargo metadata --format-version 1 --manifest-path fuzz/Cargo.toml >/dev/null
-
-          # The release job starts from a clean checkout, so stage all tracked
-          # version, changelog, and documentation changes together.
-          git add -u
-          git diff --cached --quiet || \
-            git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
-          git pull --rebase origin main
-          git push origin main
-
-          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$NEW_TAG"         >> "$GITHUB_OUTPUT"
-
-      - name: Create and push git tag
-        run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping"
-          else
-            git tag "$TAG" -m "Release $TAG"
-            git push origin "$TAG"
-          fi
+          ref: ${{ needs.validate-tag.outputs.sha }}
+          persist-credentials: false
 
       - name: Create GitHub Release
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "GitHub Release $TAG already exists, skipping"
           else
-            gh release create "$TAG" \
+            gh release create "$TAG" --verify-tag \
               --title "AI-Lake $TAG" \
               --notes "## $TAG
 
-          See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for full release notes.
+          See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/$TAG/CHANGELOG.md) for full release notes.
 
           ### Rust crates (crates.io)
-          All crates bumped to \`${{ steps.version.outputs.version }}\`.
+          Core crates prepared at \`${{ needs.validate-tag.outputs.version }}\`.
 
           ### Python SDK
           Published separately through the \`Release Python\` workflow.
@@ -238,9 +139,10 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate-tag.outputs.tag }}
 
   sync-develop:
-    name: Sync version bump to develop
+    name: Sync released tag to develop
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -250,8 +152,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          # Same bypass-listed identity as the main-branch bump commit — develop
-          # is also protected by a PR-required ruleset.
+          # The existing sync identity can update protected develop.
           token: ${{ secrets.ACTIONS_PAT }}
 
       - name: Merge released main into develop
@@ -292,7 +193,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.release.outputs.tag }}
+          ref: ${{ needs.release.outputs.sha }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -346,7 +247,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.release.outputs.tag }}
+          ref: ${{ needs.release.outputs.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -358,7 +259,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: '8.7'
+          gradle-version: '8.14.4'
 
       - name: Build libailake_jni.so
         run: cargo build --release --locked -p ailake-jni

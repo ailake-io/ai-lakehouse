@@ -470,7 +470,7 @@ Delivered in Phase 5:
 
 Delivered in Phase 6:
 
-- **`release.yml`** — automated crates.io publish for all 10 workspace crates in dependency order (30 s index wait between tiers) + creates git tag + GitHub Release
+- **`release.yml`** — publishes the core workspace crates from prepared `vX.Y.Z` tags in dependency order (30 s index wait between tiers) + GitHub Release; ordinary merges do not publish
 - **`release-python.yml`** — sets `ailake-py/Cargo.toml` to the current core version, builds Linux/macOS/Windows abi3 wheels plus sdist, and publishes `ailake` to PyPI and GitHub Releases. `pyproject.toml` uses `dynamic = ["version"]`, read from Cargo by maturin.
 - **`publish-pypi.yml`** — manual rebuild/re-publish entry point for an existing Python SDK version.
 - **`release-<plugin>.yml`** — named manual entry point for each independently released plugin; all eight delegate to the shared `release-plugin.yml` workflow for testing and publishing.
