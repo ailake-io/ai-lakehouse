@@ -12,6 +12,48 @@
           "pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"[^\\\"]+\\\"\\)$",
           "replacement": "version = providers.gradleProperty(\"pluginVersion\").getOrElse(\"{version}\")",
           "version_pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"([^\\\"]+)\\\"\\)$"
+        },
+        {
+          "file": "README.md",
+          "pattern": "(spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/guides/JVM_INTEGRATION.md",
+          "pattern": "(spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/guides/PLUGIN_RELEASES.md",
+          "pattern": "(spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/specs/CLOUD_DEPLOY.md",
+          "pattern": "(spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/specs/INTEGRATIONS.md",
+          "pattern": "(spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/specs/JVM_PLUGINS.md",
+          "pattern": "(spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:spark\\-plugin\\-|SPARK_VERSION=|spark\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
         }
       ],
       "test": [
@@ -21,6 +63,12 @@
         "test",
         "--no-daemon",
         "--no-configuration-cache"
+      ],
+      "artifacts": [
+        "spark-plugin-{version}-plugin.jar",
+        "libailake_jni-linux-x86_64.so",
+        "libailake_jni-macos-arm64.dylib",
+        "ailake_jni-windows-x86_64.dll"
       ]
     },
     {
@@ -35,6 +83,41 @@
           "pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"[^\\\"]+\\\"\\)$",
           "replacement": "version = providers.gradleProperty(\"pluginVersion\").getOrElse(\"{version}\")",
           "version_pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"([^\\\"]+)\\\"\\)$"
+        },
+        {
+          "file": "README.md",
+          "pattern": "(trino\\-plugin\\-|TRINO_VERSION=|trino\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:trino\\-plugin\\-|TRINO_VERSION=|trino\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/guides/JVM_INTEGRATION.md",
+          "pattern": "(trino\\-plugin\\-|TRINO_VERSION=|trino\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:trino\\-plugin\\-|TRINO_VERSION=|trino\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/guides/PLUGIN_RELEASES.md",
+          "pattern": "(trino\\-plugin\\-|TRINO_VERSION=|trino\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:trino\\-plugin\\-|TRINO_VERSION=|trino\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/specs/CLOUD_DEPLOY.md",
+          "pattern": "(trino\\-plugin\\-|TRINO_VERSION=|trino\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:trino\\-plugin\\-|TRINO_VERSION=|trino\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/specs/JVM_PLUGINS.md",
+          "pattern": "(trino\\-plugin\\-|TRINO_VERSION=|trino\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:trino\\-plugin\\-|TRINO_VERSION=|trino\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
         }
       ],
       "test": [
@@ -44,6 +127,12 @@
         "test",
         "--no-daemon",
         "--no-configuration-cache"
+      ],
+      "artifacts": [
+        "trino-plugin-{version}-plugin.jar",
+        "libailake_jni-linux-x86_64.so",
+        "libailake_jni-macos-arm64.dylib",
+        "ailake_jni-windows-x86_64.dll"
       ]
     },
     {
@@ -58,6 +147,48 @@
           "pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"[^\\\"]+\\\"\\)$",
           "replacement": "version = providers.gradleProperty(\"pluginVersion\").getOrElse(\"{version}\")",
           "version_pattern": "(?m)^version = providers\\.gradleProperty\\(\\\"pluginVersion\\\"\\)\\.getOrElse\\(\\\"([^\\\"]+)\\\"\\)$"
+        },
+        {
+          "file": "README.md",
+          "pattern": "(ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/guides/JVM_INTEGRATION.md",
+          "pattern": "(ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/guides/PLUGIN_RELEASES.md",
+          "pattern": "(ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/specs/CLOUD_DEPLOY.md",
+          "pattern": "(ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/specs/INTEGRATIONS.md",
+          "pattern": "(ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
+        },
+        {
+          "file": "docs/specs/JVM_PLUGINS.md",
+          "pattern": "(ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:ailake\\-flink\\-|FLINK_VERSION=|flink\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
         }
       ],
       "test": [
@@ -67,6 +198,12 @@
         "test",
         "--no-daemon",
         "--no-configuration-cache"
+      ],
+      "artifacts": [
+        "ailake-flink-{version}-plugin.jar",
+        "libailake_jni-linux-x86_64.so",
+        "libailake_jni-macos-arm64.dylib",
+        "ailake_jni-windows-x86_64.dll"
       ]
     },
     {
@@ -81,6 +218,13 @@
           "pattern": "(?m)^version = \"[^\"]+\"$",
           "replacement": "version = \"{version}\"",
           "version_pattern": "(?m)^version = \"([^\"]+)\"$"
+        },
+        {
+          "file": "docs/guides/PLUGIN_RELEASES.md",
+          "pattern": "(airflow\\-v|apache_airflow_providers_ailake\\-|apache\\-airflow\\-providers\\-ailake==)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:airflow\\-v|apache_airflow_providers_ailake\\-|apache\\-airflow\\-providers\\-ailake==)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
         }
       ],
       "test": [
@@ -90,7 +234,12 @@
         "tests",
         "-q"
       ],
-      "test_directory": "airflow-providers-ailake"
+      "test_directory": "airflow-providers-ailake",
+      "artifacts": [
+        "apache_airflow_providers_ailake-{version}-*.whl",
+        "apache_airflow_providers_ailake-{version}.tar.gz"
+      ],
+      "pypi_name": "apache-airflow-providers-ailake"
     },
     {
       "id": "airbyte",
@@ -110,6 +259,13 @@
           "pattern": "(?m)^LABEL io\\.airbyte\\.version=\"[^\"]+\"$",
           "replacement": "LABEL io.airbyte.version=\"{version}\"",
           "version_pattern": "(?m)^LABEL io\\.airbyte\\.version=\"([^\"]+)\"$"
+        },
+        {
+          "file": "docs/guides/PLUGIN_RELEASES.md",
+          "pattern": "(airbyte\\-v|airbyte_destination_ailake\\-|airbyte\\-destination\\-ailake==)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:airbyte\\-v|airbyte_destination_ailake\\-|airbyte\\-destination\\-ailake==)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
         }
       ],
       "test": [
@@ -119,7 +275,12 @@
         "tests",
         "-q"
       ],
-      "test_directory": "airbyte-destination-ailake"
+      "test_directory": "airbyte-destination-ailake",
+      "artifacts": [
+        "airbyte_destination_ailake-{version}-*.whl",
+        "airbyte_destination_ailake-{version}.tar.gz"
+      ],
+      "pypi_name": "airbyte-destination-ailake"
     },
     {
       "id": "duckdb",
@@ -133,6 +294,13 @@
           "pattern": "(?m)^project\\(duckdb_ailake VERSION [^ )]+",
           "replacement": "project(duckdb_ailake VERSION {version}",
           "version_pattern": "(?m)^project\\(duckdb_ailake VERSION ([^ )]+)"
+        },
+        {
+          "file": "docs/guides/PLUGIN_RELEASES.md",
+          "pattern": "((?<!ailake-)duckdb\\-v)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:(?<!ailake-)duckdb\\-v)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
         }
       ],
       "test": [
@@ -142,7 +310,11 @@
         "test",
         "-q"
       ],
-      "test_directory": "duckdb-ailake"
+      "test_directory": "duckdb-ailake",
+      "artifacts": [
+        "ailake-duckdb-v1.5.6.duckdb_extension",
+        "ailake-duckdb-v2.0.0.duckdb_extension"
+      ]
     },
     {
       "id": "cpp",
@@ -156,6 +328,13 @@
           "pattern": "(?m)^project\\(ailake-cpp VERSION [^ )]+",
           "replacement": "project(ailake-cpp VERSION {version}",
           "version_pattern": "(?m)^project\\(ailake-cpp VERSION ([^ )]+)"
+        },
+        {
+          "file": "docs/guides/PLUGIN_RELEASES.md",
+          "pattern": "(cpp\\-v|ailake\\-cpp\\-)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:cpp\\-v|ailake\\-cpp\\-)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
         }
       ],
       "test": [
@@ -176,6 +355,9 @@
         "--build",
         "${BUILD_DIR}",
         "--parallel"
+      ],
+      "artifacts": [
+        "ailake-cpp-{version}-source.tar.gz"
       ]
     },
     {
@@ -190,6 +372,13 @@
           "pattern": "(?m)^[^\\n]+$",
           "replacement": "{version}",
           "version_pattern": "(?m)^([^\\n]+)$"
+        },
+        {
+          "file": "docs/guides/PLUGIN_RELEASES.md",
+          "pattern": "(ailake\\-go/v|ailake\\-go%2Fv|ailake\\-go\\-)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:ailake\\-go/v|ailake\\-go%2Fv|ailake\\-go\\-)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
         }
       ],
       "test": [
@@ -199,12 +388,15 @@
         "-timeout",
         "120s"
       ],
-      "test_directory": "ailake-go"
+      "test_directory": "ailake-go",
+      "artifacts": [
+        "ailake-go-{version}-source.tar.gz"
+      ]
     },
     {
       "id": "python",
       "name": "Python SDK",
-      "version_policy": "independent",
+      "version_policy": "core",
       "tag_prefix": "python-v",
       "directory": "ailake-py",
       "targets": [
@@ -213,6 +405,13 @@
           "pattern": "(?m)^version\\s*=\\s*\"[^\"]+\"$",
           "replacement": "version = \"{version}\"",
           "version_pattern": "(?m)^version\\s*=\\s*\"([^\"]+)\"$"
+        },
+        {
+          "file": "docs/specs/CLOUD_DEPLOY.md",
+          "pattern": "(ailake==)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:ailake==)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
         }
       ],
       "test": [
@@ -220,7 +419,16 @@
         "test",
         "-p",
         "ailake-py"
-      ]
+      ],
+      "artifacts": [
+        "ailake-{version}-*-manylinux*_x86_64.whl",
+        "ailake-{version}-*-manylinux*_aarch64.whl",
+        "ailake-{version}-*-macosx*_x86_64.whl",
+        "ailake-{version}-*-macosx*_arm64.whl",
+        "ailake-{version}-*-win_amd64.whl",
+        "ailake-{version}.tar.gz"
+      ],
+      "pypi_name": "ailake"
     },
     {
       "id": "kof",
@@ -240,6 +448,13 @@
           "pattern": "(?m)^    static String CLIENT_VERSION = \"[^\"]+\"$",
           "replacement": "    static String CLIENT_VERSION = \"{version}\"",
           "version_pattern": "(?m)^    static String CLIENT_VERSION = \"([^\"]+)\"$"
+        },
+        {
+          "file": "docs/guides/PLUGIN_RELEASES.md",
+          "pattern": "(kof\\-v|ai\\-lake\\-kof\\-)[0-9]+\\.[0-9]+\\.[0-9]+",
+          "replacement": "\\g<1>{version}",
+          "version_pattern": "(?:kof\\-v|ai\\-lake\\-kof\\-)([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "multiple": true
         }
       ],
       "test": [
@@ -248,7 +463,33 @@
         "integrations/kof/client",
         "--target",
         "jvm"
+      ],
+      "artifacts": [
+        "ai-lake-kof-{version}-source.tar.gz"
       ]
+    }
+  ],
+  "core_targets": [
+    {
+      "file": "README.md",
+      "pattern": "(ailake-(?:core|query|store)\\s*=\\s*\")[0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "\\g<1>{version}",
+      "version_pattern": "ailake-(?:core|query|store)\\s*=\\s*\"([0-9]+\\.[0-9]+\\.[0-9]+)",
+      "multiple": true
+    },
+    {
+      "file": "docs/architecture/WORKSPACE.md",
+      "pattern": "(ailake-fts\\s*=\\s*\\{ path = \"ailake-fts\", version = \")[0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "\\g<1>{version}",
+      "version_pattern": "ailake-fts\\s*=\\s*\\{ path = \"ailake-fts\", version = \"([0-9]+\\.[0-9]+\\.[0-9]+)",
+      "multiple": true
+    },
+    {
+      "file": "docs/guides/CLI_INTEGRATION.md",
+      "pattern": "(ailake --version\\s*# ailake )[0-9]+\\.[0-9]+\\.[0-9]+",
+      "replacement": "\\g<1>{version}",
+      "version_pattern": "ailake --version\\s*# ailake ([0-9]+\\.[0-9]+\\.[0-9]+)",
+      "multiple": true
     }
   ]
 }

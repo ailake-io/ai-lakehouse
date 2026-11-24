@@ -69,7 +69,7 @@ class IndexJobPage(
 ) {}
 
 class AilakeClient(String baseUrl) {
-    static String CLIENT_VERSION = "0.1.0"
+    static String CLIENT_VERSION = "0.1.1"
 
     setBearerToken(String token): void {
         bearerToken = token

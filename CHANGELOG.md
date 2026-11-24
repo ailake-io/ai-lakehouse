@@ -9,15 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Publish the Python SDK automatically with each core release and validate its matching core tag, package version, documentation and distributions.
+- Align all plugin manifests and installation examples with their published versions; require reviewed version/documentation preparation before new plugin releases and verify published assets.
+- Publish core releases only from prepared `vX.Y.Z` tags; merges to `main` no longer increment or publish versions automatically.
+
 ### Security
 
 - Upgrade Gradle build and dependency-submission workflows and demo images to 8.14.4 to fix GHSA-mqwm-5m85-gmcv and GHSA-w78c-w6vf-rw82.
-
 - Upgrade Arrow/Parquet to 60.2.0 to fix RUSTSEC-2026-0595 (plaintext Bloom filters in encrypted Parquet files).
-
-### Changed
-
-- Publish core releases only from prepared `vX.Y.Z` tags; merges to `main` no longer increment or publish versions automatically.
 
 ## [0.1.24] — 2026-11-23
 

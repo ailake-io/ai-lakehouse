@@ -1,11 +1,11 @@
 name: Release Flink
-run-name: Release Flink ${{ inputs.version || 'next version' }}
+run-name: Release Flink ${{ inputs.version || 'prepared version' }}
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Independent Flink version (blank increments the latest tag)
+        description: Independent Flink version (blank uses the prepared manifest version)
         required: false
         type: string
 
