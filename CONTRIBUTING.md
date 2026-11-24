@@ -23,7 +23,7 @@ Thank you for your interest in contributing. This guide covers everything needed
 |---|---|---|
 | **Rust** (stable) | 1.78+ | `curl https://sh.rustup.rs -sSf \| sh` |
 | **JDK** | 17+ | `sudo apt install openjdk-17-jdk` or [Adoptium](https://adoptium.net) |
-| **Gradle** | 8.7+ | Included as wrapper (`./gradlew`) in each JVM subproject |
+| **Gradle** | 8.14.4 | Install Gradle or use the matching official Gradle container; CI pins this version |
 | **Python** | 3.10+ | System Python or [pyenv](https://github.com/pyenv/pyenv) |
 | **maturin** | 1.4+ | `pip install maturin` — required to build `ailake-py` |
 | **cargo-deny** | latest | `cargo install cargo-deny` — license and advisory audits |
