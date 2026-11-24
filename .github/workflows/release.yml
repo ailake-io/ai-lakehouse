@@ -63,14 +63,15 @@ jobs:
         run: |
           set -euo pipefail
           REPO="${{ github.repository }}"
-          # Excludes this workflow's own job names — Release always reports pending/
-          # in-progress for itself, which would deadlock the wait otherwise.
-          SELF_JOBS='^(Validate release tag|Wait for CI checks to pass|Create GitHub Release|Sync released tag to develop|Publish to crates\.io|Build and upload JNI library)$'
+          # Exclude this workflow's whole check suite, including reusable
+          # Python jobs waiting for publication. Otherwise CI waits on itself.
+          SELF_SUITE=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq '.check_suite_id')
+          [[ "$SELF_SUITE" =~ ^[0-9]+$ ]]
 
           echo "Waiting for all other check-runs on $SHA to complete successfully..."
           for i in $(seq 1 270); do
-            runs_json=$(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" --paginate --slurp --jq '[.[].check_runs[]]')
-            others=$(echo "$runs_json" | jq --arg self "$SELF_JOBS" '[.[] | select(.name | test($self) | not)]')
+            runs_json=$(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" --paginate --slurp | jq '[.[].check_runs[]]')
+            others=$(echo "$runs_json" | jq --argjson self "$SELF_SUITE" '[.[] | select(.check_suite.id != $self)]')
             total=$(echo "$others" | jq 'length')
             pending=$(echo "$others" | jq '[.[] | select(.status != "completed")] | length')
             failed=$(echo "$others" | jq '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "action_required")]')
@@ -129,7 +130,7 @@ jobs:
           Core crates prepared at \`${{ needs.validate-tag.outputs.version }}\`.
 
           ### Python SDK
-          Published separately through the \`Release Python\` workflow.
+          Published automatically at the same version through the \`Release Python\` workflow after crates and JNI.
 
           ### JNI library
           Linux \`libailake_jni.so\` attached as a release asset. Plugin integrations,
@@ -269,3 +270,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$TAG" target/release/libailake_jni.so --clobber
+
+  publish-python:
+    name: Publish matching Python SDK
+    needs: [release, publish-crates, publish-jni]
+    uses: ./.github/workflows/release-python.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
+    secrets: inherit
+    permissions:
+      actions: read
+      contents: write

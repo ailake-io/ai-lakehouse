@@ -12,16 +12,17 @@ From the repository root:
 ```sh
 python3 scripts/plugins.py list
 python3 scripts/plugins.py check
-python3 scripts/plugins.py update --plugin spark --version 0.1.13
-python3 scripts/plugins.py update --policy core --version 0.1.13
+python3 scripts/plugins.py update --plugin spark --version 0.1.18
+python3 scripts/plugins.py update --policy core --version 0.1.25
 ```
 
 `check` validates each plugin's registered version targets and policy. Each
 registered integration or SDK has a tag prefix. Plugin versions are independent;
-the Python SDK shares the core SemVer and uses a `python-v` tag. Its wheels are
-published separately, and `release-python.yml` rejects a version that differs
-from the core. `--all` remains available for an intentional fleet wide bump.
-`update` requires each target to match exactly once and reports changed files.
+the Python SDK shares the core SemVer and uses a `python-v` tag. The core release calls its wheel/sdist workflow automatically with the matching
+version, and `release-python.yml` validates the corresponding published core tag. `--all` remains available for an intentional fleet wide bump.
+`update` requires one match for source declarations. Documentation targets marked
+`multiple` update and validate every reference in that file. Core examples are
+registered in `core_targets`; plugin examples live beside their manifest targets.
 Add every version-bearing file for a plugin to its `targets` entry and tag prefix
 to the registry.
 
@@ -37,8 +38,10 @@ to the registry.
 | Kof integration | `kof-v` | Tested HTTP JVM/JS and Native C-ABI source archive |
 
 Run the named workflow under **Actions** (for example, **Release Spark** or
-**Release Python**). Plugin workflows increment from their latest component tag.
-Python uses the current core version; an entered version must match it. Most
+**Release Python**). Plugin workflows use the version already prepared in manifests and docs. Prepare
+a new version in a PR before publishing it; the workflow rejects an unprepared
+version. Existing tag reruns preserve their original source commit. Python follows
+the matching published core version automatically. Most
 plugin entry points invoke the shared release workflow. Python has its own
 multi-platform build because its PyPI release contains Linux, macOS, and Windows
 wheels. Kof releases the HTTP client and Native adapter together; the Native
@@ -55,8 +58,7 @@ checks against published AI-Lake files.
 
 Every core change (Rust crates, workspace dependencies, file format, C-ABI)
 must be checked against every plugin before it is merged and again before each
-core release. Plugins release independently, so nothing republishes them
-automatically: a core fix only reaches a plugin's users after that plugin's own
+core release. Non-Python plugins release independently: a core fix only reaches a plugin's users after that plugin's own
 release.
 
 How each plugin consumes the core decides what a core change requires:
@@ -65,7 +67,7 @@ How each plugin consumes the core decides what a core change requires:
 |---|---|---|---|
 | DuckDB extension | **Yes** | Rust core linked statically | always (code, dependencies, security fixes) |
 | Python SDK | **Yes** | Rust core compiled into the wheel | always; version follows the core |
-| Spark, Trino, Flink | **Yes** | JNI library built from `ailake-jni` and bundled in the JAR | `ailake-jni`/core code or dependency changes (incl. security); C-ABI changes also need wrapper updates |
+| Spark, Trino, Flink | **Yes** | JNI library built from `ailake-jni` and distributed alongside the JAR | `ailake-jni`/core code or dependency changes (incl. security); C-ABI changes also need wrapper updates |
 | Kof | No | HTTP client + Native adapter over the C-ABI | C-ABI contract changes |
 | Go SDK | No | Native Avro/Parquet reader + `ailake` CLI | file/manifest format changes, CLI flag changes, its own `go.mod` dependencies |
 | C++ SDK | No | Native header-only reader + `ailake` CLI | file/manifest format changes, CLI flag changes |
@@ -86,8 +88,9 @@ Checklist for a core change:
 3. Format changes: verify backward compatibility by writing a table with the
    previous release and reading/compacting it with the new build (vector, FTS,
    deletes), including the native Go/C++ readers.
-4. After the core release, run the release workflow of every affected plugin
-   and record it in `CHANGELOG.md`.
+4. Python publishes automatically after the core. For each other affected plugin,
+   prepare its version and documentation in a PR, then run its release workflow
+   and record the change in `CHANGELOG.md`.
 
 To find plugin code changed since its last release, compare content rather than
 `git log` (squash merges make history misleading):
@@ -114,3 +117,17 @@ python3 -m unittest scripts.test_plugins
 Plugin-specific test commands are recorded in `scripts/plugins.json`; run them
 from their registered project directory (or use the command as specified in
 that project's CI workflow) when changing plugin code.
+
+
+## Publication and documentation checks
+
+The [release catalog](../guides/PLUGIN_RELEASES.md) lists the component tags and
+expected assets. Run `python3 scripts/release_audit.py` after a release to verify
+GitHub assets, source-tag versions and Python package distributions on PyPI.
+The named plugin/Python workflows perform the selected component audit after
+publication, with retries for metadata propagation.
+
+The offline registry check runs in CI and validates every registered example,
+including repeated JAR filenames and download-tag variables. Core preparation
+updates Python and core examples together. DuckDB engine ABI versions (1.5.6 and
+2.0.0) are checked separately from the extension's own version.

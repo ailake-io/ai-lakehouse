@@ -426,7 +426,7 @@ feat(ailake-index): add IVF-PQ adaptive nlist selection
 ### What happens after merge
 
 - `develop` receives the PR.
-- Merging to `main` runs CI without publishing a release. To publish the core, prepare matching versions and dated release notes in a PR, merge it, wait for CI, then push its `vX.Y.Z` tag. The workflow validates and publishes that tagged commit. Python and plugins use their own workflows (see [`docs/guides/RELEASES.md`](./docs/guides/RELEASES.md)).
+- Merging to `main` runs CI without publishing a release. To publish the core, prepare matching versions and dated release notes in a PR, merge it, wait for CI, then push its `vX.Y.Z` tag. The workflow validates and publishes that tagged commit. The core release automatically calls the matching Python release; other plugins use independently prepared versions and workflows (see [`docs/guides/RELEASES.md`](./docs/guides/RELEASES.md)).
 
 ---
 

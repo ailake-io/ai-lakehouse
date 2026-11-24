@@ -1,11 +1,11 @@
 name: Release Airflow
-run-name: Release Airflow ${{ inputs.version || 'next version' }}
+run-name: Release Airflow ${{ inputs.version || 'prepared version' }}
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Independent Airflow version (blank increments the latest tag)
+        description: Independent Airflow version (blank uses the prepared manifest version)
         required: false
         type: string
 
